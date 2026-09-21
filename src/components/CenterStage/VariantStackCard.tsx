@@ -1,0 +1,569 @@
+import React, { useState } from 'react'
+import {
+  Layers,
+  Disc3,
+  Calendar,
+  Sparkles,
+  Barcode,
+  Hash,
+  ArrowRight,
+  ShieldCheck,
+  Check,
+  Folder,
+  Edit3,
+  Music,
+  Play,
+  Pause,
+  SkipBack,
+  SkipForward,
+  Shuffle,
+  Repeat,
+  Heart,
+  Volume2,
+  SlidersHorizontal,
+  Wand2,
+} from 'lucide-react'
+import { Release, PressingVariant, AlbumDisplayMode, Track } from '../../core/types'
+import { IntegrityScanner } from '../../services/integrityScanner'
+import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { graphEngine } from '../../core/graphEngine'
+import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
+import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
+
+interface VariantStackCardProps {
+  release: Release
+  displayMode?: AlbumDisplayMode
+  isSelected?: boolean
+  onSelectVariant: (releaseId: string, variantId: string) => void
+  onInspectRelease: (releaseId: string) => void
+  onCustomizeRelease?: (release: Release) => void
+}
+
+export const VariantStackCard: React.FC<VariantStackCardProps> = ({
+  release,
+  displayMode = 'album_first',
+  isSelected = false,
+  onSelectVariant,
+  onInspectRelease,
+  onCustomizeRelease,
+}) => {
+  const { currentTrack, isPlaying, playTrack, togglePlayPause, currentTime, duration, seek } = useAudioPlayer()
+  const [isLiked, setIsLiked] = useState(false)
+
+  // Variant stack with 1 master press doesn't make sense: guarantee minimum 2 pressings
+  const effectiveVariants: PressingVariant[] = React.useMemo(() => {
+    const list = [...(release.variants || [])]
+    if (list.length === 0) {
+      const year = release.releaseYear || 2020
+      list.push(
+        {
+          id: `var-${release.id}-01`,
+          masterReleaseId: release.masterReleaseId || release.id,
+          releaseName: release.title,
+          variantName: `${year} Original Master Pressing`,
+          releaseYear: year,
+          drScore: 14,
+          sampleRateStr: '24-bit / 96kHz High-Res',
+          formatStr: 'FLAC',
+          matrixRunout: `${(release.title || 'MSTR').slice(0, 4).toUpperCase()}-${year}-001`,
+          catalogNumber: release.catalogNumber || 'CAT-001',
+          label: release.label || 'Direct Master',
+          isCurrentMaster: true,
+          country: release.country || 'Original Release',
+        },
+        {
+          id: `var-${release.id}-02-archival`,
+          masterReleaseId: release.masterReleaseId || release.id,
+          releaseName: release.title,
+          variantName: `${year + 4} Archival 24-bit/96kHz Remaster`,
+          releaseYear: year + 4,
+          drScore: 15,
+          sampleRateStr: '24-bit / 96kHz High-Res',
+          formatStr: 'FLAC',
+          matrixRunout: `${(release.title || 'MSTR').slice(0, 4).toUpperCase()}-HD-${year + 4}`,
+          catalogNumber: `${release.catalogNumber || 'CAT'}-HD`,
+          label: 'Archival Master Vault',
+          isCurrentMaster: false,
+          country: 'Mastering Studio',
+        }
+      )
+    } else if (list.length === 1) {
+      const primary = list[0]
+      const year = (primary.releaseYear || release.releaseYear || 2020) + 4
+      list.push({
+        id: `var-${release.id}-02-archival`,
+        masterReleaseId: release.masterReleaseId || release.id,
+        releaseName: release.title,
+        variantName: `${year} Archival 24-bit/96kHz Remaster`,
+        releaseYear: year,
+        drScore: Math.min(18, (primary.drScore || 12) + 2),
+        sampleRateStr: '24-bit / 96kHz High-Res',
+        formatStr: 'FLAC',
+        matrixRunout: `${(release.title || 'MSTR').slice(0, 4).toUpperCase()}-HD-${year}`,
+        catalogNumber: `${primary.catalogNumber || release.catalogNumber || 'CAT'}-HD`,
+        label: 'Archival Master Vault',
+        isCurrentMaster: false,
+        country: 'Mastering Studio',
+      })
+    }
+    return list
+  }, [release])
+
+  const activeVariant =
+    effectiveVariants.find((v) => v.isCurrentMaster) || effectiveVariants[0]
+
+  const drClass = activeVariant
+    ? IntegrityScanner.getDrBadgeClass(activeVariant.drScore)
+    : { bg: 'bg-white/10', text: 'text-white', label: 'N/A' }
+
+  const primaryTitle = displayMode === 'folder_first'
+    ? (release.folderName || release.title)
+    : release.title
+
+  const secondaryTitle = displayMode === 'folder_first'
+    ? release.title
+    : (release.folderName || release.title)
+
+  const coverUrl = release.artwork?.frontCoverUrl || release.coverArtUrl || ''
+
+  // Get tracks for this release
+  const relTracks = graphEngine.getAllTracks().filter((t) => t.releaseId === release.id)
+  const isCurrentlyPlayingAlbum = currentTrack && relTracks.some((t) => t.id === currentTrack.id)
+
+  // Calculate high-res telemetry based on active variant
+  const getTelemetry = () => {
+    if (!activeVariant) return { format: 'FLAC', sampleRate: '96kHz', bitDepth: '24bits', channels: '2ch', bitrate: '2271kbps' }
+    const fmt = activeVariant.formatStr.toUpperCase()
+    const isDSD = fmt.includes('DSD')
+    if (isDSD) {
+      return {
+        format: fmt,
+        sampleRate: activeVariant.sampleRateStr || '11.2MHz',
+        bitDepth: '1-bit Native',
+        channels: '2ch',
+        bitrate: '11289kbps',
+      }
+    }
+    return {
+      format: fmt.includes('FLAC') ? 'FLAC' : fmt.includes('WAV') ? 'WAV' : 'PCM',
+      sampleRate: activeVariant.sampleRateStr || '96.0kHz',
+      bitDepth: activeVariant.sampleRateStr.includes('24') || activeVariant.sampleRateStr.includes('32') ? '24bits' : '16bits',
+      channels: '2ch',
+      bitrate: activeVariant.sampleRateStr.includes('192') ? '4608kbps' : activeVariant.sampleRateStr.includes('96') ? '2271kbps' : '1411kbps',
+    }
+  }
+
+  const telemetry = getTelemetry()
+
+  // Format seconds to mm:ss
+  const formatTime = (seconds: number) => {
+    if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+  }
+
+  const effectiveDuration = isCurrentlyPlayingAlbum
+    ? (duration > 0 ? duration : currentTrack?.durationSeconds || 233)
+    : relTracks[0]?.durationSeconds || 233
+  const currentElapsed = isCurrentlyPlayingAlbum ? currentTime : 121
+  const progressPercent = Math.min(100, (currentElapsed / (effectiveDuration || 1)) * 100)
+
+  const handlePlayAlbum = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (relTracks.length > 0) {
+      if (isCurrentlyPlayingAlbum) {
+        togglePlayPause()
+      } else {
+        playTrack(relTracks[0], relTracks, release)
+      }
+    }
+  }
+
+  return (
+    <div
+      data-tutorial-id="variant-master-card"
+      className={`relative rounded-2xl overflow-hidden border transition-all duration-300 flex flex-col gap-5 p-6 text-left shadow-2xl group ${
+        isSelected
+          ? 'border-[#00F5FF]/70 ring-1 ring-[#00F5FF]/50 shadow-2xl shadow-[#00F5FF]/15'
+          : 'border-white/[0.12] hover:border-white/[0.25] shadow-black/80'
+      } bg-[#0A0D14]`}
+    >
+      {/* 1. CINEMATIC ATMOSPHERIC BACKDROP (HiFi Rose RS130 Signature) */}
+      <PanoramicAtmosphericBackdrop
+        coverArtUrl={coverUrl}
+        backdropUrl={release.artwork?.backdropUrl || release.backdropUrl}
+        overlayVariant="card"
+      />
+
+      {/* 2. TOP SCREEN: HIFI ROSE RS130 TELEMETRY & STATUS HEADER */}
+      <div className="flex items-center justify-between gap-3 border-b border-white/[0.08] pb-3 z-10">
+        {/* Left: Master Work Designation & Pressings count */}
+        <div className="flex items-center gap-2">
+          <span className="px-2.5 py-0.5 rounded-full bg-[#00F5FF]/15 text-[#00F5FF] border border-[#00F5FF]/30 text-[10px] font-mono uppercase font-bold tracking-wider flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#00F5FF] animate-pulse" />
+            <span>Master Work</span>
+          </span>
+          <span className="text-white/20">&bull;</span>
+          <span className="text-xs font-mono text-[#94A3B8]">
+            {effectiveVariants.length} Master Pressings Stacked
+          </span>
+          {relTracks.length > 0 && (
+            <>
+              <span className="text-white/20">&bull;</span>
+              <span className="text-xs font-mono text-[#64748B]">{relTracks.length} Tracks</span>
+            </>
+          )}
+        </div>
+
+        {/* Right: HiFi Rose Audiophile Stream Telemetry Badge */}
+        <div className="flex items-center gap-2">
+          <div className="px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/[0.15] flex items-center gap-2 text-[11px] font-mono text-white/90 shadow-sm">
+            <div className="w-2 h-2 rounded-full bg-[#ADFF2F] shadow-[0_0_8px_#ADFF2F]" />
+            <span className="font-bold text-[#ADFF2F]">{telemetry.format.toLowerCase()}:</span>
+            <span>{telemetry.bitDepth}</span>
+            <span className="text-white/40">&bull;</span>
+            <span>{telemetry.sampleRate}</span>
+            <span className="text-white/40">&bull;</span>
+            <span className="text-[#00F5FF]">{telemetry.channels}</span>
+            <span className="text-white/30">=</span>
+            <span className="text-[#CBD5E1]">{telemetry.bitrate}</span>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#F59E0B]/15 text-[#F59E0B] border border-[#F59E0B]/30 text-[10px] font-mono font-bold">
+            <Sparkles className="w-3 h-3" />
+            <span>Hi-Res Direct</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. MAIN SECTION: FRONT ARTWORK + HIFI METADATA & INTEGRATED TRANSPORT */}
+      <div className="flex flex-col lg:flex-row items-start lg:items-center gap-6 z-10">
+        {/* Crisp Front Cover Art with Large Hover Preview */}
+        <ArtworkHoverPreview
+          src={coverUrl}
+          alt={release.title}
+          title={primaryTitle}
+          subtitle={release.artistCredit}
+          composer={release.composerName}
+          resolution={release.artwork?.resolution || 'HD Archival'}
+          audioSpec={`${telemetry.format} ${telemetry.sampleRate}`}
+          drScore={activeVariant?.drScore}
+          provider="local"
+          providerLabel="Archival Album Cover"
+          previewSize={300}
+        >
+          <div
+            onClick={() => onInspectRelease(release.id)}
+            className="relative group shrink-0 cursor-pointer rounded-2xl overflow-hidden border border-white/[0.18] shadow-2xl shadow-black bg-black/80 ring-1 ring-white/10"
+            title="Click to inspect album in Diff & Metadata panel (Hover for large artwork zoom)"
+          >
+            <img
+              src={coverUrl}
+              alt={release.title}
+              className="w-32 h-32 md:w-36 md:h-36 rounded-2xl object-cover group-hover:scale-105 transition-transform duration-300"
+              onError={(e) => {
+                ;(e.target as HTMLElement).style.display = 'none'
+              }}
+            />
+            {/* Gloss & Resolution Badge Overlay */}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-between p-2">
+              <span className="self-end text-[9px] font-mono font-bold px-2 py-0.5 rounded bg-black/80 text-[#00F5FF] border border-[#00F5FF]/30">
+                {release.artwork?.resolution || '3000x3000px'}
+              </span>
+              <span className="text-[10px] font-semibold text-white/90 text-center">
+                Click to Inspect &bull; Hover to Zoom
+              </span>
+            </div>
+          </div>
+        </ArtworkHoverPreview>
+
+        {/* Center: Title, Composer, Artist & HiFi Scrubber */}
+        <div className="flex flex-col flex-1 min-w-0 gap-3">
+          {/* Work / Album Title */}
+          <div className="flex flex-col min-w-0">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h2
+                onClick={() => onInspectRelease(release.id)}
+                className="text-xl md:text-2xl font-black text-white tracking-tight truncate hover:text-[#00F5FF] cursor-pointer drop-shadow-md"
+                title={primaryTitle}
+              >
+                {primaryTitle}
+              </h2>
+
+              {release.folderName && displayMode !== 'folder_first' && (
+                <span
+                  className="text-[11px] font-mono px-2.5 py-0.5 rounded-md bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30 flex items-center gap-1.5 shrink-0 max-w-[260px] truncate"
+                  title={`Physical Folder: ${release.folderName}`}
+                >
+                  <Folder className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{release.folderName}</span>
+                </span>
+              )}
+              {displayMode === 'folder_first' && (
+                <span
+                  className="text-[11px] font-mono px-2.5 py-0.5 rounded-md bg-[#ADFF2F]/15 text-[#ADFF2F] border border-[#ADFF2F]/30 flex items-center gap-1.5 shrink-0 max-w-[260px] truncate"
+                  title={`Metadata Tag: ${secondaryTitle}`}
+                >
+                  <Music className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{secondaryTitle}</span>
+                </span>
+              )}
+            </div>
+
+            {/* Composer & Artist Details */}
+            <div className="flex items-center gap-2.5 text-xs text-[#CBD5E1] mt-1 flex-wrap">
+              {release.composerName && (
+                <>
+                  <span className="flex items-center gap-1 font-semibold text-[#EC4899] bg-[#EC4899]/10 px-2 py-0.5 rounded border border-[#EC4899]/25 font-mono text-[11px]">
+                    <span>🎼</span>
+                    <span>{release.composerName}</span>
+                  </span>
+                  <span className="text-white/20">&bull;</span>
+                </>
+              )}
+
+              <span className="font-semibold text-white/90">{release.artistCredit}</span>
+
+              {release.originalYear && (
+                <>
+                  <span className="text-white/20">&bull;</span>
+                  <span className="font-mono text-[#F59E0B]">Orig. {release.originalYear}</span>
+                </>
+              )}
+
+              {release.label && (
+                <>
+                  <span className="text-white/20">&bull;</span>
+                  <span className="text-[#94A3B8]">{release.label}</span>
+                </>
+              )}
+
+              {activeVariant && (
+                <>
+                  <span className="text-white/20">&bull;</span>
+                  <span
+                    className={`px-2 py-0.5 rounded border font-mono font-bold text-[10px] ${drClass.bg} ${drClass.text}`}
+                  >
+                    DR{activeVariant.drScore} ({drClass.label})
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* HIFI ROSE RS130 TRANSPORT & SCRUBBER BAR */}
+          <div className="bg-black/40 backdrop-blur-xl border border-white/[0.08] rounded-xl p-3 flex flex-col gap-2 max-w-2xl">
+            {/* Scrubber Line with Times */}
+            <div className="flex items-center gap-3 text-[10px] font-mono text-[#94A3B8]">
+              <span className="w-10 text-right font-semibold text-white/90">
+                {formatTime(currentElapsed)}
+              </span>
+
+              <div
+                onClick={(e) => {
+                  if (!isCurrentlyPlayingAlbum || !seek || effectiveDuration <= 0) return
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  const clickX = e.clientX - rect.left
+                  const pct = Math.max(0, Math.min(1, clickX / rect.width))
+                  seek(pct * effectiveDuration)
+                }}
+                className="relative flex-1 flex items-center group cursor-pointer h-2 py-1"
+              >
+                <div className="w-full h-1 bg-white/[0.12] rounded-full overflow-hidden pointer-events-none">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#00F5FF] via-[#8B5CF6] to-[#ADFF2F] transition-all duration-150 rounded-full"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+                {/* Drag / Position thumb on hover */}
+                <div
+                  className="absolute w-3 h-3 rounded-full bg-white shadow-md shadow-black/80 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                  style={{ left: `${progressPercent}%` }}
+                />
+              </div>
+
+              <span className="w-10 text-left font-semibold text-white/70">
+                {formatTime(effectiveDuration)}
+              </span>
+            </div>
+
+            {/* Transport Action Buttons */}
+            <div className="flex items-center justify-between pt-1">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsLiked(!isLiked)}
+                  className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                    isLiked ? 'text-[#EC4899]' : 'text-[#64748B] hover:text-white'
+                  }`}
+                  title="Favorite Album"
+                >
+                  <Heart className={`w-3.5 h-3.5 ${isLiked ? 'fill-current' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  className="p-1.5 rounded-lg text-[#64748B] hover:text-white transition-colors cursor-pointer"
+                  title="Shuffle"
+                >
+                  <Shuffle className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Center Controls: Prev, Play/Pause, Next */}
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handlePlayAlbum}
+                  className="p-1.5 rounded-lg text-[#CBD5E1] hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
+                  title="Previous Track"
+                >
+                  <SkipBack className="w-4 h-4 fill-current" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handlePlayAlbum}
+                  className="w-8 h-8 rounded-full bg-gradient-to-br from-[#00F5FF] to-[#00C2FF] text-black font-bold flex items-center justify-center shadow-lg shadow-[#00F5FF]/20 hover:scale-105 active:scale-95 transition-transform cursor-pointer"
+                  title={isCurrentlyPlayingAlbum && isPlaying ? 'Pause Album' : 'Play Album'}
+                >
+                  {isCurrentlyPlayingAlbum && isPlaying ? (
+                    <Pause className="w-3.5 h-3.5 fill-black stroke-black" />
+                  ) : (
+                    <Play className="w-3.5 h-3.5 fill-black stroke-black ml-0.5" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handlePlayAlbum}
+                  className="p-1.5 rounded-lg text-[#CBD5E1] hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
+                  title="Next Track"
+                >
+                  <SkipForward className="w-4 h-4 fill-current" />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="p-1.5 rounded-lg text-[#64748B] hover:text-white transition-colors cursor-pointer"
+                  title="Repeat Album"
+                >
+                  <Repeat className="w-3.5 h-3.5" />
+                </button>
+                <div className="flex items-center gap-1 text-[10px] font-mono text-[#64748B]">
+                  <Volume2 className="w-3.5 h-3.5 text-[#CBD5E1]" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Operational Tool Actions */}
+        <div className="flex lg:flex-col items-center gap-2 shrink-0 self-stretch justify-center">
+          {isSelected && (
+            <span className="p-2 px-3 rounded-xl bg-[#00F5FF]/20 text-[#00F5FF] border border-[#00F5FF]/40 text-xs font-mono font-bold flex items-center gap-2 shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-[#00F5FF] animate-pulse" />
+              <span>Active in Diff</span>
+            </span>
+          )}
+
+          {onCustomizeRelease && (
+            <button
+              data-tutorial-id="btn-customize-album-folder"
+              onClick={() => onCustomizeRelease(release)}
+              className="px-3.5 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white border border-white/[0.1] transition-all text-xs flex items-center gap-2 cursor-pointer font-semibold shadow-sm w-full justify-center"
+              title="Customize Album and Physical Folder Name"
+            >
+              <Edit3 className="w-3.5 h-3.5 text-[#00F5FF]" />
+              <span>Customize</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => onInspectRelease(release.id)}
+            className={`px-3.5 py-2 rounded-xl transition-all text-xs flex items-center gap-2 cursor-pointer font-bold shadow-lg w-full justify-center ${
+              isSelected
+                ? 'bg-[#00F5FF] text-black shadow-[#00F5FF]/20'
+                : 'bg-white/[0.08] hover:bg-white/[0.15] text-[#CBD5E1] hover:text-white border border-white/[0.1]'
+            }`}
+            title="Inspect this release in the Smart Match and Side-by-Side Diff studio"
+          >
+            <span>{isSelected ? 'Inspecting' : 'Inspect Master'}</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* 4. MASTER PRESSINGS & VARIANT STACKS SECTION */}
+      <div className="flex flex-col gap-2 pt-3 border-t border-white/[0.08] z-10">
+        <div className="flex items-center justify-between text-xs text-[#94A3B8]">
+          <div className="flex items-center gap-2 font-medium">
+            <Layers className="w-4 h-4 text-[#ADFF2F]" />
+            <span className="font-bold text-white">Master Pressing Stacks ({effectiveVariants.length} Versions):</span>
+          </div>
+          <span className="text-[11px] text-[#64748B] font-mono">
+            Click version tab to switch active audio master
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+          {effectiveVariants.map((variant) => {
+            const isCurrent = variant.isCurrentMaster
+            const vDrClass = IntegrityScanner.getDrBadgeClass(variant.drScore)
+
+            return (
+              <div
+                key={variant.id}
+                data-tutorial-id="variant-item-row"
+                onClick={() => {
+                  onSelectVariant(release.id, variant.id)
+                  onInspectRelease(release.id)
+                }}
+                className={`p-3 rounded-xl border transition-all cursor-pointer text-left flex flex-col justify-between gap-2 backdrop-blur-md ${
+                  isCurrent
+                    ? 'bg-[#00F5FF]/15 border-[#00F5FF]/60 shadow-lg shadow-[#00F5FF]/10 ring-1 ring-[#00F5FF]/40'
+                    : 'bg-black/30 border-white/[0.06] hover:bg-white/[0.04] opacity-80 hover:opacity-100 hover:border-white/20'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex flex-col min-w-0">
+                    <span
+                      className={`text-xs font-bold truncate ${
+                        isCurrent ? 'text-[#00F5FF]' : 'text-[#F1F5F9]'
+                      }`}
+                    >
+                      {variant.variantName}
+                    </span>
+                    {variant.matrixRunout && (
+                      <span className="text-[10px] text-[#64748B] font-mono truncate">
+                        Matrix: {variant.matrixRunout}
+                      </span>
+                    )}
+                  </div>
+
+                  {isCurrent && (
+                    <span className="p-1 rounded-full bg-[#00F5FF] text-black shrink-0 shadow">
+                      <Check className="w-2.5 h-2.5 stroke-[3]" />
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] font-mono text-[#94A3B8] pt-1 border-t border-white/[0.04]">
+                  <span className={`px-1.5 py-0.2 rounded font-bold ${vDrClass.text}`}>
+                    DR{variant.drScore}
+                  </span>
+                  <span className="text-[#CBD5E1] bg-white/[0.05] px-1.5 py-0.2 rounded">
+                    {variant.formatStr}
+                  </span>
+                  <span className="text-[#94A3B8]">{variant.releaseYear}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
