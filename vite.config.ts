@@ -181,6 +181,143 @@ function getGeminiApiKey(): string {
   return ''
 }
 
+function getGeminiModel(): string {
+  if (process.env.GEMINI_MODEL) {
+    return process.env.GEMINI_MODEL
+  }
+  try {
+    const envPath = path.resolve(process.cwd(), '.env')
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf-8')
+      const match = content.match(/^\s*GEMINI_MODEL\s*=\s*(.+)$/m)
+      if (match) {
+        return match[1].trim().replace(/^["']|["']$/g, '')
+      }
+    }
+  } catch {}
+  return 'gemini-3.8-flash'
+}
+
+// --- Gemini API Shared Token-Bucket Pacer & Resilient Backoff ---
+let lastGeminiCallTimestamp = 0
+const GEMINI_PACING_INTERVAL_MS = 4000 // 15 RPM Safe Pacing Buffer for Free Tier
+
+const GEMINI_CANDIDATE_MODELS = [
+  getGeminiModel(),
+  'gemini-3.8-flash',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+].filter((m, idx, arr) => m && arr.indexOf(m) === idx)
+
+interface GeminiCallOptions {
+  bodyPayload: any
+  timeoutMs?: number
+}
+
+interface GeminiCallResult {
+  ok: boolean
+  status: number
+  data?: any
+  modelUsed?: string
+  pacingDelayMs?: number
+  retriesAttempted?: number
+  error?: string
+}
+
+async function executePacedGeminiCall(
+  apiKey: string,
+  options: GeminiCallOptions
+): Promise<GeminiCallResult> {
+  const { bodyPayload, timeoutMs = 25000 } = options
+
+  // 1. Enforce Token-Bucket Pacing (4000ms safe floor between calls)
+  const now = Date.now()
+  const elapsed = now - lastGeminiCallTimestamp
+  const waitMs = Math.max(0, GEMINI_PACING_INTERVAL_MS - elapsed)
+  if (waitMs > 0) {
+    console.log(`[Gemini Pacing] Enforcing safe Free Tier buffer: waiting ${waitMs}ms before dispatch...`)
+    await new Promise((r) => setTimeout(r, waitMs))
+  }
+  lastGeminiCallTimestamp = Date.now()
+
+  let lastError: any = null
+  let totalRetries = 0
+
+  for (const model of GEMINI_CANDIDATE_MODELS) {
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
+
+    // Attempt up to 3 retries with exponential backoff on 429/503 for this model
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        console.log(`[Gemini AI] Querying model ${model} (attempt ${attempt + 1})...`)
+        const resTry = await fetch(geminiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(timeoutMs),
+          body: JSON.stringify(bodyPayload),
+        })
+
+        if (resTry.ok) {
+          lastGeminiCallTimestamp = Date.now()
+          const json = await resTry.json()
+          return {
+            ok: true,
+            status: 200,
+            data: json,
+            modelUsed: model,
+            pacingDelayMs: waitMs,
+            retriesAttempted: totalRetries,
+          }
+        }
+
+        // Handle 429 Too Many Requests or 503 Overloaded
+        if (resTry.status === 429 || resTry.status === 503) {
+          totalRetries++
+          const errJson = (await resTry.json().catch(() => ({}))) as any
+          lastError =
+            errJson?.error?.message ||
+            (resTry.status === 429 ? 'Rate limit exceeded (15 RPM)' : 'Service temporarily overloaded')
+
+          // If attempt < 2, perform exponential backoff: 2s, 4s (+ jitter)
+          if (attempt < 2) {
+            const backoffMs = Math.pow(2, attempt + 1) * 1000 + Math.floor(Math.random() * 500)
+            console.warn(
+              `[Gemini AI] Model ${model} returned HTTP ${resTry.status}. Exponential backoff: waiting ${backoffMs}ms before retry...`
+            )
+            await new Promise((r) => setTimeout(r, backoffMs))
+            continue
+          } else {
+            console.warn(
+              `[Gemini AI] Model ${model} exhausted retries on HTTP ${resTry.status}. Trying next fallback model...`
+            )
+            break // Fallback to next candidate model
+          }
+        } else {
+          // Other error (400, 404, etc.)
+          const errJson = (await resTry.json().catch(() => ({}))) as any
+          lastError = errJson?.error?.message || `HTTP ${resTry.status}`
+          console.warn(`[Gemini AI] Model ${model} returned HTTP ${resTry.status}: ${lastError}`)
+          break // Move to next model
+        }
+      } catch (err: any) {
+        lastError = err.message
+        console.warn(`[Gemini AI] Model ${model} fetch exception: ${err.message}`)
+        break
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastError?.includes('429') || lastError?.includes('Rate limit') ? 429 : 503,
+    error: lastError || 'All Gemini AI candidate models failed',
+    pacingDelayMs: waitMs,
+    retriesAttempted: totalRetries,
+  }
+}
+
 function localLibraryScannerPlugin(): Plugin {
   return {
 
@@ -1331,7 +1468,7 @@ function localLibraryScannerPlugin(): Plugin {
         res.end(JSON.stringify({ success: false, message: 'No confident MusicBrainz archival match found' }))
       })
 
-      // 6. Gemini 3.7 Flash AI Metadata Resolver with 25-Album Single-Call Batching
+      // 6. Gemini AI Metadata Resolver with 25-Album Single-Call Batching & Safe Pacing
       server.middlewares.use('/api/ai-metadata-resolver', async (req, res) => {
         if (req.method !== 'POST') {
           res.statusCode = 405
@@ -1368,13 +1505,6 @@ function localLibraryScannerPlugin(): Plugin {
               res.end(JSON.stringify({ error: 'GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY to your .env file.' }))
               return
             }
-            const candidateModels = [
-              'gemini-3.6-flash',
-              'gemini-3.1-flash-lite',
-              'gemini-3.7-flash',
-              'gemini-3.5-flash',
-              'gemini-3.5-flash-lite',
-            ]
 
             const promptText = `You are an authoritative archival musicologist, discographer, and audio tag engineer.
 Analyze the following batch of ${items.length} audio release(s)/track(s) from a master music library.
@@ -1415,55 +1545,35 @@ Return ONLY a valid JSON array containing exactly ${items.length} object(s), whe
 ]
 No other text or markdown explanation, just the pure JSON array.`
 
-            let response: Response | null = null
-            let lastError: any = null
+            const callResult = await executePacedGeminiCall(apiKey, {
+              bodyPayload: {
+                contents: [{ parts: [{ text: promptText }] }],
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                },
+              },
+              timeoutMs: 25000,
+            })
 
-            for (const model of candidateModels) {
-              const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
-              try {
-                console.log(`[Gemini AI] Querying model ${model} for ${items.length} track(s)...`)
-                const resTry = await fetch(geminiUrl, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  signal: AbortSignal.timeout(20000),
-                  body: JSON.stringify({
-                    contents: [{ parts: [{ text: promptText }] }],
-                    generationConfig: {
-                      responseMimeType: 'application/json',
-                    },
-                  }),
+            res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
+            res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
+            res.setHeader('x-gemini-retries', String(callResult.retriesAttempted || 0))
+
+            if (!callResult.ok) {
+              res.statusCode = callResult.status
+              const errMessage = callResult.error || 'All Gemini AI models temporarily unavailable'
+              console.error('[Gemini AI] Resolver failed:', errMessage)
+              res.end(
+                JSON.stringify({
+                  error: errMessage,
+                  code: callResult.status === 429 ? 'RATE_LIMIT_429' : 'AI_ERROR',
+                  pacingDelayMs: callResult.pacingDelayMs,
                 })
-
-                if (resTry.ok) {
-                  console.log(`[Gemini AI] Model ${model} responded successfully (HTTP 200)`)
-                  response = resTry
-                  break
-                } else if (resTry.status === 503 || resTry.status === 429) {
-                  const errJson = (await resTry.json().catch(() => ({}))) as any
-                  console.warn(`[Gemini AI] Model ${model} returned HTTP ${resTry.status} (${errJson?.error?.message || 'High demand'}). Trying fallback model...`)
-                  lastError = errJson
-                  continue // Try next fallback model
-                } else {
-                  const errJson = (await resTry.json().catch(() => ({}))) as any
-                  console.warn(`[Gemini AI] Model ${model} returned HTTP ${resTry.status}:`, errJson?.error?.message || 'Unknown error')
-                  lastError = errJson
-                  continue
-                }
-              } catch (e: any) {
-                console.warn(`[Gemini AI] Model ${model} fetch exception:`, e.message)
-                lastError = e
-              }
-            }
-
-            if (!response || !response.ok) {
-              res.statusCode = response?.status || 503
-              const errMessage = lastError?.error?.message || lastError?.message || 'All Gemini AI models temporarily unavailable'
-              console.error('[Gemini AI] All candidate models failed:', errMessage)
-              res.end(JSON.stringify({ error: errMessage }))
+              )
               return
             }
 
-            const geminiResult = (await response.json()) as any
+            const geminiResult = callResult.data as any
             const textResponse = geminiResult.candidates?.[0]?.content?.parts?.[0]?.text || '[]'
             let parsedEntities = []
             try {
@@ -1479,6 +1589,11 @@ No other text or markdown explanation, just the pure JSON array.`
                 success: true,
                 count: parsedEntities.length,
                 results: parsedEntities,
+                telemetry: {
+                  modelUsed: callResult.modelUsed,
+                  pacingDelayMs: callResult.pacingDelayMs,
+                  retriesAttempted: callResult.retriesAttempted,
+                },
               })
             )
           } catch (e: any) {
@@ -1488,7 +1603,7 @@ No other text or markdown explanation, just the pure JSON array.`
         })
       })
 
-      // 6.5. Gemini AI Album Cover Art & Canonical Master Resolver
+      // 6.5. Gemini AI Album Cover Art & Canonical Master Resolver with Safe Pacing
       server.middlewares.use('/api/ai-cover-art', async (req, res) => {
         if (req.method !== 'POST') {
           res.statusCode = 405
@@ -1524,12 +1639,6 @@ No other text or markdown explanation, just the pure JSON array.`
               res.end(JSON.stringify({ error: 'GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY to your .env file.' }))
               return
             }
-            const candidateModels = [
-              'gemini-3.6-flash',
-              'gemini-3.1-flash-lite',
-              'gemini-3.7-flash',
-              'gemini-3.5-flash',
-            ]
 
             const promptText = `You are an authoritative archival discographer and music librarian.
 Analyze the following album and provide canonical metadata and artwork details:
@@ -1552,30 +1661,20 @@ Return ONLY a valid JSON object with these exact keys:
 }
 No markdown, just JSON.`
 
-            let response: Response | null = null
-            for (const model of candidateModels) {
-              const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
-              try {
-                const resTry = await fetch(geminiUrl, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  signal: AbortSignal.timeout(10000),
-                  body: JSON.stringify({
-                    contents: [{ parts: [{ text: promptText }] }],
-                    generationConfig: { responseMimeType: 'application/json' },
-                  }),
-                })
-                if (resTry.ok) {
-                  response = resTry
-                  break
-                }
-              } catch {}
-            }
+            const callResult = await executePacedGeminiCall(apiKey, {
+              bodyPayload: {
+                contents: [{ parts: [{ text: promptText }] }],
+                generationConfig: { responseMimeType: 'application/json' },
+              },
+              timeoutMs: 15000,
+            })
+
+            res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
+            res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
 
             let parsed: any = {}
-            if (response && response.ok) {
-              const gJson = (await response.json()) as any
-              const text = gJson.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
+            if (callResult.ok && callResult.data) {
+              const text = callResult.data.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
               try {
                 parsed = JSON.parse(text)
               } catch {
@@ -1598,6 +1697,11 @@ No markdown, just JSON.`
                 coverArtUrl: parsed.suggestedCoverArtUrl || '',
                 coverResolution: parsed.coverResolution || 'Master Reference Scan (AI Verified)',
                 confidenceScore: parsed.confidenceScore || 0.95,
+                telemetry: {
+                  modelUsed: callResult.modelUsed,
+                  pacingDelayMs: callResult.pacingDelayMs,
+                  retriesAttempted: callResult.retriesAttempted,
+                },
               })
             )
           } catch (e: any) {
@@ -1607,7 +1711,7 @@ No markdown, just JSON.`
         })
       })
 
-      // 7. Embedded Conversational AI Agent with Live Database Snapshot & Capability Tool Calling
+      // 7. Embedded Conversational AI Agent with Live Database Snapshot & Paced Calling
       server.middlewares.use('/api/agent-chat', async (req, res) => {
         if (req.method !== 'POST') {
           res.statusCode = 405
@@ -1642,12 +1746,6 @@ No markdown, just JSON.`
               res.end(JSON.stringify({ error: 'GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY to your .env file.' }))
               return
             }
-            const candidateModels = [
-              'gemini-3.6-flash',
-              'gemini-3.1-flash-lite',
-              'gemini-3.7-flash',
-              'gemini-3.5-flash',
-            ]
 
             const systemInstruction = `You are Cadence, an advanced autonomous AI musicologist, audio engineer, and library management agent embedded in Cadence Core (an audiophile-grade music management suite).
 You have full access to the live library database snapshot and can execute capabilities on the user's behalf.
@@ -1658,16 +1756,20 @@ Available executable tools:
 - filter_catalog(args: { composer?: string, era?: string, language?: string, format?: string, genre?: string, mastering?: string, searchQuery?: string })
 - switch_view(args: { viewMode: "virtual_table" | "variant_stack" | "work_movement" })
 - run_audit(args: {})
-- remediate_issue(args: { actionType: "RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER" | "MERGE_DUPLICATE_PERFORMERS" | "NORMALIZE_GENRES" | "FETCH_HIRES_ART" | "SYNC_FOLDER_TO_ALBUM" })
+- remediate_issue(args: { actionType: "RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER" | "MERGE_DUPLICATE_PERFORMERS" | "NORMALIZE_GENRES" | "FETCH_HIRES_ART" | "SYNC_FOLDER_TO_ALBUM" | "REWORK_BACKDROP" | "NORMALIZE_ARTIST_NAMES" | "AUTOGEN_TRACK_NUMBERS" | "FILL_MISSING_METADATA", provider?: "apple" | "musicbrainz" | "ai" })
+- rework_backdrop(args: { composer?: string, artist?: string, releaseId?: string, provider?: "apple" | "musicbrainz" | "ai" })
 - select_track(args: { query: string })
-- open_modal(args: { modalName: "import" | "commit" | "path_rules" | "sidecar_export" | "batch_diff" | "customize_album" })
+- open_modal(args: { modalName: "import" | "commit" | "path_rules" | "sidecar_export" | "batch_diff" | "customize_album" | "storage_manager" })
 - reset_filters(args: {})
+- execute_pipeline(args: { commands: Array<{ tool: string, args: Record<string, any> }> })
 
 Instructions:
 1. Provide a concise, knowledgeable, audiophile-grade conversational response in markdown.
 2. If the user asks to perform an action (e.g. "filter to 24-bit tracks", "switch to grid", "auto tag from folders", "open commit modal"), include the exact structured tool in "command".
-3. If the user asks for recommendations, evaluate the catalog hygiene and suggest the top 2-3 most impactful actions.
-4. Format output strictly as JSON with this schema:
+   For compound or multi-step requests (e.g. "fetch art and rework backdrop", "run audit and fix tags, then commit"), use "execute_pipeline" with an ordered array of tool commands in "args.commands".
+3. If the user asks an informational or explanatory question without requesting an action (e.g. questions about dynamic range, file formats, health score, or statistics), answer conversationally and set "command" to null.
+4. If the user asks for recommendations, evaluate the catalog hygiene and suggest the top 2-3 most impactful actions.
+5. Format output strictly as JSON with this schema:
 {
   "response": "<Markdown formatted conversational response>",
   "command": { "tool": "<tool_name>", "args": { ... }, "explanation": "<short description of action>" } | null,
@@ -1684,34 +1786,22 @@ Instructions:
               { role: 'user', parts: [{ text: `${systemInstruction}\n\nUser Instruction: ${prompt}` }] },
             ]
 
+            const callResult = await executePacedGeminiCall(apiKey, {
+              bodyPayload: {
+                contents,
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                },
+              },
+              timeoutMs: 20000,
+            })
+
+            res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
+            res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
+
             let aiResponseText = ''
-            let response: Response | null = null
-
-            for (const model of candidateModels) {
-              const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
-              try {
-                const resTry = await fetch(geminiUrl, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  signal: AbortSignal.timeout(18000),
-                  body: JSON.stringify({
-                    contents,
-                    generationConfig: {
-                      responseMimeType: 'application/json',
-                    },
-                  }),
-                })
-
-                if (resTry.ok) {
-                  response = resTry
-                  break
-                }
-              } catch {}
-            }
-
-            if (response && response.ok) {
-              const gJson = (await response.json()) as any
-              aiResponseText = gJson.candidates?.[0]?.content?.parts?.[0]?.text || ''
+            if (callResult.ok && callResult.data) {
+              aiResponseText = callResult.data.candidates?.[0]?.content?.parts?.[0]?.text || ''
             }
 
             let parsed: any = null
@@ -1737,7 +1827,17 @@ Instructions:
             }
 
             res.statusCode = 200
-            res.end(JSON.stringify({ success: true, ...parsed }))
+            res.end(
+              JSON.stringify({
+                success: true,
+                ...parsed,
+                telemetry: {
+                  modelUsed: callResult.modelUsed,
+                  pacingDelayMs: callResult.pacingDelayMs,
+                  retriesAttempted: callResult.retriesAttempted,
+                },
+              })
+            )
           } catch (err: any) {
             res.statusCode = 200
             res.end(
@@ -1753,6 +1853,25 @@ Instructions:
             )
           }
         })
+      })
+
+      // 7.5 Real-Time Gemini AI Quota & Pacing Telemetry Endpoint
+      server.middlewares.use('/api/ai-quota-telemetry', async (_req, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        const now = Date.now()
+        const elapsed = now - lastGeminiCallTimestamp
+        const nextSlotRemainingMs = Math.max(0, GEMINI_PACING_INTERVAL_MS - elapsed)
+        res.statusCode = 200
+        res.end(
+          JSON.stringify({
+            rateLimitRpm: 15,
+            pacingIntervalMs: GEMINI_PACING_INTERVAL_MS,
+            nextSlotRemainingMs,
+            isPacingActive: nextSlotRemainingMs > 0,
+            lastCallTimestamp: lastGeminiCallTimestamp,
+          })
+        )
       })
 
       // 8. Commit Staged Metadata to Disk (Audiophile Sidecars & Tag Records)

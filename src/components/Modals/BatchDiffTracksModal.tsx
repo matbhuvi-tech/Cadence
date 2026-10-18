@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useRef, useEffect } from 'react'
 import {
   GitCompare,
   Sparkles,
@@ -26,6 +26,8 @@ import {
   Building2,
   Hash,
   Calendar,
+  HelpCircle,
+  FastForward,
 } from 'lucide-react'
 import { Track, Release, DiffSource } from '../../core/types'
 import {
@@ -33,11 +35,13 @@ import {
   BatchItem,
   BatchDiffTrackResult,
   ProviderResult,
+  BatchDiffTelemetry,
 } from '../../services/federatedResolvers'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { generatePanoramicBackdrop } from '../../services/panoramicBackdropGenerator'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { graphEngine } from '../../core/graphEngine'
+import { normalizationService } from '../../services/normalizationService'
 
 export interface BatchDiffTracksModalProps {
   isOpen: boolean
@@ -73,6 +77,26 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
   const [activeTab, setActiveTab] = useState<'queue' | 'results'>('queue')
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table')
   const [searchQuery, setSearchQuery] = useState('')
+
+  // Telemetry & Rate-Limit Pacing States
+  const [telemetry, setTelemetry] = useState<BatchDiffTelemetry | null>(null)
+  const [pacingCountdown, setPacingCountdown] = useState<number>(0)
+  const [showDelayInfoModal, setShowDelayInfoModal] = useState(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    if (telemetry?.pacingCountdownSeconds && telemetry.pacingCountdownSeconds > 0) {
+      setPacingCountdown(telemetry.pacingCountdownSeconds)
+    }
+  }, [telemetry?.pacingCountdownSeconds])
+
+  useEffect(() => {
+    if (pacingCountdown <= 0) return
+    const timer = setInterval(() => {
+      setPacingCountdown((prev) => Math.max(0, Math.round((prev - 0.1) * 10) / 10))
+    }, 100)
+    return () => clearInterval(timer)
+  }, [pacingCountdown])
 
   // Provider inclusion toggles
   const [includeItunes, setIncludeItunes] = useState(true)
@@ -242,6 +266,9 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
       return
     }
 
+    const abortCtrl = new AbortController()
+    abortControllerRef.current = abortCtrl
+
     setIsResolving(true)
     setErrorMsg(null)
     setProviderWarning(null)
@@ -263,8 +290,20 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
 
       const resolved = await federatedResolversService.resolveBatchDiff(
         batchItems,
-        { includeItunes, includeMusicBrainz, includeAi },
-        (msg) => setProgressMsg(msg)
+        {
+          includeItunes,
+          includeMusicBrainz,
+          includeAi,
+          abortSignal: abortCtrl.signal,
+          onIntermediateResults: (intermediate) => {
+            setResultsMap(intermediate)
+            setActiveTab('results')
+          },
+        },
+        (msg, completed, total, telem) => {
+          setProgressMsg(msg)
+          if (telem) setTelemetry(telem)
+        }
       )
 
       setResultsMap(resolved)
@@ -272,7 +311,7 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
 
       const warnings = (resolved as any).warnings
       if (warnings?.ai) {
-        setProviderWarning(`Gemini AI Notice: ${warnings.ai}. Candidates from other providers are displayed.`)
+        setProviderWarning(`Gemini AI Notice: ${warnings.ai}`)
       }
 
       setProgressMsg(`Batch Diff complete: Generated candidates for ${resolved.size} tracks!`)
@@ -282,6 +321,16 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
     } finally {
       setIsResolving(false)
     }
+  }
+
+  // Skip AI and complete immediately using Apple Music & MusicBrainz
+  const handleSkipAiAndProceed = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    setIsResolving(false)
+    setProviderWarning('Skipped remaining Gemini AI query. Applied verified matches from Apple Music and MusicBrainz.')
+    setProgressMsg('AI query bypassed by user. Batch is ready for staging.')
   }
 
   // Bulk set chosen source for all tracks in results
@@ -429,7 +478,12 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
         chosenCatalog = res.candidates.musicbrainz.catalogNumber
       }
 
+      if (chosenArtist) chosenArtist = normalizationService.applyToText(chosenArtist, 'artist')
+      if (chosenComposer) chosenComposer = normalizationService.applyToText(chosenComposer, 'composer')
+      if (chosenGenre) chosenGenre = normalizationService.applyToText(chosenGenre, 'genre')
+
       const changes: Record<string, any> = {}
+
 
       if (chosenTitle && chosenTitle !== trk.title) {
         changes.title = chosenTitle
@@ -587,6 +641,129 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
             )}
           </div>
         </div>
+
+        {/* Active Rate-Limit Pacing Telemetry Banner */}
+        {isResolving && (
+          <div className="mx-6 mt-3 p-3.5 rounded-xl bg-[#12151D] border border-cyan-500/30 shadow-[0_0_15px_rgba(0,245,255,0.08)] flex flex-col gap-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-3">
+                {/* Apple Status */}
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      telemetry?.itunesCompleted ? 'bg-emerald-400' : 'bg-white/20'
+                    }`}
+                  />
+                  <span className="text-[#94A3B8]">Apple iTunes:</span>
+                  <span className="font-mono text-white font-semibold">
+                    {telemetry?.itunesCompleted
+                      ? `${telemetry.itunesCompleted}/${telemetry.total} Done`
+                      : 'Queued'}
+                  </span>
+                </div>
+
+                <span className="text-white/20">|</span>
+
+                {/* MusicBrainz Status */}
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      telemetry?.musicbrainzCompleted ? 'bg-emerald-400' : 'bg-white/20'
+                    }`}
+                  />
+                  <span className="text-[#94A3B8]">MusicBrainz:</span>
+                  <span className="font-mono text-white font-semibold">
+                    {telemetry?.musicbrainzCompleted
+                      ? `${telemetry.musicbrainzCompleted}/${telemetry.total}`
+                      : 'Queued'}
+                  </span>
+                </div>
+
+                <span className="text-white/20">|</span>
+
+                {/* Gemini AI Status */}
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      telemetry?.geminiCompleted
+                        ? 'bg-emerald-400'
+                        : telemetry?.isAiPacingActive
+                        ? 'bg-amber-400 animate-ping'
+                        : 'bg-cyan-400 animate-pulse'
+                    }`}
+                  />
+                  <span className="text-[#94A3B8]">Gemini AI:</span>
+                  <span className="font-mono text-cyan-300 font-semibold">
+                    {telemetry?.geminiCompleted
+                      ? 'Complete'
+                      : telemetry?.isAiPacingActive
+                      ? `Buffer Refill (${pacingCountdown.toFixed(1)}s)`
+                      : 'Processing Batch'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDelayInfoModal(true)}
+                  className="text-[11px] text-[#94A3B8] hover:text-[#00F5FF] flex items-center gap-1 cursor-pointer transition-colors"
+                  title="Learn why requests are paced"
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                  <span>Why the delay?</span>
+                </button>
+
+                {telemetry?.canSkipAi && (
+                  <button
+                    type="button"
+                    onClick={handleSkipAiAndProceed}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 flex items-center gap-1 cursor-pointer transition-all"
+                  >
+                    <FastForward className="w-3 h-3" />
+                    <span>Skip AI & Apply Apple/MB Now</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Word-Clock Progress & Quota Buffer Bar */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-1.5 bg-white/[0.06] rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-[#00F5FF] to-[#A855F7] transition-all duration-300"
+                  style={{
+                    width: telemetry?.isAiPacingActive
+                      ? `${Math.max(5, (1 - pacingCountdown / 4.0) * 100)}%`
+                      : `${Math.min(
+                          100,
+                          Math.round(
+                            (((telemetry?.itunesCompleted || 0) +
+                              (telemetry?.musicbrainzCompleted || 0) +
+                              (telemetry?.geminiCompleted || 0)) /
+                              Math.max(1, (telemetry?.total || 1) * 3)) *
+                              100
+                          )
+                        )}%`,
+                  }}
+                />
+              </div>
+              <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#64748B]">
+                <span>Free Tier Quota Buffer:</span>
+                <span className="text-cyan-400 font-bold">15 RPM Safe</span>
+                {/* 15-dot LED Indicator */}
+                <div className="flex items-center gap-0.5 ml-1" title="15 Requests Per Minute Safe Window">
+                  {Array.from({ length: 15 }).map((_, i) => (
+                    <span
+                      key={i}
+                      className={`w-1 h-1 rounded-full ${i < 3 ? 'bg-cyan-400' : 'bg-white/15'}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Tab & Preset Controls */}
         <div className="p-3 px-6 bg-black/40 border-b border-white/[0.06] flex items-center justify-between gap-3 shrink-0">
@@ -997,7 +1174,31 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
                 )
               })()}
 
+              {/* Remembered Normalization Rules Active Indicator */}
+              {(() => {
+                const activeRules = normalizationService.getRules().filter((r) => r.isEnabled)
+                if (activeRules.length === 0) return null
+                return (
+                  <div className="p-3 rounded-xl bg-[#ADFF2F]/10 border border-[#ADFF2F]/25 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2 text-[#ADFF2F] font-mono">
+                      <Sparkles className="w-3.5 h-3.5 shrink-0 text-[#ADFF2F]" />
+                      <span className="font-semibold">
+                        {activeRules.length} Remembered Normalization Rule{activeRules.length > 1 ? 's' : ''} Active:
+                      </span>
+                      <span className="text-[#CBD5E1] text-[11px] truncate max-w-lg">
+                        {activeRules.slice(0, 3).map((r) => `"${r.sourcePattern}" → "${r.targetValue}"`).join(', ')}
+                        {activeRules.length > 3 ? ` (+${activeRules.length - 3} more)` : ''}
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-mono text-[#ADFF2F] bg-[#ADFF2F]/15 border border-[#ADFF2F]/30 px-2 py-0.5 rounded-full font-bold">
+                      Precedence Enforced ✓
+                    </span>
+                  </div>
+                )
+              })()}
+
               {/* Enrichment Option: Cinematic Panoramic Backdrop Rework */}
+
               <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/[0.08] flex flex-col gap-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
@@ -1928,6 +2129,54 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Why the delay? Explanation Modal */}
+        {showDelayInfoModal && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-[#12151D] border border-white/[0.12] rounded-2xl max-w-md w-full p-6 shadow-2xl animate-in fade-in zoom-in-95">
+              <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
+                <div className="flex items-center gap-2 text-cyan-400 font-bold text-sm font-mono">
+                  <Sparkles className="w-4 h-4" />
+                  <span>Archival Rate-Limit Telemetry</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowDelayInfoModal(false)}
+                  className="text-white/40 hover:text-white p-1 rounded-lg"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="py-4 text-xs text-[#94A3B8] space-y-3 leading-relaxed">
+                <p>
+                  Cadence Core is operating on the <strong className="text-white">Google Gemini Free Tier</strong>, which enforces a strict ceiling of <strong className="text-cyan-400">15 Requests Per Minute (RPM)</strong>.
+                </p>
+                <p>
+                  To ensure your batch harmonization and sidecars complete reliably without HTTP 429 server rejections or dropped tags, Cadence:
+                </p>
+                <ul className="list-disc list-inside space-y-1 text-white/80 pl-1 font-mono text-[11px]">
+                  <li>Paces cloud queries with a 4.0-second safe buffer.</li>
+                  <li>Resolves Apple Music & MusicBrainz in parallel without waiting.</li>
+                  <li>Stages all completed progress non-destructively in JSON sidecars.</li>
+                </ul>
+                <p className="text-[11px] text-[#64748B]">
+                  Tip: You can click <span className="text-amber-300 font-semibold">"Skip AI & Apply Apple/MB Now"</span> at any time to instantly finish the batch using deterministic verified records.
+                </p>
+              </div>
+
+              <div className="pt-3 border-t border-white/[0.08] flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowDelayInfoModal(false)}
+                  className="px-4 py-1.5 rounded-xl bg-[#00F5FF] text-black font-bold text-xs font-mono hover:bg-[#00F5FF]/90 cursor-pointer"
+                >
+                  Understood
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

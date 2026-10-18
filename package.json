@@ -8,6 +8,10 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
+    "test:engine": "tsx src/test/verifyEngine.ts",
+    "test:pilot": "tsx src/test/testCadenceCopilotMatrix.ts",
+    "test:norm": "tsx src/test/testNormalizationRules.ts",
+    "test:backdrop": "tsx src/test/testBackdropAnalyzer.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

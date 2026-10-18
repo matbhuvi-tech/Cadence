@@ -44,7 +44,12 @@ import { ActivityPill } from './components/CommandBar/ActivityPill'
 import { ActivityCenterPopover } from './components/CommandBar/ActivityCenterPopover'
 import { StorageManagerModal } from './components/Modals/StorageManagerModal'
 import { QuarantineLogModal } from './components/Modals/QuarantineLogModal'
+import { NormalizationRulesModal } from './components/Modals/NormalizationRulesModal'
+import { MaintainCockpit, MaintainSubTab } from './components/Maintain/MaintainCockpit'
+import { FocusedWorkbench } from './components/CenterStage/FocusedWorkbench'
+import { SanctuaryListeningLounge } from './components/AudioPlayer/SanctuaryListeningLounge'
 import { ScanProgressPayload, WatchedFolder, SkippedFile } from './core/types'
+import { backdropAnalyzer } from './services/backdropAnalyzer'
 
 function AppContent() {
   // Primary Graph State
@@ -60,7 +65,7 @@ function AppContent() {
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set())
 
   // View & Filter State
-  const [viewMode, setViewMode] = useState<CanvasViewMode>('virtual_table')
+  const [viewMode, setViewMode] = useState<CanvasViewMode>('cover_grid')
   const [albumDisplayMode, setAlbumDisplayMode] = useState<AlbumDisplayMode>('album_first')
   const [searchQuery, setSearchQuery] = useState('')
   const [facets, setFacets] = useState<FacetSelections>({})
@@ -83,6 +88,7 @@ function AppContent() {
   const [isActivityPopoverOpen, setIsActivityPopoverOpen] = useState(false)
   const [isStorageManagerOpen, setIsStorageManagerOpen] = useState(false)
   const [isQuarantineModalOpen, setIsQuarantineModalOpen] = useState(false)
+  const [isNormalizationRulesModalOpen, setIsNormalizationRulesModalOpen] = useState(false)
   const [scanTelemetry, setScanTelemetry] = useState<ScanProgressPayload>({
     stage: 'idle',
     processedCount: 0,
@@ -97,6 +103,13 @@ function AppContent() {
   })
   const [watchedFolders, setWatchedFolders] = useState<WatchedFolder[]>([])
   const [skippedFiles, setSkippedFiles] = useState<SkippedFile[]>([])
+
+  // Top-Level Unified Product Model: Library vs Maintain & Sanctuary Lounge
+  const [topMode, setTopMode] = useState<'library' | 'maintain'>('library')
+  const [maintainSubTab, setMaintainSubTab] = useState<MaintainSubTab>('needs_attention')
+  const [isSanctuaryOpen, setIsSanctuaryOpen] = useState<boolean>(false)
+  const [focusedWorkbenchTrack, setFocusedWorkbenchTrack] = useState<Track | null>(null)
+  const [isWindowDragOver, setIsWindowDragOver] = useState<boolean>(false)
 
   const { togglePlayPause, nextTrack, prevTrack, toggleMute } = useAudioPlayer()
 
@@ -116,6 +129,21 @@ function AppContent() {
       if (e.code === 'Space') {
         e.preventDefault()
         togglePlayPause()
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '1') {
+        e.preventDefault()
+        setTopMode('library')
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '2') {
+        e.preventDefault()
+        setTopMode('maintain')
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'l' || e.key === 'L')) {
+        e.preventDefault()
+        setIsSanctuaryOpen((prev) => !prev)
+      } else if (e.key === 'Escape') {
+        if (focusedWorkbenchTrack) {
+          setFocusedWorkbenchTrack(null)
+        } else if (isSanctuaryOpen) {
+          setIsSanctuaryOpen(false)
+        }
       } else if (e.code === 'ArrowRight' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault()
         nextTrack()
@@ -126,9 +154,15 @@ function AppContent() {
         if (!e.ctrlKey && !e.metaKey && !e.altKey) {
           toggleMute()
         }
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
+        e.preventDefault()
+        setIsImportModalOpen(true)
       } else if ((e.ctrlKey || e.metaKey) && e.key === ',') {
         e.preventDefault()
         setIsStorageManagerOpen(true)
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
+        e.preventDefault()
+        setIsNormalizationRulesModalOpen(true)
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
         if (e.key === '1') setViewMode('work_movement')
         else if (e.key === '2') setViewMode('variant_stack')
@@ -150,6 +184,42 @@ function AppContent() {
       window.removeEventListener('cadence:toast' as any, handleToastEvent as any)
     }
   }, [togglePlayPause, nextTrack, prevTrack, toggleMute])
+
+  // Window drag and drop detection for audio folders & files
+  useEffect(() => {
+    const handleDragOver = (e: DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setIsWindowDragOver(true)
+    }
+
+    const handleDragLeave = (e: DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.relatedTarget === null || e.clientX <= 0 || e.clientY <= 0) {
+        setIsWindowDragOver(false)
+      }
+    }
+
+    const handleDrop = (e: DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setIsWindowDragOver(false)
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        setIsImportModalOpen(true)
+      }
+    }
+
+    window.addEventListener('dragover', handleDragOver)
+    window.addEventListener('dragleave', handleDragLeave)
+    window.addEventListener('drop', handleDrop)
+
+    return () => {
+      window.removeEventListener('dragover', handleDragOver)
+      window.removeEventListener('dragleave', handleDragLeave)
+      window.removeEventListener('drop', handleDrop)
+    }
+  }, [])
 
   // Handle saving customized album and folder names
   const handleSaveAlbumCustomization = (
@@ -323,6 +393,42 @@ function AppContent() {
     }
   }
 
+  const handleAddWatchedFolder = async () => {
+    try {
+      const selected = await tauriBridge.openDirectoryDialog()
+      if (selected) {
+        const folderName = selected.split(/[/\\]/).filter(Boolean).pop() || selected
+        const matchedMount = storageMounts.find((m) => selected.startsWith(m.mountPath))
+        const mountId = matchedMount ? matchedMount.id : storageMounts[0]?.id || 'mount-local'
+        const newFolder: WatchedFolder = {
+          id: `wf-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          mountId,
+          folderPath: selected,
+          displayName: folderName,
+          scanMode: 'realtime',
+          isEnabled: true,
+          lastScannedTimestamp: new Date().toISOString(),
+        }
+        await tauriBridge.dbSaveWatchedFolder(newFolder)
+        await handleRefreshLibrary()
+        handleTriggerScan(selected)
+        showToast(`Added watched folder: "${folderName}" and started indexing.`)
+      }
+    } catch (err: any) {
+      showToast(`Could not add folder: ${err.message || err}`)
+    }
+  }
+
+  const handleRemoveWatchedFolder = async (folderId: string) => {
+    try {
+      await tauriBridge.dbRemoveWatchedFolder(folderId)
+      await handleRefreshLibrary()
+      showToast('Removed watched folder from monitoring.')
+    } catch (err: any) {
+      showToast(`Could not remove folder: ${err.message || err}`)
+    }
+  }
+
   // Whether any filters are currently active on the Virtual Grid
   const isGridFilterActive = Boolean(
     searchQuery.trim() ||
@@ -392,6 +498,10 @@ function AppContent() {
       if (activeTriageFilter === 'missing_metadata') {
         const rel = graphEngine.getReleaseById(t.releaseId)
         return !rel?.releaseYear && !rel?.originalYear
+      }
+      if (activeTriageFilter === 'unformatted_backdrop' || activeTriageFilter === 'audit-unformatted-backdrops') {
+        const rel = graphEngine.getReleaseById(t.releaseId)
+        return rel ? backdropAnalyzer.isBackdropUnformatted(rel).isUnformatted : false
       }
       return true
     })
@@ -619,13 +729,24 @@ function AppContent() {
       releaseYear?: number
       coverArtUrl?: string
       backdropUrl?: string
+      rating?: number
+      isFavorite?: boolean
+      isMasterpiece?: boolean
     }
   ) => {
     const res = graphEngine.updateReleaseDetails(releaseId, updates)
     if (res) {
       refreshFromEngine()
       persistCurrentLibrary()
-      showToast(`Updated "${res.release.title}" & staged edits across ${res.affectedTracksCount} tracks`)
+      if (updates.rating !== undefined) {
+        showToast(updates.rating > 0 ? `Rated "${res.release.title}" ${updates.rating}★` : `Cleared rating for "${res.release.title}"`)
+      } else if (updates.isFavorite !== undefined) {
+        showToast(updates.isFavorite ? `Added "${res.release.title}" to Favorites` : `Removed "${res.release.title}" from Favorites`)
+      } else if (res.affectedTracksCount > 0) {
+        showToast(`Updated "${res.release.title}" & staged edits across ${res.affectedTracksCount} tracks`)
+      } else {
+        showToast(`Updated "${res.release.title}"`)
+      }
     }
   }
 
@@ -802,6 +923,15 @@ function AppContent() {
       },
     },
     {
+      id: 'cmd-normalization-rules',
+      title: 'Manage Remembered Normalization Rules (A. R. Rahman → A.R.Rahman)',
+      category: 'AUDIT',
+      shortcut: '⌘N',
+      icon: <Sparkles className="w-4 h-4 text-[#ADFF2F]" />,
+      action: () => setIsNormalizationRulesModalOpen(true),
+    },
+
+    {
       id: 'cmd-auto-remediate',
       title: 'Auto-Remediate First Pending Hygiene Issue in Queue',
       category: 'AUDIT',
@@ -874,20 +1004,24 @@ function AppContent() {
   ]
 
   const uncommittedCount = tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
+  const allAffectedTrackIds = new Set(auditIssues.flatMap((i) => i.sampleTrackIds || []))
+  const impactedAlbumsCount = new Set(
+    tracks.filter((t) => allAffectedTrackIds.has(t.id)).map((t) => t.releaseId).filter(Boolean)
+  ).size
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0D0E12] text-[#F1F5F9] select-none font-sans">
-      {/* Invisible/Glassmorphic Master Navigation Header */}
-      <header className="h-12 border-b border-white/[0.08] bg-[#12151D]/70 backdrop-blur-xl px-4 flex items-center justify-between shrink-0 z-30">
-        {/* Brand & App Title */}
+      {/* Refined Ergonomic Master Navigation Switchboard */}
+      <header className="h-14 border-b border-white/[0.08] bg-[#12151D]/80 backdrop-blur-xl px-4 flex items-center justify-between shrink-0 z-30">
+        {/* Brand & Library Stats */}
         <div className="flex items-center gap-3">
           <div data-tutorial-id="header-brand" className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#00F5FF] to-[#8B5CF6] flex items-center justify-center text-black font-bold shadow-md">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#00F5FF] to-[#8B5CF6] flex items-center justify-center text-black font-extrabold text-sm shadow-md">
               <Music4 className="w-4 h-4 stroke-[2.5]" />
             </div>
             <div className="flex flex-col text-left">
               <span className="font-extrabold tracking-tight text-sm text-[#F1F5F9] leading-none">
-                CADENCE CORE
+                CADENCE PRO
               </span>
               <span className="text-[9px] font-mono text-[#00F5FF] tracking-wider uppercase font-semibold">
                 Relational Music Engine
@@ -895,76 +1029,71 @@ function AppContent() {
             </div>
           </div>
 
-          <div className="h-4 w-[1px] bg-white/10 mx-1" />
+          <div className="h-4 w-[1px] bg-white/10 mx-1 hidden sm:block" />
 
-          {/* Curation Health & Safety Ledger Pills */}
-          <div className="hidden lg:flex items-center gap-2 text-[11px] font-mono">
-            {isCustomLibraryActive ? (
-              <div
-                data-tutorial-id="header-status-pill"
-                className="px-2 py-0.5 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 font-semibold flex items-center gap-1.5"
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
-                Personal Library ({stats.totalTracks} tracks)
-              </div>
-            ) : (
-              <div
-                data-tutorial-id="header-status-pill"
-                className="px-2 py-0.5 rounded-full bg-white/[0.04] border border-white/[0.07] text-[#94A3B8]"
-              >
-                Demo Catalog · {stats.totalReleases} Masters ({stats.totalTracks} Tracks)
-              </div>
-            )}
-            <div
-              data-tutorial-id="header-highres-pill"
-              className="px-2 py-0.5 rounded-full bg-[#00F5FF]/10 border border-[#00F5FF]/30 text-[#00F5FF] font-semibold"
-            >
-              {stats.highResPercentage}% Audiophile High-Res
-            </div>
-            <div
-              data-tutorial-id="header-dr-pill"
-              className="px-2 py-0.5 rounded-full bg-[#10B981]/10 border border-[#10B981]/30 text-[#10B981] font-semibold flex items-center gap-1"
-            >
-              <Volume2 className="w-3 h-3" />
-              Avg DR{stats.averageDrScore}
-            </div>
-            {stats.readOnlyMountsCount > 0 ? (
-              <div
-                data-tutorial-id="header-ro-pill"
-                className="px-2 py-0.5 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 flex items-center gap-1 font-semibold"
-              >
-                <HardDrive className="w-2.5 h-2.5" />
-                {stats.readOnlyMountsCount} RO Locks
-              </div>
-            ) : (
-              <div
-                data-tutorial-id="header-ro-pill"
-                className="px-2 py-0.5 rounded-full bg-white/[0.04] border border-white/[0.06] text-[#64748B] flex items-center gap-1 font-semibold opacity-70"
-                title="Storage is currently Read-Write enabled"
-              >
-                <HardDrive className="w-2.5 h-2.5" />
-                RW Active (0 RO)
-              </div>
-            )}
-            <div
-              data-tutorial-id="header-staged-sidecars-pill"
-              onClick={() => setIsCommitModalOpen(true)}
-              className={`px-2 py-0.5 rounded-full flex items-center gap-1 cursor-pointer font-semibold transition-colors ${
-                uncommittedCount > 0
-                  ? 'bg-[#F59E0B]/20 text-[#F59E0B] border border-[#F59E0B]/40 hover:bg-[#F59E0B]/30'
-                  : 'bg-white/[0.04] text-[#64748B] border border-white/[0.06] opacity-70 hover:opacity-100'
-              }`}
-              title="Click to review staged metadata and write to disk (2-Phase Commit)"
-            >
-              <span className="sidecar-badge-dot" />
-              {uncommittedCount > 0 ? `${uncommittedCount} Ready to Write` : '0 Staged'}
-            </div>
+          <div className="hidden lg:flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
+            <span>{tracks.length} Tracks</span>
+            <span>·</span>
+            <span className="text-[#00F5FF] font-semibold">{stats.highResPercentage}% Hi-Res</span>
           </div>
         </div>
 
-        {/* Right Header: Import Library, Spotlight, AI Copilot & Guided Tutorial */}
+        {/* PRIMARY OBJECT & OPERATION SWITCHBOARD */}
+        <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10 shadow-inner">
+          <button
+            onClick={() => {
+              setTopMode('library')
+              setFocusedWorkbenchTrack(null)
+            }}
+            className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+              topMode === 'library'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <span>📚</span>
+            <span>Library</span>
+            <span className="text-[10px] text-slate-500 font-mono hidden md:inline">⌘1</span>
+          </button>
+
+          <button
+            onClick={() => setTopMode('maintain')}
+            className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+              topMode === 'maintain'
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <span>🛠️</span>
+            <span>Maintain</span>
+            {impactedAlbumsCount > 0 && (
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 font-mono border border-amber-500/30">
+                ⚠️ {impactedAlbumsCount}
+              </span>
+            )}
+            {uncommittedCount > 0 && (
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-lime-500/20 text-lime-300 font-mono border border-lime-500/30">
+                💾 {uncommittedCount}
+              </span>
+            )}
+            <span className="text-[10px] text-slate-500 font-mono hidden md:inline">⌘2</span>
+          </button>
+        </div>
+
+        {/* Right Header: Ingestion Action, Spotlight, Copilot, Activity */}
         <div className="flex items-center gap-2 relative">
-          {/* Real-time Scan Progress & Telemetry Pill */}
+          <button
+            onClick={() => setIsImportModalOpen(true)}
+            title="Import Music Folder (⌘O)"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-500/20 to-teal-500/20 hover:from-cyan-500/30 hover:to-teal-500/30 border border-cyan-500/40 text-cyan-300 hover:text-white text-xs font-semibold shadow-md transition-all cursor-pointer"
+          >
+            <FolderPlus className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Add Music</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-cyan-300 font-mono border border-cyan-500/30">
+              ⌘O
+            </span>
+          </button>
+
           <ActivityPill
             telemetry={scanTelemetry}
             onClick={() => setIsActivityPopoverOpen((prev) => !prev)}
@@ -974,72 +1103,36 @@ function AppContent() {
             isOpen={isActivityPopoverOpen}
             onClose={() => setIsActivityPopoverOpen(false)}
             telemetry={scanTelemetry}
-            onOpenQuarantineModal={() => setIsQuarantineModalOpen(true)}
+            onOpenQuarantineModal={() => {
+              setTopMode('maintain')
+              setIsActivityPopoverOpen(false)
+            }}
           />
 
-          {/* Storage & Watched Folders Management Hub */}
-          <button
-            onClick={() => setIsStorageManagerOpen(true)}
-            title="Library & Storage Management: Watched folders, rescan, and storage topology"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-semibold text-white/90 hover:text-white transition-all shadow-sm"
-          >
-            <HardDrive className="w-3.5 h-3.5 text-[#10B981]" />
-            <span>Storage & Folders</span>
-          </button>
-
-          {/* AI AGENT COPILOT BUTTON */}
           <button
             data-tutorial-id="btn-cadence-agent"
             onClick={() => setIsAgentDrawerOpen((prev) => !prev)}
-            title="Cadence Embedded AI Agent Copilot: Conversational catalog querying, real-time statistics & auto-remediations (⌘J)"
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all shadow-md cursor-pointer ${
+            title="Cadence Embedded AI Agent Copilot (⌘J)"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all shadow-md cursor-pointer ${
               isAgentDrawerOpen
                 ? 'bg-[#ADFF2F]/25 border-[#ADFF2F] text-[#ADFF2F] shadow-[#ADFF2F]/20'
-                : 'bg-gradient-to-r from-[#8B5CF6]/20 to-[#00F5FF]/20 hover:from-[#8B5CF6]/30 hover:to-[#00F5FF]/30 border-[#8B5CF6]/40 text-[#F1F5F9] hover:text-white shadow-sm'
+                : 'bg-gradient-to-r from-[#8B5CF6]/20 to-[#00F5FF]/20 hover:from-[#8B5CF6]/30 hover:to-[#00F5FF]/30 border-[#8B5CF6]/40 text-[#F1F5F9] hover:text-white'
             }`}
           >
             <Bot className="w-3.5 h-3.5 text-[#ADFF2F]" />
-            <span>AI Copilot</span>
+            <span className="hidden sm:inline">AI Copilot</span>
             <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-[#ADFF2F] font-mono border border-[#ADFF2F]/30">
               ⌘J
             </span>
           </button>
 
-          {/* Guided Tutorial Button */}
-          <button
-            data-tutorial-id="btn-guided-tutorial"
-            onClick={() => setIsTutorialOpen(true)}
-            title="Interactive Guided Tour: Explore all features & Headless Agent Protocol (?)"
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#00F5FF]/15 hover:bg-[#00F5FF]/25 border border-[#00F5FF]/50 text-xs font-semibold text-[#00F5FF] hover:text-white transition-all shadow-md shadow-[#00F5FF]/10 cursor-pointer"
-          >
-            <Compass className="w-3.5 h-3.5 text-[#00F5FF]" />
-            <span>Guided Tutorial</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-[#00F5FF] font-mono border border-[#00F5FF]/30">
-              ?
-            </span>
-          </button>
-
-          {/* IMPORT OWN LIBRARY BUTTON */}
-          <button
-            data-tutorial-id="btn-import-library"
-            onClick={() => setIsImportModalOpen(true)}
-            className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#00F5FF]/20 to-[#ADFF2F]/20 hover:from-[#00F5FF]/30 hover:to-[#ADFF2F]/30 border border-[#00F5FF]/40 text-xs font-semibold text-[#00F5FF] hover:text-white transition-all shadow-sm"
-          >
-            <FolderPlus className="w-3.5 h-3.5 text-[#ADFF2F]" />
-            <span>Import Your Library</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-[#CBD5E1] font-mono">
-              ⌘O
-            </span>
-          </button>
-
-          {/* Spotlight palette button */}
           <button
             data-tutorial-id="btn-spotlight-cmd"
             onClick={() => setIsCommandBarOpen(true)}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-mono text-[#94A3B8] hover:text-white transition-all shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-mono text-[#94A3B8] hover:text-white transition-all shadow-sm cursor-pointer"
           >
             <Command className="w-3.5 h-3.5 text-[#00F5FF]" />
-            <span>Spotlight</span>
+            <span className="hidden sm:inline">Spotlight</span>
             <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-[#64748B]">
               ⌘K
             </span>
@@ -1047,92 +1140,170 @@ function AppContent() {
         </div>
       </header>
 
-      {/* Main 3-Panel Pro Workspace */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* 1. Left Rail: Dynamic Taxonomy Tree */}
-        <LeftRail
-          auditIssues={scopedAuditIssues}
-          activeTriageFilter={activeTriageFilter}
-          onSelectTriageFilter={setActiveTriageFilter}
+      {/* Main Workspace Stage */}
+      {topMode === 'maintain' ? (
+        <MaintainCockpit
+          tracks={tracks}
+          releases={releases}
+          auditIssues={auditIssues}
+          storageMounts={storageMounts}
+          watchedFolders={watchedFolders}
+          skippedFiles={skippedFiles}
+          uncommittedCount={uncommittedCount}
+          activeSubTab={maintainSubTab}
+          onSubTabChange={setMaintainSubTab}
+          onAddWatchedFolder={handleAddWatchedFolder}
+          onRemoveWatchedFolder={handleRemoveWatchedFolder}
           onRemediateAudit={handleRemediateAudit}
-          healthScore={scopedHealthScore}
-          isFilteredScope={isGridFilterActive}
-          scopeTrackCount={gridScopedTracks.length}
-          totalTrackCount={tracks.length}
           onRefreshAudit={() => {
             auditService.runFullCatalogAudit()
             refreshFromEngine()
             showToast('Catalog hygiene diagnostic scan updated.')
           }}
-          facets={facets}
-          onFacetChange={setFacets}
-          onResetFacets={() => setFacets({})}
-          storageMounts={storageMounts}
-          onToggleReadOnly={handleToggleReadOnly}
-          selectedMountId={selectedMountId}
-          onSelectMount={setSelectedMountId}
-          selectedFolderFilter={selectedFolderFilter}
-          onSelectFolderFilter={setSelectedFolderFilter}
-          onOpenStorageManager={() => setIsStorageManagerOpen(true)}
-          tracks={tracks}
-          releases={releases}
-        />
-
-        {/* 2. Center Stage: High-Performance Data Canvas */}
-        <DataCanvas
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          albumDisplayMode={albumDisplayMode}
-          onAlbumDisplayModeChange={setAlbumDisplayMode}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          works={works}
-          releases={releases}
-          tracks={filteredTracks}
-          selectedTrackId={selectedTrackId}
-          onSelectTrack={setSelectedTrackId}
-          selectedTrackIds={selectedTrackIds}
-          onToggleTrackSelection={handleToggleTrackSelection}
-          onSelectAllTracks={handleSelectAllTracks}
-          onSelectVariant={handleSelectVariant}
-          onInspectRelease={handleInspectRelease}
-          onCustomizeRelease={(rel) => setCustomizingRelease(rel)}
-          onUpdateReleaseDetails={handleUpdateReleaseDetails}
-          onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
-          onApplyBatchEdits={handleApplyBatchEdits}
-          onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
-          onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
-          onOpenImportModal={() => setIsImportModalOpen(true)}
-          onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
-          onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
-          totalLibraryTracksCount={tracks.length}
-          onResetFilters={() => {
-            setFacets({})
-            setActiveTriageFilter(undefined)
-            setSelectedMountId(undefined)
-            setSelectedFolderFilter(undefined)
-            setSearchQuery('')
+          onApplyPathRestructure={(pattern: string) => {
+            const previews = tracks.map((t) => {
+              const rel = releases.find((r) => r.id === t.releaseId)
+              const proposed = pattern
+                .replace('{Artist}', t.artistCredit || 'Unknown Artist')
+                .replace('{Year}', String(rel?.releaseYear || 'Unknown Year'))
+                .replace('{Album}', rel?.title || 'Unknown Album')
+                .replace('{TrackNum}', String(t.trackNumber || 1).padStart(2, '0'))
+                .replace('{Title}', t.title)
+              return {
+                trackId: t.id,
+                proposedPath: proposed + '.' + (t.format || 'flac').toLowerCase(),
+              }
+            })
+            handleApplyPathRestructure(previews)
           }}
-          activeTriageIssue={activeTriageIssue}
-          onClearTriageFilter={() => setActiveTriageFilter(undefined)}
-          onRemediateTriageIssue={handleRemediateAudit}
+          onCommitTwoPhase={() => setIsCommitModalOpen(true)}
+          onToggleMountLock={handleToggleMountLock}
+          onToggleMountStatus={(mountId: string) => {
+            const mount = storageMounts.find((m) => m.id === mountId)
+            handleToggleMountStatus(mountId, mount?.status || 'online')
+          }}
+          onTriggerScan={(folderPath?: string) => {
+            if (folderPath) {
+              handleTriggerScan(folderPath)
+            } else if (storageMounts.length > 0) {
+              handleTriggerScan(storageMounts[0].mountPath)
+            }
+          }}
+          onRefreshLibrary={handleRefreshLibrary}
+          showToast={showToast}
+          onSwitchToLibrary={() => setTopMode('library')}
         />
+      ) : (
+        <div className="flex-1 flex overflow-hidden">
+          {/* 1. Left Rail: Normalized Navigation */}
+          <LeftRail
+            auditIssues={scopedAuditIssues}
+            activeTriageFilter={activeTriageFilter}
+            onSelectTriageFilter={setActiveTriageFilter}
+            onRemediateAudit={handleRemediateAudit}
+            healthScore={scopedHealthScore}
+            isFilteredScope={isGridFilterActive}
+            scopeTrackCount={gridScopedTracks.length}
+            totalTrackCount={tracks.length}
+            onRefreshAudit={() => {
+              auditService.runFullCatalogAudit()
+              refreshFromEngine()
+              showToast('Catalog hygiene diagnostic scan updated.')
+            }}
+            onOpenNormalizationRules={() => setIsNormalizationRulesModalOpen(true)}
+            facets={facets}
+            onFacetChange={setFacets}
+            onResetFacets={() => setFacets({})}
+            storageMounts={storageMounts}
+            onToggleReadOnly={handleToggleReadOnly}
+            selectedMountId={selectedMountId}
+            onSelectMount={setSelectedMountId}
+            selectedFolderFilter={selectedFolderFilter}
+            onSelectFolderFilter={setSelectedFolderFilter}
+            onOpenStorageManager={() => {
+              setTopMode('maintain')
+              setMaintainSubTab('storage_mounts')
+            }}
+            onOpenImportModal={() => setIsImportModalOpen(true)}
+            watchedFolders={watchedFolders}
+            tracks={tracks}
+            releases={releases}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+          />
 
-        {/* 3. Right Panel: Relational Inspector & Diff Engine */}
-        <RightPanel
-          track={currentTrack}
-          release={currentRelease}
-          allReleases={releases}
-          selectedTrackIds={selectedTrackIds}
-          activeTab={rightPanelTab}
-          onTabChange={setRightPanelTab}
-          onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
-          onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
-          onAddCredit={handleAddCredit}
-          onApplyMerge={handleApplyMerge}
-          onReverifyChecksum={handleReverifyChecksum}
-        />
-      </div>
+          {/* 2. Center Stage: Data Canvas OR Focused Workbench */}
+          {focusedWorkbenchTrack ? (
+            <FocusedWorkbench
+              track={focusedWorkbenchTrack}
+              release={releases.find((r) => r.id === focusedWorkbenchTrack.releaseId)}
+              allTracks={tracks}
+              onClose={() => setFocusedWorkbenchTrack(null)}
+              onApplyEdits={(edits) => {
+                graphEngine.updateTrackSidecar(focusedWorkbenchTrack.id, edits)
+                refreshFromEngine()
+                persistCurrentLibrary()
+              }}
+              showToast={showToast}
+            />
+          ) : (
+            <DataCanvas
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              albumDisplayMode={albumDisplayMode}
+              onAlbumDisplayModeChange={setAlbumDisplayMode}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              works={works}
+              releases={releases}
+              tracks={filteredTracks}
+              selectedTrackId={selectedTrackId}
+              onSelectTrack={setSelectedTrackId}
+              selectedTrackIds={selectedTrackIds}
+              onToggleTrackSelection={handleToggleTrackSelection}
+              onSelectAllTracks={handleSelectAllTracks}
+              onSelectVariant={handleSelectVariant}
+              onInspectRelease={handleInspectRelease}
+              onCustomizeRelease={(rel) => setCustomizingRelease(rel)}
+              onUpdateReleaseDetails={handleUpdateReleaseDetails}
+              onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
+              onApplyBatchEdits={handleApplyBatchEdits}
+              onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
+              onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
+              onOpenImportModal={() => setIsImportModalOpen(true)}
+              onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
+              onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
+              totalLibraryTracksCount={tracks.length}
+              onResetFilters={() => {
+                setFacets({})
+                setActiveTriageFilter(undefined)
+                setSelectedMountId(undefined)
+                setSelectedFolderFilter(undefined)
+                setSearchQuery('')
+              }}
+              activeTriageIssue={activeTriageIssue}
+              onClearTriageFilter={() => setActiveTriageFilter(undefined)}
+              onRemediateTriageIssue={handleRemediateAudit}
+            />
+          )}
+
+          {/* 3. Right Panel: Contextual Action Surface */}
+          <RightPanel
+            track={currentTrack}
+            release={currentRelease}
+            allReleases={releases}
+            selectedTrackIds={selectedTrackIds}
+            activeTab={rightPanelTab}
+            onTabChange={setRightPanelTab}
+            onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
+            onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
+            onAddCredit={handleAddCredit}
+            onApplyMerge={handleApplyMerge}
+            onReverifyChecksum={handleReverifyChecksum}
+            onOpenFocusedWorkbench={(t) => setFocusedWorkbenchTrack(t)}
+          />
+        </div>
+      )}
 
       {/* Guided Tutorial Interactive Tour & Headless Agent Protocol */}
       <GuidedTutorialModal
@@ -1284,8 +1455,39 @@ function AppContent() {
         showToast={showToast}
       />
 
+      {/* Remembered Normalization Rules & Precedence Modal */}
+      <NormalizationRulesModal
+        isOpen={isNormalizationRulesModalOpen}
+        onClose={() => setIsNormalizationRulesModalOpen(false)}
+        onRefreshCatalog={refreshFromEngine}
+      />
+
+
       {/* Audiophile Now Playing Player Dock */}
-      <NowPlayingBar />
+      <NowPlayingBar onOpenSanctuary={() => setIsSanctuaryOpen(true)} />
+
+      {/* Audiophile Sanctuary Listening Lounge Overlay */}
+      <SanctuaryListeningLounge
+        isOpen={isSanctuaryOpen}
+        onClose={() => setIsSanctuaryOpen(false)}
+      />
+
+      {/* Global Drag-and-Drop Ingestion Overlay */}
+      {isWindowDragOver && (
+        <div className="fixed inset-0 z-50 pointer-events-none bg-[#07090E]/85 backdrop-blur-md border-4 border-dashed border-cyan-400 flex flex-col items-center justify-center animate-in fade-in duration-150">
+          <div className="bg-[#12151D] p-8 rounded-2xl border border-cyan-400/40 shadow-2xl flex flex-col items-center text-center gap-4 max-w-md pointer-events-auto">
+            <div className="w-16 h-16 rounded-2xl bg-cyan-500/20 border border-cyan-400/50 flex items-center justify-center animate-bounce">
+              <FolderPlus className="w-8 h-8 text-cyan-300" />
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-white tracking-wide">Drop Music Folder Here</h3>
+              <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                Cadence will scan and index your audio files with bit-accurate metadata, DR metering, and sidecar safety.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

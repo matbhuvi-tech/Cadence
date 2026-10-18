@@ -1,4 +1,5 @@
 import { Track, Release } from './types'
+import { normalizationService } from '../services/normalizationService'
 
 /**
  * Strips common digital rip noise, format tags, bitrate tags, and brackets from names and titles.
@@ -309,6 +310,13 @@ export function canonicalizeComposer(rawName: string): { canonicalName: string; 
     return { canonicalName: 'Unknown Composer', key: 'unknown' }
   }
 
+  // Precedence 1: Check user-remembered normalization rules
+  const ruleCanonical = normalizationService.getCanonicalComposer(trimmed)
+  if (ruleCanonical) {
+    const key = ruleCanonical.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    return { canonicalName: ruleCanonical, key }
+  }
+
   const norm = trimmed.toLowerCase().replace(/[\.\-_,]/g, ' ').replace(/\s+/g, ' ').trim()
 
   for (const comp of KNOWN_COMPOSERS) {
@@ -346,6 +354,12 @@ export function canonicalizeGenre(rawTag: string): string {
   const clean = (rawTag || '').trim()
   if (!clean || clean === 'Library Import' || /^(audio|music|flac|wav|mp3)$/i.test(clean)) {
     return 'Unclassified'
+  }
+
+  // Precedence 1: Check user-remembered normalization rules
+  const ruleCanonical = normalizationService.getCanonicalGenre(clean)
+  if (ruleCanonical) {
+    return ruleCanonical
   }
 
   const norm = clean.toLowerCase()
@@ -421,17 +435,20 @@ export function splitAndCanonicalizePerformers(rawArtistString: string): string[
     const norm = part.toLowerCase().replace(/[\.\-_,]/g, ' ').replace(/\s+/g, ' ').trim()
     if (!norm || norm.length < 2) continue
 
-    let matchedCanonical: string | null = null
+    // Precedence 1: Check user-remembered normalization rules
+    let matchedCanonical: string | null = normalizationService.getCanonicalArtist(part)
 
-    for (const art of KNOWN_ARTISTS) {
-      if (
-        art.aliases.some((alias) => {
-          const normAlias = alias.replace(/[\.\-_,]/g, ' ').replace(/\s+/g, ' ').trim()
-          return norm === normAlias || norm.includes(normAlias)
-        })
-      ) {
-        matchedCanonical = art.canonicalName
-        break
+    if (!matchedCanonical) {
+      for (const art of KNOWN_ARTISTS) {
+        if (
+          art.aliases.some((alias) => {
+            const normAlias = alias.replace(/[\.\-_,]/g, ' ').replace(/\s+/g, ' ').trim()
+            return norm === normAlias || norm.includes(normAlias)
+          })
+        ) {
+          matchedCanonical = art.canonicalName
+          break
+        }
       }
     }
 
@@ -449,8 +466,11 @@ export function splitAndCanonicalizePerformers(rawArtistString: string): string[
       }
     }
 
-    canonicalResults.push(matchedCanonical || part)
+    const finalName = matchedCanonical || part
+    const ruleNormalized = normalizationService.applyToText(finalName, 'artist')
+    canonicalResults.push(ruleNormalized)
   }
+
 
   // Deduplicate within the single track
   return Array.from(new Set(canonicalResults))

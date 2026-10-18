@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   X,
   Pause,
@@ -10,6 +10,7 @@ import {
   Activity,
   AlertTriangle,
   FolderOpen,
+  Sparkles,
 } from 'lucide-react'
 import { ScanProgressPayload } from '../../core/types'
 import { tauriBridge } from '../../services/tauriBridge'
@@ -27,6 +28,33 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
   telemetry,
   onOpenQuarantineModal,
 }) => {
+  const [aiQuota, setAiQuota] = useState<{
+    rateLimitRpm: number
+    pacingIntervalMs: number
+    nextSlotRemainingMs: number
+    isPacingActive: boolean
+  } | null>(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    let isMounted = true
+    const checkQuota = async () => {
+      try {
+        const res = await fetch('/api/ai-quota-telemetry')
+        if (res.ok && isMounted) {
+          const data = await res.json()
+          setAiQuota(data)
+        }
+      } catch {}
+    }
+    checkQuota()
+    const interval = setInterval(checkQuota, 2000)
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [isOpen])
+
   if (!isOpen) return null
 
   const percent =
@@ -207,6 +235,47 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
           </button>
         </div>
       )}
+
+      {/* Gemini AI Quota & Pacing Telemetry Bento */}
+      <div className="mb-4 p-3 rounded-xl bg-black/40 border border-white/[0.08] flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300">
+            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Gemini AI Cloud Pipeline</span>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+            Free Tier (15 RPM Safe)
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between text-[11px] text-[#94A3B8]">
+          <span>Token Bucket Buffer:</span>
+          <span className="font-mono text-white">
+            {aiQuota?.isPacingActive
+              ? `Refilling in ${(aiQuota.nextSlotRemainingMs / 1000).toFixed(1)}s`
+              : 'Safe Pacing Active (4.0s Floor)'}
+          </span>
+        </div>
+
+        {/* 15-LED Quota Slot Display */}
+        <div className="flex items-center justify-between pt-1 border-t border-white/[0.06]">
+          <span className="text-[10px] text-[#64748B] font-mono">1-Min Window Budget:</span>
+          <div className="flex items-center gap-1" title="15 Requests Per Minute Safe Window">
+            {Array.from({ length: 15 }).map((_, i) => (
+              <span
+                key={i}
+                className={`w-1.5 h-1.5 rounded-full ${
+                  aiQuota?.isPacingActive && i < 4
+                    ? 'bg-amber-400'
+                    : i < 3
+                    ? 'bg-cyan-400'
+                    : 'bg-white/10'
+                }`}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
 
       {/* Control Buttons */}
       <div className="flex items-center justify-between pt-2 border-t border-white/[0.08]">

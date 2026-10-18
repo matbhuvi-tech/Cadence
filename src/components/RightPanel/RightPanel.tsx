@@ -9,6 +9,7 @@ import {
   ShieldAlert,
   Disc3,
   Layers,
+  AlertTriangle,
 } from 'lucide-react'
 import { Track, Release, Credit } from '../../core/types'
 import { GranularCreditMatrix } from './GranularCreditMatrix'
@@ -30,6 +31,7 @@ interface RightPanelProps {
   onReverifyChecksum: (trackId: string) => void
   activeTab?: RightPanelTab
   onTabChange?: (tab: RightPanelTab) => void
+  onOpenFocusedWorkbench?: (track: Track, release?: Release) => void
 }
 
 export const RightPanel: React.FC<RightPanelProps> = ({
@@ -44,6 +46,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   onReverifyChecksum,
   activeTab: controlledTab,
   onTabChange,
+  onOpenFocusedWorkbench,
 }) => {
   const [internalTab, setInternalTab] = useState<RightPanelTab>('credits')
   const activeTab = controlledTab ?? internalTab
@@ -94,6 +97,34 @@ export const RightPanel: React.FC<RightPanelProps> = ({
           )}
         </div>
       )}
+
+      {/* Contextual Entity Banner with Expand to Workbench Action */}
+      <div className="px-3 py-2 bg-[#0E1118] border-b border-white/[0.06] flex items-center justify-between gap-2 shrink-0 text-xs">
+        <div className="flex items-center gap-2 truncate">
+          <div className="w-8 h-8 rounded-lg bg-black/40 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
+            {release?.coverArtUrl ? (
+              <img src={release.coverArtUrl} alt={release.title} className="w-full h-full object-cover" />
+            ) : (
+              <Disc3 className="w-4 h-4 text-cyan-400" />
+            )}
+          </div>
+          <div className="truncate">
+            <div className="font-bold text-white text-[11px] truncate">{track.title}</div>
+            <div className="text-[10px] text-slate-400 truncate">{release.title} ({release.releaseYear || 'Unknown'})</div>
+          </div>
+        </div>
+
+        {onOpenFocusedWorkbench && (
+          <button
+            onClick={() => onOpenFocusedWorkbench(track, release)}
+            title="Expand to Full-Width Center Stage Workbench (⛶)"
+            className="px-2 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 text-[10px] font-mono flex items-center gap-1 transition-all cursor-pointer shrink-0"
+          >
+            <Maximize2 className="w-3 h-3" />
+            <span>Workbench</span>
+          </button>
+        )}
+      </div>
 
       {/* Tab Navigation */}
       <div className="grid grid-cols-4 p-2 bg-[#12151D] border-b border-white/[0.07] gap-1 shrink-0">

@@ -17,15 +17,19 @@ import {
   Music,
   ShieldAlert,
   X,
+  ChevronsDown,
+  ChevronsUp,
+  LayoutGrid,
 } from 'lucide-react'
-import { Work, Track, Release, AlbumDisplayMode, AuditIssue } from '../../core/types'
+import { Work, Track, Release, AlbumDisplayMode, AuditIssue, CanvasViewMode } from '../../core/types'
+import { AlbumCoverGrid } from './AlbumCoverGrid'
 import { WorkMovementView } from './WorkMovementView'
 import { VariantStackCard } from './VariantStackCard'
 import { VirtualDataTable } from './VirtualDataTable'
 import { SpreadsheetMultiEdit } from './SpreadsheetMultiEdit'
 import { FolderTreeExplorer } from './FolderTreeExplorer'
 
-export type CanvasViewMode = 'work_movement' | 'variant_stack' | 'virtual_table' | 'folder_tree'
+export type { CanvasViewMode }
 
 interface DataCanvasProps {
   viewMode: CanvasViewMode
@@ -108,6 +112,28 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   onRemediateTriageIssue,
 }) => {
   const [isMultiEditOpen, setIsMultiEditOpen] = useState(false)
+  const [expandedReleaseIds, setExpandedReleaseIds] = useState<Set<string>>(new Set())
+  const isAllExpanded = releases.length > 0 && releases.every((r) => expandedReleaseIds.has(r.id))
+
+  const handleToggleExpand = (releaseId: string) => {
+    setExpandedReleaseIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(releaseId)) {
+        next.delete(releaseId)
+      } else {
+        next.add(releaseId)
+      }
+      return next
+    })
+  }
+
+  const handleToggleExpandAll = () => {
+    if (isAllExpanded) {
+      setExpandedReleaseIds(new Set())
+    } else {
+      setExpandedReleaseIds(new Set(releases.map((r) => r.id)))
+    }
+  }
 
   const selectedTracksList = tracks.filter((t) => selectedTrackIds.has(t.id))
   const uncommittedTracks = tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar')
@@ -118,6 +144,20 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
       <header className="px-6 py-3 border-b border-white/[0.07] bg-[#12151D]/60 backdrop-blur-xl flex items-center justify-between gap-4 shrink-0">
         {/* Left: View Switcher */}
         <div className="flex items-center gap-1.5 p-1 rounded-xl bg-white/[0.04] border border-white/[0.06]">
+          <button
+            data-tutorial-id="btn-view-cover-grid"
+            onClick={() => onViewModeChange('cover_grid')}
+            title="Rich visual Cover-Art album grid (Mockup style)"
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+              viewMode === 'cover_grid'
+                ? 'bg-[#00F5FF] text-black font-semibold shadow-sm'
+                : 'text-[#94A3B8] hover:text-white hover:bg-white/[0.04]'
+            }`}
+          >
+            <LayoutGrid className="w-3.5 h-3.5" />
+            <span>Cover Grid</span>
+          </button>
+
           <button
             data-tutorial-id="btn-view-work-movement"
             onClick={() => onViewModeChange('work_movement')}
@@ -216,6 +256,27 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
               <span className="hidden xl:inline">Folder First</span>
             </button>
           </div>
+
+          {/* Variant Stack Expand/Collapse All Action */}
+          {viewMode === 'variant_stack' && (
+            <button
+              onClick={handleToggleExpandAll}
+              className="px-2.5 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-mono text-[#CBD5E1] hover:text-[#00F5FF] transition-all flex items-center gap-1.5 cursor-pointer"
+              title={isAllExpanded ? 'Collapse all variant cards to compact summary rows' : 'Expand all variant cards to full master cockpits'}
+            >
+              {isAllExpanded ? (
+                <>
+                  <ChevronsUp className="w-3.5 h-3.5 text-[#00F5FF]" />
+                  <span className="hidden xl:inline">Collapse All</span>
+                </>
+              ) : (
+                <>
+                  <ChevronsDown className="w-3.5 h-3.5 text-[#00F5FF]" />
+                  <span className="hidden xl:inline">Expand All</span>
+                </>
+              )}
+            </button>
+          )}
 
           {/* Path Templating Action */}
           <button
@@ -396,6 +457,19 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
           </div>
         ) : (
           <>
+            {viewMode === 'cover_grid' && (
+              <AlbumCoverGrid
+                releases={releases}
+                tracks={tracks}
+                selectedTrackId={selectedTrackId}
+                onSelectTrack={onSelectTrack}
+                onInspectRelease={onInspectRelease}
+                onCustomizeRelease={onCustomizeRelease}
+                onUpdateReleaseDetails={onUpdateReleaseDetails}
+                onOpenBatchDiff={onOpenBatchDiff}
+              />
+            )}
+
             {viewMode === 'work_movement' && (
               <WorkMovementView
                 works={works}
@@ -410,14 +484,18 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
             )}
 
             {viewMode === 'variant_stack' && (
-              <div className="flex flex-col gap-4 p-6 overflow-y-auto h-full">
+              <div className="flex flex-col gap-3 p-6 overflow-y-auto h-full">
                 {releases.map((release) => {
                   const activeReleaseId = tracks.find((t) => t.id === selectedTrackId)?.releaseId
+                  const isSelected = activeReleaseId === release.id
+                  const isExpanded = expandedReleaseIds.has(release.id) || isSelected
                   return (
                     <VariantStackCard
                       key={release.id}
                       release={release}
-                      isSelected={activeReleaseId === release.id}
+                      isSelected={isSelected}
+                      isExpanded={isExpanded}
+                      onToggleExpand={handleToggleExpand}
                       displayMode={albumDisplayMode}
                       onSelectVariant={onSelectVariant}
                       onInspectRelease={onInspectRelease}

@@ -1,13 +1,17 @@
 import { AuditIssue, Track, Release } from '../core/types'
 import { graphEngine } from '../core/graphEngine'
 import { federatedResolversService } from './federatedResolvers'
+import { generatePanoramicBackdrop } from './panoramicBackdropGenerator'
 import {
   canonicalizeComposer,
   canonicalizeGenre,
   stripRipNoiseAndTags,
+  getCuratedAlbumArtwork,
   KNOWN_COMPOSERS,
   KNOWN_ARTISTS,
 } from '../core/taxonomyUtils'
+import { normalizationService } from './normalizationService'
+import { backdropAnalyzer, INLAY_SCAN_PATTERNS } from './backdropAnalyzer'
 
 export interface AuditDeduction {
   reason: string
@@ -87,23 +91,29 @@ export class AuditService {
     })
 
     nameClusters.forEach((subMap, normKey) => {
+      const variants = Array.from(subMap.keys()).sort(
+        (a, b) => subMap.get(b)!.length - subMap.get(a)!.length
+      )
+      // Check if a user-remembered normalization rule exists for this cluster
+      const rememberedRule = normalizationService.findRuleForCluster(normKey, variants, 'artist')
+      const canonical = rememberedRule?.targetValue || variants[0]
+
       if (subMap.size > 1) {
         // Conflicting variants found in the scoped tracks
-        const variants = Array.from(subMap.keys()).sort(
-          (a, b) => subMap.get(b)!.length - subMap.get(a)!.length
-        )
-        const canonical = variants[0]
+        const nonCanonicalVariants = variants.filter((v) => v !== canonical)
         const allTrackIds = Array.from(new Set(Array.from(subMap.values()).flat()))
         const nonCanonicalIds = Array.from(
-          new Set(variants.slice(1).flatMap((v) => subMap.get(v)!))
+          new Set(nonCanonicalVariants.flatMap((v) => subMap.get(v)!))
         )
 
         dynamicIssues.push({
           id: `audit-name-${encodeURIComponent(normKey)}`,
           category: 'inconsistent_name',
           severity: 'warning',
-          title: `Inconsistent Artist Name: "${variants[0]}" vs "${variants[1]}"`,
-          description: `Discovered ${allTrackIds.length} track(s) with conflicting spellings (${variants.join(' vs ')}).`,
+          title: `Inconsistent Artist Name: "${canonical}" vs "${nonCanonicalVariants[0] || variants[1]}"`,
+          description: `Discovered ${allTrackIds.length} track(s) with conflicting spellings (${variants.join(' vs ')}).${
+            rememberedRule ? ` (Precedence: Remembered Rule → "${canonical}")` : ''
+          }`,
           affectedCount: nonCanonicalIds.length,
           sampleTrackIds: allTrackIds,
           suggestedFix: `Normalize all affected tracks to canonical authority "${canonical}".`,
@@ -111,8 +121,25 @@ export class AuditService {
           isAutoFixable: true,
           fixActionLabel: 'Normalize Names',
         })
+      } else if (rememberedRule && variants[0] !== rememberedRule.targetValue) {
+        // All tracks in this cluster currently share a spelling, but a remembered rule dictates a different canonical form
+        const allTrackIds = subMap.get(variants[0]) || []
+        dynamicIssues.push({
+          id: `audit-name-${encodeURIComponent(normKey)}`,
+          category: 'inconsistent_name',
+          severity: 'warning',
+          title: `Artist Name Deviation from Remembered Rule: "${variants[0]}"`,
+          description: `Discovered ${allTrackIds.length} track(s) with spelling "${variants[0]}" which deviates from remembered canonical rule "${rememberedRule.targetValue}".`,
+          affectedCount: allTrackIds.length,
+          sampleTrackIds: allTrackIds,
+          suggestedFix: `Normalize all affected tracks to canonical authority "${rememberedRule.targetValue}".`,
+          autoFixAction: 'NORMALIZE_ARTIST_NAMES',
+          isAutoFixable: true,
+          fixActionLabel: 'Normalize Names',
+        })
       }
     })
+
 
     // 3. Detect Missing Sequential Track Numbers
     const missingTrackNumIds = tracks.filter((t) => !t.trackNumber || t.trackNumber <= 0).map((t) => t.id)
@@ -224,6 +251,30 @@ export class AuditService {
       })
     }
 
+    // 8. Detect Unformatted or Missing Album Backdrops (Panoramic Derivation / Inlay Scans)
+    const unformattedBackdrops = backdropAnalyzer.auditLibraryBackdrops(scopedReleases, tracks)
+    if (unformattedBackdrops.length > 0) {
+      const affectedTrackIds = tracks
+        .filter((t) => unformattedBackdrops.some((u) => u.releaseId === t.releaseId))
+        .map((t) => t.id)
+
+      if (affectedTrackIds.length > 0) {
+        dynamicIssues.push({
+          id: 'audit-unformatted-backdrops',
+          category: 'unformatted_backdrop',
+          severity: 'warning',
+          title: `Unformatted Album Backdrops (${unformattedBackdrops.length} albums)`,
+          description: `Discovered ${unformattedBackdrops.length} album(s) with unformatted backgrounds (missing 2400×320 panoramic derivatives, square crops, or text-heavy inlay scans).`,
+          affectedCount: affectedTrackIds.length,
+          sampleTrackIds: affectedTrackIds,
+          suggestedFix: 'Generate 2400×320 cinematic panoramic wallpaper derivatives with organic ambient diffusion wings.',
+          autoFixAction: 'REWORK_BACKDROP',
+          isAutoFixable: true,
+          fixActionLabel: 'Format Backdrops',
+        })
+      }
+    }
+
     // ==========================================
     // Calibrated Production-Grade Health Score Calculation
     // ==========================================
@@ -297,17 +348,168 @@ export class AuditService {
       finalIssues = Array.from(mergedMap.values())
     }
 
+    // Align any audit issues with active remembered normalization rules
+    for (const issue of finalIssues) {
+      if (issue.autoFixAction === 'NORMALIZE_ARTIST_NAMES') {
+        const rawNames = issue.description.match(/"([^"]+)"/g)?.map((s) => s.replace(/"/g, '')) || []
+        for (const name of rawNames) {
+          const normKey = normalizationService.normalizeKey(name)
+          const rule = normalizationService.findRuleForCluster(normKey, rawNames, 'artist')
+          if (rule && rule.isEnabled) {
+            issue.suggestedFix = `Standardize to "${rule.targetValue}" matching remembered normalization authority.`
+            issue.title = `Inconsistent Artist Name: "${rule.targetValue}" vs variants`
+            break
+          }
+        }
+      }
+    }
+
     graphEngine.setAuditIssues(finalIssues)
     return finalIssues
   }
+
 
   /**
    * Executes 1-click automatic remediation directly on the user's real tracks and releases.
    * Only operates on issues that are genuinely auto-fixable.
    */
-  public async remediateIssue(issueId: string): Promise<{ success: boolean; message: string }> {
-    const issues = graphEngine.getAllAuditIssues()
-    const issue = issues.find((i) => i.id === issueId)
+  public async remediateIssue(
+    issueIdOrAction: string,
+    options?: { provider?: 'apple' | 'musicbrainz' | 'ai'; [key: string]: any }
+  ): Promise<{ success: boolean; message: string }> {
+    let issues = graphEngine.getAllAuditIssues()
+    let issue = issues.find((i) => i.id === issueIdOrAction || i.autoFixAction === issueIdOrAction)
+    if (!issue) {
+      issues = this.runFullCatalogAudit()
+      issue = issues.find((i) => i.id === issueIdOrAction || i.autoFixAction === issueIdOrAction)
+    }
+
+    if (!issue) {
+      if (issueIdOrAction === 'FETCH_HIRES_ART') {
+        const lowResReleases = graphEngine.getAllReleases().filter(
+          (r) =>
+            r.artwork?.isLowRes ||
+            !r.artwork?.frontCoverUrl ||
+            !r.artwork?.width ||
+            r.artwork.width < 800 ||
+            r.artwork.resolution === 'No Embedded Art' ||
+            r.artwork.resolution.includes('Low-Res')
+        )
+        const affectedTrackIds = graphEngine
+          .getAllTracks()
+          .filter((t) => lowResReleases.some((r) => r.id === t.releaseId))
+          .map((t) => t.id)
+
+        if (lowResReleases.length > 0 || affectedTrackIds.length > 0) {
+          issue = {
+            id: 'audit-low-res-art',
+            category: 'low_res_art',
+            severity: 'warning',
+            title: 'Missing / Low-Resolution Cover Artwork (< 800px)',
+            description: `Found ${lowResReleases.length} album(s) lacking archival artwork.`,
+            affectedCount: affectedTrackIds.length,
+            sampleTrackIds: affectedTrackIds,
+            suggestedFix: 'Search Cover Art Archive and Apple Music for archival album cover art.',
+            autoFixAction: 'FETCH_HIRES_ART',
+            isAutoFixable: true,
+            fixActionLabel: 'Fetch Online Art',
+          }
+        }
+      } else if (issueIdOrAction === 'REWORK_BACKDROP' || issueIdOrAction === 'APPLY_BACKDROP') {
+        const composerQuery = options?.composer || options?.artist || ''
+        const candidateReleases = graphEngine.getAllReleases().filter((r) => {
+          if (composerQuery) {
+            const matchC = r.composerName?.toLowerCase().includes(composerQuery.toLowerCase())
+            const matchA = r.artistCredit?.toLowerCase().includes(composerQuery.toLowerCase())
+            if (!matchC && !matchA) return false
+          }
+          return true
+        })
+
+        const affectedTrackIds = graphEngine
+          .getAllTracks()
+          .filter((t) => candidateReleases.some((r) => r.id === t.releaseId))
+          .map((t) => t.id)
+
+          issue = {
+          id: 'audit-missing-backdrops',
+          category: 'missing_backdrop' as any,
+          severity: 'info',
+          title: 'Album Panoramic Backdrops for Virtual Grid',
+          description: `Ready to generate and apply high-fidelity cinematic backdrops across ${candidateReleases.length} album(s).`,
+          affectedCount: affectedTrackIds.length,
+          sampleTrackIds: affectedTrackIds,
+          suggestedFix: 'Generate 2400x320 cinematic panoramic wallpaper derivatives and stage in sidecars.',
+          autoFixAction: 'REWORK_BACKDROP',
+          isAutoFixable: true,
+          fixActionLabel: 'Rework Backdrops',
+        }
+      } else if (issueIdOrAction === 'NORMALIZE_GENRES') {
+        issue = {
+          id: 'audit-normalize-genres',
+          category: 'genre_conflict' as any,
+          severity: 'info',
+          title: 'Fragmented Genre Normalization',
+          description: 'Ready to normalize and unify genre tags across catalog albums.',
+          affectedCount: graphEngine.getAllReleases().length,
+          sampleTrackIds: [],
+          suggestedFix: 'Cluster and normalize semantic genre variations.',
+          autoFixAction: 'NORMALIZE_GENRES',
+          isAutoFixable: true,
+          fixActionLabel: 'Normalize Genres',
+        }
+      } else if (issueIdOrAction === 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER') {
+        const unknownTracks = graphEngine.getAllTracks().filter(
+          (t) =>
+            !t.artistCredit ||
+            t.artistCredit.toLowerCase() === 'unknown artist' ||
+            t.artistCredit.toLowerCase() === 'unknown'
+        )
+        issue = {
+          id: 'audit-missing-artists',
+          category: 'empty_composer',
+          severity: 'critical',
+          title: 'Untagged Audio Files (Unknown Artist)',
+          description: `Found ${unknownTracks.length} track(s) without primary artist tags.`,
+          affectedCount: unknownTracks.length,
+          sampleTrackIds: unknownTracks.map((t) => t.id),
+          suggestedFix: 'Auto-extract canonical artist & composer from directory structure.',
+          autoFixAction: 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER',
+          isAutoFixable: true,
+          fixActionLabel: 'Extract from Folders',
+        }
+      } else if (issueIdOrAction === 'SYNC_FOLDER_TO_ALBUM') {
+        const allTracks = graphEngine.getAllTracks()
+        issue = {
+          id: 'audit-sync-folder-album',
+          category: 'album_folder_conflict' as any,
+          severity: 'warning',
+          title: 'Physical Folder to Album Name Desynchronization',
+          description: 'Ready to sync release titles from physical directory folder names.',
+          affectedCount: allTracks.length,
+          sampleTrackIds: allTracks.map((t) => t.id),
+          suggestedFix: 'Synchronize canonical album names from physical directory folders.',
+          autoFixAction: 'SYNC_FOLDER_TO_ALBUM',
+          isAutoFixable: true,
+          fixActionLabel: 'Sync Album Names',
+        }
+      } else if (issueIdOrAction === 'MERGE_DUPLICATE_PERFORMERS') {
+        issue = {
+          id: 'audit-merge-performers',
+          category: 'duplicate_performers' as any,
+          severity: 'info',
+          title: 'Merge Duplicate Performers',
+          description: 'Canonicalize and merge performer credit authorities.',
+          affectedCount: graphEngine.getAllTracks().length,
+          sampleTrackIds: graphEngine.getAllTracks().map((t) => t.id),
+          suggestedFix: 'Normalize and merge duplicate performer authorities across catalog.',
+          autoFixAction: 'MERGE_DUPLICATE_PERFORMERS',
+          isAutoFixable: true,
+          fixActionLabel: 'Merge Performers',
+        }
+      }
+    }
+
     if (!issue) return { success: false, message: 'Issue not found' }
 
     if (issue.isAutoFixable === false || !issue.autoFixAction) {
@@ -319,7 +521,8 @@ export class AuditService {
       }
     }
 
-    switch (issue.autoFixAction) {
+    const actionToRun = issue.autoFixAction || issueIdOrAction
+    switch (actionToRun) {
       case 'NORMALIZE_ARTIST_NAMES': {
         // Dynamically identify canonical name from suggestedFix or the first sample track
         let canonical = ''
@@ -341,12 +544,20 @@ export class AuditService {
             ? issue.sampleTrackIds
             : graphEngine.getAllTracks().map((t) => t.id)
 
+        const recordedSources = new Set<string>()
+
         trackIdsToFix.forEach((id) => {
           const trk = graphEngine.getTrackById(id)
           if (trk) {
             const normTrk = trk.artistCredit.toLowerCase().replace(/[\.\s_,\-]+/g, '')
             const normCanonical = canonical.toLowerCase().replace(/[\.\s_,\-]+/g, '')
             if (normTrk === normCanonical || issue.sampleTrackIds.includes(id)) {
+              if (trk.artistCredit && trk.artistCredit !== canonical) {
+                recordedSources.add(trk.artistCredit)
+              }
+              if (trk.composerName && trk.composerName !== canonical) {
+                recordedSources.add(trk.composerName)
+              }
               trk.artistCredit = canonical
               if (trk.composerName && trk.composerName.toLowerCase().replace(/[\.\s_,\-]+/g, '') === normCanonical) {
                 trk.composerName = canonical
@@ -362,7 +573,19 @@ export class AuditService {
           }
         })
 
+        // Also check if issue title or description explicitly mentions the non-canonical variant
+        const vsMatch = issue.title.match(/vs\s+"([^"]+)"/) || issue.description.match(/variants?\s+"([^"]+)"/)
+        if (vsMatch && vsMatch[1] && vsMatch[1] !== canonical) {
+          recordedSources.add(vsMatch[1])
+        }
+
+        // Persist each normalization rule so it is remembered forever and takes precedence in future enrichment
+        recordedSources.forEach((src) => {
+          normalizationService.recordNormalization(src, canonical, 'artist')
+        })
+
         this.runFullCatalogAudit()
+
         return { success: true, message: `Normalized ${count} artist tag instances to "${canonical}" in staged sidecars.` }
       }
 
@@ -410,42 +633,98 @@ export class AuditService {
       }
 
       case 'FETCH_HIRES_ART': {
+        const preferredProvider = options?.provider || 'apple'
         const affectedReleaseIds = new Set<string>()
-        issue.sampleTrackIds.forEach((id) => {
-          const trk = graphEngine.getTrackById(id)
-          if (trk) affectedReleaseIds.add(trk.releaseId)
-        })
+        if (issue.sampleTrackIds && issue.sampleTrackIds.length > 0) {
+          issue.sampleTrackIds.forEach((id) => {
+            const trk = graphEngine.getTrackById(id)
+            if (trk) affectedReleaseIds.add(trk.releaseId)
+          })
+        }
 
         if (affectedReleaseIds.size === 0) {
           graphEngine.getAllReleases().forEach((r) => {
-            if (r.artwork?.isLowRes || !r.artwork?.frontCoverUrl) affectedReleaseIds.add(r.id)
+            if (
+              r.artwork?.isLowRes ||
+              !r.artwork?.frontCoverUrl ||
+              !r.artwork?.width ||
+              r.artwork.width < 800 ||
+              r.artwork.resolution === 'No Embedded Art' ||
+              r.artwork.resolution.includes('Low-Res')
+            ) {
+              affectedReleaseIds.add(r.id)
+            }
           })
         }
 
         let updatedCount = 0
+        const providerName =
+          preferredProvider === 'apple'
+            ? 'Apple Music'
+            : preferredProvider === 'musicbrainz'
+            ? 'MusicBrainz CAA'
+            : 'Gemini AI'
+
         for (const relId of affectedReleaseIds) {
           const rel = graphEngine.getReleaseById(relId)
           if (!rel) continue
           const relTracks = graphEngine.getAllTracks().filter((t) => t.releaseId === relId)
           const sampleTrack = relTracks[0]
-          const artist = sampleTrack?.artistCredit || rel.artistCredit || ''
-          const title = rel.title || sampleTrack?.folderName || ''
+          const artist = rel.artistCredit || sampleTrack?.artistCredit || ''
+          const composer = rel.composerName || sampleTrack?.composerName || ''
+          const title = rel.title || sampleTrack?.folderName || sampleTrack?.title || ''
 
-          if (!artist && !title) continue
+          if (!title) continue
 
           try {
-            let candidate = await federatedResolversService.fetchMusicBrainzCandidate(artist, sampleTrack?.title || title, title)
+            // 1. First attempt with preferred provider (e.g. Apple Music)
+            let candidate = await federatedResolversService.fetchAlbumArtworkCandidate({
+              albumTitle: title,
+              artistCredit: artist,
+              composerName: composer,
+              releaseYear: rel.releaseYear,
+              provider: preferredProvider,
+            })
+
+            // 2. Fallback hierarchy if preferred provider didn't return art
             if (!candidate?.coverArtUrl) {
-              candidate = await federatedResolversService.fetchItunesCandidate(artist, sampleTrack?.title || title, title)
+              const fallbackProviders: ('apple' | 'musicbrainz' | 'ai')[] = (['apple', 'musicbrainz', 'ai'] as const).filter(
+                (p) => p !== preferredProvider
+              )
+              for (const fb of fallbackProviders) {
+                candidate = await federatedResolversService.fetchAlbumArtworkCandidate({
+                  albumTitle: title,
+                  artistCredit: artist,
+                  composerName: composer,
+                  releaseYear: rel.releaseYear,
+                  provider: fb,
+                })
+                if (candidate?.coverArtUrl) break
+              }
             }
 
             if (candidate?.coverArtUrl && candidate.coverArtUrl.startsWith('http')) {
-              if (!rel.artwork.originalFrontCoverUrl) {
-                rel.artwork.originalFrontCoverUrl = rel.artwork.frontCoverUrl
+              if (!rel.artwork) {
+                rel.artwork = {
+                  frontCoverUrl: candidate.coverArtUrl,
+                  resolution: candidate.coverResolution || '3000×3000px (Apple Music Master Scan)',
+                  width: 3000,
+                  height: 3000,
+                  dpi: 300,
+                  colorProfile: 'sRGB',
+                  isLowRes: false,
+                  hasBookletPdf: false,
+                }
+              } else {
+                if (!rel.artwork.originalFrontCoverUrl) {
+                  rel.artwork.originalFrontCoverUrl = rel.artwork.frontCoverUrl
+                }
+                rel.artwork.frontCoverUrl = candidate.coverArtUrl
+                rel.artwork.resolution = candidate.coverResolution || '3000×3000px (Apple Music Master Scan)'
+                rel.artwork.isLowRes = false
+                rel.artwork.width = 3000
+                rel.artwork.height = 3000
               }
-              rel.artwork.frontCoverUrl = candidate.coverArtUrl
-              rel.artwork.resolution = candidate.coverResolution || 'High-Res Front (Cover Art Archive)'
-              rel.artwork.isLowRes = false
 
               relTracks.forEach((trk) => {
                 trk.sidecarStatus = 'uncommitted_sidecar'
@@ -453,11 +732,13 @@ export class AuditService {
                   ...(trk.pendingSidecarEdits || {}),
                   coverArtUrl: candidate!.coverArtUrl,
                 }
+                graphEngine.addOrUpdateTrack(trk)
               })
+              graphEngine.addOrUpdateRelease(rel)
               updatedCount++
             }
-          } catch {
-            // Network failure: do not fake art
+          } catch (e) {
+            console.warn(`[FETCH_HIRES_ART] Error resolving art for "${title}":`, e)
           }
         }
 
@@ -465,7 +746,7 @@ export class AuditService {
           this.runFullCatalogAudit()
           return {
             success: true,
-            message: `Retrieved archival cover art from online authorities for ${updatedCount} album(s) staged in sidecars.`,
+            message: `Retrieved archival cover art from ${providerName} for ${updatedCount} album(s) staged in sidecars.`,
           }
         }
 
@@ -676,6 +957,131 @@ export class AuditService {
         return {
           success: false,
           message: 'All genre tags are already canonicalized.',
+        }
+      }
+
+      case 'APPLY_BACKDROP':
+      case 'REWORK_BACKDROP': {
+        const composerQuery = options?.composer || options?.artist || ''
+        const targetReleaseId = options?.releaseId
+
+        let targetReleases = graphEngine.getAllReleases()
+        if (targetReleaseId) {
+          targetReleases = targetReleases.filter((r) => r.id === targetReleaseId)
+        } else if (composerQuery) {
+          targetReleases = targetReleases.filter((r) => {
+            const matchC = r.composerName?.toLowerCase().includes(composerQuery.toLowerCase())
+            const matchA = r.artistCredit?.toLowerCase().includes(composerQuery.toLowerCase())
+            return matchC || matchA
+          })
+        }
+
+        if (targetReleases.length === 0) {
+          targetReleases = graphEngine.getAllReleases()
+        }
+
+        let updatedCount = 0
+        for (const rel of targetReleases) {
+          let artUrl = rel.artwork?.frontCoverUrl || ''
+
+          // If front cover is missing or low-res or generic placeholder or suspected inlay scan, fetch high-resolution authentic front artwork first
+          if (!artUrl || rel.artwork?.isLowRes || artUrl.includes('unsplash') || INLAY_SCAN_PATTERNS.test(artUrl)) {
+            const relTracks = graphEngine.getAllTracks().filter((t) => t.releaseId === rel.id)
+            const sampleTrack = relTracks[0]
+            const artist = rel.artistCredit || sampleTrack?.artistCredit || ''
+            const composer = rel.composerName || sampleTrack?.composerName || ''
+            const title = rel.title || sampleTrack?.folderName || sampleTrack?.title || ''
+
+            const curated = getCuratedAlbumArtwork(title, artist || composer)
+            if (curated) {
+              artUrl = curated
+              if (rel.artwork) {
+                rel.artwork.frontCoverUrl = artUrl
+                rel.artwork.isLowRes = false
+              }
+            } else if (title) {
+              try {
+                const candidate = await federatedResolversService.fetchAlbumArtworkCandidate({
+                  albumTitle: title,
+                  artistCredit: artist,
+                  composerName: composer,
+                  releaseYear: rel.releaseYear,
+                  provider: options?.provider || 'apple',
+                })
+                if (candidate?.coverArtUrl) {
+                  artUrl = candidate.coverArtUrl
+                  if (!rel.artwork) {
+                    rel.artwork = {
+                      frontCoverUrl: artUrl,
+                      resolution: candidate.coverResolution || '3000×3000px (Apple Music Master Scan)',
+                      width: 3000,
+                      height: 3000,
+                      dpi: 300,
+                      colorProfile: 'sRGB',
+                      isLowRes: false,
+                      hasBookletPdf: false,
+                    }
+                  } else {
+                    rel.artwork.frontCoverUrl = artUrl
+                    rel.artwork.isLowRes = false
+                  }
+                }
+              } catch {}
+            }
+          }
+
+          if (!artUrl) continue
+
+          try {
+            const backdrop = await generatePanoramicBackdrop(artUrl, 2400, 320)
+            if (backdrop) {
+              if (!rel.artwork) {
+                rel.artwork = {
+                  frontCoverUrl: artUrl,
+                  backdropUrl: backdrop,
+                  resolution: '3000×3000px (Apple Music Master Scan)',
+                  width: 3000,
+                  height: 3000,
+                  dpi: 300,
+                  colorProfile: 'sRGB',
+                  isLowRes: false,
+                  hasBookletPdf: false,
+                }
+              } else {
+                rel.artwork.backdropUrl = backdrop
+              }
+              rel.backdropUrl = backdrop
+
+              const relTracks = graphEngine.getAllTracks().filter((t) => t.releaseId === rel.id)
+              relTracks.forEach((trk) => {
+                trk.sidecarStatus = 'uncommitted_sidecar'
+                trk.pendingSidecarEdits = {
+                  ...(trk.pendingSidecarEdits || {}),
+                  backdropUrl: backdrop,
+                  ...(artUrl && !trk.pendingSidecarEdits?.coverArtUrl ? { coverArtUrl: artUrl } : {}),
+                }
+                graphEngine.addOrUpdateTrack(trk)
+              })
+
+              graphEngine.addOrUpdateRelease(rel)
+              updatedCount++
+            }
+          } catch (e) {
+            console.warn(`[REWORK_BACKDROP] Error generating backdrop for "${rel.title}":`, e)
+          }
+        }
+
+        if (updatedCount > 0) {
+          this.runFullCatalogAudit()
+          return {
+            success: true,
+            message: `Successfully reworked and applied panoramic backdrops across ${updatedCount} album(s) in Virtual Grid.`,
+          }
+        }
+
+        return {
+          success: false,
+          message: 'Could not generate panoramic backdrops. Ensure album cover art is available.',
         }
       }
 

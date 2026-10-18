@@ -57,7 +57,25 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
   const [isLoading, setIsLoading] = useState(false)
   const [isExpanded, setIsExpanded] = useState(false)
   const [activeTab, setActiveTab] = useState<'chat' | 'recommendations' | 'stats'>('chat')
+  const [pacingCountdown, setPacingCountdown] = useState<number>(0)
+  const [isThrottled429, setIsThrottled429] = useState<boolean>(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const chatAbortControllerRef = useRef<AbortController | null>(null)
+
+  // Live Pacing Countdown Effect during agent query
+  useEffect(() => {
+    let timer: any = null
+    if (isLoading) {
+      setPacingCountdown(3.8)
+      timer = setInterval(() => {
+        setPacingCountdown((prev) => Math.max(0, Math.round((prev - 0.1) * 10) / 10))
+      }, 100)
+    } else {
+      setPacingCountdown(0)
+      setIsThrottled429(false)
+    }
+    return () => clearInterval(timer)
+  }, [isLoading])
 
   const stats = agentSnapshotService.getCatalogStatistics(tracks)
   const recommendations = agentSnapshotService.generateRecommendations(stats)
@@ -91,19 +109,48 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
     }
   }, [messages, isOpen, isLoading])
 
-  // Execute an action directly
-  const handleExecuteAction = async (command: AgentActionCommand, messageId?: string) => {
+  // Direct action execution from buttons/pills
+  const handleExecuteAction = async (command: AgentActionCommand) => {
     const result = await agentActionDispatcher.executeAction(command, dispatcherContext)
-    
-    // Add or update system message with result
     const sysMsg: AgentChatMessage = {
-      id: `res-${Date.now()}`,
-      role: 'system',
+      id: `sys-${Date.now()}`,
+      role: 'agent',
       text: result.message,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      command,
       commandResult: result,
     }
     setMessages((prev) => [...prev, sysMsg])
+  }
+
+  // Bypass cloud AI and immediately execute using deterministic local intent
+  const handleBypassToLocal = async (pendingText?: string) => {
+    if (chatAbortControllerRef.current) {
+      chatAbortControllerRef.current.abort()
+    }
+    setIsLoading(false)
+    const text = pendingText || messages[messages.length - 1]?.text || inputPrompt || ''
+    const localCmd = agentActionDispatcher.parseLocalIntent(text)
+    let fallbackText = 'Bypassed cloud AI. Executed with local database heuristics.'
+    let cmdResult = undefined
+    if (localCmd) {
+      cmdResult = await agentActionDispatcher.executeAction(localCmd, dispatcherContext)
+      fallbackText = `Executed action locally: **${cmdResult.message}**`
+    } else if (text.toLowerCase().includes('stat') || text.toLowerCase().includes('count')) {
+      fallbackText = `### Live Collection Statistics (Local):\n- **Total Tracks:** ${stats.totalTracks.toLocaleString()}\n- **Albums:** ${stats.totalReleases}\n- **Health Score:** ${stats.healthScore}%\n- **Hi-Res 24-bit / DSD:** ${stats.hiRes24BitCount} tracks`
+    } else {
+      fallbackText = `Bypassed cloud AI. Connected to local catalog of **${stats.totalTracks} tracks**.`
+    }
+
+    const agentMsg: AgentChatMessage = {
+      id: `agt-${Date.now()}`,
+      role: 'agent',
+      text: fallbackText,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      command: localCmd,
+      commandResult: cmdResult,
+    }
+    setMessages((prev) => [...prev, agentMsg])
   }
 
   // Submit a user prompt to the Agent
@@ -121,6 +168,10 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
     setMessages((prev) => [...prev, userMsg])
     setInputPrompt('')
     setIsLoading(true)
+    setIsThrottled429(false)
+
+    const abortCtrl = new AbortController()
+    chatAbortControllerRef.current = abortCtrl
 
     // Check fast local intent first
     const localCmd = agentActionDispatcher.parseLocalIntent(textToSend)
@@ -130,6 +181,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
       const chatRes = await fetch('/api/agent-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: abortCtrl.signal,
         body: JSON.stringify({
           prompt: textToSend,
           catalogSummary,
@@ -139,7 +191,9 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
       if (chatRes.ok) {
         const data = (await chatRes.json()) as any
-        const effectiveCommand = data.command || localCmd
+        // If data.command is explicitly provided (or explicitly null), honor it.
+        // Only fallback to localCmd if data.command is undefined.
+        const effectiveCommand = data.command !== undefined ? data.command : localCmd
 
         let cmdResult = undefined
         if (effectiveCommand) {
@@ -161,6 +215,9 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
         setMessages((prev) => [...prev, agentMsg])
       } else {
+        if (chatRes.status === 429) {
+          setIsThrottled429(true)
+        }
         throw new Error(`Server returned HTTP ${chatRes.status}`)
       }
     } catch {
@@ -281,6 +338,33 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
         </button>
       </div>
 
+      {/* 2.5 Context Scope & Staging Banner */}
+      <div className="px-4 py-1.5 border-b border-white/[0.04] bg-white/[0.015] flex items-center justify-between text-[11px] text-[#94A3B8]">
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#00F5FF]" />
+          <span>Scope: <strong className="text-white font-medium">Catalog-wide</strong> ({stats.totalTracks.toLocaleString()} tracks)</span>
+        </div>
+        {stats.uncommittedSidecars > 0 && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[#ADFF2F] font-mono text-[10px] font-semibold">
+              ● {stats.uncommittedSidecars} Staged
+            </span>
+            <button
+              onClick={() =>
+                handleExecuteAction({
+                  tool: 'open_modal',
+                  args: { modalName: 'commit' },
+                  explanation: 'Open Two-Phase Commit modal',
+                })
+              }
+              className="text-[10px] text-[#00F5FF] hover:underline cursor-pointer"
+            >
+              Commit &rarr;
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* 3. Main Content Area */}
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
         {activeTab === 'chat' && (
@@ -327,22 +411,90 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
                       {/* Attached Command Result Card */}
                       {msg.command && (
-                        <div className="mt-2.5 p-2 rounded-xl bg-black/40 border border-white/[0.08] flex items-center justify-between text-[11px]">
-                          <div className="flex items-center gap-2 text-[#00F5FF]">
-                            <Sparkles className="w-3.5 h-3.5" />
-                            <span className="font-mono">{msg.command.explanation || msg.command.tool}</span>
+                        <div className="mt-2.5 p-2.5 rounded-xl bg-black/40 border border-white/[0.08] flex flex-col gap-2 text-[11px]">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-[#00F5FF]">
+                              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                              <span className="font-mono font-medium">{msg.command.explanation || msg.command.tool}</span>
+                            </div>
+                            {msg.commandResult && (
+                              <span
+                                className={`px-2 py-0.5 rounded font-mono text-[10px] font-semibold shrink-0 ${
+                                  msg.commandResult.success
+                                    ? 'bg-[#10B981]/20 text-[#10B981]'
+                                    : 'bg-[#F43F5E]/20 text-[#F43F5E]'
+                                }`}
+                              >
+                                {msg.commandResult.success ? 'Executed' : 'Failed'}
+                              </span>
+                            )}
                           </div>
-                          {msg.commandResult && (
-                            <span
-                              className={`px-2 py-0.5 rounded font-mono text-[10px] ${
-                                msg.commandResult.success
-                                  ? 'bg-[#10B981]/20 text-[#10B981]'
-                                  : 'bg-[#F43F5E]/20 text-[#F43F5E]'
-                              }`}
-                            >
-                              {msg.commandResult.success ? 'Executed' : 'Failed'}
-                            </span>
+
+                          {/* Multi-Step Pipeline Stepper Breakdown */}
+                          {msg.command.tool === 'execute_pipeline' && msg.commandResult?.data?.stepResults && (
+                            <div className="pt-2 border-t border-white/[0.06] flex flex-col gap-1.5">
+                              <div className="flex items-center justify-between text-[10px] text-[#94A3B8]">
+                                <span>Pipeline Operations</span>
+                                <span className="font-mono text-[#00F5FF]">
+                                  {msg.commandResult.data.executed} of {msg.commandResult.data.total} completed
+                                </span>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                {msg.commandResult.data.stepResults.map((s: any, sIdx: number) => (
+                                  <div
+                                    key={sIdx}
+                                    className="flex items-center justify-between px-2 py-1 rounded bg-white/[0.03] text-[10px]"
+                                  >
+                                    <span className="text-[#CBD5E1] truncate mr-2 font-mono">
+                                      {sIdx + 1}. {s.explanation || s.message || s.tool}
+                                    </span>
+                                    <span
+                                      className={`px-1.5 py-0.2 rounded font-mono text-[9px] ${
+                                        s.success ? 'text-[#10B981] bg-[#10B981]/15' : 'text-[#F43F5E] bg-[#F43F5E]/15'
+                                      }`}
+                                    >
+                                      {s.success ? '✓ Done' : '✕ Failed'}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
                           )}
+
+                          {/* Single Action Result Message */}
+                          {msg.commandResult?.message && msg.command.tool !== 'execute_pipeline' && (
+                            <div className="text-[10px] text-[#94A3B8] font-mono leading-relaxed">
+                              {msg.commandResult.message}
+                            </div>
+                          )}
+
+                          {/* Non-Destructive Sidecar Commit Quick-Action */}
+                          {msg.commandResult?.success &&
+                            (msg.command.tool === 'remediate_issue' ||
+                              msg.command.tool === 'rework_backdrop' ||
+                              msg.command.tool === 'stage_metadata' ||
+                              (msg.command.tool === 'execute_pipeline' &&
+                                msg.command.args?.commands?.some(
+                                  (c: any) => c.tool === 'remediate_issue' || c.tool === 'rework_backdrop'
+                                ))) && (
+                              <div className="pt-1.5 border-t border-white/[0.06] flex items-center justify-between text-[10px]">
+                                <span className="text-[#ADFF2F] flex items-center gap-1 font-mono">
+                                  <span>●</span> Edits staged in sidecars
+                                </span>
+                                <button
+                                  onClick={() =>
+                                    handleExecuteAction({
+                                      tool: 'open_modal',
+                                      args: { modalName: 'commit' },
+                                      explanation: 'Review and commit staged sidecars to disk.',
+                                    })
+                                  }
+                                  className="px-2 py-0.5 rounded bg-[#00F5FF]/15 hover:bg-[#00F5FF]/25 text-[#00F5FF] font-medium transition-colors cursor-pointer"
+                                >
+                                  Review in Two-Phase Commit &rarr;
+                                </button>
+                              </div>
+                            )}
                         </div>
                       )}
                     </div>
@@ -368,9 +520,58 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
             ))}
 
             {isLoading && (
-              <div className="flex items-center gap-2 text-xs text-[#00F5FF] p-3 rounded-xl bg-[#151922] border border-white/[0.08] w-fit">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                <span>Cadence is querying database snapshot and resolving actions...</span>
+              <div className="flex flex-col gap-2 p-3.5 rounded-xl bg-[#12151D] border border-white/[0.08] shadow-lg max-w-[92%] animate-in fade-in duration-150">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex h-2 w-2">
+                      <span
+                        className={`animate-ping absolute inline-flex h-full w-full rounded-full ${
+                          isThrottled429 ? 'bg-amber-400' : 'bg-[#00F5FF]'
+                        } opacity-75`}
+                      />
+                      <span
+                        className={`relative inline-flex rounded-full h-2 w-2 ${
+                          isThrottled429 ? 'bg-amber-400' : 'bg-[#00F5FF]'
+                        }`}
+                      />
+                    </div>
+                    <span className="text-xs font-semibold text-white">
+                      {isThrottled429 ? 'Throttled (429) · Retrying...' : 'Cadence is formulating plan'}
+                    </span>
+                  </div>
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                      isThrottled429
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        : 'bg-[#00F5FF]/10 text-[#00F5FF] border-[#00F5FF]/20'
+                    }`}
+                  >
+                    {isThrottled429 ? 'Backoff active' : `Buffer Refill: ${pacingCountdown.toFixed(1)}s`}
+                  </span>
+                </div>
+
+                {/* Smooth countdown bar */}
+                <div className="h-1 w-full bg-white/[0.06] rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-100 ease-linear ${
+                      isThrottled429
+                        ? 'bg-gradient-to-r from-amber-400 to-rose-400'
+                        : 'bg-gradient-to-r from-[#00F5FF] to-[#8B5CF6]'
+                    }`}
+                    style={{ width: `${Math.max(5, (1 - pacingCountdown / 4.0) * 100)}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between text-[10px] text-[#94A3B8] font-mono pt-0.5">
+                  <span>Free Tier Buffer (15 RPM Safe)</span>
+                  <button
+                    type="button"
+                    onClick={() => handleBypassToLocal()}
+                    className="text-[#00F5FF] hover:underline cursor-pointer"
+                  >
+                    Bypass to Local Mode &rarr;
+                  </button>
+                </div>
               </div>
             )}
             <div ref={messagesEndRef} />

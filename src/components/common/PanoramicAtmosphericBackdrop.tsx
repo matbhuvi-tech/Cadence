@@ -1,4 +1,6 @@
 import React from 'react'
+import { usePanoramicBackdrop } from '../../services/panoramicBackdropGenerator'
+import { INLAY_SCAN_PATTERNS } from '../../services/backdropAnalyzer'
 
 interface PanoramicAtmosphericBackdropProps {
   coverArtUrl?: string
@@ -39,9 +41,19 @@ export const PanoramicAtmosphericBackdrop: React.FC<PanoramicAtmosphericBackdrop
   overlayVariant = 'banner',
   headerBaseHeight = 140,
 }) => {
-  const activeBackdrop = explicitBackdropUrl || coverArtUrl
+  // If no dedicated panoramic backdrop is set, auto-generate on the fly from front cover art
+  const autoPanoramic = usePanoramicBackdrop(explicitBackdropUrl ? undefined : coverArtUrl)
+  const activeBackdrop = explicitBackdropUrl || autoPanoramic || coverArtUrl
   const formattedHeaderHeight =
     typeof headerBaseHeight === 'number' ? `${headerBaseHeight}px` : headerBaseHeight
+
+  // Detect whether image is an unformatted raw image or suspected back/inlay scan
+  const isSuspectedInlayOrRaw = Boolean(
+    activeBackdrop &&
+      (INLAY_SCAN_PATTERNS.test(activeBackdrop) ||
+        (!explicitBackdropUrl && !autoPanoramic) ||
+        activeBackdrop === coverArtUrl)
+  )
 
   if (!activeBackdrop) {
     return (
@@ -61,13 +73,14 @@ export const PanoramicAtmosphericBackdrop: React.FC<PanoramicAtmosphericBackdrop
       }
       aria-hidden="true"
     >
-      {/* 1. DEDICATED PANORAMIC BACKDROP ASSET */}
+      {/* 1. DEDICATED PANORAMIC BACKDROP ASSET WITH INTELLIGENT ATMOSPHERIC BLUR */}
       <div
         className="absolute inset-0 bg-cover bg-top pointer-events-none transition-all duration-700"
         style={{
           backgroundImage: `url(${activeBackdrop})`,
-          opacity: 0.85,
-          filter: 'blur(3px)',
+          opacity: isSuspectedInlayOrRaw ? 0.70 : 0.85,
+          filter: isSuspectedInlayOrRaw ? 'blur(20px)' : 'blur(8px)',
+          transform: 'scale(1.10)', // Scale up slightly to prevent blur edge vignettes
         }}
       />
 
@@ -86,10 +99,10 @@ export const PanoramicAtmosphericBackdrop: React.FC<PanoramicAtmosphericBackdrop
             style={{
               background: `linear-gradient(
                 to bottom,
-                rgba(10, 13, 20, 0.12) 0px,
-                rgba(10, 13, 20, 0.18) var(--header-base-height, 140px),
-                rgba(10, 13, 20, 0.70) calc(var(--header-base-height, 140px) + 50px),
-                rgba(10, 13, 20, 0.92) calc(var(--header-base-height, 140px) + 120px),
+                rgba(10, 13, 20, 0.20) 0px,
+                rgba(10, 13, 20, 0.35) var(--header-base-height, 140px),
+                rgba(10, 13, 20, 0.75) calc(var(--header-base-height, 140px) + 50px),
+                rgba(10, 13, 20, 0.94) calc(var(--header-base-height, 140px) + 120px),
                 rgba(10, 13, 20, 0.98) calc(var(--header-base-height, 140px) + 180px),
                 #0A0D14 calc(var(--header-base-height, 140px) + 180px),
                 #0A0D14 100%
@@ -97,17 +110,17 @@ export const PanoramicAtmosphericBackdrop: React.FC<PanoramicAtmosphericBackdrop
             }}
           />
 
-          {/* Left-side header text & metadata protection */}
+          {/* Left-side header text & metadata protection: ensures title and badges are 100% legible */}
           <div
             className="absolute inset-0 pointer-events-none"
             style={{
               background:
-                'linear-gradient(to right, rgba(10, 13, 20, 0.85) 0px, rgba(10, 13, 20, 0.40) 320px, transparent 550px)',
+                'linear-gradient(to right, rgba(10, 13, 20, 0.92) 0px, rgba(10, 13, 20, 0.75) 280px, rgba(10, 13, 20, 0.30) 520px, transparent 720px)',
             }}
           />
 
           {/* Baseline subtle ambient tint */}
-          <div className="absolute inset-0 bg-[#0A0D14]/10 pointer-events-none" />
+          <div className="absolute inset-0 bg-[#0A0D14]/15 pointer-events-none" />
         </>
       )}
 

@@ -484,7 +484,7 @@ export const SideBySideDiff: React.FC<SideBySideDiffProps> = ({
                 ? 'bg-[#8B5CF6]/20 border-[#8B5CF6]/50 text-[#C084FC]'
                 : 'bg-[#8B5CF6]/10 hover:bg-[#8B5CF6]/20 border-[#8B5CF6]/30 text-[#E2E8F0]'
             }`}
-            title="Query Gemini 3.7 Flash on demand for canonical musicology"
+            title="Query Gemini 3.8 Flash on demand for canonical musicology"
           >
             <div className="flex items-center gap-1.5 truncate">
               <Sparkles className="w-3 h-3 shrink-0 text-[#C084FC]" />

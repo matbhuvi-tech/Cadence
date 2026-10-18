@@ -23,6 +23,7 @@ import {
   matchesFormat,
   detectLanguage,
 } from './taxonomyUtils'
+import { normalizationService } from '../services/normalizationService'
 
 export interface LibraryStats {
   totalTracks: number
@@ -600,6 +601,9 @@ export class RelationalGraphEngine {
       releaseYear?: number
       coverArtUrl?: string
       backdropUrl?: string
+      rating?: number
+      isFavorite?: boolean
+      isMasterpiece?: boolean
     }
   ): { release: Release; affectedTracksCount: number } | undefined {
     const release = this.releases.get(releaseId)
@@ -689,6 +693,16 @@ export class RelationalGraphEngine {
       release.backdropUrl = trimmedBackdrop
     }
 
+    if (updates.rating !== undefined) {
+      release.rating = updates.rating
+    }
+    if (updates.isFavorite !== undefined) {
+      release.isFavorite = updates.isFavorite
+    }
+    if (updates.isMasterpiece !== undefined) {
+      release.isMasterpiece = updates.isMasterpiece
+    }
+
     let affectedCount = 0
 
     this.tracks.forEach((track, id) => {
@@ -758,6 +772,11 @@ export class RelationalGraphEngine {
 
   // Normalization Actions (Audit Triage)
   public normalizeArtistNames(source: string, canonical: string): number {
+    // Record rule so it persists across sessions and takes precedence in future enrichment
+    if (source && canonical && source !== canonical) {
+      normalizationService.recordNormalization(source, canonical, 'artist')
+    }
+
     let modified = 0
     this.tracks.forEach((trk, id) => {
       if (trk.composerName === source || trk.artistCredit.includes(source)) {
@@ -787,6 +806,51 @@ export class RelationalGraphEngine {
     }
     return modified
   }
+
+  /**
+   * Applies all active remembered normalization rules across loaded catalog tracks.
+   * Stages sidecars for any tracks with modified metadata.
+   */
+  public applyRememberedNormalizations(): number {
+    let modifiedCount = 0
+    this.tracks.forEach((trk, id) => {
+      let isModified = false
+      let nextArtist = trk.artistCredit
+      let nextComposer = trk.composerName
+
+      const normalizedArtist = normalizationService.applyToText(trk.artistCredit || '', 'artist')
+      if (normalizedArtist && normalizedArtist !== trk.artistCredit) {
+        nextArtist = normalizedArtist
+        isModified = true
+      }
+
+      if (trk.composerName) {
+        const normalizedComposer = normalizationService.applyToText(trk.composerName, 'composer')
+        if (normalizedComposer && normalizedComposer !== trk.composerName) {
+          nextComposer = normalizedComposer
+          isModified = true
+        }
+      }
+
+      if (isModified) {
+        const updated = {
+          ...trk,
+          artistCredit: nextArtist,
+          composerName: nextComposer,
+          sidecarStatus: 'uncommitted_sidecar' as const,
+          pendingSidecarEdits: {
+            ...(trk.pendingSidecarEdits || {}),
+            artistCredit: nextArtist,
+            ...(nextComposer ? { composerName: nextComposer } : {}),
+          },
+        }
+        this.tracks.set(id, updated)
+        modifiedCount++
+      }
+    })
+    return modifiedCount
+  }
+
 
   public toggleMountReadOnly(mountId: string): boolean {
     const mount = this.storageMounts.get(mountId)

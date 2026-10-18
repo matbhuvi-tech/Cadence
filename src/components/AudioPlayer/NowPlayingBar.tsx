@@ -17,7 +17,11 @@ import {
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 
-export const NowPlayingBar: React.FC = () => {
+interface NowPlayingBarProps {
+  onOpenSanctuary?: () => void
+}
+
+export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({ onOpenSanctuary }) => {
   const {
     currentTrack,
     currentRelease,
@@ -66,12 +70,16 @@ export const NowPlayingBar: React.FC = () => {
         {/* LEFT SECTION: TRACK & ALBUM CREDITS */}
         <div className="flex items-center gap-3 w-1/4 min-w-[220px] max-w-[340px]">
           {/* Cover Art Thumbnail */}
-          <div className="relative w-12 h-12 rounded-xl bg-gradient-to-br from-white/[0.06] to-white/[0.02] border border-white/[0.1] overflow-hidden shrink-0 flex items-center justify-center shadow-md">
+          <div
+            onClick={onOpenSanctuary}
+            title="Expand Audiophile Sanctuary Lounge (⌘L)"
+            className="relative w-12 h-12 rounded-xl bg-gradient-to-br from-white/[0.06] to-white/[0.02] border border-white/[0.1] overflow-hidden shrink-0 flex items-center justify-center shadow-md cursor-pointer hover:border-[#00F5FF]/50 transition-all group"
+          >
             {coverUrl ? (
               <img
                 src={coverUrl}
                 alt={currentTrack?.title || 'Album Art'}
-                className="w-full h-full object-cover"
+                className="w-full h-full object-cover group-hover:scale-105 transition-transform"
               />
             ) : (
               <Disc3
@@ -259,6 +267,16 @@ export const NowPlayingBar: React.FC = () => {
               className="w-18 h-1 bg-white/[0.1] rounded-lg appearance-none cursor-pointer accent-[#00F5FF]"
               title={`Volume: ${Math.round((isMuted ? 0 : volume) * 100)}%`}
             />
+            {/* Expand Sanctuary Lounge Button */}
+            {onOpenSanctuary && (
+              <button
+                onClick={onOpenSanctuary}
+                title="Expand Audiophile Sanctuary Lounge (⌘L)"
+                className="p-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-[#94A3B8] hover:text-[#00F5FF] transition-all cursor-pointer ml-1"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
       </footer>

@@ -24,16 +24,9 @@ import {
   detectLanguage,
   KNOWN_COMPOSERS,
 } from '../../core/taxonomyUtils'
+import { FacetSelections } from '../../core/types'
 
-export interface FacetSelections {
-  era?: string
-  composer?: string
-  language?: string
-  format?: string
-  genre?: string
-  ensemble?: string
-  mastering?: string
-}
+export type { FacetSelections }
 
 interface FacetedFiltersProps {
   facets: FacetSelections

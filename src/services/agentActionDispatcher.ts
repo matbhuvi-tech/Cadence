@@ -1,5 +1,4 @@
-import { CanvasViewMode } from '../components/CenterStage/DataCanvas'
-import { FacetSelections } from '../components/LeftRail/FacetedFilters'
+import { CanvasViewMode, FacetSelections } from '../core/types'
 import { auditService } from './auditService'
 import { graphEngine } from '../core/graphEngine'
 import { agentSnapshotService } from './agentSnapshotService'
@@ -15,8 +14,28 @@ export interface AgentActionCommand {
     | 'stage_metadata'
     | 'get_statistics'
     | 'reset_filters'
+    | 'rework_backdrop'
+    | 'execute_pipeline'
   args: Record<string, any>
   explanation?: string
+}
+
+export interface AgentPipelineStepResult {
+  tool: string
+  command: AgentActionCommand
+  success: boolean
+  message: string
+  data?: any
+}
+
+export interface AgentPipelineResult {
+  success: boolean
+  message: string
+  stepResults: AgentPipelineStepResult[]
+  completedSteps: number
+  totalSteps: number
+  executed: number
+  total: number
 }
 
 export interface AgentDispatcherContext {
@@ -104,12 +123,69 @@ export class AgentActionDispatcher {
 
         case 'remediate_issue': {
           const actionType = command.args.actionType || command.args.autoFixAction || command.args.issueId
-          const res = await auditService.remediateIssue(actionType)
+          const res = await auditService.remediateIssue(actionType, command.args)
           ctx.refreshFromEngine()
           if (res.success) {
             ctx.showToast(res.message)
           }
           return res
+        }
+
+        case 'rework_backdrop': {
+          const res = await auditService.remediateIssue('REWORK_BACKDROP', command.args)
+          ctx.refreshFromEngine()
+          if (res.success) {
+            ctx.showToast(res.message)
+          }
+          return res
+        }
+
+        case 'stage_metadata': {
+          const commands: AgentActionCommand[] = []
+          if (
+            command.args.coverArtUrl ||
+            command.args.actionType === 'FETCH_HIRES_ART' ||
+            command.args.action === 'FETCH_HIRES_ART' ||
+            command.args.provider
+          ) {
+            commands.push({
+              tool: 'remediate_issue',
+              args: { actionType: 'FETCH_HIRES_ART', ...command.args },
+              explanation: command.explanation || 'Staging high-resolution cover art into metadata sidecars.',
+            })
+          }
+          if (
+            command.args.backdropUrl ||
+            command.args.actionType === 'REWORK_BACKDROP' ||
+            command.args.reworkBackdrop
+          ) {
+            commands.push({
+              tool: 'rework_backdrop',
+              args: command.args,
+              explanation: command.explanation || 'Applying high-resolution album backdrops in Virtual Grid.',
+            })
+          }
+          if (commands.length > 1) {
+            const pipeRes = await this.executePipeline(commands, ctx)
+            return { success: pipeRes.success, message: pipeRes.message, data: pipeRes }
+          }
+          if (commands.length === 1) {
+            return this.executeAction(commands[0], ctx)
+          }
+          return { success: false, message: 'Unsupported stage_metadata payload.' }
+        }
+
+        case 'execute_pipeline': {
+          const commands: AgentActionCommand[] = command.args.commands || []
+          if (!Array.isArray(commands) || commands.length === 0) {
+            return { success: false, message: 'execute_pipeline requires a non-empty "commands" array.' }
+          }
+          const pipeRes = await this.executePipeline(commands, ctx, command.args.stopOnError !== false)
+          return {
+            success: pipeRes.success,
+            message: pipeRes.message,
+            data: pipeRes,
+          }
         }
 
         case 'open_modal': {
@@ -150,18 +226,145 @@ export class AgentActionDispatcher {
   }
 
   /**
-   * Deterministic local fallback intent parser for common user commands when offline or for fast execution.
+   * Executes a sequential pipeline of tool commands, capturing step-by-step progress and safely reporting failures.
    */
-  public parseLocalIntent(prompt: string): AgentActionCommand | null {
-    const p = prompt.toLowerCase().trim()
+  public async executePipeline(
+    commands: AgentActionCommand[],
+    ctx: AgentDispatcherContext,
+    stopOnError = true
+  ): Promise<AgentPipelineResult> {
+    const stepResults: AgentPipelineStepResult[] = []
+    let allSuccess = true
 
-    // Statistics / Status
+    for (let i = 0; i < commands.length; i++) {
+      const cmd = commands[i]
+      const stepRes = await this.executeAction(cmd, ctx)
+      stepResults.push({
+        tool: cmd.tool,
+        command: cmd,
+        success: stepRes.success,
+        message: stepRes.message,
+        data: stepRes.data,
+      })
+
+      if (!stepRes.success) {
+        allSuccess = false
+        if (stopOnError) {
+          break
+        }
+      }
+    }
+
+    const completed = stepResults.filter((s) => s.success).length
+    const total = commands.length
+    const summaryMsg = allSuccess
+      ? `Completed compound pipeline: ${completed}/${total} steps executed successfully.`
+      : `Pipeline halted: ${completed}/${total} steps completed. Error on step ${stepResults.length}: ${
+          stepResults[stepResults.length - 1]?.message
+        }`
+
+    return {
+      success: allSuccess,
+      message: summaryMsg,
+      stepResults,
+      completedSteps: completed,
+      totalSteps: total,
+      executed: completed,
+      total,
+    }
+  }
+
+  /**
+   * Parses a single clause into an AgentActionCommand.
+   */
+  public parseSingleLocalIntent(prompt: string, contextArgs: Record<string, any> = {}): AgentActionCommand | null {
+    const p = prompt.toLowerCase().trim()
+    if (!p) return null
+
+    // 1. Cover Artwork Remediation & Staging (Prioritized)
+    if (
+      /\b(?:fetch|get|download|find|stage|resolve|add)\b.*?\b(?:art|artwork|covers?)\b/i.test(p) ||
+      /\b(?:cover\s*art|artwork|covers?)\b.*?\b(?:apple|itunes|musicbrainz|stage|online|authorit)\b/i.test(p) ||
+      /\b(?:no|missing|low-res|lowres)\s+(?:cover\s*art|artwork|covers?)\b/i.test(p) ||
+      /\b(fetch art|archival art|download covers?|hires art)\b/i.test(p)
+    ) {
+      const provider = /\b(?:apple(?:\s*music)?|itunes)\b/i.test(p)
+        ? 'apple'
+        : /\b(?:musicbrainz|caa)\b/i.test(p)
+        ? 'musicbrainz'
+        : /\b(?:ai|gemini)\b/i.test(p)
+        ? 'ai'
+        : contextArgs.provider
+
+      return {
+        tool: 'remediate_issue',
+        args: { actionType: 'FETCH_HIRES_ART', ...(provider ? { provider } : {}) },
+        explanation: `Triggering the automated fetch process to resolve missing/low-res cover art across the library${
+          provider === 'apple' ? ' from Apple Music' : ''
+        }.`,
+      }
+    }
+
+    // 2. Backdrop / Panoramic Wallpaper Rework & Application
+    if (
+      /\b(?:rework|generate|apply|create|update|set|map)\b.*?\bbackdrops?\b/i.test(p) ||
+      /\bbackdrops?\b/i.test(p)
+    ) {
+      const rahmanMatch = /\b(?:a\.?\s*r\.?\s*rahman|rahman)\b/i.test(p) ? 'A. R. Rahman' : contextArgs.composer
+      const provider = /\b(?:apple(?:\s*music)?|itunes)\b/i.test(p)
+        ? 'apple'
+        : /\b(?:musicbrainz|caa)\b/i.test(p)
+        ? 'musicbrainz'
+        : contextArgs.provider
+
+      return {
+        tool: 'rework_backdrop',
+        args: {
+          actionType: 'REWORK_BACKDROP',
+          ...(rahmanMatch ? { composer: rahmanMatch, artist: rahmanMatch } : {}),
+          ...(provider ? { provider } : {}),
+        },
+        explanation:
+          'Initiating high-resolution cover art retrieval and applying it as the album backdrop to resolve the visual deficiency in the Virtual Grid.',
+      }
+    }
+
+    // 3. Metadata Remediations
+    if (
+      /\b(?:extract|resolve|unknown|auto\s*tag|tag\s+from)\b.*?\b(?:artists?|folders?)\b/i.test(p) ||
+      /\b(unknown artists|auto tag)\b/i.test(p)
+    ) {
+      return { tool: 'remediate_issue', args: { actionType: 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER' } }
+    }
+    if (
+      /\b(?:normalize|clean(?:\s*up)?|merge|unify)\b.*?\bgenres?\b/i.test(p) ||
+      (/\bgenres?\b/i.test(p) && /\b(?:normalize|clean|unify)\b/i.test(p))
+    ) {
+      return { tool: 'remediate_issue', args: { actionType: 'NORMALIZE_GENRES' } }
+    }
+    if (
+      /\b(?:merge|canonicalize|deduplicate|clean(?:\s*up)?)\b.*?\b(?:performers?|artists?|authorit(?:y|ies))\b/i.test(p)
+    ) {
+      return { tool: 'remediate_issue', args: { actionType: 'MERGE_DUPLICATE_PERFORMERS' } }
+    }
+    if (
+      /\b(?:disentangle|sync|boxset|conflict)\b.*?\b(?:folder|boxset|album(?:\s*names?)?)\b/i.test(p)
+    ) {
+      return { tool: 'remediate_issue', args: { actionType: 'SYNC_FOLDER_TO_ALBUM' } }
+    }
+
+    // 4. Statistics / Status
     if (/\b(stats|statistics|summary|count|how many|collection size|breakdown)\b/i.test(p)) {
       return { tool: 'get_statistics', args: {} }
     }
 
-    // View Switching
-    if (/\b(grid|spreadsheet|virtual table|table view|show table)\b/i.test(p)) {
+    // 5. Audit / Hygiene
+    if (/\b(audit|scan library|run audit|health scan|hygiene|check health)\b/i.test(p)) {
+      return { tool: 'run_audit', args: {} }
+    }
+
+    // 6. View Switching
+    if (/\b(grid|spreadsheet|virtual table|table view|show table|virtual grid)\b/i.test(p)) {
       return { tool: 'switch_view', args: { viewMode: 'virtual_table' } }
     }
     if (/\b(stacks|variants|variant stack|album view|show albums)\b/i.test(p)) {
@@ -171,29 +374,7 @@ export class AgentActionDispatcher {
       return { tool: 'switch_view', args: { viewMode: 'work_movement' } }
     }
 
-    // Audit / Hygiene
-    if (/\b(audit|scan library|run audit|health scan|hygiene|check health)\b/i.test(p)) {
-      return { tool: 'run_audit', args: {} }
-    }
-
-    // Remediations
-    if (/\b(extract artists|resolve artists|unknown artists|auto tag|tag from folders?)\b/i.test(p)) {
-      return { tool: 'remediate_issue', args: { actionType: 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER' } }
-    }
-    if (/\b(normalize genres?|clean genres?|merge genres?)\b/i.test(p)) {
-      return { tool: 'remediate_issue', args: { actionType: 'NORMALIZE_GENRES' } }
-    }
-    if (/\b(merge performers?|canonicalize artists?|clean performers?)\b/i.test(p)) {
-      return { tool: 'remediate_issue', args: { actionType: 'MERGE_DUPLICATE_PERFORMERS' } }
-    }
-    if (/\b(disentangle|sync folder|boxset conflict|sync album names?)\b/i.test(p)) {
-      return { tool: 'remediate_issue', args: { actionType: 'SYNC_FOLDER_TO_ALBUM' } }
-    }
-    if (/\b(fetch art|archival art|download covers?|hires art)\b/i.test(p)) {
-      return { tool: 'remediate_issue', args: { actionType: 'FETCH_HIRES_ART' } }
-    }
-
-    // Filters
+    // 7. Filters
     if (/\b(filter to 24-bit|hi-res|high res|24bit)\b/i.test(p)) {
       return { tool: 'filter_catalog', args: { mastering: 'high_res_24bit' } }
     }
@@ -212,21 +393,132 @@ export class AgentActionDispatcher {
     if (/\b(hindi|filter hindi|bollywood)\b/i.test(p)) {
       return { tool: 'filter_catalog', args: { language: 'Hindi' } }
     }
-    if (/\b(reset filters?|clear filters?|show all)\b/i.test(p)) {
+    if (/\b(?:reset|clear)\s+(?:all\s+)?(?:active\s+)?filters?\b|\b(?:show\s+all(?:\s+tracks)?)\b/i.test(p)) {
       return { tool: 'reset_filters', args: {} }
     }
 
-    // Modals
+    // 8. Modals
     if (/\b(commit|stage sidecars?|two phase commit|write sidecars?)\b/i.test(p)) {
       return { tool: 'open_modal', args: { modalName: 'commit' } }
     }
     if (/\b(import|scan folder|import modal|add music)\b/i.test(p)) {
       return { tool: 'open_modal', args: { modalName: 'import' } }
     }
-    if (/\b(path rules?|restructure|renaming rules?)\b/i.test(p)) {
+    if (/\b(path\s*rules?|restructur\w*|renam\w*\s*rules?|naming\s*rules?)\b/i.test(p)) {
       return { tool: 'open_modal', args: { modalName: 'path_rules' } }
     }
 
+    return null
+  }
+
+  /**
+   * Robust compound local intent parser that extracts multiple distinct operations from natural language requests.
+   */
+  public parseCompoundLocalIntent(prompt: string): AgentActionCommand[] {
+    const p = prompt.trim()
+    if (!p) return []
+
+    // Detect shared context such as provider or composer mentioned anywhere in the overall prompt
+    const sharedProvider = /\b(?:apple(?:\s*music)?|itunes)\b/i.test(p)
+      ? 'apple'
+      : /\b(?:musicbrainz|caa)\b/i.test(p)
+      ? 'musicbrainz'
+      : /\b(?:ai|gemini)\b/i.test(p)
+      ? 'ai'
+      : undefined
+
+    const sharedComposer = /\b(?:a\.?\s*r\.?\s*rahman|rahman)\b/i.test(p)
+      ? 'A. R. Rahman'
+      : /\b(?:beethoven|ludwig)\b/i.test(p)
+      ? 'Ludwig van Beethoven'
+      : /\b(?:miles\s*davis|miles)\b/i.test(p)
+      ? 'Miles Davis'
+      : undefined
+
+    const contextArgs: Record<string, any> = {}
+    if (sharedProvider) contextArgs.provider = sharedProvider
+    if (sharedComposer) {
+      contextArgs.composer = sharedComposer
+      contextArgs.artist = sharedComposer
+    }
+
+    // Split on compound sequence conjunctions: "and then", "then", "followed by", "after that", "also", "and", ";", "+"
+    const clauses = p
+      .split(/\b(?:and\s+then|then|followed\s+by|after\s+that|\balso\b|\band\b|;|\+)\b/i)
+      .map((c) => c.trim())
+      .filter((c) => c.length > 2)
+
+    const commands: AgentActionCommand[] = []
+
+    for (const clause of clauses) {
+      const cmd = this.parseSingleLocalIntent(clause, contextArgs)
+      if (cmd) {
+        // Deduplicate identical adjacent tool invocations with identical parameters
+        const isDuplicate = commands.some(
+          (existing) =>
+            existing.tool === cmd.tool &&
+            JSON.stringify(existing.args) === JSON.stringify(cmd.args)
+        )
+        if (!isDuplicate) {
+          commands.push(cmd)
+        }
+      }
+    }
+
+    // Co-occurrence fallback:
+    // If splitting by conjunctions didn't detect multiple distinct tools,
+    // check if distinct strong intents co-occur in the full prompt (e.g. art fetch + backdrop rework)
+    if (commands.length <= 1) {
+      const hasArtFetch =
+        /\b(?:fetch|get|download|find|stage|resolve|add)\b.*?\b(?:art|artwork|covers?)\b/i.test(p) ||
+        /\b(?:cover\s*art|artwork|covers?)\b.*?\b(?:apple|itunes|musicbrainz|stage|online)\b/i.test(p)
+      const hasBackdrop =
+        /\b(?:rework|generate|apply|create|update|set|map)\b.*?\bbackdrops?\b/i.test(p) || /\bbackdrops?\b/i.test(p)
+
+      if (hasArtFetch && hasBackdrop) {
+        const artIdx = p.search(/\b(?:art|artwork|covers?)\b/i)
+        const backdropIdx = p.search(/\bbackdrops?\b/i)
+        const artCmd: AgentActionCommand = {
+          tool: 'remediate_issue',
+          args: { actionType: 'FETCH_HIRES_ART', ...(sharedProvider ? { provider: sharedProvider } : {}) },
+          explanation: `Triggering automated fetch to resolve cover art${sharedProvider === 'apple' ? ' from Apple Music' : ''}.`,
+        }
+        const backdropCmd: AgentActionCommand = {
+          tool: 'rework_backdrop',
+          args: {
+            actionType: 'REWORK_BACKDROP',
+            ...(sharedComposer ? { composer: sharedComposer, artist: sharedComposer } : {}),
+            ...(sharedProvider ? { provider: sharedProvider } : {}),
+          },
+          explanation: 'Rework and apply panoramic album backdrops in Virtual Grid.',
+        }
+
+        const coOccurred = artIdx <= backdropIdx ? [artCmd, backdropCmd] : [backdropCmd, artCmd]
+        if (coOccurred.length > commands.length) {
+          return coOccurred
+        }
+      }
+    }
+
+    return commands
+  }
+
+  /**
+   * Deterministic local fallback intent parser for common user commands when offline or for fast execution.
+   * If compound clauses are present, returns an execute_pipeline compound action.
+   */
+  public parseLocalIntent(prompt: string): AgentActionCommand | null {
+    const compound = this.parseCompoundLocalIntent(prompt)
+    if (compound.length > 1) {
+      return {
+        tool: 'execute_pipeline',
+        args: { commands: compound },
+        explanation: `Executing compound multi-step workflow (${compound.length} operations).`,
+      }
+    }
+    if (compound.length === 1) {
+      return compound[0]
+    }
     return null
   }
 }

@@ -1,5 +1,6 @@
 import { DiffField, DiffSource } from '../core/types'
 import { getCuratedAlbumArtwork } from '../core/taxonomyUtils'
+import { normalizationService } from './normalizationService'
 
 export interface CoverArtCandidate {
   provider: 'apple' | 'musicbrainz' | 'ai' | 'local'
@@ -76,10 +77,31 @@ export type BatchDiffResultMap = Map<string, BatchDiffTrackResult> & {
   }
 }
 
+export interface BatchDiffTelemetry {
+  stage: 'idle' | 'itunes' | 'musicbrainz' | 'gemini_pacing' | 'gemini_querying' | 'complete'
+  itunesCompleted: number
+  musicbrainzCompleted: number
+  geminiCompleted: number
+  total: number
+  pacingCountdownSeconds: number
+  activeProviderMessage: string
+  isAiPacingActive?: boolean
+  canSkipAi?: boolean
+}
+
+export type BatchDiffProgressCallback = (
+  msg: string,
+  completed: number,
+  total: number,
+  telemetry?: BatchDiffTelemetry
+) => void
+
 export interface BatchDiffOptions {
   includeItunes?: boolean
   includeMusicBrainz?: boolean
   includeAi?: boolean
+  abortSignal?: AbortSignal
+  onIntermediateResults?: (results: Map<string, BatchDiffTrackResult>) => void
 }
 
 export class FederatedResolversService {
@@ -110,7 +132,7 @@ export class FederatedResolversService {
       const data = await res.json()
       if (!data.success) return null
 
-      return {
+      return normalizationService.applyToCandidate<ProviderResult>({
         provider: 'itunes',
         confidenceScore: data.confidenceScore || 0.95,
         releaseTitle: data.releaseTitle || album || title,
@@ -124,7 +146,7 @@ export class FederatedResolversService {
         coverArtUrl: data.coverArtUrl || '',
         coverResolution: data.coverResolution || '3000x3000px (Apple Music Master Scan)',
         genre: data.genre || 'Soundtrack',
-      }
+      })
     } catch {
       return null
     }
@@ -150,7 +172,7 @@ export class FederatedResolversService {
       const data = await res.json()
       if (!data.success) return null
 
-      return {
+      return normalizationService.applyToCandidate<ProviderResult>({
         provider: 'musicbrainz',
         confidenceScore: data.confidenceScore || 0.93,
         releaseTitle: data.releaseTitle || album || title,
@@ -163,7 +185,8 @@ export class FederatedResolversService {
         barcodeUpc: data.barcodeUpc || '',
         coverArtUrl: data.coverArtUrl || '',
         coverResolution: data.coverResolution || 'Archival Front (Cover Art Archive)',
-      }
+      })
+
     } catch {
       return null
     }
@@ -196,7 +219,7 @@ export class FederatedResolversService {
       const data = await res.json()
       if (data.results && Array.isArray(data.results)) {
         for (const r of data.results) {
-          const providerRes: ProviderResult = {
+          const providerRes: ProviderResult = normalizationService.applyToCandidate({
             provider: 'gemini_ai',
             confidenceScore: r.confidenceScore || 0.98,
             releaseTitle: r.releaseTitle || '',
@@ -211,7 +234,8 @@ export class FederatedResolversService {
             coverArtUrl: '',
             coverResolution: 'Archival Reference Scan',
             genre: r.genre || '',
-          }
+          })
+
 
           if (r.id) {
             resultMap.set(r.id, providerRes)
@@ -231,15 +255,39 @@ export class FederatedResolversService {
   }
 
   /**
+   * Queries server quota telemetry for real-time pacing state.
+   */
+  public async getAiQuotaTelemetry(): Promise<{
+    rateLimitRpm: number
+    pacingIntervalMs: number
+    nextSlotRemainingMs: number
+    isPacingActive: boolean
+    lastCallTimestamp: number
+  }> {
+    try {
+      const res = await fetch(`${this.getBaseUrl()}/api/ai-quota-telemetry`)
+      if (res.ok) return await res.json()
+    } catch {}
+    return {
+      rateLimitRpm: 15,
+      pacingIntervalMs: 4000,
+      nextSlotRemainingMs: 0,
+      isPacingActive: false,
+      lastCallTimestamp: 0,
+    }
+  }
+
+  /**
    * Resolves a batch of tracks across Apple iTunes, MusicBrainz, and Gemini AI.
-   * - Gemini AI is batched into 1 single call for up to 25 items.
-   * - iTunes calls are made concurrently per track.
-   * - MusicBrainz calls are made per track (with rate-throttling).
+   * Decoupled architecture:
+   * 1. Apple iTunes and MusicBrainz begin immediately and yield intermediate results.
+   * 2. Gemini AI processes in a single batch call with pacing telemetry.
+   * 3. Users can skip AI or cancel at any time while preserving Apple & MB matches.
    */
   public async resolveBatchDiff(
     items: BatchItem[],
     options: BatchDiffOptions = { includeItunes: true, includeMusicBrainz: true, includeAi: true },
-    onProgress?: (msg: string, completed: number, total: number) => void
+    onProgress?: BatchDiffProgressCallback
   ): Promise<Map<string, BatchDiffTrackResult>> {
     const resultMap = new Map<string, BatchDiffTrackResult>()
     if (!items || items.length === 0) return resultMap
@@ -265,33 +313,26 @@ export class FederatedResolversService {
       })
     }
 
-    const { includeItunes = true, includeMusicBrainz = true, includeAi = true } = options
+    const { includeItunes = true, includeMusicBrainz = true, includeAi = true, abortSignal, onIntermediateResults } = options
     const warnings: { ai?: string; itunes?: string; musicbrainz?: string } = {}
 
-    // 1. Gemini AI Batch Resolution (1 single call for all items in batch)
-    if (includeAi) {
-      onProgress?.('Querying Gemini AI (single batch call for up to 25 tracks)...', 0, total)
-      try {
-        const aiResults = await this.resolveBatchWithAi(batch)
-        if (aiResults.size === 0) {
-          warnings.ai = 'Gemini AI returned 0 candidate matches for this batch.'
-        }
-        aiResults.forEach((res, id) => {
-          const trackResult = resultMap.get(id)
-          if (trackResult) {
-            trackResult.candidates.ai = res
-            trackResult.selectedSource = 'ai' // Default to AI if available
-          }
-        })
-      } catch (err: any) {
-        console.warn('Batch AI resolution failed during batch diff:', err?.message || err)
-        warnings.ai = err?.message || 'Gemini AI service encountered an issue'
-      }
-    }
+    let itunesCount = 0
+    let mbCount = 0
+    let aiCount = 0
 
-    // 2. Apple iTunes Queries (per-track, running with Promise.allSettled)
+    // 1. Apple iTunes Queries (fast concurrent resolution)
     if (includeItunes) {
-      onProgress?.('Querying Apple iTunes catalog...', Math.floor(total / 3), total)
+      onProgress?.('Querying Apple iTunes catalog...', 0, total, {
+        stage: 'itunes',
+        itunesCompleted: 0,
+        musicbrainzCompleted: 0,
+        geminiCompleted: 0,
+        total,
+        pacingCountdownSeconds: 0,
+        activeProviderMessage: 'Searching Apple Music masters...',
+        canSkipAi: false,
+      })
+
       const itunesPromises = batch.map(async (item) => {
         try {
           const candidate = await this.fetchItunesCandidate(item.artist, item.title, item.album)
@@ -302,20 +343,32 @@ export class FederatedResolversService {
               trackResult.selectedSource = 'itunes'
             }
           }
+          itunesCount++
         } catch {}
       })
       await Promise.allSettled(itunesPromises)
+      onIntermediateResults?.(new Map(resultMap))
     }
 
-    // 3. MusicBrainz Queries (per-track)
+    // 2. MusicBrainz Queries (per-track with 1.1s rate throttling)
     if (includeMusicBrainz) {
-      let mbCount = 0
       for (const item of batch) {
+        if (abortSignal?.aborted) break
         mbCount++
         onProgress?.(
           `Querying MusicBrainz (${mbCount}/${total}): "${item.title}"...`,
-          Math.floor(total / 2) + Math.floor((mbCount / total) * (total / 2)),
-          total
+          mbCount,
+          total,
+          {
+            stage: 'musicbrainz',
+            itunesCompleted: itunesCount,
+            musicbrainzCompleted: mbCount,
+            geminiCompleted: aiCount,
+            total,
+            pacingCountdownSeconds: 0,
+            activeProviderMessage: `Querying MusicBrainz (${mbCount}/${total})`,
+            canSkipAi: false,
+          }
         )
         try {
           const candidate = await this.fetchMusicBrainzCandidate(item.artist, item.title, item.album, item.trackNumber)
@@ -327,11 +380,71 @@ export class FederatedResolversService {
             }
           }
         } catch {}
+        onIntermediateResults?.(new Map(resultMap))
       }
     }
 
+    // 3. Gemini AI Batch Resolution (safe paced call)
+    if (includeAi && !abortSignal?.aborted) {
+      // Check quota telemetry before dispatching
+      const quota = await this.getAiQuotaTelemetry()
+      const waitSec = Math.ceil(quota.nextSlotRemainingMs / 1000)
+
+      onProgress?.(
+        quota.isPacingActive
+          ? `Free Tier Buffer active: pacing next query in ${waitSec}s...`
+          : 'Querying Gemini AI for canonical discography...',
+        total,
+        total,
+        {
+          stage: quota.isPacingActive ? 'gemini_pacing' : 'gemini_querying',
+          itunesCompleted: itunesCount,
+          musicbrainzCompleted: mbCount,
+          geminiCompleted: 0,
+          total,
+          pacingCountdownSeconds: waitSec,
+          activeProviderMessage: quota.isPacingActive ? `Token buffer active: ${waitSec}s` : 'Gemini AI processing',
+          isAiPacingActive: quota.isPacingActive,
+          canSkipAi: true,
+        }
+      )
+
+      try {
+        const aiResults = await this.resolveBatchWithAi(batch)
+        if (aiResults.size === 0) {
+          warnings.ai = 'Gemini AI returned 0 candidate matches for this batch.'
+        }
+        aiResults.forEach((res, id) => {
+          const trackResult = resultMap.get(id)
+          if (trackResult) {
+            trackResult.candidates.ai = res
+            trackResult.selectedSource = 'ai' // Default to AI if available
+            aiCount++
+          }
+        })
+        onIntermediateResults?.(new Map(resultMap))
+      } catch (err: any) {
+        console.warn('Batch AI resolution failed during batch diff:', err?.message || err)
+        warnings.ai =
+          err?.message?.includes('429') || err?.message?.includes('Rate limit')
+            ? 'Gemini Free Tier rate limit (15 RPM) reached. Apple Music & MusicBrainz matches are preserved.'
+            : err?.message || 'Gemini AI service encountered a temporary delay.'
+      }
+    } else if (abortSignal?.aborted) {
+      warnings.ai = 'Gemini AI query was bypassed. Apple Music & MusicBrainz matches applied.'
+    }
+
     ;(resultMap as any).warnings = warnings
-    onProgress?.(`Completed federated diff resolution for ${total} tracks`, total, total)
+    onProgress?.(`Completed federated diff resolution for ${total} tracks`, total, total, {
+      stage: 'complete',
+      itunesCompleted: itunesCount,
+      musicbrainzCompleted: mbCount,
+      geminiCompleted: aiCount,
+      total,
+      pacingCountdownSeconds: 0,
+      activeProviderMessage: 'Batch Harmonization Complete',
+      canSkipAi: false,
+    })
     return resultMap as BatchDiffResultMap
   }
 
@@ -407,8 +520,9 @@ export class FederatedResolversService {
       })
     }
 
-    return results
+    return results.map((r) => normalizationService.applyToCandidate(r))
   }
+
 
   /**
    * Builds the interactive field-by-field diff comparison.
@@ -794,7 +908,7 @@ export class FederatedResolversService {
               thumbnailUrl: aiData.coverArtUrl,
               coverResolution: aiData.coverResolution || 'Master Reference Scan (AI Verified)',
               confidenceScore: aiData.confidenceScore || 0.95,
-              sourceInfo: aiData.officialCoverDescription || 'Gemini 3.7 Flash Discography Resolver',
+              sourceInfo: aiData.officialCoverDescription || 'Gemini 3.8 Flash Discography Resolver',
             }
           }
         }

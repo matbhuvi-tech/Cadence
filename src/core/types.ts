@@ -149,7 +149,32 @@ export interface Release {
   genreTags: string[]
   storageMountId: string
   language?: string
+  // Curation fields (DB-only, non-destructive)
+  rating?: number // 1 to 5 stars
+  isFavorite?: boolean
+  isMasterpiece?: boolean
+  isCollected?: boolean
 }
+
+export type CanvasViewMode =
+  | 'cover_grid'
+  | 'virtual_table'
+  | 'work_movement'
+  | 'variant_stack'
+  | 'folder_tree'
+
+export interface FacetSelections {
+  era?: string
+  composer?: string
+  language?: string
+  format?: string
+  genre?: string
+  ensemble?: string
+  mastering?: string
+  rating?: number
+}
+
+export type DRSource = 'embedded_tag' | 'replaygain_calc' | 'measured' | 'decoded_pcm' | 'estimated'
 
 export type SidecarStatus = 'synced' | 'uncommitted_sidecar' | 'committed'
 
@@ -181,12 +206,16 @@ export interface Track {
   checksumValid: boolean
   accurateRipConfidence: number // 0 = no match, >0 = verified rips
   drScore: number
+  drSource?: DRSource
   sampleRateStr: string
   format: AudioFormat
   isHighRes?: boolean
   credits: Credit[]
   masterReleaseId: string
   isOnline?: boolean
+  // Curation fields (DB-only)
+  rating?: number
+  isFavorite?: boolean
 }
 
 export interface StorageMount {
@@ -262,6 +291,7 @@ export type AuditCategory =
   | 'unmatched_fingerprint'
   | 'duplicate_master'
   | 'compilation_conflict'
+  | 'unformatted_backdrop'
 
 export interface AuditIssue {
   id: string

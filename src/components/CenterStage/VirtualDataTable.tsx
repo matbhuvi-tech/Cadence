@@ -32,6 +32,7 @@ import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { getCuratedAlbumArtwork } from '../../core/taxonomyUtils'
+import { backdropAnalyzer } from '../../services/backdropAnalyzer'
 
 const IndeterminateCheckbox: React.FC<{
   checked: boolean
@@ -86,6 +87,7 @@ interface VirtualDataTableProps {
       artistCredit?: string
       releaseYear?: number
       coverArtUrl?: string
+      backdropUrl?: string
     }
   ) => void
 }
@@ -716,6 +718,33 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                       >
                         <Sparkles className="w-3.5 h-3.5 text-[#ADFF2F]" />
                         <span>Enrich Album</span>
+                      </button>
+                    )}
+
+                    {backdropAnalyzer.isBackdropUnformatted(group.release).isUnformatted && (
+                      <button
+                        onClick={async () => {
+                          if (group.release) {
+                            const res = await backdropAnalyzer.formatBackdropForRelease(group.release.id)
+                            if (res.success && res.backdropUrl) {
+                              onUpdateReleaseDetails?.(group.release.id, { backdropUrl: res.backdropUrl })
+                              window.dispatchEvent(
+                                new CustomEvent('cadence:toast', {
+                                  detail: `Generated 2400×320 panoramic backdrop for "${group.title}"`,
+                                })
+                              )
+                            } else {
+                              window.dispatchEvent(
+                                new CustomEvent('cadence:toast', { detail: res.message })
+                              )
+                            }
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-white border border-amber-500/40 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-bold shadow-md hover:scale-[1.02] active:scale-[0.98]"
+                        title="Background is not properly formatted. Click to automatically generate a high-fidelity 2400×320 panoramic backdrop."
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Format Backdrop</span>
                       </button>
                     )}
                   </div>

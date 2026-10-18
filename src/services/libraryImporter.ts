@@ -636,6 +636,7 @@ export class LibraryImporter {
         checksumValid: true,
         accurateRipConfidence: 16,
         drScore,
+        drSource: drMeasurement.source,
         sampleRateStr,
         format: audioFormat,
         credits,
