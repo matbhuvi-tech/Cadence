@@ -1,0 +1,227 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-base: var(--bg-base);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-surface-elevated: var(--bg-surface-elevated);
+  --color-bg-surface-hover: var(--bg-surface-hover);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-accent: var(--border-accent);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-accent-cyan: var(--accent-cyan);
+  --color-accent-lime: var(--accent-lime);
+  --color-accent-mint: var(--accent-mint);
+  --color-accent-amber: var(--accent-amber);
+  --color-accent-coral: var(--accent-coral);
+  --color-accent-violet: var(--accent-violet);
+  --color-accent-pink: var(--accent-pink);
+
+  --color-role-composer: var(--role-composer);
+  --color-role-staged: var(--role-staged);
+  --color-role-verified: var(--role-verified);
+  --color-role-warning: var(--role-warning);
+  --color-role-danger: var(--role-danger);
+  --color-role-highres: var(--role-highres);
+}
+
+@layer base {
+  :root,
+  [data-theme="audiophile-dark"] {
+    --bg-base: #0D0E12;
+    --bg-surface: #12151D;
+    --bg-surface-elevated: #181C26;
+    --bg-surface-hover: #1E2330;
+    --bg-glass: rgba(18, 21, 29, 0.75);
+    --border-subtle: rgba(255, 255, 255, 0.08);
+    --border-accent: rgba(0, 245, 255, 0.3);
+    
+    --text-primary: #F1F5F9;
+    --text-secondary: #94A3B8;
+    --text-muted: #64748B;
+    
+    --accent-cyan: #00F5FF;
+    --accent-lime: #ADFF2F;
+    --accent-mint: #10B981;
+    --accent-amber: #F59E0B;
+    --accent-coral: #F43F5E;
+    --accent-violet: #8B5CF6;
+    --accent-pink: #EC4899;
+
+    --role-composer: #EC4899;
+    --role-staged: #F59E0B;
+    --role-verified: #10B981;
+    --role-warning: #F59E0B;
+    --role-danger: #F43F5E;
+    --role-highres: #38BDF8;
+  }
+
+  [data-theme="studio-slate"] {
+    --bg-base: #0B0F17;
+    --bg-surface: #111724;
+    --bg-surface-elevated: #182032;
+    --bg-surface-hover: #1F2A42;
+    --bg-glass: rgba(17, 23, 36, 0.85);
+    --border-subtle: rgba(255, 255, 255, 0.09);
+    --border-accent: rgba(56, 189, 248, 0.35);
+
+    --text-primary: #F8FAFC;
+    --text-secondary: #94A3B8;
+    --text-muted: #64748B;
+
+    --accent-cyan: #38BDF8;
+    --accent-lime: #4ADE80;
+    --accent-mint: #10B981;
+    --accent-amber: #FBBF24;
+    --accent-coral: #FB7185;
+    --accent-violet: #A78BFA;
+    --accent-pink: #F472B6;
+
+    --role-composer: #F472B6;
+    --role-staged: #FBBF24;
+    --role-verified: #34D399;
+    --role-warning: #FBBF24;
+    --role-danger: #F87171;
+    --role-highres: #60A5FA;
+  }
+
+  [data-theme="amber-sanctuary"] {
+    --bg-base: #0C0A08;
+    --bg-surface: #14110E;
+    --bg-surface-elevated: #1E1914;
+    --bg-surface-hover: #29221B;
+    --bg-glass: rgba(20, 17, 14, 0.85);
+    --border-subtle: rgba(245, 158, 11, 0.12);
+    --border-accent: rgba(245, 158, 11, 0.4);
+
+    --text-primary: #FEF3C7;
+    --text-secondary: #D4B895;
+    --text-muted: #8E7A63;
+
+    --accent-cyan: #F59E0B;
+    --accent-lime: #EAB308;
+    --accent-mint: #10B981;
+    --accent-amber: #D97706;
+    --accent-coral: #EF4444;
+    --accent-violet: #C084FC;
+    --accent-pink: #F472B6;
+
+    --role-composer: #FB923C;
+    --role-staged: #F59E0B;
+    --role-verified: #10B981;
+    --role-warning: #FBBF24;
+    --role-danger: #EF4444;
+    --role-highres: #F59E0B;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+  }
+
+  #root {
+    height: 100vh;
+    width: 100vw;
+    max-width: 100%;
+    margin: 0;
+    padding: 0;
+    border: none;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+/* Custom modern scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* Glassmorphism helpers */
+.glass-panel {
+  background: var(--bg-glass);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--border-subtle);
+}
+
+.glass-dropdown {
+  background: rgba(18, 21, 29, 0.92);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7);
+}
+
+/* Bento card styles */
+.bento-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.bento-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Glow effects */
+.glow-cyan {
+  box-shadow: 0 0 20px -5px rgba(0, 245, 255, 0.25);
+}
+
+.glow-lime {
+  box-shadow: 0 0 20px -5px rgba(173, 255, 47, 0.25);
+}
+
+.glow-amber {
+  box-shadow: 0 0 20px -5px rgba(245, 158, 11, 0.25);
+}
+
+/* Sidecar non-destructive indicator */
+.sidecar-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background-color: var(--accent-amber);
+  box-shadow: 0 0 8px var(--accent-amber);
+}
+
+/* Animations */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
