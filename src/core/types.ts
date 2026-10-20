@@ -244,6 +244,8 @@ export interface WatchedFolder {
   ignorePatterns?: string
   isEnabled: boolean
   lastScannedTimestamp?: string
+  lastScanned?: string
+  trackCount?: number
 }
 
 export interface ScanProgressPayload {

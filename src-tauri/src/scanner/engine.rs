@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
+use crate::audio::stream_tuning;
 use crate::db::{
     AppDb, DbOperations, DbRelease, DbSkippedFile, DbTrack, DbWatchedFolder,
 };
@@ -69,6 +70,115 @@ pub struct ScanChunkPayload {
     pub releases: Vec<DbRelease>,
     pub processed_count: usize,
     pub total_count: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct AlbumSidecar {
+    pub album: Option<String>,
+    pub folder_name: Option<String>,
+    pub cover_art_url: Option<String>,
+    pub backdrop_url: Option<String>,
+}
+
+pub fn read_album_sidecar(dir: &Path) -> AlbumSidecar {
+    let sidecar_path = dir.join("cadence-album.sidecar.json");
+    if sidecar_path.is_file() {
+        if let Ok(content) = fs::read_to_string(&sidecar_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                let alb = v.get("album").and_then(|s| s.as_str()).map(|s| s.to_string());
+                let fn_name = v.get("folderName").and_then(|s| s.as_str()).map(|s| s.to_string());
+                let cover = v.get("coverArtUrl")
+                    .or_else(|| v.get("artworkUrl"))
+                    .and_then(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let backdrop = v.get("backdropUrl")
+                    .and_then(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                return AlbumSidecar {
+                    album: alb,
+                    folder_name: fn_name,
+                    cover_art_url: cover,
+                    backdrop_url: backdrop,
+                };
+            }
+        }
+    }
+    AlbumSidecar::default()
+}
+
+pub fn find_local_cover_art(dir: &Path) -> Option<String> {
+    let candidates = [
+        "cover.jpg", "cover.png", "folder.jpg", "folder.png",
+        "front.jpg", "front.png", "cover.jpeg", "folder.jpeg",
+        "Cover.jpg", "Cover.png", "Folder.jpg", "Folder.png"
+    ];
+    for c in &candidates {
+        let p = dir.join(c);
+        if p.is_file() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TrackSidecar {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub composer: Option<String>,
+    pub year: Option<i32>,
+    pub track_number: Option<i32>,
+    pub genre: Option<String>,
+}
+
+pub fn read_track_sidecar(audio_path: &Path) -> TrackSidecar {
+    let sidecar_path = PathBuf::from(format!("{}.sidecar.json", audio_path.to_string_lossy()));
+    if sidecar_path.is_file() {
+        if let Ok(content) = fs::read_to_string(&sidecar_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                let meta = v.get("metadata");
+                let edits = v.get("pendingEditsApplied");
+
+                let title = meta.and_then(|m| m.get("title")).and_then(|s| s.as_str())
+                    .or_else(|| edits.and_then(|e| e.get("title")).and_then(|s| s.as_str()))
+                    .map(|s| s.to_string());
+                let artist = meta.and_then(|m| m.get("artist")).and_then(|s| s.as_str())
+                    .or_else(|| edits.and_then(|e| e.get("artistCredit")).and_then(|s| s.as_str()))
+                    .map(|s| s.to_string());
+                let album = meta.and_then(|m| m.get("album")).and_then(|s| s.as_str())
+                    .or_else(|| edits.and_then(|e| e.get("album")).and_then(|s| s.as_str()))
+                    .map(|s| s.to_string());
+                let composer = meta.and_then(|m| m.get("composer")).and_then(|s| s.as_str())
+                    .or_else(|| edits.and_then(|e| e.get("composerName")).and_then(|s| s.as_str()))
+                    .map(|s| s.to_string());
+                let year = meta.and_then(|m| m.get("year")).and_then(|y| y.as_i64()).map(|y| y as i32)
+                    .or_else(|| edits.and_then(|e| e.get("year")).and_then(|y| y.as_i64()).map(|y| y as i32));
+                let track_number = meta.and_then(|m| m.get("trackNumber")).and_then(|t| t.as_i64()).map(|t| t as i32)
+                    .or_else(|| edits.and_then(|e| e.get("trackNumber")).and_then(|t| t.as_i64()).map(|t| t as i32));
+                let genre = meta.and_then(|m| m.get("genre")).and_then(|g| {
+                    if let Some(arr) = g.as_array() {
+                        arr.first().and_then(|s| s.as_str()).map(|s| s.to_string())
+                    } else {
+                        g.as_str().map(|s| s.to_string())
+                    }
+                });
+
+                return TrackSidecar {
+                    title,
+                    artist,
+                    album,
+                    composer,
+                    year,
+                    track_number,
+                    genre,
+                };
+            }
+        }
+    }
+    TrackSidecar::default()
 }
 
 #[derive(Clone)]
@@ -193,34 +303,15 @@ impl ScannerController {
 
             // Identify or auto-create StorageMount & WatchedFolder in SQLite
             let mount_id = match mount_id_override {
-                Some(id) => id,
+                Some(id) => {
+                    let conn = db.conn.lock();
+                    DbOperations::ensure_mount_for_path(&conn, &folder_path, Some(&id))
+                        .unwrap_or(id)
+                }
                 None => {
                     let conn = db.conn.lock();
-                    let mounts = DbOperations::get_storage_mounts(&conn).unwrap_or_default();
-                    let matched = mounts.into_iter().find(|m| folder_path.starts_with(&m.mount_path));
-                    match matched {
-                        Some(m) => m.id,
-                        None => {
-                            let new_mount_id = format!("mount-{}", uuid::Uuid::new_v4().simple());
-                            let new_mount = crate::db::DbStorageMount {
-                                id: new_mount_id.clone(),
-                                name: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Music Storage".to_string()),
-                                mount_path: folder_path.clone(),
-                                r#type: "local_disk".to_string(),
-                                file_system: "NTFS".to_string(),
-                                total_bytes: 1_000_000_000_000,
-                                used_bytes: 450_000_000_000,
-                                is_read_only_locked: false,
-                                status: "scanning".to_string(),
-                                health_score: "healthy".to_string(),
-                                smart_ok: true,
-                                temp_celsius: 34.0,
-                                last_seen_timestamp: Utc::now().to_rfc3339(),
-                            };
-                            let _ = DbOperations::upsert_storage_mount(&conn, &new_mount);
-                            new_mount_id
-                        }
-                    }
+                    DbOperations::ensure_mount_for_path(&conn, &folder_path, None)
+                        .unwrap_or_else(|_| "mount-local".to_string())
                 }
             };
 
@@ -237,6 +328,7 @@ impl ScannerController {
                     ignore_patterns: None,
                     is_enabled: true,
                     last_scanned_timestamp: Some(Utc::now().to_rfc3339()),
+                    track_count: None,
                 };
                 let _ = DbOperations::upsert_watched_folder(&conn, &watched);
             }
@@ -315,7 +407,7 @@ impl ScannerController {
 
                         let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
 
-                        let title = tag
+                        let mut title = tag
                             .and_then(|t| t.title().map(|s| s.to_string()))
                             .unwrap_or_else(|| {
                                 path.file_stem()
@@ -323,19 +415,35 @@ impl ScannerController {
                                     .unwrap_or_else(|| "Unknown Track".to_string())
                             });
 
-                        let artist = tag
+                        let mut artist = tag
                             .and_then(|t| t.artist().map(|s| s.to_string()))
                             .unwrap_or_else(|| "Unknown Artist".to_string());
 
-                        let album = tag
+                        let mut album = tag
                             .and_then(|t| t.album().map(|s| s.to_string()))
                             .unwrap_or_else(|| folder_name.clone());
 
-                        let year = tag.and_then(|t| t.year()).map(|y| y as i32);
-                        let track_number = tag.and_then(|t| t.track()).map(|t| t as i32);
-                        let genre = tag.and_then(|t| t.genre().map(|s| s.to_string()));
-                        let composer = tag.and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
+                        let mut year = tag.and_then(|t| t.year()).map(|y| y as i32);
+                        let mut track_number = tag.and_then(|t| t.track()).map(|t| t as i32);
+                        let mut genre = tag.and_then(|t| t.genre().map(|s| s.to_string()));
+                        let mut composer = tag.and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
                         let has_embedded_art = tag.map(|t| !t.pictures().is_empty()).unwrap_or(false);
+
+                        // Read track-level sidecar if present
+                        let trk_sidecar = read_track_sidecar(path);
+                        if let Some(t) = trk_sidecar.title { title = t; }
+                        if let Some(a) = trk_sidecar.artist { artist = a; }
+                        if let Some(alb) = trk_sidecar.album { album = alb; }
+                        if let Some(y) = trk_sidecar.year { year = Some(y); }
+                        if let Some(tn) = trk_sidecar.track_number { track_number = Some(tn); }
+                        if let Some(g) = trk_sidecar.genre { genre = Some(g); }
+                        if let Some(c) = trk_sidecar.composer { composer = Some(c); }
+
+                        // Read album-level sidecar if present
+                        let alb_sidecar = read_album_sidecar(parent_dir);
+                        if let Some(alb) = alb_sidecar.album.as_ref() {
+                            album = alb.clone();
+                        }
 
                         let ext_str = path
                             .extension()
@@ -343,28 +451,65 @@ impl ScannerController {
                             .map(|s| s.to_uppercase())
                             .unwrap_or_else(|| "FLAC".to_string());
 
-                        let release_id = format!("rel-{}", uuid::Uuid::new_v4().simple());
+                        let release_id = if let Some(existing_rel) = pending_releases.values().find(|r| r.folder_path == folder_path_str && r.title == album) {
+                            existing_rel.id.clone()
+                        } else {
+                            // Check if release already exists in SQLite DB
+                            let db_rel_info: Option<(String, Option<String>, Option<String>)> = {
+                                let conn = db.conn.lock();
+                                conn.query_row(
+                                    "SELECT id, front_cover_url, backdrop_url FROM releases WHERE folder_path = ?1 AND title = ?2 LIMIT 1",
+                                    rusqlite::params![folder_path_str, album],
+                                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                                )
+                                .ok()
+                            };
 
-                        // Generate or update release record
-                        if !pending_releases.contains_key(&release_id) {
-                            pending_releases.insert(
-                                release_id.clone(),
-                                DbRelease {
-                                    id: release_id.clone(),
-                                    title: album.clone(),
-                                    folder_path: folder_path_str.clone(),
-                                    folder_name: folder_name.clone(),
-                                    artist_credit: artist.clone(),
-                                    composer_name: composer.clone(),
-                                    release_year: year,
-                                    genre_tags: genre.as_ref().map(|g| serde_json::to_string(&vec![g.clone()]).unwrap_or_default()),
-                                    front_cover_url: None,
-                                    backdrop_url: None,
-                                    target_folder_path: None,
-                                    created_at: Utc::now().to_rfc3339(),
-                                },
-                            );
-                        }
+                            let rel_id = db_rel_info.as_ref().map(|(id, _, _)| id.clone())
+                                .unwrap_or_else(|| format!("rel-{}", uuid::Uuid::new_v4().simple()));
+
+                            if !pending_releases.contains_key(&rel_id) {
+                                // Priority 1: cadence-album.sidecar.json
+                                // Priority 2: Existing SQLite DB values
+                                // Priority 3: Local cover image files in directory
+                                let mut front_cover_url = alb_sidecar.cover_art_url.clone();
+                                let mut backdrop_url = alb_sidecar.backdrop_url.clone();
+
+                                if front_cover_url.is_none() {
+                                    if let Some((_, ref db_cov, ref db_back)) = db_rel_info {
+                                        if db_cov.is_some() {
+                                            front_cover_url = db_cov.clone();
+                                        }
+                                        if db_back.is_some() {
+                                            backdrop_url = db_back.clone();
+                                        }
+                                    }
+                                }
+
+                                if front_cover_url.is_none() {
+                                    front_cover_url = find_local_cover_art(parent_dir);
+                                }
+
+                                pending_releases.insert(
+                                    rel_id.clone(),
+                                    DbRelease {
+                                        id: rel_id.clone(),
+                                        title: album.clone(),
+                                        folder_path: folder_path_str.clone(),
+                                        folder_name: alb_sidecar.folder_name.clone().unwrap_or_else(|| folder_name.clone()),
+                                        artist_credit: artist.clone(),
+                                        composer_name: composer.clone(),
+                                        release_year: year,
+                                        genre_tags: genre.as_ref().map(|g| serde_json::to_string(&vec![g.clone()]).unwrap_or_default()),
+                                        front_cover_url,
+                                        backdrop_url,
+                                        target_folder_path: None,
+                                        created_at: Utc::now().to_rfc3339(),
+                                    },
+                                );
+                            }
+                            rel_id
+                        };
 
                         let track_id = format!("trk-{}", uuid::Uuid::new_v4().simple());
                         let calculated_dr = calculate_dr_score(
@@ -412,20 +557,142 @@ impl ScannerController {
                         imported_count += 1;
                     }
                     Err(err) => {
-                        skipped_errors += 1;
-                        let conn = db.conn.lock();
-                        let _ = DbOperations::add_skipped_file(
-                            &conn,
-                            &DbSkippedFile {
-                                id: format!("skip-{}", uuid::Uuid::new_v4().simple()),
+                        let trk_sidecar = read_track_sidecar(path);
+                        let ext_lower = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                        let dsf_opt = if ext_lower == "dsf" {
+                            stream_tuning::parse_dsf_header(path)
+                        } else {
+                            None
+                        };
+
+                        if trk_sidecar.title.is_some() || trk_sidecar.album.is_some() || dsf_opt.is_some() {
+                            // Recovered from track sidecar or native DSF header!
+                            let title = trk_sidecar.title.unwrap_or_else(|| {
+                                path.file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "Unknown Track".to_string())
+                            });
+                            let artist = trk_sidecar.artist.unwrap_or_else(|| "Unknown Artist".to_string());
+                            let alb_sidecar = read_album_sidecar(parent_dir);
+                            let album = trk_sidecar.album.or(alb_sidecar.album.clone()).unwrap_or_else(|| folder_name.clone());
+                            let year = trk_sidecar.year;
+                            let track_number = trk_sidecar.track_number;
+                            let genre = trk_sidecar.genre;
+                            let composer = trk_sidecar.composer;
+                            let ext_str = path.extension().and_then(|e| e.to_str()).map(|s| s.to_uppercase()).unwrap_or_else(|| "FLAC".to_string());
+
+                            let (duration_secs, sample_rate, bit_depth, channels) = if let Some(dsf) = dsf_opt {
+                                (dsf.duration_secs, Some(dsf.sample_rate), Some(dsf.bits_per_sample), Some(dsf.channels))
+                            } else {
+                                (0.0, None, None, None)
+                            };
+
+                            let release_id = if let Some(existing_rel) = pending_releases.values().find(|r| r.folder_path == folder_path_str && r.title == album) {
+                                existing_rel.id.clone()
+                            } else {
+                                let db_rel_info: Option<(String, Option<String>, Option<String>)> = {
+                                    let conn = db.conn.lock();
+                                    conn.query_row(
+                                        "SELECT id, front_cover_url, backdrop_url FROM releases WHERE folder_path = ?1 AND title = ?2 LIMIT 1",
+                                        rusqlite::params![folder_path_str, album],
+                                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                                    ).ok()
+                                };
+                                let rel_id = db_rel_info.as_ref().map(|(id, _, _)| id.clone())
+                                    .unwrap_or_else(|| format!("rel-{}", uuid::Uuid::new_v4().simple()));
+
+                                if !pending_releases.contains_key(&rel_id) {
+                                    let mut front_cover_url = alb_sidecar.cover_art_url.clone();
+                                    let mut backdrop_url = alb_sidecar.backdrop_url.clone();
+                                    if front_cover_url.is_none() {
+                                        if let Some((_, ref db_cov, ref db_back)) = db_rel_info {
+                                            if db_cov.is_some() { front_cover_url = db_cov.clone(); }
+                                            if db_back.is_some() { backdrop_url = db_back.clone(); }
+                                        }
+                                    }
+                                    if front_cover_url.is_none() {
+                                        front_cover_url = find_local_cover_art(parent_dir);
+                                    }
+                                    pending_releases.insert(
+                                        rel_id.clone(),
+                                        DbRelease {
+                                            id: rel_id.clone(),
+                                            title: album.clone(),
+                                            folder_path: folder_path_str.clone(),
+                                            folder_name: alb_sidecar.folder_name.clone().unwrap_or_else(|| folder_name.clone()),
+                                            artist_credit: artist.clone(),
+                                            composer_name: composer.clone(),
+                                            release_year: year,
+                                            genre_tags: genre.as_ref().map(|g| serde_json::to_string(&vec![g.clone()]).unwrap_or_default()),
+                                            front_cover_url,
+                                            backdrop_url,
+                                            target_folder_path: None,
+                                            created_at: Utc::now().to_rfc3339(),
+                                        },
+                                    );
+                                }
+                                rel_id
+                            };
+
+                            let dr_score = calculate_dr_score(
+                                None,
+                                bit_depth,
+                                duration_secs,
+                                sample_rate,
+                                &ext_str,
+                                &file_name,
+                            );
+
+                            let track_id = format!("trk-{}", uuid::Uuid::new_v4().simple());
+                            pending_tracks.push(DbTrack {
+                                id: track_id,
+                                release_id,
+                                mount_id: mount_id.clone(),
+                                folder_path: folder_path_str.clone(),
+                                folder_name: folder_name.clone(),
                                 file_path: path_str.clone(),
                                 file_name: file_name.clone(),
-                                category: "corrupt_header".to_string(),
-                                diagnostic_error: format!("Lofty audio parser error: {}", err),
-                                timestamp: Utc::now().to_rfc3339(),
-                                is_ignored: false,
-                            },
-                        );
+                                file_size,
+                                mtime,
+                                title,
+                                artist_credit: artist,
+                                album_title: album,
+                                release_year: year,
+                                track_number,
+                                genre,
+                                composer,
+                                duration_secs,
+                                format: ext_str,
+                                sample_rate,
+                                bit_depth,
+                                channels,
+                                dr_score: Some(dr_score),
+                                has_embedded_art: false,
+                                sidecar_status: "in_sync".to_string(),
+                                sidecar_edits_json: None,
+                                is_online: true,
+                                work_title: None,
+                                movement_number: None,
+                                movement_title: None,
+                                created_at: Utc::now().to_rfc3339(),
+                            });
+                            imported_count += 1;
+                        } else {
+                            skipped_errors += 1;
+                            let conn = db.conn.lock();
+                            let _ = DbOperations::add_skipped_file(
+                                &conn,
+                                &DbSkippedFile {
+                                    id: format!("skip-{}", uuid::Uuid::new_v4().simple()),
+                                    file_path: path_str.clone(),
+                                    file_name: file_name.clone(),
+                                    category: "corrupt_header".to_string(),
+                                    diagnostic_error: format!("Lofty audio parser error: {}", err),
+                                    timestamp: Utc::now().to_rfc3339(),
+                                    is_ignored: false,
+                                },
+                            );
+                        }
                     }
                 }
 
@@ -635,4 +902,5 @@ pub fn calculate_dr_score(
         8 + (char_sum % 7) as i32 // DR8 - DR14
     }
 }
+
 

@@ -19,6 +19,11 @@ interface AudioPlayerContextType {
   activeDevice: string
   availableDevices: string[]
   isNativeTauri: boolean
+  isPurityMode: boolean
+  isBitPerfect: boolean
+  outputSampleRate?: number
+  deviceType?: string
+  upnpDevices: any[]
   playTrack: (track: Track, queueContext?: Track[], release?: Release) => Promise<void>
   togglePlayPause: () => Promise<void>
   nextTrack: () => Promise<void>
@@ -30,6 +35,8 @@ interface AudioPlayerContextType {
   toggleShuffle: () => void
   selectDevice: (device: string) => Promise<void>
   refreshDevices: () => Promise<void>
+  togglePurityMode: (enabled?: boolean) => Promise<void>
+  discoverUpnpDevices: () => Promise<any[]>
 }
 
 const AudioPlayerContext = createContext<AudioPlayerContextType | null>(null)
@@ -48,9 +55,19 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [repeatMode, setRepeatMode] = useState<'off' | 'all' | 'one'>('off')
   const [isShuffle, setIsShuffle] = useState<boolean>(false)
   const [streamTelemetry, setStreamTelemetry] = useState<AudioStreamTelemetry | null>(null)
-  const [activeDevice, setActiveDevice] = useState<string>('Default System Audio')
+  const [activeDevice, setActiveDevice] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('cadence:active_device') || 'Default System Audio'
+    }
+    return 'Default System Audio'
+  })
   const [availableDevices, setAvailableDevices] = useState<string[]>([])
-  const [isNativeTauri, setIsNativeTauri] = useState<boolean>(false)
+  const [isNativeTauri, setIsNativeTauri] = useState<boolean>(() => tauriBridge.isTauri())
+  const [isPurityMode, setIsPurityMode] = useState<boolean>(false)
+  const [isBitPerfect, setIsBitPerfect] = useState<boolean>(false)
+  const [outputSampleRate, setOutputSampleRate] = useState<number | undefined>(undefined)
+  const [deviceType, setDeviceType] = useState<string | undefined>('wasapi_shared')
+  const [upnpDevices, setUpnpDevices] = useState<any[]>([])
 
   const prevVolumeRef = useRef<number>(1)
   const pollIntervalRef = useRef<any>(null)
@@ -60,31 +77,41 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     stateRef.current = { queue, queueIndex, repeatMode, isShuffle, currentTrack }
   }, [queue, queueIndex, repeatMode, isShuffle, currentTrack])
 
-  // Detect environment on mount & load audio devices
+  // Detect environment on mount & load audio devices & purity mode
   useEffect(() => {
-    setIsNativeTauri(tauriBridge.isTauri())
-    tauriBridge.listAudioDevices().then((devices) => {
-      setAvailableDevices(devices)
-      if (devices.length > 0) {
-        setActiveDevice(devices[0])
-      }
-    })
+    const tauri = tauriBridge.isTauri()
+    setIsNativeTauri(tauri)
+    tauriBridge.getPurityMode().then((p) => setIsPurityMode(p))
+    refreshDevices()
   }, [])
 
   // Poll position and status for native Tauri playback
   useEffect(() => {
-    if (isPlaying && !isPaused && isNativeTauri) {
+    const isTauri = isNativeTauri || tauriBridge.isTauri()
+    if (isPlaying && !isPaused && isTauri) {
       pollIntervalRef.current = setInterval(async () => {
         try {
           const status = await tauriBridge.getPlaybackStatus()
-          if (status.positionSecs !== undefined) {
+          if (typeof status.positionSecs === 'number' && !isNaN(status.positionSecs)) {
             setCurrentTime(status.positionSecs)
           }
-          if (status.durationSecs > 0) {
+          if (status.durationSecs && status.durationSecs > 0) {
             setDuration(status.durationSecs)
           }
           if (status.streamInfo) {
             setStreamTelemetry(status.streamInfo)
+          }
+          if (status.purityMode !== undefined) {
+            setIsPurityMode(status.purityMode)
+          }
+          if (status.isBitPerfect !== undefined) {
+            setIsBitPerfect(status.isBitPerfect)
+          }
+          if (status.outputSampleRate !== undefined) {
+            setOutputSampleRate(status.outputSampleRate)
+          }
+          if (status.deviceType !== undefined) {
+            setDeviceType(status.deviceType)
           }
           // Auto advance if track ended
           if (
@@ -97,7 +124,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         } catch (e) {
           // ignore polling error
         }
-      }, 300)
+      }, 250)
     } else {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current)
@@ -198,6 +225,18 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         setIsPaused(false)
       } catch (err) {
         console.error('[AudioPlayer] Play track failed:', err)
+        setIsPlaying(false)
+        setIsPaused(false)
+        try {
+          await tauriBridge.stop()
+        } catch {}
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('cadence:toast', {
+              detail: `Cannot play "${track.title}": ${err instanceof Error ? err.message : String(err)}`,
+            })
+          )
+        }
       }
     },
     [queue, handleAutoAdvance]
@@ -270,11 +309,18 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   // Set Volume
   const setVolume = useCallback((level: number) => {
+    if (isPurityMode) {
+      // In Bit-Perfect Purity Mode, volume is locked to 1.0 (Unity Gain)
+      setVolumeState(1)
+      setIsMuted(false)
+      tauriBridge.setVolume(1)
+      return
+    }
     const clamped = Math.max(0, Math.min(1, level))
     setVolumeState(clamped)
     setIsMuted(clamped === 0)
     tauriBridge.setVolume(clamped)
-  }, [])
+  }, [isPurityMode])
 
   // Toggle Mute
   const toggleMute = useCallback(() => {
@@ -304,14 +350,86 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Select Audio Output Device
   const selectDevice = useCallback(async (device: string) => {
     setActiveDevice(device)
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('cadence:active_device', device)
+    }
     await tauriBridge.setAudioDevice(device)
   }, [])
 
-  // Refresh Audio Output Devices
-  const refreshDevices = useCallback(async () => {
-    const devices = await tauriBridge.listAudioDevices()
-    setAvailableDevices(devices)
+  // Toggle Bit-Perfect Purity Mode
+  const togglePurityMode = useCallback(async (forced?: boolean) => {
+    const nextState = typeof forced === 'boolean' ? forced : !isPurityMode
+    try {
+      const active = await tauriBridge.setPurityMode(nextState)
+      setIsPurityMode(active)
+      if (active) {
+        setVolumeState(1)
+        setIsMuted(false)
+      }
+    } catch (e) {
+      console.error('[AudioPlayerContext] Failed to toggle purity mode:', e)
+    }
+  }, [isPurityMode])
+
+  // Discover UPnP / DLNA Network Renderers
+  const discoverUpnpDevices = useCallback(async () => {
+    try {
+      const discovered = await tauriBridge.discoverUpnpDevices()
+      setUpnpDevices(discovered)
+      return discovered
+    } catch (e) {
+      console.error('[AudioPlayerContext] discoverUpnpDevices error:', e)
+      return []
+    }
   }, [])
+
+  // Refresh Audio Output Devices (Local + UPnP)
+  const refreshDevices = useCallback(async () => {
+    try {
+      const [localDevices, netDevices] = await Promise.all([
+        tauriBridge.listAudioDevices(),
+        tauriBridge.discoverUpnpDevices(),
+      ])
+      setUpnpDevices(netDevices)
+      const merged = [...localDevices]
+      for (const d of netDevices) {
+        const upnpLabel = `[UPnP] ${d.friendlyName}`
+        if (!merged.includes(upnpLabel)) {
+          merged.push(upnpLabel)
+        }
+      }
+      setAvailableDevices(merged)
+
+      const savedDevice = typeof window !== 'undefined' ? localStorage.getItem('cadence:active_device') : null
+      // Check if savedDevice is an unintended display monitor/TV
+      const isSavedMonitor = savedDevice && /odyssey|oled|tv|monitor|screen|display/i.test(savedDevice)
+
+      // Find top audiophile network streamer (e.g. HiFi Rose, Anthem AVM)
+      const audiophileStreamer = netDevices.find(
+        (d) => !/odyssey|oled|tv|monitor|screen|display/i.test(d.friendlyName + (d.modelName || '') + (d.modelDescription || ''))
+      )
+
+      if (savedDevice && merged.includes(savedDevice) && !isSavedMonitor) {
+        setActiveDevice(savedDevice)
+        await tauriBridge.setAudioDevice(savedDevice)
+      } else if (audiophileStreamer) {
+        // Auto-activate top audiophile network streamer (e.g. dedicated UPnP endpoint) for bit-perfect delivery
+        const streamerLabel = `[UPnP] ${audiophileStreamer.friendlyName}`
+        setActiveDevice(streamerLabel)
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('cadence:active_device', streamerLabel)
+        }
+        await tauriBridge.setAudioDevice(streamerLabel)
+      } else if (savedDevice && merged.includes(savedDevice)) {
+        setActiveDevice(savedDevice)
+        await tauriBridge.setAudioDevice(savedDevice)
+      } else if (merged.length > 0 && !activeDevice) {
+        setActiveDevice(merged[0])
+      }
+    } catch (e) {
+      console.error('[AudioPlayerContext] refreshDevices error:', e)
+    }
+  }, [activeDevice])
 
   return (
     <AudioPlayerContext.Provider
@@ -332,6 +450,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         activeDevice,
         availableDevices,
         isNativeTauri,
+        isPurityMode,
+        isBitPerfect,
+        outputSampleRate,
+        deviceType,
+        upnpDevices,
         playTrack,
         togglePlayPause,
         nextTrack,
@@ -343,6 +466,8 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         toggleShuffle,
         selectDevice,
         refreshDevices,
+        togglePurityMode,
+        discoverUpnpDevices,
       }}
     >
       {children}

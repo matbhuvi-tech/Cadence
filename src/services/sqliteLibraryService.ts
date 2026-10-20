@@ -9,6 +9,7 @@ import {
   ScanCompletePayload,
   SkippedFile,
 } from '../core/types'
+import { getCuratedAlbumArtwork } from '../core/taxonomyUtils'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 
 export interface MigrationResult {
@@ -152,25 +153,36 @@ export class SqliteLibraryService {
   /**
    * Load entire library state from SQLite
    */
-  public async loadLibraryFromDb(): Promise<{
+  public async loadLibraryFromDb(options?: { onlyOnline?: boolean }): Promise<{
     tracks: Track[]
     releases: Release[]
     storageMounts: StorageMount[]
     watchedFolders: WatchedFolder[]
     skippedFiles: SkippedFile[]
+    offlineMounts: StorageMount[]
+    offlineTracksCount: number
+    offlineReleasesCount: number
   } | null> {
     if (!tauriBridge.isTauri()) return null
 
     try {
-      const [rawMounts, rawFolders, rawTracks, rawReleases, rawSkipped] = await Promise.all([
+      // 1. Proactively verify accessibility of storage mounts and network folders
+      await tauriBridge.checkStorageMountsAccessibility()
+
+      // 2. Fetch mounts, folders, tracks, releases, and offline statistics
+      const onlyOnline = options?.onlyOnline ?? false
+      const [rawMounts, rawFolders, rawTracks, rawReleases, rawSkipped, offlineCounts] = await Promise.all([
         tauriBridge.dbGetStorageMounts(),
         tauriBridge.dbGetWatchedFolders(),
-        tauriBridge.dbGetTracks(),
-        tauriBridge.dbGetReleases(),
+        tauriBridge.dbGetTracks(undefined, undefined, onlyOnline),
+        tauriBridge.dbGetReleases(onlyOnline),
         tauriBridge.dbGetSkippedFiles(),
+        tauriBridge.dbGetOfflineCounts(),
       ])
 
-      if (rawTracks.length === 0 && rawMounts.length === 0) {
+      const [offlineTracksCount, offlineReleasesCount] = offlineCounts || [0, 0]
+
+      if (rawTracks.length === 0 && rawMounts.length === 0 && offlineTracksCount === 0) {
         return null
       }
 
@@ -191,50 +203,58 @@ export class SqliteLibraryService {
         lastSeenTimestamp: m.lastSeenTimestamp,
       }))
 
-      const watchedFolders: WatchedFolder[] = rawFolders.map((f) => ({
+      const offlineMounts = storageMounts.filter((m) => m.status === 'offline')
+
+      const watchedFolders: WatchedFolder[] = rawFolders.map((f: any) => ({
         id: f.id,
-        mountId: f.mountId,
-        folderPath: f.folderPath,
-        displayName: f.displayName,
-        scanMode: f.scanMode,
-        ignorePatterns: f.ignorePatterns,
-        isEnabled: f.isEnabled,
-        lastScannedTimestamp: f.lastScannedTimestamp,
+        mountId: f.mountId || f.mount_id,
+        folderPath: f.folderPath || f.folder_path,
+        displayName: f.displayName || f.display_name,
+        scanMode: f.scanMode || f.scan_mode,
+        ignorePatterns: f.ignorePatterns || f.ignore_patterns,
+        isEnabled: Boolean(f.isEnabled ?? f.is_enabled ?? true),
+        lastScannedTimestamp: f.lastScannedTimestamp || f.last_scanned_timestamp,
+        lastScanned: f.lastScannedTimestamp || f.last_scanned_timestamp,
+        trackCount: f.trackCount ?? f.track_count ?? 0,
       }))
 
-      const releases: Release[] = rawReleases.map((r) => ({
-        id: r.id,
-        masterReleaseId: r.id,
-        title: r.title,
-        folderName: r.folderName,
-        folderPath: r.folderPath,
-        targetFolderPath: r.targetFolderPath,
-        artistCredit: r.artistCredit,
-        composerName: r.composerName,
-        releaseYear: r.releaseYear || 0,
-        originalYear: r.releaseYear || 0,
-        label: 'Lossless Master',
-        catalogNumber: 'CAD-001',
-        mediaFormat: 'Lossless Audio',
-        country: 'Global',
-        matrixRunout: '',
-        artwork: {
-          frontCoverUrl: r.frontCoverUrl || '',
-          backdropUrl: r.backdropUrl,
-          resolution: '3000x3000px',
-          width: 3000,
-          height: 3000,
-          dpi: 300,
-          colorProfile: 'sRGB',
-          isLowRes: false,
-          hasBookletPdf: false,
-        },
-        variants: [],
-        discsCount: 1,
-        tracksCount: 0,
-        genreTags: r.genreTags ? JSON.parse(r.genreTags) : [],
-        storageMountId: storageMounts[0]?.id || '',
-      }))
+      const releases: Release[] = rawReleases.map((r) => {
+        const rawCover = r.frontCoverUrl || ''
+        const coverArtUrl = rawCover || getCuratedAlbumArtwork(r.title, r.composerName || r.artistCredit)
+        return {
+          id: r.id,
+          masterReleaseId: r.id,
+          title: r.title,
+          folderName: r.folderName,
+          folderPath: r.folderPath,
+          targetFolderPath: r.targetFolderPath,
+          artistCredit: r.artistCredit,
+          composerName: r.composerName,
+          releaseYear: r.releaseYear || 0,
+          originalYear: r.releaseYear || 0,
+          label: 'Lossless Master',
+          catalogNumber: 'CAD-001',
+          mediaFormat: 'Lossless Audio',
+          country: 'Global',
+          matrixRunout: '',
+          artwork: {
+            frontCoverUrl: coverArtUrl,
+            backdropUrl: r.backdropUrl,
+            resolution: '3000x3000px',
+            width: 3000,
+            height: 3000,
+            dpi: 300,
+            colorProfile: 'sRGB',
+            isLowRes: false,
+            hasBookletPdf: false,
+          },
+          variants: [],
+          discsCount: 1,
+          tracksCount: 0,
+          genreTags: r.genreTags ? JSON.parse(r.genreTags) : [],
+          storageMountId: storageMounts[0]?.id || '',
+        }
+      })
 
       const tracks: Track[] = rawTracks.map((t) => ({
         id: t.id,
@@ -285,6 +305,9 @@ export class SqliteLibraryService {
         storageMounts,
         watchedFolders,
         skippedFiles,
+        offlineMounts,
+        offlineTracksCount,
+        offlineReleasesCount,
       }
     } catch (err) {
       console.error('[SqliteLibraryService] Failed to load library from SQLite:', err)
@@ -389,6 +412,139 @@ export class SqliteLibraryService {
         'library://scan-complete',
         (event) => handlers.onComplete?.(event.payload)
       )
+    }
+  }
+
+  /**
+   * Persists release records (specifically frontCoverUrl and backdropUrl) to SQLite database
+   */
+  public async persistReleasesToDb(releases: Release[]): Promise<void> {
+    if (!tauriBridge.isTauri() || releases.length === 0) return
+
+    try {
+      const dbReleases = releases.map((r) => ({
+        id: r.id,
+        title: r.title,
+        folderPath: r.folderPath || '',
+        folderName: r.folderName || '',
+        artistCredit: r.artistCredit,
+        composerName: r.composerName || null,
+        releaseYear: r.releaseYear || null,
+        genreTags: r.genreTags ? JSON.stringify(r.genreTags) : null,
+        frontCoverUrl: r.artwork?.frontCoverUrl || null,
+        backdropUrl: r.artwork?.backdropUrl || r.backdropUrl || null,
+        targetFolderPath: r.targetFolderPath || null,
+        createdAt: new Date().toISOString(),
+      }))
+
+      await tauriBridge.dbSaveTracksBatch([], dbReleases)
+      console.log(`[SqliteLibraryService] Persisted ${dbReleases.length} releases to SQLite database.`)
+    } catch (err) {
+      console.warn('[SqliteLibraryService] Failed to persist releases to SQLite:', err)
+    }
+  }
+
+  /**
+   * Persists an individual release's artwork updates directly into SQLite
+   */
+  public async persistReleaseArtworkToDb(
+    releaseId: string,
+    artwork: { frontCoverUrl?: string; backdropUrl?: string }
+  ): Promise<void> {
+    if (!tauriBridge.isTauri()) return
+
+    try {
+      const rawReleases = await tauriBridge.dbGetReleases()
+      const existing = rawReleases.find((r) => r.id === releaseId)
+      if (existing) {
+        const updated = {
+          ...existing,
+          frontCoverUrl: artwork.frontCoverUrl !== undefined ? artwork.frontCoverUrl : existing.frontCoverUrl,
+          backdropUrl: artwork.backdropUrl !== undefined ? artwork.backdropUrl : existing.backdropUrl,
+        }
+        await tauriBridge.dbSaveTracksBatch([], [updated])
+        console.log(`[SqliteLibraryService] Updated artwork for release "${existing.title}" in SQLite.`)
+      }
+    } catch (err) {
+      console.warn('[SqliteLibraryService] Failed to update release artwork in SQLite:', err)
+    }
+  }
+
+  /**
+   * Synchronizes the full in-memory graph (tracks and releases) to native SQLite
+   */
+  public async persistLibraryToDb(tracks: Track[], releases: Release[]): Promise<void> {
+    if (!tauriBridge.isTauri()) return
+
+    try {
+      const dbReleases = releases.map((r) => ({
+        id: r.id,
+        title: r.title,
+        folderPath: r.folderPath || '',
+        folderName: r.folderName || '',
+        artistCredit: r.artistCredit,
+        composerName: r.composerName || null,
+        releaseYear: r.releaseYear || null,
+        genreTags: r.genreTags ? JSON.stringify(r.genreTags) : null,
+        frontCoverUrl: r.artwork?.frontCoverUrl || null,
+        backdropUrl: r.artwork?.backdropUrl || r.backdropUrl || null,
+        targetFolderPath: r.targetFolderPath || null,
+        createdAt: new Date().toISOString(),
+      }))
+
+      const dbTracks = tracks.map((t) => {
+        const p = t.filePath || ''
+        const winMatch = p.match(/^([A-Za-z]:)/)
+        const uncMatch = p.match(/^(\\\\[^\\]+\\[^\\]+)/)
+        const rootKey = winMatch
+          ? winMatch[1]
+          : uncMatch
+          ? uncMatch[1]
+          : p.startsWith('/')
+          ? '/' + p.split('/').filter(Boolean)[0]
+          : 'Local Audio'
+        const derivedMountId = `mount-${rootKey.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
+        const mountId = t.storageMountId || derivedMountId
+
+        return {
+          id: t.id,
+          releaseId: t.releaseId,
+          mountId,
+          folderPath: t.folderPath || '',
+          folderName: t.folderName || '',
+          filePath: t.filePath || '',
+          fileName: t.title || '',
+          fileSize: t.fileSize || 0,
+          mtime: Math.floor(Date.now() / 1000),
+          title: t.title,
+          artistCredit: t.artistCredit || '',
+          albumTitle: t.pendingSidecarEdits?.album || t.folderName || '',
+          releaseYear: t.pendingSidecarEdits?.year || null,
+          trackNumber: t.trackNumber,
+          genre: t.pendingSidecarEdits?.genre || null,
+          composer: t.composerName || null,
+          durationSecs: t.durationSeconds || 0,
+          format: t.format,
+          sampleRate: t.sampleRateStr ? parseInt(t.sampleRateStr) : null,
+          bitDepth: null,
+          channels: null,
+          drScore: t.drScore != null ? t.drScore : null,
+          drSource: t.drSource || null,
+          hasEmbeddedArt: false,
+          sidecarStatus: t.sidecarStatus || 'in_sync',
+          sidecarEditsJson: t.pendingSidecarEdits ? JSON.stringify(t.pendingSidecarEdits) : null,
+          isOnline: true,
+          workTitle: t.workTitle || null,
+          movementNumber: t.movementNumber || null,
+          movementTitle: t.movementTitle || null,
+          createdAt: new Date().toISOString(),
+        }
+      })
+
+      await tauriBridge.dbSaveTracksBatch(dbTracks, dbReleases)
+      console.log(`[SqliteLibraryService] Synchronized ${dbTracks.length} tracks and ${dbReleases.length} releases to SQLite.`)
+    } catch (err) {
+      console.warn('[SqliteLibraryService] Failed to synchronize library to SQLite:', err)
     }
   }
 

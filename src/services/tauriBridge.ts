@@ -19,6 +19,27 @@ export interface AudioStreamTelemetry {
   isHighRes: boolean
 }
 
+export interface UpnpDevice {
+  id: string
+  friendlyName: string
+  modelName?: string
+  modelDescription?: string
+  manufacturer?: string
+  location: string
+  controlUrl: string
+}
+
+export interface StreamBufferInfo {
+  limitMb: number
+  effectiveBudgetMb: number
+  availableRamMb?: number
+  totalRamMb?: number
+  currentMode: 'whole_track' | 'windowed' | 'idle' | string
+  currentFileMb?: number
+  currentWindowMb?: number
+  currentLocked?: boolean
+}
+
 export interface PlaybackStatePayload {
   isPlaying: boolean
   isPaused: boolean
@@ -28,6 +49,21 @@ export interface PlaybackStatePayload {
   volume: number
   activeDevice?: string
   streamInfo?: AudioStreamTelemetry
+  purityMode?: boolean
+  isBitPerfect?: boolean
+  outputSampleRate?: number
+  outputChannels?: number
+  deviceType?: string
+}
+
+export interface StorageAccessibilityReport {
+  mountId: string
+  name: string
+  mountPath: string
+  isAccessible: boolean
+  status: 'online' | 'offline'
+  tracksCount: number
+  releasesCount: number
 }
 
 class TauriBridgeService {
@@ -62,8 +98,20 @@ class TauriBridgeService {
 
     if (this.isTauri()) {
       try {
-        const info = await invoke<AudioStreamTelemetry>('play_track', { filePath })
-        return info
+        const raw: any = await invoke('play_track', { filePath })
+        if (!raw) return null
+        return {
+          filePath: raw.filePath ?? raw.file_path ?? filePath,
+          title: raw.title,
+          artist: raw.artist,
+          album: raw.album,
+          durationSecs: raw.durationSecs ?? raw.duration_secs ?? 0,
+          sampleRate: raw.sampleRate ?? raw.sample_rate,
+          bitDepth: raw.bitDepth ?? raw.bit_depth,
+          channels: raw.channels,
+          format: raw.format || 'AUDIO',
+          isHighRes: Boolean(raw.isHighRes ?? raw.is_high_res),
+        }
       } catch (err) {
         console.error('[TauriBridge] Native play_track error:', err)
         throw err
@@ -202,7 +250,36 @@ class TauriBridgeService {
    */
   public async getPlaybackStatus(): Promise<PlaybackStatePayload> {
     if (this.isTauri()) {
-      return await invoke<PlaybackStatePayload>('get_playback_status')
+      const raw: any = await invoke('get_playback_status')
+      const sInfo = raw.streamInfo ?? raw.stream_info
+      return {
+        isPlaying: Boolean(raw.isPlaying ?? raw.is_playing),
+        isPaused: Boolean(raw.isPaused ?? raw.is_paused),
+        currentFile: raw.currentFile ?? raw.current_file ?? null,
+        positionSecs: Number(raw.positionSecs ?? raw.position_secs ?? 0),
+        durationSecs: Number(raw.durationSecs ?? raw.duration_secs ?? 0),
+        volume: Number(raw.volume ?? 1),
+        activeDevice: raw.activeDevice ?? raw.active_device,
+        purityMode: Boolean(raw.purityMode ?? raw.purity_mode),
+        isBitPerfect: Boolean(raw.isBitPerfect ?? raw.is_bit_perfect),
+        outputSampleRate: raw.outputSampleRate ?? raw.output_sample_rate,
+        outputChannels: raw.outputChannels ?? raw.output_channels,
+        deviceType: raw.deviceType ?? raw.device_type ?? 'wasapi_shared',
+        streamInfo: sInfo
+          ? {
+              filePath: sInfo.filePath ?? sInfo.file_path,
+              title: sInfo.title,
+              artist: sInfo.artist,
+              album: sInfo.album,
+              durationSecs: sInfo.durationSecs ?? sInfo.duration_secs ?? 0,
+              sampleRate: sInfo.sampleRate ?? sInfo.sample_rate,
+              bitDepth: sInfo.bitDepth ?? sInfo.bit_depth,
+              channels: sInfo.channels,
+              format: sInfo.format || 'AUDIO',
+              isHighRes: Boolean(sInfo.isHighRes ?? sInfo.is_high_res),
+            }
+          : undefined,
+      }
     } else {
       const isPlaying = Boolean(this.browserAudio && !this.browserAudio.paused && !this.browserAudio.ended)
       const cur = this.browserAudio?.currentTime || 0
@@ -214,9 +291,78 @@ class TauriBridgeService {
         positionSecs: cur,
         durationSecs: dur,
         volume: this.browserAudio?.volume ?? this.currentVolume,
+        purityMode: false,
+        isBitPerfect: false,
+        deviceType: 'web_audio',
       }
     }
   }
+
+  /**
+   * Set Bit-Perfect Purity Mode (WASAPI Exclusive Clock Matching & Unity Gain)
+   */
+  public async setPurityMode(enabled: boolean): Promise<boolean> {
+    if (this.isTauri()) {
+      return await invoke<boolean>('set_purity_mode', { enabled })
+    }
+    return enabled
+  }
+
+  /**
+   * Get current Bit-Perfect Purity Mode state
+   */
+  public async getPurityMode(): Promise<boolean> {
+    if (this.isTauri()) {
+      return await invoke<boolean>('get_purity_mode')
+    }
+    return false
+  }
+
+  /**
+   * Discover network UPnP / DLNA media renderers (e.g. PS Audio AirLens, WiiM, Volumio)
+   */
+  public async discoverUpnpDevices(): Promise<UpnpDevice[]> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<UpnpDevice[]>('discover_upnp_devices')
+      } catch (err) {
+        console.error('[TauriBridge] discover_upnp_devices error:', err)
+        return []
+      }
+    }
+    return []
+  }
+
+  /**
+   * Get low-noise stream RAM buffer and allocation telemetry
+   */
+  public async getStreamBufferInfo(): Promise<StreamBufferInfo | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<StreamBufferInfo>('get_stream_buffer_info')
+      } catch (err) {
+        console.error('[TauriBridge] get_stream_buffer_info error:', err)
+        return null
+      }
+    }
+    return null
+  }
+
+  /**
+   * Set low-noise stream RAM buffer limit (0 = Auto)
+   */
+  public async setStreamBufferLimit(limitMb: number): Promise<StreamBufferInfo | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<StreamBufferInfo>('set_stream_buffer_limit', { limitMb })
+      } catch (err) {
+        console.error('[TauriBridge] set_stream_buffer_limit error:', err)
+        return null
+      }
+    }
+    return null
+  }
+
 
   /**
    * List available audio output devices (WASAPI / DirectSound in Tauri or Audio Output Devices in Web)
@@ -329,6 +475,27 @@ class TauriBridgeService {
 
   // --- SQLite Database IPC Methods ---
 
+  public async checkStorageMountsAccessibility(): Promise<StorageAccessibilityReport[]> {
+    if (this.isTauri()) {
+      return await invoke<StorageAccessibilityReport[]>('check_storage_mounts_accessibility')
+    }
+    return []
+  }
+
+  public async checkPathAccessible(path: string): Promise<boolean> {
+    if (this.isTauri()) {
+      return await invoke<boolean>('check_path_accessible', { path })
+    }
+    return true
+  }
+
+  public async dbGetOfflineCounts(): Promise<[number, number]> {
+    if (this.isTauri()) {
+      return await invoke<[number, number]>('db_get_offline_counts')
+    }
+    return [0, 0]
+  }
+
   public async dbGetStorageMounts(): Promise<any[]> {
     if (this.isTauri()) {
       return await invoke<any[]>('db_get_storage_mounts')
@@ -380,16 +547,16 @@ class TauriBridgeService {
     }
   }
 
-  public async dbGetTracks(limit?: number, offset?: number): Promise<any[]> {
+  public async dbGetTracks(limit?: number, offset?: number, onlyOnline?: boolean): Promise<any[]> {
     if (this.isTauri()) {
-      return await invoke<any[]>('db_get_tracks', { limit, offset })
+      return await invoke<any[]>('db_get_tracks', { limit, offset, onlyOnline })
     }
     return []
   }
 
-  public async dbGetReleases(): Promise<any[]> {
+  public async dbGetReleases(onlyOnline?: boolean): Promise<any[]> {
     if (this.isTauri()) {
-      return await invoke<any[]>('db_get_releases')
+      return await invoke<any[]>('db_get_releases', { onlyOnline })
     }
     return []
   }

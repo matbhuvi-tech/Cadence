@@ -2,7 +2,7 @@
 name = "cadence-core"
 version = "0.1.0"
 description = "Cadence Core - Relational Audiophile Music Engine & Native Player"
-authors = ["Mathan"]
+authors = ["matbhuvi"]
 edition = "2021"
 
 [lib]
@@ -30,3 +30,13 @@ walkdir = "2"
 rusqlite = { version = "0.31", features = ["bundled", "blob"] }
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 chrono = { version = "0.4", features = ["serde"] }
+socket2 = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Media",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }

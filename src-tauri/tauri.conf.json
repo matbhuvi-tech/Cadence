@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Cadence Core - Relational Audiophile Engine",
         "width": 1440,
         "height": 920,

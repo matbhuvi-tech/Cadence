@@ -191,19 +191,23 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
       if (chatRes.ok) {
         const data = (await chatRes.json()) as any
-        // If data.command is explicitly provided (or explicitly null), honor it.
-        // Only fallback to localCmd if data.command is undefined.
-        const effectiveCommand = data.command !== undefined ? data.command : localCmd
+        // If data.command is provided, use it; if data returned null/fallback but local intent recognized an action, execute localCmd
+        const effectiveCommand = data.command || localCmd
 
         let cmdResult = undefined
         if (effectiveCommand) {
           cmdResult = await agentActionDispatcher.executeAction(effectiveCommand, dispatcherContext)
         }
 
+        let responseText = data.response
+        if (effectiveCommand && (!data.command && localCmd)) {
+          responseText = `Initiated action: **${cmdResult?.message || effectiveCommand.explanation || 'Processed successfully'}**`
+        }
+
         const agentMsg: AgentChatMessage = {
           id: `agt-${Date.now()}`,
           role: 'agent',
-          text: data.response || 'I processed your request.',
+          text: responseText || 'I processed your request.',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           command: effectiveCommand,
           commandResult: cmdResult,

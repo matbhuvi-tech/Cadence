@@ -139,7 +139,7 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
     const hasChildren = node.subfolders.size > 0 || node.tracks.length > 0
     const isHighlighted = highlightedPath && highlightedPath.replace(/\\/g, '/').includes(node.path)
 
-    // Calculate recursive track counts
+    // Calculate recursive track counts and collect all recursive tracks
     const totalRecursiveTracks = (n: TreeNode): number => {
       let count = n.tracks.length
       n.subfolders.forEach((sub) => {
@@ -148,7 +148,19 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
       return count
     }
 
+    const getAllRecursiveTracks = (n: TreeNode): Track[] => {
+      let result = [...n.tracks]
+      n.subfolders.forEach((sub) => {
+        result = result.concat(getAllRecursiveTracks(sub))
+      })
+      return result
+    }
+
     const recCount = totalRecursiveTracks(node)
+    const allNodeTracks = getAllRecursiveTracks(node)
+    const isFolderPlaying =
+      isPlaying && Boolean(currentTrack && allNodeTracks.some((t) => t.id === currentTrack.id))
+
     if (searchQuery.trim() && !node.name.toLowerCase().includes(searchQuery.toLowerCase())) {
       // Check if any children match
       if (recCount === 0) return null
@@ -160,7 +172,7 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
         <div
           onClick={() => toggleFolder(node.path)}
           style={{ paddingLeft: `${depth * 18 + 12}px` }}
-          className={`h-9 flex items-center justify-between pr-4 hover:bg-white/[0.04] cursor-pointer transition-colors border-l-2 ${
+          className={`h-9 flex items-center justify-between pr-4 hover:bg-white/[0.04] cursor-pointer transition-colors border-l-2 group ${
             isHighlighted
               ? 'border-[#00F5FF] bg-[#00F5FF]/10 text-white font-medium'
               : 'border-transparent text-white/80'
@@ -175,6 +187,35 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
               )
             ) : (
               <span className="w-3.5 h-3.5 shrink-0" />
+            )}
+
+            {/* Play / Pause Folder Button */}
+            {allNodeTracks.length > 0 && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (isFolderPlaying) {
+                    togglePlayPause()
+                  } else {
+                    const onlineTracks = allNodeTracks.filter((t) => t.isOnline !== false)
+                    if (onlineTracks.length > 0) {
+                      playTrack(onlineTracks[0], onlineTracks)
+                    }
+                  }
+                }}
+                title={isFolderPlaying ? 'Pause folder' : `Play folder (${allNodeTracks.length} tracks)`}
+                className={`w-5 h-5 rounded flex items-center justify-center transition-all shrink-0 ${
+                  isFolderPlaying
+                    ? 'text-[#00F5FF] bg-[#00F5FF]/20 opacity-100'
+                    : 'text-white/40 hover:text-white hover:bg-white/[0.1] opacity-70 group-hover:opacity-100'
+                }`}
+              >
+                {isFolderPlaying ? (
+                  <Pause className="w-3 h-3 fill-current" />
+                ) : (
+                  <Play className="w-3 h-3 fill-current ml-0.5" />
+                )}
+              </button>
             )}
 
             {isExpanded ? (
@@ -222,6 +263,12 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
                 <div
                   key={track.id}
                   onClick={() => onSelectTrack(track.id)}
+                  onDoubleClick={() => {
+                    if (!isOffline) {
+                      const folderContext = node.tracks.length > 0 ? node.tracks : [track]
+                      playTrack(track, folderContext)
+                    }
+                  }}
                   style={{ paddingLeft: `${(depth + 1) * 18 + 24}px` }}
                   className={`h-8 flex items-center justify-between pr-4 cursor-pointer transition-colors border-l-2 ${
                     isSelected
@@ -237,7 +284,8 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
                         if (isCurrent) {
                           togglePlayPause()
                         } else {
-                          playTrack(track)
+                          const folderContext = node.tracks.length > 0 ? node.tracks : [track]
+                          playTrack(track, folderContext)
                         }
                       }}
                       disabled={isOffline}

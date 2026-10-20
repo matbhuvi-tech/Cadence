@@ -13,6 +13,8 @@ import {
   Speaker,
   Sparkles,
   Maximize2,
+  ShieldCheck,
+  Wifi,
 } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
@@ -34,6 +36,10 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({ onOpenSanctuary })
     isShuffle,
     streamTelemetry,
     activeDevice,
+    isPurityMode,
+    isBitPerfect,
+    deviceType,
+    togglePurityMode,
     togglePlayPause,
     nextTrack,
     prevTrack,
@@ -234,24 +240,65 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({ onOpenSanctuary })
             ))}
           </div>
 
+          {/* Bit-Perfect Purity Mode Master Toggle */}
+          <button
+            onClick={() => togglePurityMode()}
+            title={
+              isPurityMode
+                ? 'Bit-Perfect Purity Mode: Active (Unity Gain 100% locked). Click to disable.'
+                : 'Enable Bit-Perfect Purity Mode (WASAPI Exclusive Clock Matching & Unity Gain)'
+            }
+            className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] font-mono font-bold transition-all cursor-pointer ${
+              isPurityMode
+                ? 'bg-[#EAB308]/20 border-[#EAB308]/50 text-[#EAB308] shadow-sm shadow-[#EAB308]/20'
+                : 'bg-white/[0.03] hover:bg-white/[0.06] border-white/[0.08] text-[#64748B] hover:text-[#CBD5E1]'
+            }`}
+          >
+            <ShieldCheck className="w-3 h-3" />
+            <span className="hidden md:inline">{isPurityMode ? 'BIT-PERFECT' : 'PURITY'}</span>
+          </button>
+
           {/* Audio Output Device Selector Button */}
           <button
             onClick={() => setIsDeviceModalOpen(true)}
-            title={`Active Audio Device: ${activeDevice}`}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[11px] font-mono text-[#CBD5E1] hover:text-white transition-all cursor-pointer truncate max-w-[130px]"
+            title={`Active Output Endpoint: ${activeDevice}`}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-all cursor-pointer truncate max-w-[130px] ${
+              deviceType === 'upnp_streamer'
+                ? 'bg-[#8B5CF6]/15 hover:bg-[#8B5CF6]/25 border-[#8B5CF6]/40 text-[#A78BFA]'
+                : isPurityMode
+                ? 'bg-[#00F5FF]/10 hover:bg-[#00F5FF]/20 border-[#00F5FF]/30 text-white'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-[#CBD5E1] hover:text-white'
+            }`}
           >
-            <Speaker className="w-3 h-3 text-[#ADFF2F] shrink-0" />
-            <span className="truncate">{activeDevice.split('(')[0]}</span>
+            {deviceType === 'upnp_streamer' ? (
+              <Wifi className="w-3 h-3 text-[#A78BFA] shrink-0" />
+            ) : (
+              <Speaker className="w-3 h-3 text-[#ADFF2F] shrink-0" />
+            )}
+            <span className="truncate">{activeDevice.replace(/^\[UPnP\]\s*/, '').split('(')[0]}</span>
           </button>
 
           {/* Volume Control */}
           <div className="flex items-center gap-1.5">
             <button
               onClick={toggleMute}
-              title={isMuted ? 'Unmute' : 'Mute'}
-              className="p-1 rounded text-[#94A3B8] hover:text-white transition-colors cursor-pointer"
+              disabled={isPurityMode}
+              title={
+                isPurityMode
+                  ? 'Volume locked in Bit-Perfect Purity Mode (Unity Gain)'
+                  : isMuted
+                  ? 'Unmute'
+                  : 'Mute'
+              }
+              className={`p-1 rounded transition-colors ${
+                isPurityMode
+                  ? 'text-[#EAB308] opacity-70 cursor-not-allowed'
+                  : 'text-[#94A3B8] hover:text-white cursor-pointer'
+              }`}
             >
-              {isMuted || volume === 0 ? (
+              {isPurityMode ? (
+                <ShieldCheck className="w-4 h-4 text-[#EAB308]" />
+              ) : isMuted || volume === 0 ? (
                 <VolumeX className="w-4 h-4 text-rose-400" />
               ) : (
                 <Volume2 className="w-4 h-4 text-[#CBD5E1]" />
@@ -262,10 +309,19 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({ onOpenSanctuary })
               min={0}
               max={1}
               step={0.01}
-              value={isMuted ? 0 : volume}
+              value={isPurityMode ? 1 : isMuted ? 0 : volume}
+              disabled={isPurityMode}
               onChange={(e) => setVolume(Number(e.target.value))}
-              className="w-18 h-1 bg-white/[0.1] rounded-lg appearance-none cursor-pointer accent-[#00F5FF]"
-              title={`Volume: ${Math.round((isMuted ? 0 : volume) * 100)}%`}
+              className={`w-18 h-1 rounded-lg appearance-none transition-all ${
+                isPurityMode
+                  ? 'bg-[#EAB308]/40 accent-[#EAB308] cursor-not-allowed'
+                  : 'bg-white/[0.1] accent-[#00F5FF] cursor-pointer'
+              }`}
+              title={
+                isPurityMode
+                  ? 'Bit-Perfect Unity Gain (100%): Software attenuation locked to preserve bit depth. Adjust volume on hardware DAC/preamp.'
+                  : `Volume: ${Math.round((isMuted ? 0 : volume) * 100)}%`
+              }
             />
             {/* Expand Sanctuary Lounge Button */}
             {onOpenSanctuary && (

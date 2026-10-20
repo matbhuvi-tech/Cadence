@@ -760,8 +760,26 @@ export function getCuratedAlbumArtwork(albumTitle?: string, artistOrComposer?: s
   if (normTitle.includes('amman kovil') || normTitle.includes('amman koil')) {
     return 'https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/bb/94/bc/bb94bc97-e818-f2e3-2ee8-dc1a8f90ff8a/8901858022889.jpg/1200x1200bb.jpg'
   }
-  if (normTitle.includes('karnan')) {
-    return 'https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/e5/bd/48/e5bd486a-728b-b892-0b04-f5f84fcda257/cover.jpg/1200x1200bb.jpg'
+  if (normTitle.includes('slumdog')) {
+    return 'https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/ef/11/46/ef1146cf-e28e-b43b-59f6-06cb7e7eec77/8902894629058_cover.jpg/1200x1200bb.jpg'
+  }
+  if (normTitle.includes('delhi-6') || normTitle.includes('delhi 6')) {
+    return 'https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/e2/fe/21/e2fe21b6-50e6-7b4b-285a-d40394baba4e/8902894628990_cover.jpg/1200x1200bb.jpg'
+  }
+  if (normTitle.includes('ghajini')) {
+    return 'https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/d6/ef/40/d6ef4087-eef2-53aa-3ee5-ca3e3e2a6978/816481010137.jpg/1200x1200bb.jpg'
+  }
+  if (normTitle.includes('jaane tu') || normTitle.includes('jaane tu... ya jaane na')) {
+    return 'https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/69/9d/1e/699d1e5f-9fb9-a4a9-3fe0-6cae29b7dd49/8902894626033_cover.jpg/1200x1200bb.jpg'
+  }
+  if (normTitle.includes('rock on')) {
+    return 'https://is1-ssl.mzstatic.com/image/thumb/Music/3d/02/74/mzi.rdsmizhb.jpg/1200x1200bb.jpg'
+  }
+  if (normTitle === 'blue' || (normTitle.includes('blue') && (normCredit.includes('rahman') || normCredit.includes('narayan')))) {
+    return 'https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/45/31/27/45312722-6b6f-deaf-8d67-85f8a3e4a198/8902894684682_cover.jpg/1200x1200bb.jpg'
+  }
+  if (normTitle.includes('world of music')) {
+    return 'https://is1-ssl.mzstatic.com/image/thumb/Music114/v4/8e/f8/85/8ef88544-a6c7-018b-0a75-dc3b6b024fa0/cover.jpg/1200x1200bb.jpg'
   }
   return ''
 }

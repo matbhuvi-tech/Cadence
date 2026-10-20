@@ -107,9 +107,9 @@ export class TransactionEngine {
       if (onProgress) onProgress([...steps])
     }
 
-    // Step 0: Check read-only mounts
-    updateStep(0, false, 'Checking mount permissions...')
-    notifyDetailed('PREPARE', 'Validating storage mount locks and write access', 0)
+    // Step 0: Check read-only and offline mounts
+    updateStep(0, false, 'Checking mount permissions and accessibility...')
+    notifyDetailed('PREPARE', 'Validating storage mount locks and network accessibility', 0)
     await new Promise((r) => setTimeout(r, 150))
     const readOnlyMountIds = new Set(
       graphEngine.getAllStorageMounts().filter((m) => m.isReadOnlyLocked).map((m) => m.id)
@@ -122,7 +122,18 @@ export class TransactionEngine {
       if (onProgress) onProgress([...steps])
       return { success: false, transactionId: txId, error: steps[0].detail }
     }
-    updateStep(0, true, 'All target mounts are write-ready')
+
+    const offlineMountIds = new Set(
+      graphEngine.getAllStorageMounts().filter((m) => m.status === 'offline').map((m) => m.id)
+    )
+    const offlineTracks = tracks.filter((t) => offlineMountIds.has(t.storageMountId) || t.isOnline === false)
+    if (offlineTracks.length > 0) {
+      steps[0].hasError = true
+      steps[0].detail = `Aborted: Storage location for "${offlineTracks[0].title}" is offline or inaccessible! Reconnect network storage before committing changes.`
+      if (onProgress) onProgress([...steps])
+      return { success: false, transactionId: txId, error: steps[0].detail }
+    }
+    updateStep(0, true, 'All target mounts are online and write-ready')
 
     // Step 1: Checksum verification
     updateStep(1, false, `Computing stream hashes for ${totalTracks} tracks...`)

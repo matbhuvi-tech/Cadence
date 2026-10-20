@@ -1,6 +1,10 @@
-# Logs
-logs
+# Logs & Crash Dumps
+logs/
 *.log
+panic.txt
+panic.log
+*.dump
+*.dmp
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

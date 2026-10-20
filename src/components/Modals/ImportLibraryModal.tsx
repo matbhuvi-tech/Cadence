@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect, useMemo } from 'react'
 import {
   FolderPlus,
   HardDrive,
@@ -15,10 +15,14 @@ import {
   Database,
   ShieldCheck,
   FolderOpen,
+  Server,
+  RotateCw,
+  SlidersHorizontal,
 } from 'lucide-react'
 import { libraryImporter, IngestionProgress, IngestionResult } from '../../services/libraryImporter'
 import { storagePersistence } from '../../core/storagePersistence'
 import { tauriBridge } from '../../services/tauriBridge'
+import { StorageMount, WatchedFolder } from '../../core/types'
 
 interface ImportLibraryModalProps {
   isOpen: boolean
@@ -26,6 +30,10 @@ interface ImportLibraryModalProps {
   onImportComplete: (result: IngestionResult, isCustom: boolean, isStreaming?: boolean) => void
   onResetToDemo: () => void
   isCustomLibraryActive: boolean
+  storageMounts?: StorageMount[]
+  watchedFolders?: WatchedFolder[]
+  onTriggerScan?: (folderPath: string, forceFull?: boolean) => void
+  onOpenStorageManager?: () => void
 }
 
 export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
@@ -34,8 +42,154 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
   onImportComplete,
   onResetToDemo,
   isCustomLibraryActive,
+  storageMounts = [],
+  watchedFolders = [],
+  onTriggerScan,
+  onOpenStorageManager,
 }) => {
-  const [localPath, setLocalPath] = useState('\\\\192.168.1.3\\Mathan\\Music Collection\\Master')
+  const [activeMounts, setActiveMounts] = useState<StorageMount[]>(storageMounts)
+  const [activeWatchedFolders, setActiveWatchedFolders] = useState<WatchedFolder[]>(watchedFolders)
+
+  // Sync props when updated from parent
+  useEffect(() => {
+    if (storageMounts.length > 0) setActiveMounts(storageMounts)
+    if (watchedFolders.length > 0) setActiveWatchedFolders(watchedFolders)
+  }, [storageMounts, watchedFolders])
+
+  // On open, refresh directly from SQLite if in native Tauri environment
+  useEffect(() => {
+    if (!isOpen) return
+
+    if (tauriBridge.isTauri()) {
+      Promise.all([
+        tauriBridge.dbGetStorageMounts().catch(() => []),
+        tauriBridge.dbGetWatchedFolders().catch(() => []),
+      ]).then(([dbMounts, dbFolders]) => {
+        if (dbMounts && dbMounts.length > 0) {
+          const mappedMounts: StorageMount[] = dbMounts.map((m: any) => ({
+            id: m.id,
+            name: m.name,
+            mountPath: m.mountPath || m.mount_path || '',
+            type: m.type || m.mount_type || 'nas_array',
+            fileSystem: m.fileSystem || m.file_system || 'ZFS',
+            totalBytes: m.totalBytes || m.total_bytes || 0,
+            usedBytes: m.usedBytes || m.used_bytes || 0,
+            isReadOnlyLocked: Boolean(m.isReadOnlyLocked ?? m.is_read_only_locked),
+            healthScore: m.healthScore || m.health_score || 'healthy',
+            smartOk: Boolean(m.smartOk ?? m.smart_ok ?? true),
+            tempCelsius: m.tempCelsius || m.temp_celsius || 35,
+            status: m.status || 'online',
+            lastSeenTimestamp: m.lastSeenTimestamp || m.last_seen_timestamp,
+          }))
+          setActiveMounts(mappedMounts)
+        }
+        if (dbFolders && dbFolders.length > 0) {
+          const mappedFolders: WatchedFolder[] = dbFolders.map((f: any) => ({
+            id: f.id,
+            mountId: f.mountId || f.mount_id || '',
+            folderPath: f.folderPath || f.folder_path || '',
+            displayName: f.displayName || f.display_name,
+            scanMode: f.scanMode || f.scan_mode || 'realtime',
+            isEnabled: Boolean(f.isEnabled ?? f.is_enabled ?? true),
+            lastScanned: f.lastScanned || f.last_scanned,
+            trackCount: f.trackCount || f.track_count,
+          }))
+          setActiveWatchedFolders(mappedFolders)
+        }
+      })
+    }
+  }, [isOpen])
+
+  // Resolve primary active mount & base path
+  const primaryMount = useMemo(() => {
+    return activeMounts.find((m) => m.status === 'online') || activeMounts[0] || null
+  }, [activeMounts])
+
+  const baseMountPath = useMemo(() => {
+    return primaryMount?.mountPath ? primaryMount.mountPath.replace(/[/\\]+$/, '') : ''
+  }, [primaryMount])
+
+  // Derive suggested default path dynamically from active mount and watched folders
+  const suggestedDefaultPath = useMemo(() => {
+    if (activeWatchedFolders && activeWatchedFolders.length > 0) {
+      const masterFolder = activeWatchedFolders.find(
+        (f) => f?.folderPath && /master/i.test(f.folderPath)
+      )
+      if (masterFolder?.folderPath) {
+        const match = masterFolder.folderPath.match(/^(.*?[\\/]Master)/i)
+        if (match) return match[1]
+      }
+      if (activeWatchedFolders[0]?.folderPath) {
+        return activeWatchedFolders[0].folderPath
+      }
+    }
+    if (baseMountPath) {
+      return `${baseMountPath}\\Music Collection\\Master`
+    }
+    return ''
+  }, [activeWatchedFolders, baseMountPath])
+
+  const [localPath, setLocalPath] = useState(suggestedDefaultPath || '')
+
+  // Dynamically update localPath when opening or when active mount is detected
+  useEffect(() => {
+    if (isOpen && suggestedDefaultPath && !localPath) {
+      setLocalPath(suggestedDefaultPath)
+    }
+  }, [isOpen, suggestedDefaultPath])
+
+  const quickPresets = useMemo(() => {
+    const list: { label: string; path: string }[] = []
+
+    if (baseMountPath) {
+      list.push({
+        label: 'Master Collection',
+        path: `${baseMountPath}\\Music Collection\\Master`,
+      })
+      list.push({
+        label: 'Mount Root',
+        path: baseMountPath,
+      })
+    }
+
+    // Add all registered watched folders
+    if (Array.isArray(activeWatchedFolders)) {
+      activeWatchedFolders.forEach((wf) => {
+        if (!wf?.folderPath) return
+        const folderName =
+          wf.displayName ||
+          wf.folderPath.split(/[/\\]/).filter(Boolean).pop() ||
+          'Watched Folder'
+        list.push({
+          label: folderName,
+          path: wf.folderPath,
+        })
+      })
+    }
+
+    // If base mount path is available, also provide common artist presets
+    if (baseMountPath) {
+      list.push({
+        label: 'Hindi Master (A R Rahman)',
+        path: `${baseMountPath}\\Music Collection\\Master\\Hindi\\A R Rahman`,
+      })
+      list.push({
+        label: 'Tamil Master (Ilaiyaraaja)',
+        path: `${baseMountPath}\\Music Collection\\Master\\Tamil\\Ilaiyaraaja`,
+      })
+    }
+
+    // Deduplicate presets by normalized path
+    const seen = new Set<string>()
+    return list.filter((item) => {
+      if (!item?.path) return false
+      const norm = String(item.path).toLowerCase().replace(/[/\\]+$/, '')
+      if (seen.has(norm)) return false
+      seen.add(norm)
+      return true
+    })
+  }, [baseMountPath, activeWatchedFolders])
+
   const [isProcessing, setIsProcessing] = useState(false)
   const [progress, setProgress] = useState<IngestionProgress | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -56,8 +210,12 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
         const selected = await tauriBridge.openDirectoryDialog(localPath)
         if (selected) {
           setLocalPath(selected)
-          // Automatically trigger scan for selected directory
-          startLocalPathScan(selected)
+          onClose()
+          if (onTriggerScan) {
+            onTriggerScan(selected, false)
+          } else {
+            await tauriBridge.startLibraryScan(selected, undefined, false)
+          }
         }
       } catch (err: any) {
         console.error('Failed to open native directory picker:', err)
@@ -283,6 +441,17 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
     const cleaned = pathToScan.trim().replace(/^["']+|["']+$/g, '')
     if (!cleaned) return
     setErrorMessage(null)
+
+    if (tauriBridge.isTauri()) {
+      onClose()
+      if (onTriggerScan) {
+        onTriggerScan(cleaned, false)
+      } else {
+        await tauriBridge.startLibraryScan(cleaned, undefined, false)
+      }
+      return
+    }
+
     setIsProcessing(true)
 
     const controller = new AbortController()
@@ -332,11 +501,6 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
     onClose()
   }
 
-  const quickPresets = [
-    { label: 'Master Collection', path: '\\\\192.168.1.3\\Mathan\\Music Collection\\Master' },
-    { label: 'Hindi Master (A R Rahman)', path: '\\\\192.168.1.3\\Mathan\\Music Collection\\Master\\Hindi\\A R Rahman' },
-    { label: 'Tamil Master (Ilaiyaraaja)', path: '\\\\192.168.1.3\\Mathan\\Music Collection\\Master\\Tamil\\Ilaiyaraaja' },
-  ]
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
@@ -423,8 +587,19 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
 
               {/* DIRECT PATH INPUT WITH INTEGRATED BROWSE BUTTON */}
               <div className="flex flex-col gap-1.5">
-                <div className="flex items-center justify-between text-xs font-mono text-[#94A3B8]">
-                  <span className="font-semibold text-white/90">Selected Directory / Network UNC Path:</span>
+                <div className="flex items-center justify-between text-xs font-mono text-[#94A3B8] flex-wrap gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-white/90">Selected Directory / Network UNC Path:</span>
+                    {primaryMount && (
+                      <span className="inline-flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-mono">
+                        <HardDrive className="w-3 h-3 text-emerald-400" />
+                        <span className="truncate max-w-[220px]">
+                          Active: {primaryMount.name || primaryMount.mountPath}
+                        </span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      </span>
+                    )}
+                  </div>
                   <span className="text-[10px] text-[#64748B]">Auto-detects FLAC, WAV, DSF, DFF, MP3, AAC</span>
                 </div>
 
@@ -474,6 +649,131 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
                   ))}
                 </div>
               </div>
+
+              {/* EXISTING IMPORTED DIRECTORIES & MOUNTS */}
+              {activeWatchedFolders && activeWatchedFolders.length > 0 && (
+                <div className="flex flex-col gap-2.5 pt-3 border-t border-white/[0.08]">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <span className="font-semibold text-white/90 flex items-center gap-1.5">
+                      <Folder className="w-3.5 h-3.5 text-[#00F5FF]" />
+                      Existing Imported Directories ({activeWatchedFolders.length})
+                    </span>
+                    {onOpenStorageManager && (
+                      <button
+                        type="button"
+                        onClick={onOpenStorageManager}
+                        className="text-[11px] text-[#00F5FF] hover:underline flex items-center gap-1 transition-colors cursor-pointer"
+                      >
+                        <SlidersHorizontal className="w-3 h-3" />
+                        <span>Storage Manager Cockpit</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
+                    {activeWatchedFolders.map((wf) => {
+                      const associatedMount = activeMounts.find((m) => {
+                        if (m.id === wf.mountId) return true
+                        const normMount = m.mountPath.replace(/\//g, '\\').toLowerCase().trim()
+                        const normWf = wf.folderPath.replace(/\//g, '\\').toLowerCase().trim()
+                        return normWf.startsWith(normMount)
+                      })
+                      const isOffline = associatedMount?.status === 'offline'
+                      const isUnc = wf.folderPath.startsWith('\\\\') || wf.folderPath.startsWith('//')
+                      const isSelected = localPath.trim().toLowerCase() === wf.folderPath.trim().toLowerCase()
+
+                      return (
+                        <div
+                          key={wf.id}
+                          className={`p-3 rounded-xl border transition-all flex items-center justify-between gap-3 ${
+                            isSelected
+                              ? 'bg-[#00F5FF]/10 border-[#00F5FF]/50 shadow-sm shadow-[#00F5FF]/10'
+                              : 'bg-[#161A26] border-white/[0.08] hover:border-white/[0.18]'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div
+                              className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                                isOffline
+                                  ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                                  : 'bg-[#00F5FF]/10 border-[#00F5FF]/20 text-[#00F5FF]'
+                              }`}
+                            >
+                              {isUnc ? (
+                                <Server className="w-4 h-4" />
+                              ) : (
+                                <HardDrive className="w-4 h-4" />
+                              )}
+                            </div>
+
+                            <div className="min-w-0 flex flex-col text-left">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-xs text-white truncate max-w-[280px]">
+                                  {wf.displayName || wf.folderPath.split(/[/\\]/).filter(Boolean).pop()}
+                                </span>
+                                {isOffline ? (
+                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                    Offline
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                    Online
+                                  </span>
+                                )}
+                                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-white/[0.06] text-[#ADFF2F] border border-white/[0.08]">
+                                  {wf.trackCount != null ? `${wf.trackCount} Tracks` : 'Monitored'}
+                                </span>
+                              </div>
+
+                              <span
+                                className="text-[10px] font-mono text-[#94A3B8] truncate max-w-[380px]"
+                                title={wf.folderPath}
+                              >
+                                {wf.folderPath}
+                              </span>
+
+                              {associatedMount && (
+                                <span className="text-[9px] font-mono text-[#64748B] truncate">
+                                  Mount: {associatedMount.name} ({associatedMount.fileSystem})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setLocalPath(wf.folderPath)}
+                              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono transition-all cursor-pointer border ${
+                                isSelected
+                                  ? 'bg-[#00F5FF]/20 text-[#00F5FF] border-[#00F5FF]/40'
+                                  : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#94A3B8] hover:text-white border-white/[0.08]'
+                              }`}
+                              title="Set as active target in input"
+                            >
+                              {isSelected ? 'Active' : 'Select'}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setLocalPath(wf.folderPath)
+                                startLocalPathScan(wf.folderPath)
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-[#00F5FF]/10 hover:bg-[#00F5FF]/20 text-[#00F5FF] border border-[#00F5FF]/30 text-[10px] font-mono flex items-center gap-1 transition-all cursor-pointer"
+                              title="Trigger immediate rescan of this folder"
+                            >
+                              <RotateCw className="w-3 h-3" />
+                              <span>Rescan</span>
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             /* ACTIVE INGESTION / PROGRESS DISPLAY */

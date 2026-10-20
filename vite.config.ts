@@ -3,6 +3,35 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import fs from 'node:fs'
 import path from 'node:path'
+import net from 'node:net'
+
+const uncHostReachability = new Map<string, { reachable: boolean; checkedAt: number }>()
+
+async function isUncHostReachable(host: string): Promise<boolean> {
+  const cached = uncHostReachability.get(host)
+  const now = Date.now()
+  if (cached && now - cached.checkedAt < 30000) {
+    return cached.reachable
+  }
+
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port: 445, timeout: 350 }, () => {
+      socket.destroy()
+      uncHostReachability.set(host, { reachable: true, checkedAt: now })
+      resolve(true)
+    })
+    socket.on('error', () => {
+      socket.destroy()
+      uncHostReachability.set(host, { reachable: false, checkedAt: now })
+      resolve(false)
+    })
+    socket.on('timeout', () => {
+      socket.destroy()
+      uncHostReachability.set(host, { reachable: false, checkedAt: now })
+      resolve(false)
+    })
+  })
+}
 
 const AUDIO_EXTS = new Set([
   '.flac',
@@ -205,10 +234,10 @@ const GEMINI_PACING_INTERVAL_MS = 4000 // 15 RPM Safe Pacing Buffer for Free Tie
 const GEMINI_CANDIDATE_MODELS = [
   getGeminiModel(),
   'gemini-3.8-flash',
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
+  'gemini-3.7-flash',
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-pro-latest',
 ].filter((m, idx, arr) => m && arr.indexOf(m) === idx)
 
 interface GeminiCallOptions {
@@ -678,6 +707,17 @@ function localLibraryScannerPlugin(): Plugin {
         const cleanedPath = targetPath.trim().replace(/^["']+|["']+$/g, '')
         const normalized = path.resolve(cleanedPath)
 
+        const uncMatch = cleanedPath.match(/^\\\\([^\\]+)/)
+        if (uncMatch) {
+          const host = uncMatch[1]
+          const reachable = await isUncHostReachable(host)
+          if (!reachable) {
+            res.statusCode = 404
+            res.end(`Network storage host "${host}" is currently unreachable.`)
+            return
+          }
+        }
+
         if (!fs.existsSync(normalized) || !fs.statSync(normalized).isFile()) {
           res.statusCode = 404
           res.end(`Audio file not found: "${targetPath}"`)
@@ -775,6 +815,21 @@ function localLibraryScannerPlugin(): Plugin {
           res.setHeader('Cache-Control', 'public, max-age=3600')
           res.statusCode = 200
           res.end(svg)
+        }
+
+        const uncMatch = cleanedPath.match(/^\\\\([^\\]+)/)
+        if (uncMatch) {
+          const host = uncMatch[1]
+          const reachable = await isUncHostReachable(host)
+          if (!reachable) {
+            if (isStrict) {
+              res.statusCode = 404
+              res.end(`Host "${host}" is currently unreachable`)
+              return
+            }
+            sendPlaceholderSvg(path.basename(cleanedPath))
+            return
+          }
         }
 
         if (!fs.existsSync(normalized)) {
@@ -2022,6 +2077,16 @@ Instructions:
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), localLibraryScannerPlugin()],
+  optimizeDeps: {
+    include: [
+      '@tauri-apps/api',
+      '@tauri-apps/api/event',
+      '@tauri-apps/api/core',
+      '@tauri-apps/plugin-dialog',
+      '@tauri-apps/plugin-fs',
+      '@tauri-apps/plugin-shell',
+    ],
+  },
   server: {
     port: 5173,
     strictPort: true,

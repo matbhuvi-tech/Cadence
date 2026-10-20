@@ -128,7 +128,7 @@ const mockTracks: Track[] = [
     artistCredit: 'Ilaiyaraaja',
     composerName: 'Ilaiyaraaja',
     durationSeconds: 114,
-    filePath: 'D:/Music/Thalapathi/01.flac',
+    filePath: '/music/mock-album/01.flac',
     fileSize: 20000000,
     storageMountId: 'mount-1',
     sidecarStatus: 'synced',

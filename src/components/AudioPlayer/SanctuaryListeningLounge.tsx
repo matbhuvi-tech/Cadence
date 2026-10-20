@@ -34,6 +34,11 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     isMuted,
     streamTelemetry,
     activeDevice,
+    isPurityMode,
+    isBitPerfect,
+    outputSampleRate,
+    deviceType,
+    togglePurityMode,
     togglePlayPause,
     nextTrack,
     prevTrack,
@@ -167,33 +172,46 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
           {/* Hardware Signal Chain Specs */}
           <div className="p-4 bg-white/[0.03] border border-white/10 rounded-2xl space-y-2.5 font-mono text-xs">
             <div className="text-[10px] text-[#94A3B8] uppercase font-bold tracking-wider flex items-center justify-between">
-              <span>DAC Signal Path Telemetry</span>
-              <span className="text-[#10B981] flex items-center gap-1">
+              <span>Hardware Signal Chain & Clock</span>
+              <button
+                onClick={() => togglePurityMode()}
+                className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border transition-all cursor-pointer ${
+                  isPurityMode
+                    ? 'bg-[#EAB308]/20 border-[#EAB308]/40 text-[#EAB308]'
+                    : 'bg-[#10B981]/20 border-[#10B981]/40 text-[#10B981]'
+                }`}
+              >
                 <ShieldCheck className="w-3.5 h-3.5" />
-                Bit-Perfect 0% Resampling
-              </span>
+                {isPurityMode ? 'Purity Mode: 0dB Unity' : 'Bit-Perfect Clock'}
+              </button>
             </div>
             <div className="grid grid-cols-2 gap-2 text-[11px] pt-1 border-t border-white/[0.06]">
               <div>
-                <span className="text-slate-500">Output Device:</span>
-                <div className="text-white truncate font-semibold">{activeDevice}</div>
+                <span className="text-slate-500">Output Endpoint:</span>
+                <div className="text-white truncate font-semibold">
+                  {deviceType === 'upnp_streamer' ? `[Network Streamer] ${activeDevice.replace(/^\[UPnP\]\s*/, '')}` : activeDevice}
+                </div>
               </div>
               <div>
-                <span className="text-slate-500">Codec & Bitrate:</span>
+                <span className="text-slate-500">DAC Clock Negotiation:</span>
                 <div className="text-[#00F5FF] font-semibold">
-                  {currentTrack?.format || 'FLAC'} · {streamTelemetry?.sampleRate ? `${streamTelemetry.sampleRate / 1000}kHz` : '96kHz'} / {streamTelemetry?.bitDepth || 24}b
+                  {outputSampleRate ? `${outputSampleRate / 1000} kHz Locked` : 'WASAPI Native Clock'}
                 </div>
               </div>
               <div>
-                <span className="text-slate-500">Dynamic Range:</span>
+                <span className="text-slate-500">Native Stream:</span>
                 <div className="text-[#ADFF2F] font-semibold">
-                  DR{currentTrack?.drScore || 14} (Master Fidelity)
+                  {streamTelemetry?.format || currentTrack?.format || 'FLAC'} · {streamTelemetry?.sampleRate ? `${streamTelemetry.sampleRate / 1000}kHz` : '44.1kHz'} / {streamTelemetry?.bitDepth || 16}b
                 </div>
               </div>
               <div>
-                <span className="text-slate-500">Encoding Format:</span>
+                <span className="text-slate-500">Stream Delivery:</span>
                 <div className="text-white font-semibold">
-                  {streamTelemetry?.channels === 2 ? 'Stereo PCM' : 'Lossless Audio'}
+                  {deviceType === 'upnp_streamer'
+                    ? 'Untouched Stream (Raw UPnP)'
+                    : isPurityMode
+                    ? 'Bit-Perfect Exclusive Pass'
+                    : 'WASAPI Direct Stream'}
                 </div>
               </div>
             </div>

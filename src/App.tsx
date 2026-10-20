@@ -15,6 +15,10 @@ import {
   Volume2,
   Compass,
   Bot,
+  WifiOff,
+  AlertTriangle,
+  RefreshCw,
+  Server,
 } from 'lucide-react'
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
@@ -59,6 +63,9 @@ function AppContent() {
   const [storageMounts, setStorageMounts] = useState<StorageMount[]>(() => graphEngine.getAllStorageMounts())
   const [auditIssues, setAuditIssues] = useState<AuditIssue[]>(() => graphEngine.getAllAuditIssues())
   const [isCustomLibraryActive, setIsCustomLibraryActive] = useState<boolean>(false)
+  const [offlineMounts, setOfflineMounts] = useState<StorageMount[]>([])
+  const [offlineStats, setOfflineStats] = useState<{ tracks: number; releases: number }>({ tracks: 0, releases: 0 })
+  const [isCheckingConnectivity, setIsCheckingConnectivity] = useState<boolean>(false)
 
   // Selection State
   const [selectedTrackId, setSelectedTrackId] = useState<string>(tracks[0]?.id || '')
@@ -238,22 +245,34 @@ function AppContent() {
     if (res) {
       refreshFromEngine()
       persistCurrentLibrary()
+      if (updates.coverArtUrl !== undefined || updates.backdropUrl !== undefined) {
+        sqliteLibraryService.persistReleaseArtworkToDb(releaseId, {
+          frontCoverUrl: updates.coverArtUrl,
+          backdropUrl: updates.backdropUrl,
+        })
+      }
       showToast(`Customized "${res.release.title}" • ${res.affectedTracksCount} tracks staged in sidecar`)
     }
   }
 
-  // Persist current active library to IndexedDB local database
+  // Persist current active library to IndexedDB local database and native SQLite
   const persistCurrentLibrary = async () => {
     try {
+      const allTracks = graphEngine.getAllTracks()
+      const allReleases = graphEngine.getAllReleases()
+
       await storagePersistence.saveLibrary({
-        tracks: graphEngine.getAllTracks(),
-        releases: graphEngine.getAllReleases(),
+        tracks: allTracks,
+        releases: allReleases,
         works: graphEngine.getAllWorks(),
         storageMounts: graphEngine.getAllStorageMounts(),
         auditIssues: graphEngine.getAllAuditIssues(),
         isCustomLibrary: graphEngine.isUsingCustomLibrary(),
         lastImportedTimestamp: new Date().toISOString(),
       })
+
+      // Immediately synchronize releases (frontCoverUrl, backdropUrl, etc.) into native SQLite database
+      await sqliteLibraryService.persistReleasesToDb(allReleases)
     } catch (err) {
       console.warn('Failed to persist library to local database:', err)
     }
@@ -285,37 +304,70 @@ function AppContent() {
 
       // 2. Load from SQLite
       const dbData = await sqliteLibraryService.loadLibraryFromDb()
-      if (dbData && dbData.tracks.length > 0 && mounted) {
-        graphEngine.loadCustomLibrary({
-          tracks: dbData.tracks,
-          releases: dbData.releases,
-          works: [],
-          auditIssues: [],
-          storageMounts: dbData.storageMounts,
-        })
+      if (dbData && mounted) {
+        setStorageMounts(dbData.storageMounts)
         setWatchedFolders(dbData.watchedFolders)
         setSkippedFiles(dbData.skippedFiles)
-        refreshFromEngine()
-        if (dbData.tracks.length > 0) {
-          setSelectedTrackId(dbData.tracks[0].id)
+
+        if (dbData.offlineMounts.length > 0) {
+          setOfflineMounts(dbData.offlineMounts)
+          setOfflineStats({
+            tracks: dbData.offlineTracksCount,
+            releases: dbData.offlineReleasesCount,
+          })
+        } else {
+          setOfflineMounts([])
+          setOfflineStats({ tracks: 0, releases: 0 })
         }
-        showToast(`Loaded ${dbData.tracks.length} tracks from SQLite database (WAL active)`)
-      } else {
-        // Fallback to legacy IndexedDB if SQLite has no data and not in Tauri
-        const saved = await storagePersistence.loadLibrary()
-        if (saved && saved.tracks && saved.tracks.length > 0 && mounted) {
+
+        if (dbData.tracks.length > 0) {
           graphEngine.loadCustomLibrary({
-            tracks: saved.tracks,
-            releases: saved.releases,
-            works: saved.works,
-            auditIssues: saved.auditIssues,
-            storageMounts: saved.storageMounts,
+            tracks: dbData.tracks,
+            releases: dbData.releases,
+            works: [],
+            auditIssues: [],
+            storageMounts: dbData.storageMounts,
           })
           refreshFromEngine()
-          if (saved.tracks.length > 0) {
-            setSelectedTrackId(saved.tracks[0].id)
+          if (dbData.tracks.length > 0) {
+            setSelectedTrackId(dbData.tracks[0].id)
           }
-          showToast(`Loaded personal library (${saved.tracks.length} tracks) from storage cache`)
+          if (dbData.offlineMounts.length > 0) {
+            showToast(
+              `Loaded ${dbData.tracks.length} active tracks. Notice: "${dbData.offlineMounts[0].name}" is offline (${dbData.offlineReleasesCount} albums withheld).`
+            )
+          } else {
+            showToast(`Loaded ${dbData.tracks.length} tracks from SQLite database (WAL active)`)
+          }
+        } else if (dbData.offlineMounts.length > 0) {
+          // All tracks are on offline network storage!
+          // Withhold all album data as requested by user to prevent unplayable playback and failed commits
+          graphEngine.clearLibrary()
+          refreshFromEngine()
+          showToast(
+            `Network folder not accessible (${dbData.offlineMounts[0].mountPath}). Albums withheld from display.`
+          )
+        } else if (tauriBridge.isTauri()) {
+          // In desktop environment with empty library: do not load stale legacy IndexedDB cache
+          graphEngine.clearLibrary()
+          refreshFromEngine()
+        } else {
+          // Fallback to legacy IndexedDB if SQLite has no data and not in Tauri
+          const saved = await storagePersistence.loadLibrary()
+          if (saved && saved.tracks && saved.tracks.length > 0 && mounted) {
+            graphEngine.loadCustomLibrary({
+              tracks: saved.tracks,
+              releases: saved.releases,
+              works: saved.works,
+              auditIssues: saved.auditIssues,
+              storageMounts: saved.storageMounts,
+            })
+            refreshFromEngine()
+            if (saved.tracks.length > 0) {
+              setSelectedTrackId(saved.tracks[0].id)
+            }
+            showToast(`Loaded personal library (${saved.tracks.length} tracks) from storage cache`)
+          }
         }
       }
 
@@ -342,6 +394,17 @@ function AppContent() {
             if (refreshed) {
               setWatchedFolders(refreshed.watchedFolders)
               setSkippedFiles(refreshed.skippedFiles)
+              setStorageMounts(refreshed.storageMounts)
+              setOfflineMounts(refreshed.offlineMounts)
+              if (refreshed.tracks.length > 0) {
+                graphEngine.loadCustomLibrary({
+                  tracks: refreshed.tracks,
+                  releases: refreshed.releases,
+                  works: [],
+                  auditIssues: [],
+                  storageMounts: refreshed.storageMounts,
+                })
+              }
               refreshFromEngine()
             }
           }
@@ -389,7 +452,85 @@ function AppContent() {
       setWatchedFolders(data.watchedFolders)
       setSkippedFiles(data.skippedFiles)
       setStorageMounts(data.storageMounts)
-      refreshFromEngine()
+
+      if (data.offlineMounts.length > 0) {
+        setOfflineMounts(data.offlineMounts)
+        setOfflineStats({
+          tracks: data.offlineTracksCount,
+          releases: data.offlineReleasesCount,
+        })
+      } else {
+        setOfflineMounts([])
+        setOfflineStats({ tracks: 0, releases: 0 })
+      }
+
+      if (data.tracks.length > 0) {
+        graphEngine.loadCustomLibrary({
+          tracks: data.tracks,
+          releases: data.releases,
+          works: [],
+          auditIssues: [],
+          storageMounts: data.storageMounts,
+        })
+        refreshFromEngine()
+        showToast(
+          data.offlineMounts.length > 0
+            ? `Storage refreshed: ${data.tracks.length} active tracks (${data.offlineReleasesCount} albums withheld).`
+            : `Storage refreshed: ${data.tracks.length} tracks loaded.`
+        )
+      } else if (data.offlineMounts.length > 0) {
+        graphEngine.clearLibrary()
+        refreshFromEngine()
+        showToast(`Network folder still inaccessible (${data.offlineMounts[0].mountPath}). Albums withheld.`)
+      }
+    }
+  }
+
+  const handleRetryConnection = async () => {
+    setIsCheckingConnectivity(true)
+    try {
+      const data = await sqliteLibraryService.loadLibraryFromDb()
+      if (data) {
+        setWatchedFolders(data.watchedFolders)
+        setSkippedFiles(data.skippedFiles)
+        setStorageMounts(data.storageMounts)
+
+        if (data.offlineMounts.length > 0) {
+          setOfflineMounts(data.offlineMounts)
+          setOfflineStats({
+            tracks: data.offlineTracksCount,
+            releases: data.offlineReleasesCount,
+          })
+        } else {
+          setOfflineMounts([])
+          setOfflineStats({ tracks: 0, releases: 0 })
+        }
+
+        if (data.tracks.length > 0) {
+          graphEngine.loadCustomLibrary({
+            tracks: data.tracks,
+            releases: data.releases,
+            works: [],
+            auditIssues: [],
+            storageMounts: data.storageMounts,
+          })
+          refreshFromEngine()
+          setSelectedTrackId(data.tracks[0].id)
+          showToast(
+            `Network storage reconnected! Loaded ${data.releases.length} albums (${data.tracks.length} tracks).`
+          )
+        } else if (data.offlineMounts.length > 0) {
+          graphEngine.clearLibrary()
+          refreshFromEngine()
+          showToast(`Network storage is still unreachable (${data.offlineMounts[0].mountPath}).`)
+        } else {
+          showToast('No music tracks found in storage.')
+        }
+      }
+    } catch (err: any) {
+      showToast(`Connection check failed: ${err.message || err}`)
+    } finally {
+      setIsCheckingConnectivity(false)
     }
   }
 
@@ -398,11 +539,57 @@ function AppContent() {
       const selected = await tauriBridge.openDirectoryDialog()
       if (selected) {
         const folderName = selected.split(/[/\\]/).filter(Boolean).pop() || selected
-        const matchedMount = storageMounts.find((m) => selected.startsWith(m.mountPath))
-        const mountId = matchedMount ? matchedMount.id : storageMounts[0]?.id || 'mount-local'
+
+        const winMatch = selected.match(/^([A-Za-z]:)/)
+        const uncMatch = selected.match(/^(\\\\[^\\]+\\[^\\]+)/)
+        const rootKey = winMatch
+          ? winMatch[1]
+          : uncMatch
+          ? uncMatch[1]
+          : selected.startsWith('/')
+          ? '/' + selected.split('/').filter(Boolean)[0]
+          : 'Local Audio'
+        const expectedMountId = `mount-${rootKey.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
+
+        const normSelected = selected.replace(/\//g, '\\').toLowerCase()
+        let matchedMount = storageMounts.find((m) => {
+          const normMount = m.mountPath.replace(/\//g, '\\').toLowerCase().trim()
+          return (
+            normSelected.startsWith(normMount) ||
+            m.id.toLowerCase() === expectedMountId.toLowerCase()
+          )
+        })
+
+        if (!matchedMount) {
+          const isWin = Boolean(winMatch)
+          const isUnc = Boolean(uncMatch)
+          const newMount: StorageMount = {
+            id: expectedMountId,
+            name: isUnc
+              ? `TrueNAS Network Storage (${rootKey})`
+              : isWin
+              ? `Drive ${rootKey} (Local Audio Disk)`
+              : `Storage Volume (${rootKey})`,
+            mountPath: isWin ? `${rootKey}\\` : rootKey,
+            type: isUnc ? 'nas_array' : 'local_disk',
+            fileSystem: isUnc ? 'ZFS' : isWin ? 'NTFS' : 'APFS',
+            totalBytes: 1000000000000,
+            usedBytes: 450000000000,
+            isReadOnlyLocked: false,
+            healthScore: 'healthy',
+            smartOk: true,
+            tempCelsius: 34,
+            status: 'online',
+            lastSeenTimestamp: new Date().toISOString(),
+          }
+          await tauriBridge.dbSaveStorageMount(newMount)
+          matchedMount = newMount
+          setStorageMounts((prev) => [...prev.filter((m) => m.id !== newMount.id), newMount])
+        }
+
         const newFolder: WatchedFolder = {
           id: `wf-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          mountId,
+          mountId: matchedMount.id,
           folderPath: selected,
           displayName: folderName,
           scanMode: 'realtime',
@@ -738,6 +925,12 @@ function AppContent() {
     if (res) {
       refreshFromEngine()
       persistCurrentLibrary()
+      if (updates.coverArtUrl !== undefined || updates.backdropUrl !== undefined) {
+        sqliteLibraryService.persistReleaseArtworkToDb(releaseId, {
+          frontCoverUrl: updates.coverArtUrl,
+          backdropUrl: updates.backdropUrl,
+        })
+      }
       if (updates.rating !== undefined) {
         showToast(updates.rating > 0 ? `Rated "${res.release.title}" ${updates.rating}★` : `Cleared rating for "${res.release.title}"`)
       } else if (updates.isFavorite !== undefined) {
@@ -1232,7 +1425,7 @@ function AppContent() {
             onViewModeChange={setViewMode}
           />
 
-          {/* 2. Center Stage: Data Canvas OR Focused Workbench */}
+          {/* 2. Center Stage: Data Canvas OR Focused Workbench OR Storage Offline View */}
           {focusedWorkbenchTrack ? (
             <FocusedWorkbench
               track={focusedWorkbenchTrack}
@@ -1246,45 +1439,145 @@ function AppContent() {
               }}
               showToast={showToast}
             />
+          ) : tracks.length === 0 && offlineMounts.length > 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0D13] relative overflow-hidden text-center">
+              {/* Ambient background glow */}
+              <div className="absolute w-96 h-96 rounded-full bg-amber-500/10 blur-[120px] pointer-events-none" />
+
+              <div className="relative z-10 max-w-lg flex flex-col items-center">
+                <div className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-6 shadow-xl shadow-amber-500/10">
+                  <WifiOff className="w-8 h-8" />
+                </div>
+
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-[11px] font-mono font-semibold border border-amber-500/30 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                    Network Folder Offline
+                  </span>
+                </div>
+
+                <h2 className="text-xl font-bold text-white mb-2">
+                  Storage Location Inaccessible
+                </h2>
+
+                <p className="text-xs text-white/60 mb-4 leading-relaxed">
+                  Cadence Core detected that your network folder is currently unreachable.
+                  To protect playback integrity and prevent uncommittable metadata edits,
+                  album data from this storage location is withheld from display.
+                </p>
+
+                {/* Storage Path Card */}
+                <div className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl p-4 mb-6 text-left">
+                  <div className="text-[11px] font-medium text-white/50 mb-1">Target Storage Path:</div>
+                  <div className="font-mono text-xs text-[#00F5FF] break-all bg-black/40 px-3 py-2 rounded-lg border border-white/[0.05] flex items-center gap-2">
+                    <Server className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>{offlineMounts[0]?.mountPath}</span>
+                  </div>
+                  {offlineStats.releases > 0 && (
+                    <div className="mt-3 flex items-center justify-between text-[11px] text-white/40 pt-2 border-t border-white/[0.05]">
+                      <span>Preserved in SQLite Database:</span>
+                      <span className="text-amber-300 font-mono">
+                        {offlineStats.releases} albums • {offlineStats.tracks} tracks
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleRetryConnection}
+                    disabled={isCheckingConnectivity}
+                    className="px-5 py-2.5 rounded-xl bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 text-[#00F5FF] border border-[#00F5FF]/50 text-xs font-semibold transition-all flex items-center gap-2 shadow-lg shadow-[#00F5FF]/10 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
+                    {isCheckingConnectivity ? 'Checking Connection...' : 'Retry Connection'}
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setTopMode('maintain')
+                      setMaintainSubTab('storage_mounts')
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white/80 border border-white/[0.1] text-xs font-medium transition-colors"
+                  >
+                    Manage Storage Roots
+                  </button>
+                </div>
+              </div>
+            </div>
           ) : (
-            <DataCanvas
-              viewMode={viewMode}
-              onViewModeChange={setViewMode}
-              albumDisplayMode={albumDisplayMode}
-              onAlbumDisplayModeChange={setAlbumDisplayMode}
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              works={works}
-              releases={releases}
-              tracks={filteredTracks}
-              selectedTrackId={selectedTrackId}
-              onSelectTrack={setSelectedTrackId}
-              selectedTrackIds={selectedTrackIds}
-              onToggleTrackSelection={handleToggleTrackSelection}
-              onSelectAllTracks={handleSelectAllTracks}
-              onSelectVariant={handleSelectVariant}
-              onInspectRelease={handleInspectRelease}
-              onCustomizeRelease={(rel) => setCustomizingRelease(rel)}
-              onUpdateReleaseDetails={handleUpdateReleaseDetails}
-              onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
-              onApplyBatchEdits={handleApplyBatchEdits}
-              onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
-              onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
-              onOpenImportModal={() => setIsImportModalOpen(true)}
-              onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
-              onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
-              totalLibraryTracksCount={tracks.length}
-              onResetFilters={() => {
-                setFacets({})
-                setActiveTriageFilter(undefined)
-                setSelectedMountId(undefined)
-                setSelectedFolderFilter(undefined)
-                setSearchQuery('')
-              }}
-              activeTriageIssue={activeTriageIssue}
-              onClearTriageFilter={() => setActiveTriageFilter(undefined)}
-              onRemediateTriageIssue={handleRemediateAudit}
-            />
+            <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+              {/* If some mounts are offline, render top alert banner */}
+              {offlineMounts.length > 0 && (
+                <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0 animate-in fade-in duration-200">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span className="text-amber-300 truncate">
+                      Network Storage Offline: <span className="font-mono">{offlineMounts[0].name}</span> ({offlineMounts[0].mountPath}) is unreachable.
+                      {offlineStats.releases > 0 && ` ${offlineStats.releases} albums from this folder are withheld.`}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={handleRetryConnection}
+                      disabled={isCheckingConnectivity}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-[11px] font-mono transition-colors flex items-center gap-1.5"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
+                      {isCheckingConnectivity ? 'Checking...' : 'Retry'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setTopMode('maintain')
+                        setMaintainSubTab('storage_mounts')
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 text-[11px] transition-colors"
+                    >
+                      Manage
+                    </button>
+                  </div>
+                </div>
+              )}
+              <DataCanvas
+                viewMode={viewMode}
+                onViewModeChange={setViewMode}
+                albumDisplayMode={albumDisplayMode}
+                onAlbumDisplayModeChange={setAlbumDisplayMode}
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                works={works}
+                releases={releases}
+                tracks={filteredTracks}
+                selectedTrackId={selectedTrackId}
+                onSelectTrack={setSelectedTrackId}
+                selectedTrackIds={selectedTrackIds}
+                onToggleTrackSelection={handleToggleTrackSelection}
+                onSelectAllTracks={handleSelectAllTracks}
+                onSelectVariant={handleSelectVariant}
+                onInspectRelease={handleInspectRelease}
+                onCustomizeRelease={(rel) => setCustomizingRelease(rel)}
+                onUpdateReleaseDetails={handleUpdateReleaseDetails}
+                onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
+                onApplyBatchEdits={handleApplyBatchEdits}
+                onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
+                onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
+                onOpenImportModal={() => setIsImportModalOpen(true)}
+                onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
+                onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
+                totalLibraryTracksCount={tracks.length}
+                onResetFilters={() => {
+                  setFacets({})
+                  setActiveTriageFilter(undefined)
+                  setSelectedMountId(undefined)
+                  setSelectedFolderFilter(undefined)
+                  setSearchQuery('')
+                }}
+                activeTriageIssue={activeTriageIssue}
+                onClearTriageFilter={() => setActiveTriageFilter(undefined)}
+                onRemediateTriageIssue={handleRemediateAudit}
+              />
+            </div>
           )}
 
           {/* 3. Right Panel: Contextual Action Surface */}
@@ -1327,6 +1620,13 @@ function AppContent() {
         onImportComplete={handleImportComplete}
         onResetToDemo={handleResetToDemo}
         isCustomLibraryActive={isCustomLibraryActive}
+        storageMounts={storageMounts}
+        watchedFolders={watchedFolders}
+        onTriggerScan={handleTriggerScan}
+        onOpenStorageManager={() => {
+          setIsImportModalOpen(false)
+          setIsStorageManagerOpen(true)
+        }}
       />
 
       {/* Omni Command Bar Modal */}

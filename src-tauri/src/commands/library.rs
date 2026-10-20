@@ -2,11 +2,82 @@ use std::process::Command;
 use tauri::{AppHandle, State};
 
 use crate::db::{
-    AppDb, DbOperations, DbRelease, DbSkippedFile, DbStorageMount, DbTrack, DbWatchedFolder,
+    is_directory_accessible, AppDb, DbOperations, DbRelease, DbSkippedFile, DbStorageMount,
+    DbTrack, DbWatchedFolder, StorageAccessibilityReport,
 };
 use crate::scanner::{ScanProgressPayload, ScannerController};
 
 // Storage Mounts
+#[tauri::command]
+pub async fn check_storage_mounts_accessibility(
+    db: State<'_, AppDb>,
+) -> Result<Vec<StorageAccessibilityReport>, String> {
+    let (mounts, watched_folders) = {
+        let conn = db.conn.lock();
+        let m = DbOperations::get_storage_mounts(&conn).map_err(|e| e.to_string())?;
+        let w = DbOperations::get_watched_folders(&conn).map_err(|e| e.to_string())?;
+        (m, w)
+    };
+
+    let mut reports = Vec::new();
+
+    for mut mount in mounts {
+        let mut accessible = is_directory_accessible(&mount.mount_path).await;
+        if !accessible {
+            // Check if any watched folder belonging to this mount is accessible
+            for wf in watched_folders.iter().filter(|w| w.mount_id == mount.id) {
+                if is_directory_accessible(&wf.folder_path).await {
+                    accessible = true;
+                    break;
+                }
+            }
+        }
+
+        let new_status = if accessible { "online" } else { "offline" };
+        if mount.status != new_status {
+            mount.status = new_status.to_string();
+            let conn = db.conn.lock();
+            let _ = DbOperations::set_mount_status(&conn, &mount.id, new_status);
+        }
+
+        let (tracks_count, releases_count) = {
+            let conn = db.conn.lock();
+            let mut stmt_t = conn
+                .prepare("SELECT COUNT(*) FROM tracks WHERE mount_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let t_cnt: i64 = stmt_t.query_row(rusqlite::params![mount.id], |r| r.get(0)).unwrap_or(0);
+            let mut stmt_r = conn
+                .prepare("SELECT COUNT(DISTINCT release_id) FROM tracks WHERE mount_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let r_cnt: i64 = stmt_r.query_row(rusqlite::params![mount.id], |r| r.get(0)).unwrap_or(0);
+            (t_cnt, r_cnt)
+        };
+
+        reports.push(StorageAccessibilityReport {
+            mount_id: mount.id,
+            name: mount.name,
+            mount_path: mount.mount_path,
+            is_accessible: accessible,
+            status: new_status.to_string(),
+            tracks_count,
+            releases_count,
+        });
+    }
+
+    Ok(reports)
+}
+
+#[tauri::command]
+pub async fn check_path_accessible(path: String) -> Result<bool, String> {
+    Ok(is_directory_accessible(&path).await)
+}
+
+#[tauri::command]
+pub fn db_get_offline_counts(db: State<'_, AppDb>) -> Result<(i64, i64), String> {
+    let conn = db.conn.lock();
+    DbOperations::get_offline_counts(&conn).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn db_get_storage_mounts(db: State<'_, AppDb>) -> Result<Vec<DbStorageMount>, String> {
     let conn = db.conn.lock();
@@ -69,15 +140,19 @@ pub fn db_get_tracks(
     db: State<'_, AppDb>,
     limit: Option<i64>,
     offset: Option<i64>,
+    only_online: Option<bool>,
 ) -> Result<Vec<DbTrack>, String> {
     let conn = db.conn.lock();
-    DbOperations::get_tracks(&conn, limit, offset).map_err(|e| e.to_string())
+    DbOperations::get_tracks(&conn, limit, offset, only_online).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn db_get_releases(db: State<'_, AppDb>) -> Result<Vec<DbRelease>, String> {
+pub fn db_get_releases(
+    db: State<'_, AppDb>,
+    only_online: Option<bool>,
+) -> Result<Vec<DbRelease>, String> {
     let conn = db.conn.lock();
-    DbOperations::get_releases(&conn).map_err(|e| e.to_string())
+    DbOperations::get_releases(&conn, only_online).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

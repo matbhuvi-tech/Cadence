@@ -31,6 +31,8 @@ pub struct DbWatchedFolder {
     pub ignore_patterns: Option<String>,
     pub is_enabled: bool,
     pub last_scanned_timestamp: Option<String>,
+    #[serde(default)]
+    pub track_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +105,59 @@ pub struct FileMtimeCheck {
     pub file_path: String,
     pub mtime: i64,
     pub file_size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageAccessibilityReport {
+    pub mount_id: String,
+    pub name: String,
+    pub mount_path: String,
+    pub is_accessible: bool,
+    pub status: String,
+    pub tracks_count: i64,
+    pub releases_count: i64,
+}
+
+pub fn check_directory_accessible_sync(path_str: &str) -> bool {
+    let norm = path_str.replace('/', "\\");
+    if norm.starts_with(r"\\") {
+        let parts: Vec<&str> = norm
+            .trim_start_matches('\\')
+            .split('\\')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if let Some(host) = parts.first() {
+            use std::net::{TcpStream, ToSocketAddrs};
+            use std::time::Duration;
+            let addr = format!("{}:445", host);
+            let is_host_up = addr
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut iter| iter.next())
+                .map(|sock_addr| TcpStream::connect_timeout(&sock_addr, Duration::from_millis(2000)).is_ok())
+                .unwrap_or(false);
+            if !is_host_up {
+                return false;
+            }
+        }
+    }
+
+    let p = std::path::Path::new(path_str);
+    if !p.exists() || !p.is_dir() {
+        return false;
+    }
+    std::fs::read_dir(p).is_ok()
+}
+
+pub async fn is_directory_accessible(path_str: &str) -> bool {
+    let p = path_str.to_string();
+    let task = tokio::task::spawn_blocking(move || check_directory_accessible_sync(&p));
+
+    match tokio::time::timeout(std::time::Duration::from_millis(4000), task).await {
+        Ok(Ok(res)) => res,
+        _ => false,
+    }
 }
 
 pub struct DbOperations;
@@ -210,15 +265,144 @@ impl DbOperations {
     }
 
     pub fn delete_storage_mount(conn: &Connection, mount_id: &str) -> Result<()> {
+        conn.execute("DELETE FROM tracks WHERE mount_id = ?1", params![mount_id])?;
+        conn.execute("DELETE FROM watched_folders WHERE mount_id = ?1", params![mount_id])?;
         conn.execute("DELETE FROM storage_mounts WHERE id = ?1", params![mount_id])?;
+        let _ = conn.execute(
+            "DELETE FROM releases WHERE id NOT IN (SELECT DISTINCT release_id FROM tracks)",
+            [],
+        );
         Ok(())
+    }
+
+    pub fn ensure_mount_for_path(
+        conn: &Connection,
+        path: &str,
+        preferred_mount_id: Option<&str>,
+    ) -> Result<String> {
+        // 1. If preferred_mount_id is provided, check if it actually exists in storage_mounts
+        if let Some(pref_id) = preferred_mount_id {
+            if !pref_id.is_empty() {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM storage_mounts WHERE id = ?1 LIMIT 1",
+                        params![pref_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if exists {
+                    return Ok(pref_id.to_string());
+                }
+            }
+        }
+
+        // 2. Fetch existing storage mounts and check if any covers this path
+        let existing_mounts = Self::get_storage_mounts(conn).unwrap_or_default();
+        let norm_path = path.replace('/', "\\").to_lowercase();
+        let trimmed_norm_path = norm_path.trim_end_matches('\\');
+
+        for m in &existing_mounts {
+            let m_norm = m.mount_path.replace('/', "\\").to_lowercase();
+            let m_trimmed = m_norm.trim_end_matches('\\');
+
+            if !m_trimmed.is_empty() {
+                if trimmed_norm_path == m_trimmed
+                    || trimmed_norm_path.starts_with(&format!("{}\\", m_trimmed))
+                    || (m_trimmed.ends_with(':') && trimmed_norm_path.starts_with(m_trimmed))
+                {
+                    return Ok(m.id.clone());
+                }
+            }
+        }
+
+        // 3. Derive canonical mount details from path
+        let raw_path = path.replace('/', "\\");
+        let (mount_id, mount_name, mount_path, mount_type, file_system) = {
+            let is_win_drive = if raw_path.len() >= 2 {
+                let bytes = raw_path.as_bytes();
+                bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+            } else {
+                false
+            };
+
+            if is_win_drive {
+                let drive_char = raw_path.chars().next().unwrap().to_ascii_uppercase();
+                let clean_id = format!("mount-{}_", drive_char.to_ascii_lowercase());
+                let name = format!("Drive {}: (Local Audio Disk)", drive_char);
+                let m_path = format!("{}:\\", drive_char);
+                (clean_id, name, m_path, "local_disk".to_string(), "NTFS".to_string())
+            } else if raw_path.starts_with("\\\\") {
+                let parts: Vec<&str> = raw_path
+                    .trim_start_matches('\\')
+                    .split('\\')
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let share_root = if parts.len() >= 2 {
+                    format!("\\\\{}\\{}", parts[0], parts[1])
+                } else if !parts.is_empty() {
+                    format!("\\\\{}", parts[0])
+                } else {
+                    "\\\\network-share".to_string()
+                };
+                let clean_id = format!(
+                    "mount-{}",
+                    share_root.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "_")
+                );
+                let name = format!("Network Storage ({})", share_root);
+                (clean_id, name, share_root, "nas_array".to_string(), "ZFS".to_string())
+            } else if path.starts_with('/') {
+                let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+                let root_str = if parts.len() >= 2 && parts[0] == "Volumes" {
+                    format!("/Volumes/{}", parts[1])
+                } else if !parts.is_empty() {
+                    format!("/{}", parts[0])
+                } else {
+                    "/".to_string()
+                };
+                let clean_id = format!(
+                    "mount-{}",
+                    root_str.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "_")
+                );
+                let name = format!("Storage Volume ({})", root_str);
+                (clean_id, name, root_str, "local_disk".to_string(), "APFS".to_string())
+            } else {
+                (
+                    "mount-local".to_string(),
+                    "Local Storage".to_string(),
+                    raw_path.clone(),
+                    "local_disk".to_string(),
+                    "NTFS".to_string(),
+                )
+            }
+        };
+
+        // 4. Upsert this new storage mount into database
+        let new_mount = DbStorageMount {
+            id: mount_id.clone(),
+            name: mount_name,
+            mount_path,
+            r#type: mount_type,
+            file_system,
+            total_bytes: 1_000_000_000_000,
+            used_bytes: 450_000_000_000,
+            is_read_only_locked: false,
+            status: "online".to_string(),
+            health_score: "healthy".to_string(),
+            smart_ok: true,
+            temp_celsius: 34.0,
+            last_seen_timestamp: Utc::now().to_rfc3339(),
+        };
+
+        Self::upsert_storage_mount(conn, &new_mount)?;
+        Ok(mount_id)
     }
 
     // Watched Folders
     pub fn get_watched_folders(conn: &Connection) -> Result<Vec<DbWatchedFolder>> {
         let mut stmt = conn.prepare(
-            "SELECT id, mount_id, folder_path, display_name, scan_mode, ignore_patterns, is_enabled, last_scanned_timestamp
-             FROM watched_folders ORDER BY folder_path ASC",
+            "SELECT wf.id, wf.mount_id, wf.folder_path, wf.display_name, wf.scan_mode, wf.ignore_patterns, wf.is_enabled, wf.last_scanned_timestamp,
+             (SELECT COUNT(*) FROM tracks t WHERE t.file_path LIKE wf.folder_path || '%') AS track_count
+             FROM watched_folders wf ORDER BY wf.folder_path ASC",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -231,6 +415,7 @@ impl DbOperations {
                 ignore_patterns: row.get(5)?,
                 is_enabled: row.get::<_, i32>(6)? != 0,
                 last_scanned_timestamp: row.get(7)?,
+                track_count: row.get(8).ok(),
             })
         })?;
 
@@ -242,6 +427,17 @@ impl DbOperations {
     }
 
     pub fn upsert_watched_folder(conn: &Connection, folder: &DbWatchedFolder) -> Result<()> {
+        let valid_mount_id = Self::ensure_mount_for_path(conn, &folder.folder_path, Some(&folder.mount_id))?;
+
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM watched_folders WHERE folder_path = ?1 LIMIT 1",
+                params![folder.folder_path],
+                |r| r.get(0),
+            )
+            .ok();
+        let target_id = existing_id.unwrap_or_else(|| folder.id.clone());
+
         conn.execute(
             "INSERT INTO watched_folders (
                 id, mount_id, folder_path, display_name, scan_mode, ignore_patterns, is_enabled, last_scanned_timestamp
@@ -255,8 +451,8 @@ impl DbOperations {
                 is_enabled=excluded.is_enabled,
                 last_scanned_timestamp=excluded.last_scanned_timestamp",
             params![
-                folder.id,
-                folder.mount_id,
+                target_id,
+                valid_mount_id,
                 folder.folder_path,
                 folder.display_name,
                 folder.scan_mode,
@@ -274,12 +470,20 @@ impl DbOperations {
     }
 
     // Releases
-    pub fn get_releases(conn: &Connection) -> Result<Vec<DbRelease>> {
-        let mut stmt = conn.prepare(
+    pub fn get_releases(conn: &Connection, only_online: Option<bool>) -> Result<Vec<DbRelease>> {
+        let sql = if only_online.unwrap_or(false) {
+            "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
+                    r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path, r.created_at
+             FROM releases r
+             WHERE r.id IN (SELECT DISTINCT release_id FROM tracks WHERE is_online = 1)
+             ORDER BY r.title ASC"
+        } else {
             "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
                     release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path, created_at
-             FROM releases ORDER BY title ASC",
-        )?;
+             FROM releases ORDER BY title ASC"
+        };
+
+        let mut stmt = conn.prepare(sql)?;
 
         let rows = stmt.query_map([], |row| {
             Ok(DbRelease {
@@ -318,12 +522,12 @@ impl DbOperations {
                     folder_path=excluded.folder_path,
                     folder_name=excluded.folder_name,
                     artist_credit=excluded.artist_credit,
-                    composer_name=excluded.composer_name,
-                    release_year=excluded.release_year,
-                    genre_tags=excluded.genre_tags,
-                    front_cover_url=excluded.front_cover_url,
-                    backdrop_url=excluded.backdrop_url,
-                    target_folder_path=excluded.target_folder_path",
+                    composer_name=COALESCE(excluded.composer_name, releases.composer_name),
+                    release_year=COALESCE(excluded.release_year, releases.release_year),
+                    genre_tags=COALESCE(excluded.genre_tags, releases.genre_tags),
+                    front_cover_url=COALESCE(excluded.front_cover_url, releases.front_cover_url),
+                    backdrop_url=COALESCE(excluded.backdrop_url, releases.backdrop_url),
+                    target_folder_path=COALESCE(excluded.target_folder_path, releases.target_folder_path)",
             )?;
 
             for rel in releases {
@@ -348,33 +552,33 @@ impl DbOperations {
     }
 
     // Tracks
-    pub fn get_tracks(conn: &Connection, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<DbTrack>> {
-        let sql = match (limit, offset) {
-            (Some(l), Some(o)) => format!(
-                "SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
-                        file_size, mtime, title, artist_credit, album_title, release_year, track_number,
-                        genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
-                        dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
-                        work_title, movement_number, movement_title, created_at
-                 FROM tracks ORDER BY album_title ASC, track_number ASC LIMIT {} OFFSET {}",
-                l, o
-            ),
-            (Some(l), None) => format!(
-                "SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
-                        file_size, mtime, title, artist_credit, album_title, release_year, track_number,
-                        genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
-                        dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
-                        work_title, movement_number, movement_title, created_at
-                 FROM tracks ORDER BY album_title ASC, track_number ASC LIMIT {}",
-                l
-            ),
-            _ => "SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
-                        file_size, mtime, title, artist_credit, album_title, release_year, track_number,
-                        genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
-                        dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
-                        work_title, movement_number, movement_title, created_at
-                 FROM tracks ORDER BY album_title ASC, track_number ASC".to_string(),
+    pub fn get_tracks(
+        conn: &Connection,
+        limit: Option<i64>,
+        offset: Option<i64>,
+        only_online: Option<bool>,
+    ) -> Result<Vec<DbTrack>> {
+        let where_clause = if only_online.unwrap_or(false) {
+            "WHERE is_online = 1"
+        } else {
+            ""
         };
+
+        let pagination_clause = match (limit, offset) {
+            (Some(l), Some(o)) => format!("LIMIT {} OFFSET {}", l, o),
+            (Some(l), None) => format!("LIMIT {}", l),
+            _ => "".to_string(),
+        };
+
+        let sql = format!(
+            "SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
+                    file_size, mtime, title, artist_credit, album_title, release_year, track_number,
+                    genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
+                    dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
+                    work_title, movement_number, movement_title, created_at
+             FROM tracks {} ORDER BY album_title ASC, track_number ASC {}",
+            where_clause, pagination_clause
+        );
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
@@ -419,7 +623,29 @@ impl DbOperations {
         Ok(tracks)
     }
 
+    pub fn get_offline_counts(conn: &Connection) -> Result<(i64, i64)> {
+        let mut stmt_trk = conn.prepare("SELECT COUNT(*) FROM tracks WHERE is_online = 0")?;
+        let offline_tracks: i64 = stmt_trk.query_row([], |r| r.get(0))?;
+
+        let mut stmt_rel = conn.prepare(
+            "SELECT COUNT(*) FROM releases WHERE id NOT IN (SELECT DISTINCT release_id FROM tracks WHERE is_online = 1)"
+        )?;
+        let offline_releases: i64 = stmt_rel.query_row([], |r| r.get(0))?;
+
+        Ok((offline_tracks, offline_releases))
+    }
+
     pub fn upsert_tracks_batch(conn: &mut Connection, tracks: &[DbTrack]) -> Result<()> {
+        // Pre-resolve and ensure all referenced mounts exist in storage_mounts
+        let mut resolved_mounts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for t in tracks {
+            if !resolved_mounts.contains_key(&t.mount_id) {
+                let valid_id = Self::ensure_mount_for_path(conn, &t.folder_path, Some(&t.mount_id))
+                    .unwrap_or_else(|_| t.mount_id.clone());
+                resolved_mounts.insert(t.mount_id.clone(), valid_id);
+            }
+        }
+
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
@@ -461,10 +687,11 @@ impl DbOperations {
             )?;
 
             for t in tracks {
+                let mount_id = resolved_mounts.get(&t.mount_id).unwrap_or(&t.mount_id);
                 stmt.execute(params![
                     t.id,
                     t.release_id,
-                    t.mount_id,
+                    mount_id,
                     t.folder_path,
                     t.folder_name,
                     t.file_path,
