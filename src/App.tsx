@@ -19,6 +19,7 @@ import {
   AlertTriangle,
   RefreshCw,
   Server,
+  Smartphone,
 } from 'lucide-react'
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
@@ -49,6 +50,7 @@ import { ActivityCenterPopover } from './components/CommandBar/ActivityCenterPop
 import { StorageManagerModal } from './components/Modals/StorageManagerModal'
 import { QuarantineLogModal } from './components/Modals/QuarantineLogModal'
 import { NormalizationRulesModal } from './components/Modals/NormalizationRulesModal'
+import { MobileRemoteModal } from './components/Modals/MobileRemoteModal'
 import { MaintainCockpit, MaintainSubTab } from './components/Maintain/MaintainCockpit'
 import { FocusedWorkbench } from './components/CenterStage/FocusedWorkbench'
 import { SanctuaryListeningLounge } from './components/AudioPlayer/SanctuaryListeningLounge'
@@ -96,6 +98,7 @@ function AppContent() {
   const [isStorageManagerOpen, setIsStorageManagerOpen] = useState(false)
   const [isQuarantineModalOpen, setIsQuarantineModalOpen] = useState(false)
   const [isNormalizationRulesModalOpen, setIsNormalizationRulesModalOpen] = useState(false)
+  const [isRemoteModalOpen, setIsRemoteModalOpen] = useState(false)
   const [scanTelemetry, setScanTelemetry] = useState<ScanProgressPayload>({
     stage: 'idle',
     processedCount: 0,
@@ -1330,6 +1333,15 @@ function AppContent() {
               ⌘K
             </span>
           </button>
+
+          <button
+            onClick={() => setIsRemoteModalOpen(true)}
+            title="Cadence Mobile Remote (Couch Controller QR Code)"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-xs font-mono text-cyan-400 hover:text-white transition-all shadow-sm cursor-pointer"
+          >
+            <Smartphone className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden md:inline">Remote</span>
+          </button>
         </div>
       </header>
 
@@ -1764,7 +1776,16 @@ function AppContent() {
 
 
       {/* Audiophile Now Playing Player Dock */}
-      <NowPlayingBar onOpenSanctuary={() => setIsSanctuaryOpen(true)} />
+      <NowPlayingBar
+        onOpenSanctuary={() => setIsSanctuaryOpen(true)}
+        onOpenRemoteModal={() => setIsRemoteModalOpen(true)}
+      />
+
+      {/* Cadence Mobile Remote QR Pairing Modal */}
+      <MobileRemoteModal
+        isOpen={isRemoteModalOpen}
+        onClose={() => setIsRemoteModalOpen(false)}
+      />
 
       {/* Audiophile Sanctuary Listening Lounge Overlay */}
       <SanctuaryListeningLounge

@@ -633,6 +633,82 @@ class TauriBridgeService {
     }
     return null
   }
+
+  // --- Remote Mobile Controller IPC ---
+
+  public async getRemoteServerInfo(): Promise<RemoteServerStatus | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<RemoteServerStatus>('get_remote_server_info')
+      } catch (err) {
+        console.error('[TauriBridge] get_remote_server_info error:', err)
+        return null
+      }
+    }
+    return {
+      enabled: true,
+      port: 4040,
+      primaryIp: '127.0.0.1',
+      computerName: 'CADENCE-DEV',
+      mDnsHost: 'cadence-dev.local',
+      pairingToken: '4242',
+      interfaces: [{ name: 'Wi-Fi', ip: '127.0.0.1', isRecommended: true }],
+      connectedClients: 0,
+      qrUrl: 'http://127.0.0.1:4040/?token=4242',
+    }
+  }
+
+  public async regeneratePairingToken(): Promise<string | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<string>('regenerate_pairing_token')
+      } catch (err) {
+        console.error('[TauriBridge] regenerate_pairing_token error:', err)
+        return null
+      }
+    }
+    return '4242'
+  }
+
+  public async syncDesktopQueueToRemote(items: any[], currentIndex: number): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        const payload = items.map((t) => ({
+          id: t.id || t.filePath,
+          title: t.title || 'Unknown',
+          artist: t.artist || t.artistCredit || 'Unknown Artist',
+          album: t.album || t.albumTitle || 'Unknown Album',
+          filePath: t.filePath,
+          durationSecs: t.durationSecs || 0,
+          format: t.format || 'AUDIO',
+          sampleRate: t.sampleRate,
+          bitDepth: t.bitDepth,
+          isHighRes: Boolean(t.isHighRes),
+        }))
+        await invoke('sync_desktop_queue_to_remote', { items: payload, currentIndex })
+      } catch (err) {
+        console.error('[TauriBridge] sync_desktop_queue_to_remote error:', err)
+      }
+    }
+  }
+}
+
+export interface LanInterfaceInfo {
+  name: string
+  ip: string
+  isRecommended: boolean
+}
+
+export interface RemoteServerStatus {
+  enabled: boolean
+  port: number
+  primaryIp: string
+  computerName: string
+  mDnsHost: string
+  pairingToken: string
+  interfaces: LanInterfaceInfo[]
+  connectedClients: number
+  qrUrl: string
 }
 
 export const tauriBridge = new TauriBridgeService()

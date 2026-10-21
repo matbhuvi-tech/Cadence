@@ -1,11 +1,13 @@
 pub mod audio;
 pub mod commands;
 pub mod db;
+pub mod remote;
 pub mod scanner;
 
 use audio::AudioEngine;
 use commands::audio::*;
 use commands::library::*;
+use commands::remote::*;
 use commands::scanner::*;
 use db::AppDb;
 use scanner::ScannerController;
@@ -14,6 +16,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let audio_engine = AudioEngine::new();
+    let engine_for_remote = audio_engine.clone();
     let scanner_controller = ScannerController::new();
 
     tauri::Builder::default()
@@ -22,12 +25,31 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(audio_engine)
         .manage(scanner_controller)
-        .setup(|app| {
+        .setup(move |app| {
             let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let db_path = app_data_dir.join("cadence.db");
             println!("[Cadence Core] Initializing SQLite database at: {:?}", db_path);
             let app_db = AppDb::new(db_path).expect("Failed to initialize SQLite database");
+
+            let artwork_cache_dir = app_data_dir.join("cache").join("artwork");
+            let token_path = app_data_dir.join("remote_token.txt");
+            let remote_state = std::sync::Arc::new(crate::remote::RemoteState::new(
+                engine_for_remote.clone(),
+                app_db.clone(),
+                artwork_cache_dir,
+                token_path,
+            ));
+            remote_state.set_app_handle(app.handle().clone());
+
+            let remote_state_for_server = std::sync::Arc::clone(&remote_state);
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::remote::start_remote_server(remote_state_for_server, 4040).await {
+                    eprintln!("[Cadence Remote] Could not launch server: {}", e);
+                }
+            });
+
             app.manage(app_db);
+            app.manage(remote_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -48,6 +70,10 @@ pub fn run() {
             scan_directory_native,
             read_cover_art_base64,
             commit_track_tags_native,
+            // Remote Mobile Controller commands
+            get_remote_server_info,
+            regenerate_pairing_token,
+            sync_desktop_queue_to_remote,
             // SQLite Library & Storage commands
             check_storage_mounts_accessibility,
             check_path_accessible,

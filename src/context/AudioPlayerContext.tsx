@@ -75,14 +75,34 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   useEffect(() => {
     stateRef.current = { queue, queueIndex, repeatMode, isShuffle, currentTrack }
+    tauriBridge.syncDesktopQueueToRemote(queue, queueIndex)
   }, [queue, queueIndex, repeatMode, isShuffle, currentTrack])
 
-  // Detect environment on mount & load audio devices & purity mode
+  // Detect environment on mount & load audio devices & purity mode & listen to Remote Controller events
   useEffect(() => {
     const tauri = tauriBridge.isTauri()
     setIsNativeTauri(tauri)
     tauriBridge.getPurityMode().then((p) => setIsPurityMode(p))
     refreshDevices()
+
+    if (tauri) {
+      import('@tauri-apps/api/event').then(({ listen }) => {
+        listen<any>('cadence:remote-state-changed', (event) => {
+          const data = event.payload
+          if (data) {
+            if (data.isPlaying !== undefined) setIsPlaying(Boolean(data.isPlaying))
+            if (data.isPaused !== undefined) setIsPaused(Boolean(data.isPaused))
+            if (data.positionSecs !== undefined) setCurrentTime(data.positionSecs)
+            if (data.durationSecs !== undefined) setDuration(data.durationSecs)
+            if (data.volume !== undefined) setVolumeState(data.volume)
+            if (data.isPurityMode !== undefined) setIsPurityMode(data.isPurityMode)
+            if (data.isBitPerfect !== undefined) setIsBitPerfect(data.isBitPerfect)
+            if (data.activeDevice) setActiveDevice(data.activeDevice)
+            if (data.streamInfo) setStreamTelemetry(data.streamInfo)
+          }
+        }).catch(() => {})
+      }).catch(() => {})
+    }
   }, [])
 
   // Poll position and status for native Tauri playback

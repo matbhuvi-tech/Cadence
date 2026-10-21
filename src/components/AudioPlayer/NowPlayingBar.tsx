@@ -15,15 +15,20 @@ import {
   Maximize2,
   ShieldCheck,
   Wifi,
+  Smartphone,
 } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 
 interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
+  onOpenRemoteModal?: () => void
 }
 
-export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({ onOpenSanctuary }) => {
+export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
+  onOpenSanctuary,
+  onOpenRemoteModal,
+}) => {
   const {
     currentTrack,
     currentRelease,
@@ -239,6 +244,16 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({ onOpenSanctuary })
               />
             ))}
           </div>
+
+          {/* Mobile Remote Controller Pairing Button */}
+          <button
+            onClick={() => onOpenRemoteModal?.()}
+            title="Mobile Remote: Scan QR to control Cadence from iPhone / Android"
+            className="flex items-center gap-1 px-2 py-1 rounded-lg border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 text-[10px] font-mono font-bold transition-all cursor-pointer shadow-sm shadow-cyan-500/10 active:scale-95"
+          >
+            <Smartphone className="w-3 h-3 text-cyan-400" />
+            <span className="hidden lg:inline">REMOTE</span>
+          </button>
 
           {/* Bit-Perfect Purity Mode Master Toggle */}
           <button
