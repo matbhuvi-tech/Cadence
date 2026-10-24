@@ -1,4 +1,5 @@
 import { storagePersistence } from '../core/storagePersistence'
+import { splitMultiArtistCredits, setTaxonomyNormalizationDelegate } from '../core/taxonomyUtils'
 
 export type NormalizationField = 'artist' | 'composer' | 'genre' | 'all'
 
@@ -58,8 +59,127 @@ export class NormalizationService {
       console.warn('[NormalizationService] Failed to load rules from localStorage:', e)
     }
 
+    this.sanitizeRules()
     this.initialized = true
     return Array.from(this.rules.values())
+  }
+
+  /**
+   * Simple Levenshtein distance for string edit comparison.
+   */
+  public levenshtein(a: string, b: string): number {
+    const an = a ? a.length : 0
+    const bn = b ? b.length : 0
+    if (an === 0) return bn
+    if (bn === 0) return an
+    const matrix = new Array<number[]>(bn + 1)
+    for (let i = 0; i <= bn; ++i) {
+      const row = (matrix[i] = new Array<number>(an + 1))
+      row[0] = i
+    }
+    const firstRow = matrix[0]
+    for (let j = 1; j <= an; ++j) {
+      firstRow[j] = j
+    }
+    for (let i = 1; i <= bn; ++i) {
+      for (let j = 1; j <= an; ++j) {
+        if (b.charAt(i - 1) === a.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1]
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1, // substitution
+            Math.min(
+              matrix[i][j - 1] + 1, // insertion
+              matrix[i - 1][j] + 1 // deletion
+            )
+          )
+        }
+      }
+    }
+    return matrix[bn][an]
+  }
+
+  /**
+   * Checks whether two names are plausible spelling, spacing, punctuation,
+   * or transliteration variants of the same entity rather than two distinct people.
+   */
+  public isPlausibleVariant(source: string, target: string): boolean {
+    if (!source || !target) return false
+    const sTrim = source.trim()
+    const tTrim = target.trim()
+    if (sTrim.toLowerCase() === tTrim.toLowerCase()) return true
+
+    // Multi-artist collaboration credit check (e.g. "A. R. Rahman, Anuradha Sriram & Anupama" vs "A. R. Rahman")
+    // A collaboration or ensemble credit is NEVER a spelling/typo variant of a single individual artist.
+    const sArtists = splitMultiArtistCredits(sTrim)
+    const tArtists = splitMultiArtistCredits(tTrim)
+
+    if ((sArtists.length > 1 && tArtists.length <= 1) || (tArtists.length > 1 && sArtists.length <= 1)) {
+      return false
+    }
+
+    if (sArtists.length > 1 && tArtists.length > 1) {
+      if (sArtists.length !== tArtists.length) return false
+      const sNames = sArtists.map((a) => this.normalizeKey(a.name)).sort()
+      const tNames = tArtists.map((a) => this.normalizeKey(a.name)).sort()
+      return sNames.every((sn, idx) => sn === tNames[idx] || this.levenshtein(sn, tNames[idx]) <= 2)
+    }
+
+    const sNorm = this.normalizeKey(sTrim)
+    const tNorm = this.normalizeKey(tTrim)
+    if (sNorm === tNorm) return true
+
+    const sTokens = sTrim.toLowerCase().split(/[\s,./&+\-_]+/).filter(Boolean)
+    const tTokens = tTrim.toLowerCase().split(/[\s,./&+\-_]+/).filter(Boolean)
+
+    // Token subset / permutation check (e.g. "Ilaiyaraaja" vs "Ilaiyaraaja Master" or "Rahman, A. R." vs "A. R. Rahman")
+    if (sTokens.length > 0 && tTokens.length > 0) {
+      if (sTokens.every((st) => tTokens.includes(st)) || tTokens.every((tt) => sTokens.includes(tt))) {
+        return true
+      }
+    }
+
+    // Initials / abbreviation expansion check (e.g. "A. Rahman" vs "A. R. Rahman")
+    if (this.checkInitialsVariant(sTokens, tTokens)) return true
+
+    // Edit distance check for genuine typos and transliterations (e.g. Ilaiyaraaja vs Ilayaraja)
+    const dist = this.levenshtein(sNorm, tNorm)
+    const maxLen = Math.max(sNorm.length, tNorm.length)
+    if (dist <= 2 || (maxLen >= 8 && dist <= 3 && dist / maxLen <= 0.25)) return true
+
+    return false
+  }
+
+  private checkInitialsVariant(sTokens: string[], tTokens: string[]): boolean {
+    if (sTokens.length === 0 || tTokens.length === 0) return false
+    const sLong = sTokens.filter((t) => t.length >= 3)
+    const tLong = tTokens.filter((t) => t.length >= 3)
+    if (sLong.length === 0 || tLong.length === 0) return false
+    if ([...sLong].sort().join(' ') !== [...tLong].sort().join(' ')) return false
+
+    const sShort = sTokens.filter((t) => t.length < 3)
+    const tShort = tTokens.filter((t) => t.length < 3)
+    const [smaller, larger] = sShort.length <= tShort.length ? [sShort, tShort] : [tShort, sShort]
+    return smaller.every((st) => larger.includes(st))
+  }
+
+  /**
+   * Purges poisoned or invalid rules (e.g. singer names mapped to composer names).
+   */
+  public sanitizeRules(): void {
+    let purged = 0
+    for (const [id, rule] of Array.from(this.rules.entries())) {
+      if (rule.field === 'artist' || rule.field === 'composer' || rule.field === 'all') {
+        if (!this.isPlausibleVariant(rule.sourcePattern, rule.targetValue)) {
+          this.rules.delete(id)
+          purged++
+        }
+      }
+    }
+    if (purged > 0) {
+      console.info(`[NormalizationService] Purged ${purged} invalid cross-entity normalization rules.`)
+      this.saveRules()
+    }
   }
 
   /**
@@ -125,6 +245,22 @@ export class NormalizationService {
       if (existing) return existing
     }
 
+    // Safety guard: Prevent recording distinct entities (e.g. playback singer -> composer) as spelling rules
+    if ((field === 'artist' || field === 'composer') && !this.isPlausibleVariant(sTrim, tTrim)) {
+      console.warn(`[NormalizationService] Ignored implausible normalization rule: "${sTrim}" → "${tTrim}"`)
+      const existing = this.findRuleBySourceAndTarget(sTrim, tTrim, field)
+      if (existing) return existing
+      return {
+        id: `ignored-${Date.now()}`,
+        field,
+        sourcePattern: sTrim,
+        targetValue: tTrim,
+        createdAt: new Date().toISOString(),
+        matchCount: 0,
+        isEnabled: false,
+      }
+    }
+
     const normKeySource = this.normalizeKey(sTrim)
     const normKeyTarget = this.normalizeKey(tTrim)
 
@@ -135,9 +271,7 @@ export class NormalizationService {
         const rNormSource = this.normalizeKey(rule.sourcePattern)
         const rNormTarget = this.normalizeKey(rule.targetValue)
         if (
-          rNormSource === normKeySource ||
-          rNormTarget === normKeySource ||
-          rNormSource === normKeyTarget ||
+          (rNormSource === normKeySource && this.isPlausibleVariant(rule.sourcePattern, sTrim)) ||
           rule.sourcePattern.toLowerCase() === sTrim.toLowerCase()
         ) {
           existingRule = rule
@@ -148,7 +282,7 @@ export class NormalizationService {
 
     if (existingRule) {
       existingRule.targetValue = tTrim
-      if (!existingRule.sourcePattern.toLowerCase().includes(sTrim.toLowerCase())) {
+      if (existingRule.sourcePattern.toLowerCase() === sTrim.toLowerCase()) {
         existingRule.sourcePattern = sTrim
       }
       existingRule.matchCount = (existingRule.matchCount || 0) + 1
@@ -397,3 +531,4 @@ export class NormalizationService {
 }
 
 export const normalizationService = new NormalizationService()
+setTaxonomyNormalizationDelegate(normalizationService)

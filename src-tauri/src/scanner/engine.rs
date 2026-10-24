@@ -703,6 +703,12 @@ impl ScannerController {
                     let _ = DbOperations::upsert_releases_batch(&mut conn, &releases_slice);
                     let _ = DbOperations::upsert_tracks_batch(&mut conn, &pending_tracks);
 
+                    // Populate relational artist credits
+                    for trk in &pending_tracks {
+                        let credits = DbOperations::split_multi_artist_credits(&trk.artist_credit, trk.composer.as_deref());
+                        let _ = DbOperations::upsert_track_artist_credits(&mut conn, &trk.id, &credits);
+                    }
+
                     let _ = app.emit(
                         "library://scan-chunk",
                         &ScanChunkPayload {
@@ -759,6 +765,12 @@ impl ScannerController {
                 let releases_slice: Vec<DbRelease> = pending_releases.values().cloned().collect();
                 let _ = DbOperations::upsert_releases_batch(&mut conn, &releases_slice);
                 let _ = DbOperations::upsert_tracks_batch(&mut conn, &pending_tracks);
+
+                // Populate relational artist credits for final batch
+                for trk in &pending_tracks {
+                    let credits = DbOperations::split_multi_artist_credits(&trk.artist_credit, trk.composer.as_deref());
+                    let _ = DbOperations::upsert_track_artist_credits(&mut conn, &trk.id, &credits);
+                }
 
                 let _ = app.emit(
                     "library://scan-chunk",

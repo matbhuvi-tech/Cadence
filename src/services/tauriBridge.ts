@@ -593,6 +593,53 @@ class TauriBridgeService {
     return [0, 0, 0, 0]
   }
 
+  // --- Canonical Relational Artists ---
+
+  public async dbGetCanonicalArtists(): Promise<any[]> {
+    if (this.isTauri()) {
+      return await invoke<any[]>('db_get_canonical_artists')
+    }
+    return []
+  }
+
+  public async dbGetCanonicalArtistDetail(artistId: string): Promise<any | null> {
+    if (this.isTauri()) {
+      return await invoke<any | null>('db_get_canonical_artist_detail', { artistId })
+    }
+    return null
+  }
+
+  public async dbSetArtistPortrait(
+    artistId: string,
+    portraitUrl: string,
+    status?: string
+  ): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_set_artist_portrait', { artistId, portraitUrl, status })
+    }
+  }
+
+  public async dbBackfillArtistCredits(): Promise<number> {
+    if (this.isTauri()) {
+      return await invoke<number>('db_backfill_artist_credits')
+    }
+    return 0
+  }
+
+  public async dbSearchCatalog(
+    query: string,
+    limit?: number
+  ): Promise<{ albums: any[]; tracks: any[]; artists: any[] }> {
+    if (this.isTauri()) {
+      return await invoke<{ albums: any[]; tracks: any[]; artists: any[] }>('db_search_catalog', {
+        query,
+        limit,
+      })
+    }
+    return { albums: [], tracks: [], artists: [] }
+  }
+
+
   // --- Scanner Controls & Real-time Events ---
 
   public async startLibraryScan(
@@ -691,6 +738,295 @@ class TauriBridgeService {
       }
     }
   }
+
+  public async getMaintenanceStats(): Promise<MaintenanceStats | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<MaintenanceStats>('get_maintenance_stats')
+      } catch (err) {
+        console.error('[TauriBridge] get_maintenance_stats error:', err)
+        return null
+      }
+    }
+    return {
+      isRunning: false,
+      isIdle: true,
+      statusMessage: 'Ready',
+      cachedCount: 0,
+      notFoundCount: 0,
+      failedCount: 0,
+      totalItems: 0,
+      pendingItems: 0,
+    }
+  }
+
+  public async getPortraitSyncStats(): Promise<PortraitSyncProgressPayload | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<PortraitSyncProgressPayload>('get_portrait_sync_stats')
+      } catch (err) {
+        console.error('[TauriBridge] get_portrait_sync_stats error:', err)
+        return null
+      }
+    }
+    return {
+      state: 'complete',
+      completed: 0,
+      total: 0,
+      pending: 0,
+      nextInQueue: [],
+    }
+  }
+
+  public async toggleMaintenancePause(): Promise<boolean> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<boolean>('toggle_maintenance_pause')
+      } catch (err) {
+        console.error('[TauriBridge] toggle_maintenance_pause error:', err)
+        return false
+      }
+    }
+    return false
+  }
+
+  public async forceEnrichNow(): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('force_enrich_now')
+      } catch (err) {
+        console.error('[TauriBridge] force_enrich_now error:', err)
+      }
+    }
+  }
+
+  public async notifyArtistPortraitResolved(
+    artistId: string,
+    artistName: string,
+    portraitUrl: string,
+    providerInfo: string
+  ): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('notify_artist_portrait_resolved', {
+          artistId,
+          artistName,
+          portraitUrl,
+          providerInfo,
+        })
+      } catch (err) {
+        console.error('[TauriBridge] notify_artist_portrait_resolved error:', err)
+      }
+    }
+  }
+
+  public async onPortraitSyncProgress(
+    callback: (payload: PortraitSyncProgressPayload) => void
+  ): Promise<() => void> {
+    if (this.isTauri()) {
+      try {
+        const { listen } = await import('@tauri-apps/api/event')
+        const unlisten = await listen<PortraitSyncProgressPayload>(
+          'portrait-sync-progress',
+          (event) => {
+            callback(event.payload)
+          }
+        )
+        return unlisten
+      } catch (err) {
+        console.error('[TauriBridge] onPortraitSyncProgress error:', err)
+      }
+    }
+    return () => {}
+  }
+
+  public async onPortraitEnriched(
+    callback: (payload: { artistId: string; artistName: string; portraitUrl: string; provider?: string }) => void
+  ): Promise<() => void> {
+    if (this.isTauri()) {
+      try {
+        const { listen } = await import('@tauri-apps/api/event')
+        const unlisten = await listen<{ artistId: string; artistName: string; portraitUrl: string; provider?: string }>(
+          'portrait-enriched',
+          (event) => {
+            callback(event.payload)
+          }
+        )
+        return unlisten
+      } catch (err) {
+        console.error('[TauriBridge] onPortraitEnriched error:', err)
+      }
+    }
+    return () => {}
+  }
+
+  // ==========================================
+  // Audiophile Gapless & Clock Settling
+  // ==========================================
+
+  public async prepareNextTrack(filePath: string): Promise<boolean> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<boolean>('prepare_next_track', { filePath })
+      } catch (err) {
+        console.warn('[TauriBridge] prepare_next_track failed:', err)
+        return false
+      }
+    }
+    return false
+  }
+
+  public async invalidateNextTrack(): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('invalidate_next_track')
+      } catch (err) {
+        console.warn('[TauriBridge] invalidate_next_track error:', err)
+      }
+    }
+  }
+
+  public async setSettlingDelayMs(delayMs: number): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('set_settling_delay_ms', { delayMs })
+      } catch (err) {
+        console.warn('[TauriBridge] set_settling_delay_ms error:', err)
+      }
+    }
+  }
+
+  // ==========================================
+  // Playlists SQLite Integration
+  // ==========================================
+
+  public async dbGetPlaylists(): Promise<any[]> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<any[]>('db_get_playlists')
+      } catch (err) {
+        console.error('[TauriBridge] db_get_playlists error:', err)
+        return []
+      }
+    }
+    return []
+  }
+
+  public async dbGetPlaylistDetails(playlistId: string): Promise<any | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<any | null>('db_get_playlist_details', { playlistId })
+      } catch (err) {
+        console.error('[TauriBridge] db_get_playlist_details error:', err)
+        return null
+      }
+    }
+    return null
+  }
+
+  public async dbCreatePlaylist(params: {
+    id: string
+    title: string
+    description?: string
+    coverArtUrl?: string
+    tags?: string
+    listeningNotes?: string
+    trackIds: string[]
+  }): Promise<any> {
+    if (this.isTauri()) {
+      return await invoke<any>('db_create_playlist', {
+        id: params.id,
+        title: params.title,
+        description: params.description,
+        coverArtUrl: params.coverArtUrl,
+        tags: params.tags,
+        listeningNotes: params.listeningNotes,
+        trackIds: params.trackIds,
+      })
+    }
+    return {
+      id: params.id,
+      title: params.title,
+      description: params.description,
+      coverArtUrl: params.coverArtUrl,
+      tags: params.tags,
+      listeningNotes: params.listeningNotes,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tracksCount: params.trackIds.length,
+      totalDurationSecs: 0,
+      formatBreakdown: '',
+    }
+  }
+
+  public async dbUpdatePlaylist(params: {
+    id: string
+    title: string
+    description?: string
+    coverArtUrl?: string
+    tags?: string
+    listeningNotes?: string
+  }): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_update_playlist', {
+        id: params.id,
+        title: params.title,
+        description: params.description,
+        coverArtUrl: params.coverArtUrl,
+        tags: params.tags,
+        listeningNotes: params.listeningNotes,
+      })
+    }
+  }
+
+  public async dbDeletePlaylist(id: string): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_delete_playlist', { id })
+    }
+  }
+
+  public async dbAddTracksToPlaylist(playlistId: string, trackIds: string[]): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_add_tracks_to_playlist', { playlistId, trackIds })
+    }
+  }
+
+  public async dbRemoveTrackFromPlaylist(playlistId: string, position: number): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_remove_track_from_playlist', { playlistId, position })
+    }
+  }
+
+  public async dbReorderPlaylistTracks(playlistId: string, trackIds: string[]): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_reorder_playlist_tracks', { playlistId, trackIds })
+    }
+  }
+}
+
+export interface PortraitSyncProgressPayload {
+  state: 'active' | 'cooldown' | 'paused_playback' | 'complete' | 'user_paused'
+  completed: number
+  total: number
+  pending: number
+  cooldownRemainingSecs?: number
+  currentArtistId?: string
+  currentArtistName?: string
+  resolvedPortraitUrl?: string
+  providerInfo?: string
+  nextInQueue: string[]
+}
+
+export interface MaintenanceStats {
+  isRunning: boolean
+  isIdle: boolean
+  statusMessage: string
+  cachedCount: number
+  notFoundCount: number
+  failedCount: number
+  totalItems: number
+  pendingItems: number
+  lastProcessedItem?: string
 }
 
 export interface LanInterfaceInfo {

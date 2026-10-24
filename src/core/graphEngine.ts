@@ -22,6 +22,7 @@ import {
   matchesEra,
   matchesFormat,
   detectLanguage,
+  KNOWN_COMPOSERS,
 } from './taxonomyUtils'
 import { normalizationService } from '../services/normalizationService'
 
@@ -120,7 +121,21 @@ export class RelationalGraphEngine {
     this.auditIssues.clear()
 
     data.tracks.forEach((t) => this.tracks.set(t.id, t))
-    data.releases.forEach((r) => this.releases.set(r.id, r))
+
+    const releaseTrackCounts = new Map<string, number>()
+    data.tracks.forEach((t) => {
+      if (t.releaseId) {
+        releaseTrackCounts.set(t.releaseId, (releaseTrackCounts.get(t.releaseId) || 0) + 1)
+      }
+    })
+
+    data.releases.forEach((r) => {
+      const computed = releaseTrackCounts.get(r.id)
+      if (computed !== undefined && computed > 0) {
+        r.tracksCount = computed
+      }
+      this.releases.set(r.id, r)
+    })
     data.works.forEach((w) => this.works.set(w.id, w))
 
     if (data.auditIssues && data.auditIssues.length > 0) {
@@ -276,6 +291,114 @@ export class RelationalGraphEngine {
 
   public getAllAuditIssues(): AuditIssue[] {
     return Array.from(this.auditIssues.values())
+  }
+
+  /**
+   * Fast, in-memory zero-latency search across releases, tracks, and persons/composers.
+   * Runs in <1ms without disk I/O, preserving audiophile bus silence during playback.
+   */
+  public searchCatalog(
+    query: string,
+    limitPerCategory: number = 5
+  ): {
+    albums: Release[]
+    tracks: Track[]
+    artists: { id: string; name: string; role: 'Composer' | 'Artist'; albumsCount: number; tracksCount: number; portraitUrl?: string }[]
+  } {
+    const q = (query || '').trim().toLowerCase()
+    if (!q) {
+      return { albums: [], tracks: [], artists: [] }
+    }
+
+    const albums: Release[] = []
+    for (const rel of this.releases.values()) {
+      if (
+        rel.title.toLowerCase().includes(q) ||
+        (rel.artistCredit && rel.artistCredit.toLowerCase().includes(q)) ||
+        (rel.composerName && rel.composerName.toLowerCase().includes(q)) ||
+        (rel.folderName && rel.folderName.toLowerCase().includes(q))
+      ) {
+        albums.push(rel)
+        if (albums.length >= limitPerCategory) break
+      }
+    }
+
+    const tracks: Track[] = []
+    for (const track of this.tracks.values()) {
+      if (
+        track.title.toLowerCase().includes(q) ||
+        (track.artistCredit && track.artistCredit.toLowerCase().includes(q)) ||
+        (track.composerName && track.composerName.toLowerCase().includes(q)) ||
+        (track.workTitle && track.workTitle.toLowerCase().includes(q)) ||
+        (track.movementTitle && track.movementTitle.toLowerCase().includes(q))
+      ) {
+        tracks.push(track)
+        if (tracks.length >= limitPerCategory) break
+      }
+    }
+
+    const artists: { id: string; name: string; role: 'Composer' | 'Artist'; albumsCount: number; tracksCount: number; portraitUrl?: string }[] = []
+    const seenNames = new Set<string>()
+
+    for (const person of this.persons.values()) {
+      if (
+        person.name.toLowerCase().includes(q) ||
+        (person.sortName && person.sortName.toLowerCase().includes(q))
+      ) {
+        seenNames.add(person.name.toLowerCase())
+        const relCount = Array.from(this.releases.values()).filter(
+          (r) => (r.composerName && r.composerName.toLowerCase().includes(person.name.toLowerCase())) ||
+                 (r.artistCredit && r.artistCredit.toLowerCase().includes(person.name.toLowerCase()))
+        ).length
+        const trkCount = Array.from(this.tracks.values()).filter(
+          (t) => (t.composerName && t.composerName.toLowerCase().includes(person.name.toLowerCase())) ||
+                 (t.artistCredit && t.artistCredit.toLowerCase().includes(person.name.toLowerCase()))
+        ).length
+
+        artists.push({
+          id: person.id,
+          name: person.name,
+          role: person.primaryRole === 'composer' ? 'Composer' : 'Artist',
+          albumsCount: relCount,
+          tracksCount: trkCount,
+          portraitUrl: person.avatarUrl,
+        })
+        if (artists.length >= limitPerCategory) break
+      }
+    }
+
+    if (artists.length < limitPerCategory) {
+      for (const comp of KNOWN_COMPOSERS) {
+        if (seenNames.has(comp.canonicalName.toLowerCase())) continue
+        const matches =
+          comp.canonicalName.toLowerCase().includes(q) ||
+          comp.aliases.some((a) => a.toLowerCase().includes(q))
+
+        if (matches) {
+          seenNames.add(comp.canonicalName.toLowerCase())
+          const normName = comp.canonicalName.toLowerCase()
+          const relCount = Array.from(this.releases.values()).filter(
+            (r) => (r.composerName && r.composerName.toLowerCase().includes(normName)) ||
+                   (r.artistCredit && r.artistCredit.toLowerCase().includes(normName))
+          ).length
+          const trkCount = Array.from(this.tracks.values()).filter(
+            (t) => (t.composerName && t.composerName.toLowerCase().includes(normName)) ||
+                   (t.artistCredit && t.artistCredit.toLowerCase().includes(normName))
+          ).length
+
+          artists.push({
+            id: `composer-${comp.key}`,
+            name: comp.canonicalName,
+            role: 'Composer',
+            albumsCount: relCount,
+            tracksCount: trkCount,
+          })
+          if (artists.length >= limitPerCategory) break
+        }
+      }
+    }
+
+    return { albums, tracks, artists }
   }
 
   // Work-Movement Hierarchies
@@ -860,11 +983,23 @@ export class RelationalGraphEngine {
   }
 
   // Filter & Query
-  public filterTracks(filters: FacetFilterState): Track[] {
-    let result = Array.from(this.tracks.values())
+  public filterTracks(filters: FacetFilterState, sourceTracks?: Track[], sourceReleases?: Release[]): Track[] {
+    // If source tracks/releases provided and internal map is empty or stale, rehydrate internal maps
+    if (sourceTracks && sourceTracks.length > 0) {
+      if (this.tracks.size === 0) {
+        sourceTracks.forEach((t) => this.tracks.set(t.id, t))
+      }
+    }
+    if (sourceReleases && sourceReleases.length > 0) {
+      if (this.releases.size === 0) {
+        sourceReleases.forEach((r) => this.releases.set(r.id, r))
+      }
+    }
+
+    let result = sourceTracks && sourceTracks.length > 0 ? [...sourceTracks] : Array.from(this.tracks.values())
 
     // Search query
-    if (filters.searchQuery.trim()) {
+    if (filters.searchQuery && filters.searchQuery.trim()) {
       const q = filters.searchQuery.toLowerCase()
       result = result.filter((t) => {
         const rel = this.releases.get(t.releaseId)
@@ -952,7 +1087,16 @@ export class RelationalGraphEngine {
       } else if (filters.masteringFilter === 'compressed_dr_low') {
         result = result.filter((t) => t.drScore > 0 && t.drScore < 10)
       } else if (filters.masteringFilter === 'high_res_24bit') {
-        result = result.filter((t) => t.sampleRateStr.includes('24/') || t.format === 'DSD')
+        result = result.filter(
+          (t) =>
+            t.sampleRateStr.includes('24/') ||
+            t.sampleRateStr.includes('32/') ||
+            t.format === 'DSD' ||
+            (t.format as string) === 'DSF' ||
+            (t.format as string) === 'DFF' ||
+            t.sampleRateStr.includes('DSD') ||
+            Boolean(t.isHighRes)
+        )
       }
     }
 
@@ -1022,7 +1166,16 @@ export class RelationalGraphEngine {
     const totalStorageBytes = trks.reduce((acc, t) => acc + t.fileSize, 0)
 
     const highResTracks = trks.filter(
-      (t) => t.format === 'DSD' || t.sampleRateStr.includes('192') || t.sampleRateStr.includes('96')
+      (t) =>
+        t.format === 'DSD' ||
+        (t.format as string) === 'DSF' ||
+        (t.format as string) === 'DFF' ||
+        t.sampleRateStr.includes('DSD') ||
+        t.sampleRateStr.includes('24/') ||
+        t.sampleRateStr.includes('32/') ||
+        t.sampleRateStr.includes('192') ||
+        t.sampleRateStr.includes('96') ||
+        Boolean(t.isHighRes)
     ).length
     const highResPercentage = totalTracks > 0 ? Math.round((highResTracks / totalTracks) * 100) : 0
 

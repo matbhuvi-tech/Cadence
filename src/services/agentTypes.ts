@@ -17,6 +17,13 @@ export type AgentToolName =
   | 'reset_filters'
   | 'stage_metadata'
   | 'execute_pipeline'
+  | 'resolve_work_hierarchy'
+  | 'compare_variant_pressings'
+  | 'detect_transcode_anomalies'
+  | 'synthesize_normalization_rule'
+  | 'preview_path_restructure'
+  | 'curate_sonic_session'
+  | 'query_graph'
 
 export type RemediationActionType =
   | 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER'
@@ -99,6 +106,37 @@ export interface ToolArgumentMap {
     commands: AgentActionCommand[]
     stopOnError?: boolean
     atomic?: boolean
+  }
+  resolve_work_hierarchy: {
+    releaseId?: string
+    query?: string
+    strategy?: 'classical_movement' | 'soundtrack_performers' | 'auto'
+  }
+  compare_variant_pressings: {
+    releaseId?: string
+    albumTitle?: string
+  }
+  detect_transcode_anomalies: {
+    scopeTrackIds?: string[]
+    thresholdKhz?: number
+  }
+  synthesize_normalization_rule: {
+    pattern: string
+    canonical: string
+    category: 'artist' | 'genre' | 'composer'
+  }
+  preview_path_restructure: {
+    pattern: string
+  }
+  curate_sonic_session: {
+    minDrScore?: number
+    format?: 'FLAC' | 'DSD' | 'WAV' | string
+    durationMinutes?: number
+    genres?: string[]
+  }
+  query_graph: {
+    filter: Record<string, any>
+    limit?: number
   }
 }
 

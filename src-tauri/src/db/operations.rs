@@ -119,6 +119,118 @@ pub struct StorageAccessibilityReport {
     pub releases_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbArtworkCacheState {
+    pub id: String,
+    pub entity_type: String,
+    pub source_path: String,
+    pub cache_path: Option<String>,
+    pub status: String, // "cached", "not_found", "failed"
+    pub source_mtime: i64,
+    pub file_size: Option<i64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbCanonicalArtist {
+    pub id: String,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub mbid: Option<String>,
+    pub apple_artist_id: Option<String>,
+    pub portrait_url: Option<String>,
+    pub portrait_status: String,
+    pub portrait_checked_at: Option<i64>,
+    pub bio_summary: Option<String>,
+    pub era_active: Option<String>,
+    pub primary_role: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbArtistSummary {
+    pub id: String,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub portrait_url: Option<String>,
+    pub portrait_status: String,
+    pub primary_role: String,
+    pub albums_count: i64,
+    pub tracks_count: i64,
+    pub roles: Vec<String>,
+    pub era_active: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbArtistCreditItem {
+    pub track_id: String,
+    pub track_title: String,
+    pub track_number: Option<i32>,
+    pub release_id: String,
+    pub release_title: String,
+    pub release_year: Option<i32>,
+    pub role: String,
+    pub format: String,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub dr_score: Option<i32>,
+    pub duration_secs: f64,
+    pub full_artist_credit: String,
+    pub co_artists: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbArtistDetail {
+    pub artist: DbCanonicalArtist,
+    pub albums_count: i64,
+    pub tracks_count: i64,
+    pub roles: Vec<String>,
+    pub discography: Vec<DbRelease>,
+    pub appearing_tracks: Vec<DbArtistCreditItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbCatalogSearchResults {
+    pub albums: Vec<DbRelease>,
+    pub tracks: Vec<DbTrack>,
+    pub artists: Vec<DbArtistSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbPlaylist {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub cover_art_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub tags: Option<String>,
+    pub listening_notes: Option<String>,
+    #[serde(default)]
+    pub tracks_count: i64,
+    #[serde(default)]
+    pub total_duration_secs: f64,
+    #[serde(default)]
+    pub format_breakdown: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbPlaylistWithTracks {
+    #[serde(flatten)]
+    pub playlist: DbPlaylist,
+    pub tracks: Vec<DbTrack>,
+}
+
 pub fn check_directory_accessible_sync(path_str: &str) -> bool {
     let norm = path_str.replace('/', "\\");
     if norm.starts_with(r"\\") {
@@ -811,5 +923,1101 @@ impl DbOperations {
         let total_mounts: i64 = conn.query_row("SELECT COUNT(*) FROM storage_mounts", [], |r| r.get(0))?;
         let total_skipped: i64 = conn.query_row("SELECT COUNT(*) FROM skipped_files WHERE is_ignored = 0", [], |r| r.get(0))?;
         Ok((total_tracks, total_releases, total_mounts, total_skipped))
+    }
+
+    // --- Artwork Cache State Maintenance ---
+    pub fn upsert_artwork_cache_state(conn: &Connection, state: &DbArtworkCacheState) -> Result<()> {
+        conn.execute(
+            "INSERT INTO artwork_cache_state (
+                id, entity_type, source_path, cache_path, status, source_mtime, file_size, width, height, checked_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                cache_path = excluded.cache_path,
+                status = excluded.status,
+                source_mtime = excluded.source_mtime,
+                file_size = excluded.file_size,
+                width = excluded.width,
+                height = excluded.height,
+                checked_at = excluded.checked_at",
+            params![
+                state.id,
+                state.entity_type,
+                state.source_path,
+                state.cache_path,
+                state.status,
+                state.source_mtime,
+                state.file_size,
+                state.width,
+                state.height,
+                state.checked_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_artwork_cache_state(conn: &Connection, id: &str) -> Result<Option<DbArtworkCacheState>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, entity_type, source_path, cache_path, status, source_mtime, file_size, width, height, checked_at
+             FROM artwork_cache_state WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(DbArtworkCacheState {
+                id: row.get(0)?,
+                entity_type: row.get(1)?,
+                source_path: row.get(2)?,
+                cache_path: row.get(3)?,
+                status: row.get(4)?,
+                source_mtime: row.get(5)?,
+                file_size: row.get(6)?,
+                width: row.get(7)?,
+                height: row.get(8)?,
+                checked_at: row.get(9)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_pending_artwork_releases(conn: &Connection, limit: usize) -> Result<Vec<(String, String, Option<String>)>> {
+        let sql = format!(
+            "SELECT r.id, r.folder_path,
+                    (SELECT t.file_path FROM tracks t WHERE t.release_id = r.id AND t.is_online = 1 LIMIT 1)
+             FROM releases r
+             WHERE r.id NOT IN (SELECT id FROM artwork_cache_state WHERE status IN ('cached', 'not_found', 'failed'))
+             LIMIT {}",
+            limit
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        let mut res = Vec::new();
+        for r in rows {
+            if let Ok(item) = r {
+                res.push(item);
+            }
+        }
+        Ok(res)
+    }
+
+    pub fn get_pending_artwork_tracks(conn: &Connection, limit: usize) -> Result<Vec<(String, String, String, i64)>> {
+        let sql = format!(
+            "SELECT t.id, t.release_id, t.file_path, t.mtime
+             FROM tracks t
+             WHERE t.is_online = 1
+               AND t.has_embedded_art = 1
+               AND t.id NOT IN (SELECT id FROM artwork_cache_state WHERE status IN ('cached', 'not_found', 'failed'))
+               AND (t.release_id IS NULL OR t.release_id = '' OR t.release_id NOT IN (SELECT id FROM artwork_cache_state WHERE status = 'cached'))
+             LIMIT {}",
+            limit
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        let mut res = Vec::new();
+        for r in rows {
+            if let Ok(item) = r {
+                res.push(item);
+            }
+        }
+        Ok(res)
+    }
+
+    pub fn get_artwork_cache_stats(conn: &Connection) -> Result<(i64, i64, i64, i64, i64)> {
+        let total_releases: i64 = conn.query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0)).unwrap_or(0);
+        // Only count loose singles that do not belong to any album release
+        let standalone_singles: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE is_online = 1 AND (release_id IS NULL OR release_id = '' OR release_id NOT IN (SELECT id FROM releases))",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        let total_target = total_releases + standalone_singles;
+
+        let mut stmt = conn.prepare(
+            "SELECT 
+                COALESCE(SUM(CASE WHEN status = 'cached' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'not_found' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+             FROM artwork_cache_state
+             WHERE entity_type = 'release' OR id IN (
+                 SELECT id FROM tracks WHERE is_online = 1 AND (release_id IS NULL OR release_id = '' OR release_id NOT IN (SELECT id FROM releases))
+             )",
+        )?;
+        let (cached, not_found, failed): (i64, i64, i64) = stmt.query_row([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let completed = cached + not_found + failed;
+        let pending = if total_target > completed { total_target - completed } else { 0 };
+
+        Ok((cached, not_found, failed, total_target, pending))
+    }
+
+    pub fn update_release_front_cover_url(conn: &Connection, release_id: &str, cover_url: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE releases SET front_cover_url = ?1 WHERE id = ?2 AND (front_cover_url IS NULL OR front_cover_url = '')",
+            params![cover_url, release_id],
+        )?;
+        Ok(())
+    }
+
+    // --- Relational Artist Methods ---
+
+    pub fn normalize_artist_alias(name: &str) -> String {
+        name.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase()
+    }
+
+    pub fn is_compound_exception(name: &str) -> bool {
+        let norm = Self::normalize_artist_alias(name);
+        if norm.is_empty() {
+            return false;
+        }
+
+        const EXCEPTIONS: &[&str] = &[
+            "simon & garfunkel", "simon and garfunkel",
+            "shankar-ehsaan-loy", "shankar ehsaan loy", "shankar, ehsaan & loy",
+            "salim-sulaiman", "salim sulaiman", "salim & sulaiman",
+            "vishal-shekhar", "vishal shekhar", "vishal & shekhar",
+            "earth, wind & fire", "earth wind & fire", "earth wind and fire",
+            "crosby, stills, nash & young", "crosby, stills & nash",
+            "emerson, lake & palmer", "blood, sweat & tears",
+            "kalyanji-anandji", "kalyanji anandji",
+            "laxmikant-pyarelal", "laxmikant pyarelal",
+            "nadeem-shravan", "nadeem shravan",
+            "jatin-lalit", "jatin lalit",
+            "anand-milind", "anand milind",
+            "sajid-wajid", "sajid wajid",
+            "sachin-jigar", "sachin jigar",
+            "ajay-atul", "ajay atul",
+            "brooks & dunn", "hall & oates", "daryl hall & john oates",
+            "sly & the family stone", "kc & the sunshine band",
+            "katrina and the waves", "huey lewis and the news",
+            "joan jett & the blackhearts", "tom petty and the heartbreakers",
+            "bob marley & the wailers", "iron & wine",
+            "florence + the machine", "florence and the machine",
+            "mumford & sons", "of monsters and men",
+            "king gizzard & the lizard wizard"
+        ];
+
+        for ex in EXCEPTIONS {
+            if norm == Self::normalize_artist_alias(ex) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn split_multi_artist_credits(raw_artist: &str, composer: Option<&str>) -> Vec<(String, String, String, i32)> {
+        let mut credits = Vec::new();
+        let mut order = 0;
+
+        let trimmed_artist = raw_artist.trim();
+        if !trimmed_artist.is_empty() && !trimmed_artist.eq_ignore_ascii_case("unknown artist") && !trimmed_artist.eq_ignore_ascii_case("various artists") {
+            if Self::is_compound_exception(trimmed_artist) {
+                credits.push((trimmed_artist.to_string(), "Primary".to_string(), String::new(), order));
+                order += 1;
+            } else {
+                let lower = trimmed_artist.to_lowercase();
+                let feat_pos = lower.find(" feat. ")
+                    .or_else(|| lower.find(" feat "))
+                    .or_else(|| lower.find(" ft. "))
+                    .or_else(|| lower.find(" ft "))
+                    .or_else(|| lower.find(" featuring "))
+                    .or_else(|| lower.find(" with "));
+
+                let (main_str, feat_str) = match feat_pos {
+                    Some(pos) => {
+                        let main = &trimmed_artist[..pos];
+                        let after_delim = &trimmed_artist[pos..];
+                        let delim_len = if after_delim.to_lowercase().starts_with(" featuring ") {
+                            11
+                        } else if after_delim.to_lowercase().starts_with(" feat. ") {
+                            7
+                        } else if after_delim.to_lowercase().starts_with(" feat ") {
+                            6
+                        } else if after_delim.to_lowercase().starts_with(" with ") {
+                            6
+                        } else if after_delim.to_lowercase().starts_with(" ft. ") {
+                            5
+                        } else if after_delim.to_lowercase().starts_with(" ft ") {
+                            4
+                        } else {
+                            4
+                        };
+                        let feat = if after_delim.len() > delim_len { &after_delim[delim_len..] } else { "" };
+                        (main, Some(feat))
+                    }
+                    None => (trimmed_artist, None),
+                };
+
+                let split_tokens = |s: &str| -> Vec<String> {
+                    let mut tokens = Vec::new();
+                    let cleaned = s.replace(';', ",")
+                                   .replace('/', ",")
+                                   .replace('•', ",")
+                                   .replace('|', ",")
+                                   .replace('\\', ",");
+                    for chunk in cleaned.split(',') {
+                        let sub_cleaned = chunk.replace(" & ", ", ").replace(" and ", ", ");
+                        for tok in sub_cleaned.split(',') {
+                            let t = tok.trim();
+                            if !t.is_empty() && !t.eq_ignore_ascii_case("unknown artist") && !t.eq_ignore_ascii_case("various artists") {
+                                tokens.push(t.to_string());
+                            }
+                        }
+                    }
+                    tokens
+                };
+
+                for tok in split_tokens(main_str) {
+                    if !credits.iter().any(|(name, role, _, _)| name.eq_ignore_ascii_case(&tok) && role == "Primary") {
+                        credits.push((tok, "Primary".to_string(), ", ".to_string(), order));
+                        order += 1;
+                    }
+                }
+
+                if let Some(feat) = feat_str {
+                    for tok in split_tokens(feat) {
+                        if !credits.iter().any(|(name, _, _, _)| name.eq_ignore_ascii_case(&tok)) {
+                            credits.push((tok, "Featured".to_string(), " feat. ".to_string(), order));
+                            order += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(comp_str) = composer {
+            let comp_trimmed = comp_str.trim();
+            if !comp_trimmed.is_empty() && !comp_trimmed.eq_ignore_ascii_case("unknown composer") && !comp_trimmed.eq_ignore_ascii_case("unknown") {
+                if Self::is_compound_exception(comp_trimmed) {
+                    if !credits.iter().any(|(name, role, _, _)| name.eq_ignore_ascii_case(comp_trimmed) && role == "Composer") {
+                        credits.push((comp_trimmed.to_string(), "Composer".to_string(), String::new(), order));
+                        order += 1;
+                    }
+                } else {
+                    let comp_cleaned = comp_trimmed.replace(';', ",")
+                                                   .replace('/', ",")
+                                                   .replace(" & ", ", ")
+                                                   .replace(" and ", ", ");
+                    for chunk in comp_cleaned.split(',') {
+                        let t = chunk.trim();
+                        if !t.is_empty() && !t.eq_ignore_ascii_case("unknown") {
+                            if !credits.iter().any(|(name, role, _, _)| name.eq_ignore_ascii_case(t) && role == "Composer") {
+                                credits.push((t.to_string(), "Composer".to_string(), String::new(), order));
+                                order += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        credits
+    }
+
+    pub fn upsert_canonical_artist_entity(conn: &Connection, name: &str, role: &str) -> Result<String> {
+        let alias_norm = Self::normalize_artist_alias(name);
+        if alias_norm.is_empty() {
+            return Ok(String::new());
+        }
+
+        // Check alias mapping first
+        let existing_id: Option<String> = conn.query_row(
+            "SELECT canonical_artist_id FROM artist_aliases WHERE alias_norm = ?1 LIMIT 1",
+            params![alias_norm],
+            |r| r.get(0),
+        ).ok();
+
+        if let Some(id) = existing_id {
+            return Ok(id);
+        }
+
+        // Check if canonical_artists already has exact name
+        let existing_by_name: Option<String> = conn.query_row(
+            "SELECT id FROM canonical_artists WHERE name = ?1 LIMIT 1",
+            params![name],
+            |r| r.get(0),
+        ).ok();
+
+        let artist_id = if let Some(id) = existing_by_name {
+            id
+        } else {
+            let new_id = format!("art-{}", uuid::Uuid::new_v4().simple());
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO canonical_artists (id, name, sort_name, primary_role, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(name) DO UPDATE SET primary_role = excluded.primary_role",
+                params![new_id, name, name, role, now],
+            )?;
+            new_id
+        };
+
+        // Link alias
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO artist_aliases (alias_norm, canonical_artist_id) VALUES (?1, ?2)",
+            params![alias_norm, artist_id],
+        );
+
+        Ok(artist_id)
+    }
+
+    pub fn upsert_track_artist_credits(
+        conn: &mut Connection,
+        track_id: &str,
+        credits: &[(String, String, String, i32)],
+    ) -> Result<()> {
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO track_artist_credits (track_id, canonical_artist_id, role, join_phrase, credit_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
+            )?;
+
+            for (artist_name, role, join_phrase, order) in credits {
+                let artist_id = Self::upsert_canonical_artist_entity(&tx, artist_name, role)?;
+                if !artist_id.is_empty() {
+                    stmt.execute(params![track_id, artist_id, role, join_phrase, order])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_canonical_artists(conn: &Connection) -> Result<Vec<DbArtistSummary>> {
+        let mut stmt = conn.prepare(
+            "SELECT 
+                ca.id, ca.name, ca.sort_name, ca.portrait_url, ca.primary_role, ca.era_active,
+                COUNT(DISTINCT t.release_id) AS albums_count,
+                COUNT(DISTINCT tac.track_id) AS tracks_count,
+                COALESCE(GROUP_CONCAT(DISTINCT tac.role), ca.primary_role) AS all_roles,
+                ca.portrait_status
+             FROM canonical_artists ca
+             JOIN track_artist_credits tac ON tac.canonical_artist_id = ca.id
+             JOIN tracks t ON t.id = tac.track_id
+             GROUP BY ca.id
+             HAVING tracks_count > 0
+             ORDER BY albums_count DESC, tracks_count DESC, ca.name ASC"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let roles_str: String = row.get(8).unwrap_or_default();
+            let roles: Vec<String> = roles_str.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            Ok(DbArtistSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                sort_name: row.get(2)?,
+                portrait_url: row.get(3)?,
+                primary_role: row.get(4)?,
+                era_active: row.get(5)?,
+                albums_count: row.get(6)?,
+                tracks_count: row.get(7)?,
+                roles,
+                portrait_status: row.get(9).unwrap_or_else(|_| "pending".to_string()),
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn get_canonical_artist_detail(conn: &Connection, artist_id: &str) -> Result<Option<DbArtistDetail>> {
+        let artist_res: Option<DbCanonicalArtist> = conn.query_row(
+            "SELECT id, name, sort_name, mbid, apple_artist_id, portrait_url, portrait_status, portrait_checked_at, bio_summary, era_active, primary_role, created_at
+             FROM canonical_artists WHERE id = ?1 LIMIT 1",
+            params![artist_id],
+            |row| {
+                Ok(DbCanonicalArtist {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    sort_name: row.get(2)?,
+                    mbid: row.get(3)?,
+                    apple_artist_id: row.get(4)?,
+                    portrait_url: row.get(5)?,
+                    portrait_status: row.get(6).unwrap_or_else(|_| "pending".to_string()),
+                    portrait_checked_at: row.get(7).ok(),
+                    bio_summary: row.get(8)?,
+                    era_active: row.get(9)?,
+                    primary_role: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            },
+        ).ok();
+
+        let artist = match artist_res {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        // Discography releases where this artist contributed
+        let mut rel_stmt = conn.prepare(
+            "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
+                             r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path, r.created_at
+             FROM releases r
+             JOIN tracks t ON t.release_id = r.id
+             JOIN track_artist_credits tac ON tac.track_id = t.id
+             WHERE tac.canonical_artist_id = ?1
+             ORDER BY r.release_year DESC, r.title ASC"
+        )?;
+
+        let rel_rows = rel_stmt.query_map(params![artist_id], |row| {
+            Ok(DbRelease {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                folder_path: row.get(2)?,
+                folder_name: row.get(3)?,
+                artist_credit: row.get(4)?,
+                composer_name: row.get(5)?,
+                release_year: row.get(6)?,
+                genre_tags: row.get(7)?,
+                front_cover_url: row.get(8)?,
+                backdrop_url: row.get(9)?,
+                target_folder_path: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })?;
+
+        let mut discography = Vec::new();
+        for r in rel_rows {
+            discography.push(r?);
+        }
+
+        // Appearing tracks
+        let mut trk_stmt = conn.prepare(
+            "SELECT t.id, t.title, t.track_number, t.release_id, r.title, r.release_year, tac.role,
+                    t.format, t.sample_rate, t.bit_depth, t.dr_score, t.duration_secs, t.artist_credit
+             FROM tracks t
+             JOIN releases r ON r.id = t.release_id
+             JOIN track_artist_credits tac ON tac.track_id = t.id
+             WHERE tac.canonical_artist_id = ?1
+             ORDER BY r.release_year DESC, t.track_number ASC, t.title ASC"
+        )?;
+
+        let trk_rows = trk_stmt.query_map(params![artist_id], |row| {
+            let full_credit: String = row.get(12)?;
+            let co_artists: Vec<String> = full_credit.split(&[',', ';', '&', '/'][..])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&artist.name))
+                .collect();
+
+            Ok(DbArtistCreditItem {
+                track_id: row.get(0)?,
+                track_title: row.get(1)?,
+                track_number: row.get(2)?,
+                release_id: row.get(3)?,
+                release_title: row.get(4)?,
+                release_year: row.get(5)?,
+                role: row.get(6)?,
+                format: row.get(7)?,
+                sample_rate: row.get(8)?,
+                bit_depth: row.get(9)?,
+                dr_score: row.get(10)?,
+                duration_secs: row.get(11)?,
+                full_artist_credit: full_credit,
+                co_artists,
+            })
+        })?;
+
+        let mut appearing_tracks = Vec::new();
+        for t in trk_rows {
+            appearing_tracks.push(t?);
+        }
+
+        let mut roles_stmt = conn.prepare(
+            "SELECT DISTINCT role FROM track_artist_credits WHERE canonical_artist_id = ?1"
+        )?;
+        let roles: Vec<String> = roles_stmt.query_map(params![artist_id], |r| r.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let albums_count = discography.len() as i64;
+        let tracks_count = appearing_tracks.len() as i64;
+
+        Ok(Some(DbArtistDetail {
+            artist,
+            albums_count,
+            tracks_count,
+            roles,
+            discography,
+            appearing_tracks,
+        }))
+    }
+
+    pub fn set_artist_portrait(
+        conn: &Connection,
+        artist_id: &str,
+        portrait_url: &str,
+        status: &str,
+    ) -> Result<()> {
+        let now_sec = Utc::now().timestamp();
+        conn.execute(
+            "UPDATE canonical_artists 
+             SET portrait_url = ?1, portrait_status = ?2, portrait_checked_at = ?3 
+             WHERE id = ?4",
+            params![portrait_url, status, now_sec, artist_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_artist_portrait_not_found(conn: &Connection, artist_id: &str) -> Result<()> {
+        let now_sec = Utc::now().timestamp();
+        conn.execute(
+            "UPDATE canonical_artists SET portrait_status = 'not_found', portrait_checked_at = ?1 WHERE id = ?2",
+            params![now_sec, artist_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pending_portrait_artists(conn: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name FROM canonical_artists 
+             WHERE portrait_status = 'pending' AND (portrait_url IS NULL OR portrait_url = '')
+             LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut list = Vec::new();
+        for r in rows {
+            if let Ok(item) = r {
+                list.push(item);
+            }
+        }
+        Ok(list)
+    }
+
+    pub fn get_artist_portrait_stats(conn: &Connection) -> Result<(usize, usize, usize, Vec<String>)> {
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM canonical_artists",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let completed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM canonical_artists WHERE (portrait_url IS NOT NULL AND portrait_url != '') OR portrait_status = 'not_found'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM canonical_artists WHERE portrait_status = 'pending' AND (portrait_url IS NULL OR portrait_url = '')",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let mut stmt = conn.prepare(
+            "SELECT name FROM canonical_artists 
+             WHERE portrait_status = 'pending' AND (portrait_url IS NULL OR portrait_url = '')
+             ORDER BY name ASC
+             LIMIT 5"
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        let mut next_names = Vec::new();
+        for r in rows {
+            if let Ok(name) = r {
+                next_names.push(name);
+            }
+        }
+
+        Ok((total as usize, completed as usize, pending as usize, next_names))
+    }
+
+    pub fn backfill_artist_credits_from_tracks(conn: &mut Connection) -> Result<usize> {
+        let count_tracks: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0)).unwrap_or(0);
+        if count_tracks == 0 {
+            return Ok(0);
+        }
+
+        let track_items: Vec<(String, String, Option<String>)> = {
+            let mut stmt = conn.prepare("SELECT id, artist_credit, composer FROM tracks")?;
+            let items: Vec<(String, String, Option<String>)> = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?.filter_map(|r| r.ok()).collect();
+            items
+        };
+
+        let tx = conn.transaction()?;
+        let mut inserted_credits = 0;
+        {
+            let mut credit_stmt = tx.prepare(
+                "INSERT OR REPLACE INTO track_artist_credits (track_id, canonical_artist_id, role, join_phrase, credit_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
+            )?;
+
+            for (track_id, artist_credit, composer) in &track_items {
+                let credits = Self::split_multi_artist_credits(artist_credit, composer.as_deref());
+                for (artist_name, role, join_phrase, order) in credits {
+                    let artist_id = Self::upsert_canonical_artist_entity(&tx, &artist_name, &role)?;
+                    if !artist_id.is_empty() {
+                        let _ = credit_stmt.execute(params![track_id, artist_id, role, join_phrase, order]);
+                        inserted_credits += 1;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(inserted_credits)
+    }
+
+    pub fn search_catalog(
+        conn: &Connection,
+        query: &str,
+        limit: usize,
+    ) -> Result<DbCatalogSearchResults> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(DbCatalogSearchResults {
+                albums: Vec::new(),
+                tracks: Vec::new(),
+                artists: Vec::new(),
+            });
+        }
+
+        let like_pat = format!("%{}%", q);
+        let lim = limit.min(25) as i64;
+
+        // 1. Search Releases
+        let mut albums = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
+                        release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path, created_at
+                 FROM releases
+                 WHERE title LIKE ?1 OR artist_credit LIKE ?1 OR composer_name LIKE ?1 OR folder_name LIKE ?1
+                 LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![like_pat, lim], |row| {
+                Ok(DbRelease {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    folder_path: row.get(2)?,
+                    folder_name: row.get(3)?,
+                    artist_credit: row.get(4)?,
+                    composer_name: row.get(5)?,
+                    release_year: row.get(6)?,
+                    genre_tags: row.get(7)?,
+                    front_cover_url: row.get(8)?,
+                    backdrop_url: row.get(9)?,
+                    target_folder_path: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            })?;
+            for r in rows.flatten() {
+                albums.push(r);
+            }
+        }
+
+        // 2. Search Tracks
+        let mut tracks = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
+                        file_size, mtime, title, artist_credit, album_title, release_year, track_number,
+                        genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
+                        dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
+                        work_title, movement_number, movement_title, created_at
+                 FROM tracks
+                 WHERE title LIKE ?1 OR artist_credit LIKE ?1 OR composer LIKE ?1 OR work_title LIKE ?1 OR movement_title LIKE ?1
+                 LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![like_pat, lim], |row| {
+                Ok(DbTrack {
+                    id: row.get(0)?,
+                    release_id: row.get(1)?,
+                    mount_id: row.get(2)?,
+                    folder_path: row.get(3)?,
+                    folder_name: row.get(4)?,
+                    file_path: row.get(5)?,
+                    file_name: row.get(6)?,
+                    file_size: row.get(7)?,
+                    mtime: row.get(8)?,
+                    title: row.get(9)?,
+                    artist_credit: row.get(10)?,
+                    album_title: row.get(11)?,
+                    release_year: row.get(12)?,
+                    track_number: row.get(13)?,
+                    genre: row.get(14)?,
+                    composer: row.get(15)?,
+                    duration_secs: row.get(16)?,
+                    format: row.get(17)?,
+                    sample_rate: row.get(18)?,
+                    bit_depth: row.get(19)?,
+                    channels: row.get(20)?,
+                    dr_score: row.get(21)?,
+                    has_embedded_art: row.get::<_, i32>(22)? != 0,
+                    sidecar_status: row.get(23)?,
+                    sidecar_edits_json: row.get(24)?,
+                    is_online: row.get::<_, i32>(25)? != 0,
+                    work_title: row.get(26)?,
+                    movement_number: row.get(27)?,
+                    movement_title: row.get(28)?,
+                    created_at: row.get(29)?,
+                })
+            })?;
+            for t in rows.flatten() {
+                tracks.push(t);
+            }
+        }
+
+        // 3. Search Canonical Artists
+        let mut artists = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT a.id, a.name, a.sort_name, a.portrait_url, a.portrait_status, a.primary_role,
+                        a.era_active,
+                        COUNT(DISTINCT t.release_id) as albums_count,
+                        COUNT(DISTINCT tac.track_id) as tracks_count
+                 FROM canonical_artists a
+                 LEFT JOIN track_artist_credits tac ON tac.canonical_artist_id = a.id
+                 LEFT JOIN tracks t ON t.id = tac.track_id
+                 WHERE a.name LIKE ?1 OR a.sort_name LIKE ?1
+                 GROUP BY a.id
+                 ORDER BY tracks_count DESC
+                 LIMIT ?2"
+            )?;
+            let rows = stmt.query_map(params![like_pat, lim], |row| {
+                Ok(DbArtistSummary {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    sort_name: row.get(2)?,
+                    portrait_url: row.get(3)?,
+                    portrait_status: row.get(4)?,
+                    primary_role: row.get(5)?,
+                    era_active: row.get(6)?,
+                    albums_count: row.get(7)?,
+                    tracks_count: row.get(8)?,
+                    roles: vec![row.get(5)?],
+                })
+            })?;
+            for a in rows.flatten() {
+                artists.push(a);
+            }
+        }
+
+        Ok(DbCatalogSearchResults {
+            albums,
+            tracks,
+            artists,
+        })
+    }
+
+    // ==========================================
+    // Playlists & Curated Archival Stacks
+    // ==========================================
+
+    pub fn get_playlists(conn: &Connection) -> Result<Vec<DbPlaylist>> {
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.title, p.description, p.cover_art_url, p.created_at, p.updated_at,
+                    p.tags, p.listening_notes,
+                    COUNT(pt.track_id) as tracks_count,
+                    COALESCE(SUM(t.duration_secs), 0.0) as total_duration_secs,
+                    COALESCE(GROUP_CONCAT(DISTINCT t.format), '') as format_breakdown
+             FROM playlists p
+             LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+             LEFT JOIN tracks t ON t.id = pt.track_id
+             GROUP BY p.id
+             ORDER BY p.updated_at DESC"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(DbPlaylist {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                cover_art_url: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                tags: row.get(6)?,
+                listening_notes: row.get(7)?,
+                tracks_count: row.get(8)?,
+                total_duration_secs: row.get(9)?,
+                format_breakdown: row.get(10)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for pl in rows.flatten() {
+            list.push(pl);
+        }
+        Ok(list)
+    }
+
+    pub fn get_playlist_details(conn: &Connection, playlist_id: &str) -> Result<Option<DbPlaylistWithTracks>> {
+        let mut stmt_p = conn.prepare(
+            "SELECT p.id, p.title, p.description, p.cover_art_url, p.created_at, p.updated_at,
+                    p.tags, p.listening_notes,
+                    COUNT(pt.track_id) as tracks_count,
+                    COALESCE(SUM(t.duration_secs), 0.0) as total_duration_secs,
+                    COALESCE(GROUP_CONCAT(DISTINCT t.format), '') as format_breakdown
+             FROM playlists p
+             LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+             LEFT JOIN tracks t ON t.id = pt.track_id
+             WHERE p.id = ?1
+             GROUP BY p.id"
+        )?;
+
+        let playlist = stmt_p.query_row(params![playlist_id], |row| {
+            Ok(DbPlaylist {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                cover_art_url: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                tags: row.get(6)?,
+                listening_notes: row.get(7)?,
+                tracks_count: row.get(8)?,
+                total_duration_secs: row.get(9)?,
+                format_breakdown: row.get(10)?,
+            })
+        });
+
+        let playlist = match playlist {
+            Ok(p) => p,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+        // Fetch tracks ordered by pt.position ASC
+        let mut stmt_t = conn.prepare(
+            "SELECT t.id, t.release_id, t.mount_id, t.folder_path, t.folder_name,
+                    t.file_path, t.file_name, t.file_size, t.mtime, t.title,
+                    t.artist_credit, t.album_title, t.release_year, t.track_number,
+                    t.genre, t.composer, t.duration_secs, t.format, t.sample_rate,
+                    t.bit_depth, t.channels, t.dr_score, t.has_embedded_art,
+                    t.sidecar_status, t.sidecar_edits_json, t.is_online,
+                    t.work_title, t.movement_number, t.movement_title, t.created_at
+             FROM playlist_tracks pt
+             JOIN tracks t ON t.id = pt.track_id
+             WHERE pt.playlist_id = ?1
+             ORDER BY pt.position ASC"
+        )?;
+
+        let track_rows = stmt_t.query_map(params![playlist_id], |row| {
+            Ok(DbTrack {
+                id: row.get(0)?,
+                release_id: row.get(1)?,
+                mount_id: row.get(2)?,
+                folder_path: row.get(3)?,
+                folder_name: row.get(4)?,
+                file_path: row.get(5)?,
+                file_name: row.get(6)?,
+                file_size: row.get(7)?,
+                mtime: row.get(8)?,
+                title: row.get(9)?,
+                artist_credit: row.get(10)?,
+                album_title: row.get(11)?,
+                release_year: row.get(12)?,
+                track_number: row.get(13)?,
+                genre: row.get(14)?,
+                composer: row.get(15)?,
+                duration_secs: row.get(16)?,
+                format: row.get(17)?,
+                sample_rate: row.get(18)?,
+                bit_depth: row.get(19)?,
+                channels: row.get(20)?,
+                dr_score: row.get(21)?,
+                has_embedded_art: row.get::<_, i64>(22)? != 0,
+                sidecar_status: row.get(23)?,
+                sidecar_edits_json: row.get(24)?,
+                is_online: row.get::<_, i64>(25)? != 0,
+                work_title: row.get(26)?,
+                movement_number: row.get(27)?,
+                movement_title: row.get(28)?,
+                created_at: row.get(29)?,
+            })
+        })?;
+
+        let mut tracks = Vec::new();
+        for t in track_rows.flatten() {
+            tracks.push(t);
+        }
+
+        Ok(Some(DbPlaylistWithTracks { playlist, tracks }))
+    }
+
+    pub fn create_playlist(
+        conn: &mut Connection,
+        id: &str,
+        title: &str,
+        description: Option<&str>,
+        cover_art_url: Option<&str>,
+        tags: Option<&str>,
+        listening_notes: Option<&str>,
+        track_ids: &[String],
+    ) -> Result<DbPlaylist> {
+        let now = Utc::now().to_rfc3339();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO playlists (id, title, description, cover_art_url, created_at, updated_at, tags, listening_notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+            params![id, title, description, cover_art_url, now, tags, listening_notes],
+        )?;
+
+        let mut stmt_ins = tx.prepare(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, ?3, ?4)"
+        )?;
+
+        for (pos, tid) in track_ids.iter().enumerate() {
+            stmt_ins.execute(params![id, tid, pos as i64, now])?;
+        }
+        drop(stmt_ins);
+
+        tx.commit()?;
+
+        Ok(DbPlaylist {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: description.map(|s| s.to_string()),
+            cover_art_url: cover_art_url.map(|s| s.to_string()),
+            created_at: now.clone(),
+            updated_at: now,
+            tags: tags.map(|s| s.to_string()),
+            listening_notes: listening_notes.map(|s| s.to_string()),
+            tracks_count: track_ids.len() as i64,
+            total_duration_secs: 0.0,
+            format_breakdown: String::new(),
+        })
+    }
+
+    pub fn update_playlist(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        description: Option<&str>,
+        cover_art_url: Option<&str>,
+        tags: Option<&str>,
+        listening_notes: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE playlists SET title = ?1, description = ?2, cover_art_url = ?3,
+                    tags = ?4, listening_notes = ?5, updated_at = ?6
+             WHERE id = ?7",
+            params![title, description, cover_art_url, tags, listening_notes, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_playlist(conn: &Connection, id: &str) -> Result<()> {
+        conn.execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn add_tracks_to_playlist(
+        conn: &mut Connection,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = conn.transaction()?;
+
+        let max_pos: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist_id],
+            |r| r.get(0),
+        ).unwrap_or(-1);
+
+        let mut stmt = tx.prepare(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, ?3, ?4)"
+        )?;
+
+        for (idx, tid) in track_ids.iter().enumerate() {
+            let pos = max_pos + 1 + (idx as i64);
+            stmt.execute(params![playlist_id, tid, pos, now])?;
+        }
+        drop(stmt);
+
+        tx.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now, playlist_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_track_from_playlist(
+        conn: &mut Connection,
+        playlist_id: &str,
+        position: i64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND position = ?2",
+            params![playlist_id, position],
+        )?;
+
+        // Re-index remaining tracks atomically
+        let mut stmt_sel = tx.prepare(
+            "SELECT id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position ASC"
+        )?;
+        let row_ids: Vec<i64> = stmt_sel.query_map(params![playlist_id], |r| r.get(0))?
+            .flatten()
+            .collect();
+        drop(stmt_sel);
+
+        let mut stmt_upd = tx.prepare(
+            "UPDATE playlist_tracks SET position = ?1 WHERE id = ?2"
+        )?;
+        for (new_pos, row_id) in row_ids.iter().enumerate() {
+            stmt_upd.execute(params![new_pos as i64, row_id])?;
+        }
+        drop(stmt_upd);
+
+        tx.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now, playlist_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reorder_playlist_tracks(
+        conn: &mut Connection,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = conn.transaction()?;
+
+        // Atomic delete and re-insert inside explicit transaction avoids UNIQUE collision
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+            params![playlist_id],
+        )?;
+
+        let mut stmt = tx.prepare(
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, ?3, ?4)"
+        )?;
+
+        for (pos, tid) in track_ids.iter().enumerate() {
+            stmt.execute(params![playlist_id, tid, pos as i64, now])?;
+        }
+        drop(stmt);
+
+        tx.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now, playlist_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
     }
 }

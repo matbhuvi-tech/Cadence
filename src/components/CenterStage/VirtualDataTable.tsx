@@ -25,6 +25,9 @@ import {
   Play,
   Pause,
   Volume2,
+  ArrowUpToLine,
+  ListPlus,
+  BookmarkPlus,
 } from 'lucide-react'
 import { Track, Release, AlbumDisplayMode } from '../../core/types'
 import { IntegrityScanner } from '../../services/integrityScanner'
@@ -137,7 +140,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
   const [pinnedColumns, setPinnedColumns] = useState<Set<string>>(new Set(['select', 'trackNumber']))
 
-  const { currentTrack, isPlaying, playTrack, togglePlayPause } = useAudioPlayer()
+  const { currentTrack, isPlaying, playTrack, togglePlayPause, playNext, addToQueue } = useAudioPlayer()
 
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -697,6 +700,33 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                     </button>
 
                     <button
+                      onClick={() => {
+                        addToQueue(group.tracks)
+                        window.dispatchEvent(
+                          new CustomEvent('cadence:toast', { detail: `Added ${group.tracks.length} tracks to queue` })
+                        )
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-medium shadow-md"
+                      title="Add all album tracks to playback queue"
+                    >
+                      <ListPlus className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Queue</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        window.dispatchEvent(
+                          new CustomEvent('cadence:add-tracks-playlist', { detail: group.tracks })
+                        )
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-medium shadow-md"
+                      title="Add all album tracks to a playlist"
+                    >
+                      <BookmarkPlus className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Playlist</span>
+                    </button>
+
+                    <button
                       onClick={() => handleEditAlbum(group)}
                       className="px-3 py-1.5 rounded-xl bg-[#00F5FF]/15 hover:bg-[#00F5FF]/25 text-[#00F5FF] border border-[#00F5FF]/40 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-bold shadow-md hover:scale-[1.02] active:scale-[0.98]"
                       title="Edit Album Title, Physical Folder Name, Composer, Year & Artwork for all tracks at once"
@@ -880,20 +910,65 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                             <span className="text-[#94A3B8] font-semibold">{track.format}</span>
                           </div>
 
-                          {/* Col 6: Duration & Checksum Status */}
+                          {/* Col 6: Duration & Checksum Status + Quick Actions on Hover */}
                           <div
                             data-tutorial-id="grid-sidecar-status-pill"
-                            className="col-span-1 flex items-center justify-end gap-2 text-right"
+                            className="col-span-1 flex items-center justify-end gap-1.5 text-right relative"
                           >
-                            <span className="font-mono text-[11px] text-[#94A3B8]">
+                            <span className="font-mono text-[11px] text-[#94A3B8] group-hover/row:hidden">
                               {formatDuration(track.durationSeconds)}
                             </span>
-                            <div title={track.checksumValid ? 'Bit-perfect audio MD5 checksum verified' : 'Bit-rot / Checksum corrupt'}>
+                            <div className="group-hover/row:hidden" title={track.checksumValid ? 'Bit-perfect audio MD5 checksum verified' : 'Bit-rot / Checksum corrupt'}>
                               {track.checksumValid ? (
                                 <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
                               ) : (
                                 <AlertTriangle className="w-3.5 h-3.5 text-[#F43F5E]" />
                               )}
+                            </div>
+
+                            {/* Quick Actions Revealed on Hover */}
+                            <div className="hidden group-hover/row:flex items-center gap-1 animate-fadeIn">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  playNext(track)
+                                  window.dispatchEvent(
+                                    new CustomEvent('cadence:toast', { detail: `Queued "${track.title}" to play next` })
+                                  )
+                                }}
+                                title="Play Next"
+                                className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors"
+                              >
+                                <ArrowUpToLine className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  addToQueue(track)
+                                  window.dispatchEvent(
+                                    new CustomEvent('cadence:toast', { detail: `Added "${track.title}" to queue` })
+                                  )
+                                }}
+                                title="Add to Queue"
+                                className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors"
+                              >
+                                <ListPlus className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  window.dispatchEvent(
+                                    new CustomEvent('cadence:add-tracks-playlist', { detail: [track] })
+                                  )
+                                }}
+                                title="Add to Playlist..."
+                                className="p-1 rounded text-neutral-400 hover:text-white hover:bg-white/10 transition-colors"
+                              >
+                                <BookmarkPlus className="w-3.5 h-3.5" />
+                              </button>
                             </div>
                           </div>
                         </div>

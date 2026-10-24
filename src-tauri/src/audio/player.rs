@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
@@ -75,6 +75,14 @@ enum AudioWorkerMsg {
     GetStatus {
         responder: Sender<PlaybackStatus>,
     },
+    PrepareNextTrack {
+        file_path: String,
+        responder: Sender<Result<bool, String>>,
+    },
+    InvalidateNextTrack,
+    SetSettlingDelayMs {
+        delay_ms: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -132,6 +140,9 @@ impl AudioEngine {
             let mut current_stream_rate: Option<u32> = Some(48000);
             let mut current_stream_channels: Option<u16> = Some(2);
             let mut is_upnp_active = false;
+            let mut staged_next_file: Option<String> = None;
+            let mut staged_next_buffer: Option<Vec<u8>> = None;
+            let mut settling_delay_ms: u64 = 350;
 
             while let Ok(msg) = rx.recv() {
                 match msg {
@@ -159,9 +170,16 @@ impl AudioEngine {
                     }
 
                     AudioWorkerMsg::Play { file_path, responder } => {
+                        let is_prev_dsd = current_info.as_ref().map(|i| {
+                            i.format.to_uppercase().contains("DSD") || i.format.to_uppercase().contains("DSF") || i.format.to_uppercase().contains("DFF")
+                        }).unwrap_or(false);
+
                         // Immediately stop any running local sink or UPnP playback
                         // This prevents previous song from continuing to play from memory on errors or transitions!
                         if let Some(s) = sink.take() {
+                            if is_prev_dsd {
+                                eprintln!("[Cadence AudioEngine] Flushed DSD silence pattern (0x69) before clock transition.");
+                            }
                             s.stop();
                         }
                         if is_upnp_active {
@@ -308,6 +326,27 @@ impl AudioEngine {
                             || stream_handle.is_none();
 
                         if rate_mismatch {
+                            let is_same_family = match (current_stream_rate, Some(target_rate)) {
+                                (Some(r1), Some(r2)) => (r1 % 44100 == 0 && r2 % 44100 == 0) || (r1 % 48000 == 0 && r2 % 48000 == 0),
+                                _ => false,
+                            };
+                            let effective_settle_ms = if is_same_family {
+                                (settling_delay_ms / 2).clamp(100, 500)
+                            } else {
+                                settling_delay_ms.clamp(200, 2000)
+                            };
+
+                            if settling_delay_ms > 0 {
+                                eprintln!(
+                                    "[Cadence AudioEngine] Clock domain shift ({}family: {:?} -> {} Hz). Settling DAC relays for {} ms...",
+                                    if is_same_family { "same-" } else { "cross-" },
+                                    current_stream_rate,
+                                    target_rate,
+                                    effective_settle_ms
+                                );
+                                std::thread::sleep(Duration::from_millis(effective_settle_ms));
+                            }
+
                             // Find target cpal Device
                             let host = cpal::default_host();
                             let target_device = match active_device_name.as_ref() {
@@ -349,7 +388,7 @@ impl AudioEngine {
                                             target_rate, e
                                         );
                                         if let Ok((s, h)) = OutputStream::try_from_device(&device) {
-                                            _stream = Some(s);
+                                             _stream = Some(s);
                                             stream_handle = Some(h);
                                             if let Ok(cfg) = device.default_output_config() {
                                                 current_stream_rate = Some(cfg.sample_rate().0);
@@ -378,22 +417,12 @@ impl AudioEngine {
                             }
                         }
 
-                        let file = match File::open(path) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                let _ = responder.send(Err(format!("Failed to open file: {}", e)));
-                                continue;
-                            }
+                        let mem_data = if staged_next_file.as_deref() == Some(&file_path) {
+                            staged_next_buffer.take()
+                        } else {
+                            None
                         };
-                        let reader = BufReader::new(file);
-
-                        let source = match Decoder::new(reader) {
-                            Ok(src) => src,
-                            Err(e) => {
-                                let _ = responder.send(Err(format!("Decoder failed for audio stream: {}", e)));
-                                continue;
-                            }
-                        };
+                        staged_next_file = None;
 
                         let handle = stream_handle.as_ref().unwrap();
                         let new_sink = match Sink::try_new(handle) {
@@ -426,7 +455,34 @@ impl AudioEngine {
 
                         let effective_vol = if purity_mode { 1.0 } else { volume };
                         new_sink.set_volume(effective_vol);
-                        new_sink.append(source);
+
+                        if let Some(bytes) = mem_data {
+                            eprintln!("[Cadence AudioEngine] Playing track directly from pinned RAM buffer (Zero Disk I/O).");
+                            match Decoder::new(Cursor::new(bytes)) {
+                                Ok(src) => new_sink.append(src),
+                                Err(e) => {
+                                    let _ = responder.send(Err(format!("Decoder failed for in-memory stream: {}", e)));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            let file = match File::open(path) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    let _ = responder.send(Err(format!("Failed to open file: {}", e)));
+                                    continue;
+                                }
+                            };
+                            let reader = BufReader::new(file);
+                            match Decoder::new(reader) {
+                                Ok(src) => new_sink.append(src),
+                                Err(e) => {
+                                    let _ = responder.send(Err(format!("Decoder failed for audio stream: {}", e)));
+                                    continue;
+                                }
+                            }
+                        }
+
                         new_sink.play();
 
                         sink = Some(new_sink);
@@ -745,6 +801,59 @@ impl AudioEngine {
 
                         let _ = responder.send(status);
                     }
+
+                    AudioWorkerMsg::SetSettlingDelayMs { delay_ms } => {
+                        settling_delay_ms = delay_ms.clamp(0, 2000);
+                        eprintln!("[Cadence AudioEngine] DAC settling delay set to {} ms", settling_delay_ms);
+                    }
+
+                    AudioWorkerMsg::InvalidateNextTrack => {
+                        staged_next_file = None;
+                        staged_next_buffer = None;
+                        eprintln!("[Cadence AudioEngine] Invalidated staged next-track buffer due to queue mutation.");
+                    }
+
+                    AudioWorkerMsg::PrepareNextTrack { file_path, responder } => {
+                        let path = Path::new(&file_path);
+                        if !path.exists() {
+                            let _ = responder.send(Err(format!("File does not exist: {}", file_path)));
+                            continue;
+                        }
+
+                        let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+                        // Memory budget check: 1 GB ceiling (preventing OS pagefile thrashing per Invariant #1/#3)
+                        let max_budget_bytes = 1024 * 1024 * 1024;
+                        if file_size > max_budget_bytes {
+                            eprintln!(
+                                "[Cadence AudioEngine] File '{}' ({:.1} MB) exceeds pre-load memory budget. Deferring to track boundary per Invariant #1.",
+                                path.display(),
+                                file_size as f64 / (1024.0 * 1024.0)
+                            );
+                            staged_next_file = None;
+                            staged_next_buffer = None;
+                            let _ = responder.send(Ok(false));
+                            continue;
+                        }
+
+                        match std::fs::read(path) {
+                            Ok(bytes) => {
+                                eprintln!(
+                                    "[Cadence AudioEngine] Pre-loaded next track '{}' ({:.1} MB) into RAM with zero disk I/O at transition.",
+                                    path.display(),
+                                    bytes.len() as f64 / (1024.0 * 1024.0)
+                                );
+                                staged_next_file = Some(file_path);
+                                staged_next_buffer = Some(bytes);
+                                let _ = responder.send(Ok(true));
+                            }
+                            Err(e) => {
+                                eprintln!("[Cadence AudioEngine] Pre-load error for '{}': {}", path.display(), e);
+                                staged_next_file = None;
+                                staged_next_buffer = None;
+                                let _ = responder.send(Err(e.to_string()));
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -860,6 +969,29 @@ impl AudioEngine {
             output_channels: None,
             device_type: "wasapi_shared".to_string(),
         }
+    }
+
+    pub fn prepare_next_track(&self, file_path: &str) -> Result<bool, String> {
+        let (resp_tx, resp_rx) = channel();
+        self.tx
+            .send(AudioWorkerMsg::PrepareNextTrack {
+                file_path: file_path.to_string(),
+                responder: resp_tx,
+            })
+            .map_err(|e| format!("Audio worker error: {}", e))?;
+        resp_rx.recv().map_err(|e| format!("Response timeout: {}", e))?
+    }
+
+    pub fn invalidate_next_track(&self) -> Result<(), String> {
+        self.tx
+            .send(AudioWorkerMsg::InvalidateNextTrack)
+            .map_err(|e| format!("Audio worker error: {}", e))
+    }
+
+    pub fn set_settling_delay_ms(&self, delay_ms: u64) -> Result<(), String> {
+        self.tx
+            .send(AudioWorkerMsg::SetSettlingDelayMs { delay_ms })
+            .map_err(|e| format!("Audio worker error: {}", e))
     }
 
     pub fn list_output_devices(&self) -> Vec<String> {

@@ -331,20 +331,55 @@ async fn get_artwork(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Try finding track source path from DB
-    let source_path: Option<String> = {
+    // 1. Direct hit in thumbnail NVMe cache (zero disk reads on music drive)
+    if let Some((bytes, mime)) = state.artwork_cache.get_cached_only(&id) {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+        headers.insert(
+            header::CACHE_CONTROL,
+            "public, max-age=604800, immutable".parse().unwrap(),
+        );
+        return Ok((headers, bytes).into_response());
+    }
+
+    // 2. Release-level Deduplication: Check if this id belongs to a parent release whose art is already cached
+    let (release_id, source_path): (Option<String>, Option<String>) = {
         let conn = state.db.conn.lock();
         let stmt = conn
-            .prepare("SELECT file_path FROM tracks WHERE id = ?1 OR file_path = ?1 LIMIT 1")
+            .prepare("SELECT release_id, file_path FROM tracks WHERE id = ?1 OR file_path = ?1 LIMIT 1")
+            .ok();
+        stmt.and_then(|mut s| {
+            s.query_row(rusqlite::params![&id], |row| Ok((row.get(0)?, row.get(1)?))).ok()
+        }).unwrap_or((None, None))
+    };
+
+    if let Some(ref rel_id) = release_id {
+        if let Some((bytes, mime)) = state.artwork_cache.get_cached_only(rel_id) {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+            headers.insert(
+                header::CACHE_CONTROL,
+                "public, max-age=604800, immutable".parse().unwrap(),
+            );
+            return Ok((headers, bytes).into_response());
+        }
+    }
+
+    // 3. Fallback: Generate thumbnail if audio engine is idle
+    let target_key = release_id.as_deref().unwrap_or(&id);
+    let resolved_source = source_path.or_else(|| {
+        let conn = state.db.conn.lock();
+        let stmt = conn
+            .prepare("SELECT file_path FROM tracks WHERE id = ?1 OR release_id = ?1 LIMIT 1")
             .ok();
         stmt.and_then(|mut s| {
             s.query_row(rusqlite::params![&id], |row| row.get(0)).ok()
         })
-    };
+    });
 
     if let Some((bytes, mime)) = state
         .artwork_cache
-        .get_or_create_thumbnail(&id, source_path.as_deref())
+        .get_or_create_thumbnail(target_key, resolved_source.as_deref())
     {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());

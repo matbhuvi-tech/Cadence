@@ -147,6 +147,62 @@ async function runCopilotTestSuite() {
   const statsRes = await agentActionDispatcher.executeAction({ tool: 'get_statistics', args: {} }, t1Ctx)
   assert(statsRes.success, 'get_statistics executed successfully', 'Tier 1: Atomic Tools')
   assert(statsRes.data?.totalTracks > 0 && statsRes.data?.totalReleases > 0, 'get_statistics returned non-zero tracks & releases', 'Tier 1: Atomic Tools')
+
+  // 1.9 resolve_work_hierarchy
+  const workRes = await agentActionDispatcher.executeAction(
+    { tool: 'resolve_work_hierarchy', args: { query: 'Dil Se' } },
+    t1Ctx
+  )
+  assert(workRes.success, 'resolve_work_hierarchy executed successfully', 'Tier 1: Atomic Tools')
+
+  // 1.10 compare_variant_pressings
+  const variantRes = await agentActionDispatcher.executeAction(
+    { tool: 'compare_variant_pressings', args: {} },
+    t1Ctx
+  )
+  assert(variantRes.success, 'compare_variant_pressings executed successfully', 'Tier 1: Atomic Tools')
+  assert(Boolean(variantRes.data?.bestVariant), 'compare_variant_pressings returned recommended variant', 'Tier 1: Atomic Tools')
+
+  // 1.11 detect_transcode_anomalies
+  const transcodeRes = await agentActionDispatcher.executeAction(
+    { tool: 'detect_transcode_anomalies', args: {} },
+    t1Ctx
+  )
+  assert(transcodeRes.success, 'detect_transcode_anomalies executed successfully', 'Tier 1: Atomic Tools')
+
+  // 1.12 synthesize_normalization_rule
+  const synthRes = await agentActionDispatcher.executeAction(
+    {
+      tool: 'synthesize_normalization_rule',
+      args: { pattern: 'Illayaraja', canonical: 'Ilaiyaraaja', category: 'artist' },
+    },
+    t1Ctx
+  )
+  assert(synthRes.success, 'synthesize_normalization_rule executed successfully', 'Tier 1: Atomic Tools')
+
+  // 1.13 preview_path_restructure
+  const pathPrevRes = await agentActionDispatcher.executeAction(
+    { tool: 'preview_path_restructure', args: { pattern: '{Composer}/{Year} - {Album}/{TrackNum} - {Title}' } },
+    t1Ctx
+  )
+  assert(pathPrevRes.success, 'preview_path_restructure executed successfully', 'Tier 1: Atomic Tools')
+  assert(Array.isArray(pathPrevRes.data?.previews) && pathPrevRes.data.previews.length > 0, 'preview_path_restructure returned previews', 'Tier 1: Atomic Tools')
+
+  // 1.14 curate_sonic_session
+  const curateRes = await agentActionDispatcher.executeAction(
+    { tool: 'curate_sonic_session', args: { minDrScore: 12, durationMinutes: 30 } },
+    t1Ctx
+  )
+  assert(curateRes.success, 'curate_sonic_session executed successfully', 'Tier 1: Atomic Tools')
+  assert(curateRes.data?.sessionTracks?.length > 0, 'curate_sonic_session generated session tracks', 'Tier 1: Atomic Tools')
+
+  // 1.15 query_graph
+  const queryGraphRes = await agentActionDispatcher.executeAction(
+    { tool: 'query_graph', args: { filter: { format: 'FLAC' }, limit: 5 } },
+    t1Ctx
+  )
+  assert(queryGraphRes.success, 'query_graph executed successfully', 'Tier 1: Atomic Tools')
+  assert(queryGraphRes.data?.records?.length > 0, 'query_graph returned matched records', 'Tier 1: Atomic Tools')
   console.log('')
 
   // ============================================================================
@@ -485,6 +541,13 @@ async function runCopilotTestSuite() {
     { prompt: 'Open two-phase commit modal to stage sidecars', expectedTool: 'open_modal' },
     { prompt: 'Import music from new directory', expectedTool: 'open_modal' },
     { prompt: 'Configure path restructuring rules', expectedTool: 'open_modal' },
+    { prompt: 'Disentangle work hierarchy and playback credits', expectedTool: 'resolve_work_hierarchy' },
+    { prompt: 'Compare variant pressings and find best master', expectedTool: 'compare_variant_pressings' },
+    { prompt: 'Detect transcode anomalies and fake flac cutoffs', expectedTool: 'detect_transcode_anomalies' },
+    { prompt: 'Synthesize authority rule whenever you see variant canonicalize target', expectedTool: 'synthesize_normalization_rule' },
+    { prompt: 'Preview path restructuring dry run', expectedTool: 'preview_path_restructure' },
+    { prompt: 'Curate sonic session for listening DR 14', expectedTool: 'curate_sonic_session' },
+    { prompt: 'Search graph for tracks', expectedTool: 'query_graph' },
   ]
 
   for (const tc of atomicVocabCases) {

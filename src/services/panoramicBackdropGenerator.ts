@@ -135,13 +135,35 @@ export async function generatePanoramicBackdrop(
         ctx.fillStyle = rightFeather
         ctx.fillRect(rightEdge - rightFeatherWidth, 0, rightFeatherWidth + 10, targetHeight)
 
-        const resultDataUrl = canvas.toDataURL('image/jpeg', 0.92)
-        backdropCache.set(coverUrl, resultDataUrl)
-        resolve(resultDataUrl)
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              resolve(coverUrl)
+              pendingGenerations.delete(coverUrl)
+              return
+            }
+            // Enforce LRU cap of 40 object URLs to prevent unbounded memory growth
+            if (backdropCache.size >= 40) {
+              const oldestKey = backdropCache.keys().next().value
+              if (oldestKey) {
+                const oldUrl = backdropCache.get(oldestKey)
+                if (oldUrl && oldUrl.startsWith('blob:')) {
+                  URL.revokeObjectURL(oldUrl)
+                }
+                backdropCache.delete(oldestKey)
+              }
+            }
+            const objectUrl = URL.createObjectURL(blob)
+            backdropCache.set(coverUrl, objectUrl)
+            resolve(objectUrl)
+            pendingGenerations.delete(coverUrl)
+          },
+          'image/jpeg',
+          0.90
+        )
       } catch (err) {
         // Fallback to source URL if canvas tainted or error occurs
         resolve(coverUrl)
-      } finally {
         pendingGenerations.delete(coverUrl)
       }
     }

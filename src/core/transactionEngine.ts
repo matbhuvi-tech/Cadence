@@ -1,5 +1,6 @@
 import { Track, TransactionSnapshot } from './types'
 import { graphEngine } from './graphEngine'
+import { analyzeHeaderPadding, PreflightCheckResult } from '../types/commit'
 
 export interface CommitStepProgress {
   step: 'PREPARE' | 'VERIFY_STREAM_CHECKSUM' | 'CREATE_BACKUP_SNAPSHOT' | 'WRITE_EMBEDDED_TAGS' | 'FINALIZE'
@@ -43,19 +44,82 @@ export class TransactionEngine {
   private backupManifests: Map<string, { trackId: string; previousState: Partial<Track> }[]> = new Map()
 
   /**
+   * Preflight verification checking playback idle state and storage writability
+   */
+  public runPreflightChecks(
+    tracks: Track[],
+    isPlaybackActive: boolean,
+    cooldownElapsed: boolean = true
+  ): PreflightCheckResult {
+    const readOnlyMountIds = new Set(
+      graphEngine.getAllStorageMounts().filter((m) => m.isReadOnlyLocked).map((m) => m.id)
+    )
+    const offlineMountIds = new Set(
+      graphEngine.getAllStorageMounts().filter((m) => m.status === 'offline').map((m) => m.id)
+    )
+
+    const blockedPaths: { path: string; reason: string }[] = []
+
+    if (isPlaybackActive) {
+      blockedPaths.push({
+        path: 'Audio Transport',
+        reason: 'AudioEngine is currently Playing or Paused. Transport Purity Lock is active.',
+      })
+    }
+
+    if (!cooldownElapsed) {
+      blockedPaths.push({
+        path: 'Audio Transport',
+        reason: 'Cooldown period active (30s quiet period required after playback).',
+      })
+    }
+
+    tracks.forEach((t) => {
+      if (readOnlyMountIds.has(t.storageMountId)) {
+        blockedPaths.push({
+          path: t.filePath,
+          reason: `Storage mount "${t.storageMountId}" is Read-Only Locked.`,
+        })
+      }
+      if (offlineMountIds.has(t.storageMountId) || t.isOnline === false) {
+        blockedPaths.push({
+          path: t.filePath,
+          reason: `Storage mount "${t.storageMountId}" is offline or inaccessible.`,
+        })
+      }
+    })
+
+    return {
+      playbackIdle: !isPlaybackActive,
+      cooldownElapsed,
+      storageWritable: blockedPaths.filter((b) => b.path !== 'Audio Transport').length === 0,
+      blockedPaths,
+      canProceed: blockedPaths.length === 0,
+    }
+  }
+
+  /**
    * Performs Phase 1 & 2 of the Two-Phase Transactional Tag Commit with real-time telemetry.
    */
   public async executeTwoPhaseCommit(
     tracks: Track[],
     description: string,
     onProgress?: (progress: CommitStepProgress[]) => void,
-    onDetailedProgress?: (detailed: DetailedCommitProgress) => void
+    onDetailedProgress?: (detailed: DetailedCommitProgress) => void,
+    options?: {
+      destination?: 'sidecar' | 'embedded'
+      isPlaybackActive?: boolean
+    }
   ): Promise<{
     success: boolean
     transactionId: string
+    durationMs: number
     committedCount?: number
     embeddedHeadersCount?: number
     sidecarsCount?: number
+    failedTracks?: { trackId: string; filePath: string; error: string }[]
+    rewrittenFilesCount?: number
+    inPlaceHeaderCount?: number
     error?: string
   }> {
     const txId = `tx-${Date.now()}`
@@ -107,10 +171,18 @@ export class TransactionEngine {
       if (onProgress) onProgress([...steps])
     }
 
-    // Step 0: Check read-only and offline mounts
-    updateStep(0, false, 'Checking mount permissions and accessibility...')
-    notifyDetailed('PREPARE', 'Validating storage mount locks and network accessibility', 0)
+    // Step 0: Check read-only and offline mounts, and verify playback idle guard
+    updateStep(0, false, 'Checking mount permissions, playback idle state, and accessibility...')
+    notifyDetailed('PREPARE', 'Validating storage mount locks and playback transport state', 0)
     await new Promise((r) => setTimeout(r, 150))
+
+    if (options?.isPlaybackActive) {
+      steps[0].hasError = true
+      steps[0].detail = 'Aborted: AudioEngine is currently active (Playing/Paused). Transport Purity Lock requires idle audio playback before committing to disk.'
+      if (onProgress) onProgress([...steps])
+      return { success: false, transactionId: txId, durationMs: Date.now() - startTime, error: steps[0].detail }
+    }
+
     const readOnlyMountIds = new Set(
       graphEngine.getAllStorageMounts().filter((m) => m.isReadOnlyLocked).map((m) => m.id)
     )
@@ -120,7 +192,7 @@ export class TransactionEngine {
       steps[0].hasError = true
       steps[0].detail = `Aborted: Mount "${lockedTracks[0].storageMountId}" has Hardware/Software Read-Only Lock active!`
       if (onProgress) onProgress([...steps])
-      return { success: false, transactionId: txId, error: steps[0].detail }
+      return { success: false, transactionId: txId, durationMs: Date.now() - startTime, error: steps[0].detail }
     }
 
     const offlineMountIds = new Set(
@@ -131,9 +203,9 @@ export class TransactionEngine {
       steps[0].hasError = true
       steps[0].detail = `Aborted: Storage location for "${offlineTracks[0].title}" is offline or inaccessible! Reconnect network storage before committing changes.`
       if (onProgress) onProgress([...steps])
-      return { success: false, transactionId: txId, error: steps[0].detail }
+      return { success: false, transactionId: txId, durationMs: Date.now() - startTime, error: steps[0].detail }
     }
-    updateStep(0, true, 'All target mounts are online and write-ready')
+    updateStep(0, true, 'All target mounts are online, writable, and playback is idle')
 
     // Step 1: Checksum verification
     updateStep(1, false, `Computing stream hashes for ${totalTracks} tracks...`)
@@ -145,7 +217,7 @@ export class TransactionEngine {
       steps[1].hasError = true
       steps[1].detail = `Pre-flight failed: Track ${corruptTracks[0].id} has corrupted stream CRC!`
       if (onProgress) onProgress([...steps])
-      return { success: false, transactionId: txId, error: steps[1].detail }
+      return { success: false, transactionId: txId, durationMs: Date.now() - startTime, error: steps[1].detail }
     }
     await new Promise((r) => setTimeout(r, Math.min(250, 10 + totalTracks * 2)))
     updateStep(1, true, `${tracks.length} tracks verified bit-perfect`)
@@ -319,7 +391,34 @@ export class TransactionEngine {
 
     notifyDetailed('FINALIZE', 'Complete', totalTracks, undefined, totalBatches, totalBatches, 0)
 
-    return { success: true, transactionId: txId, committedCount, embeddedHeadersCount, sidecarsCount }
+    let rewrittenFilesCount = 0
+    let inPlaceHeaderCount = 0
+    tracks.forEach((t) => {
+      const analysis = analyzeHeaderPadding(t)
+      if (analysis.requiresFullRewrite) rewrittenFilesCount++
+      else inPlaceHeaderCount++
+    })
+
+    const durationMs = Date.now() - startTime
+
+    const failedTracks = errors.map((err, idx) => ({
+      trackId: tracks[idx]?.id || 'unknown',
+      filePath: tracks[idx]?.filePath || 'unknown',
+      error: err,
+    }))
+
+    return {
+      success: errors.length === 0,
+      transactionId: txId,
+      durationMs,
+      committedCount,
+      embeddedHeadersCount,
+      sidecarsCount,
+      failedTracks,
+      rewrittenFilesCount,
+      inPlaceHeaderCount,
+      error: errors.length > 0 ? errors[0] : undefined,
+    }
   }
 
   /**

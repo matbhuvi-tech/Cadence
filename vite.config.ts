@@ -224,7 +224,7 @@ function getGeminiModel(): string {
       }
     }
   } catch {}
-  return 'gemini-3.8-flash'
+  return 'gemini-flash-lite-latest'
 }
 
 // --- Gemini API Shared Token-Bucket Pacer & Resilient Backoff ---
@@ -233,10 +233,14 @@ const GEMINI_PACING_INTERVAL_MS = 4000 // 15 RPM Safe Pacing Buffer for Free Tie
 
 const GEMINI_CANDIDATE_MODELS = [
   getGeminiModel(),
+  'gemini-flash-lite-latest',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-flash-latest',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
   'gemini-3.8-flash',
   'gemini-3.7-flash',
-  'gemini-3.5-flash',
-  'gemini-flash-latest',
   'gemini-pro-latest',
 ].filter((m, idx, arr) => m && arr.indexOf(m) === idx)
 
@@ -259,7 +263,7 @@ async function executePacedGeminiCall(
   apiKey: string,
   options: GeminiCallOptions
 ): Promise<GeminiCallResult> {
-  const { bodyPayload, timeoutMs = 25000 } = options
+  const { bodyPayload, timeoutMs = 12000 } = options
 
   // 1. Enforce Token-Bucket Pacing (4000ms safe floor between calls)
   const now = Date.now()
@@ -1350,6 +1354,149 @@ function localLibraryScannerPlugin(): Plugin {
         })
       }
 
+      // 4b. Multi-Tier Artist Portrait Search (Apple Music OG -> Deezer -> MusicBrainz/Wikidata)
+      server.middlewares.use('/api/artist-portrait-search', async (req, res) => {
+        const url = new URL(req.url || '', `http://${req.headers.host}`)
+        const artist = url.searchParams.get('artist') || url.searchParams.get('name') || ''
+
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Access-Control-Allow-Origin', '*')
+
+        if (!artist.trim()) {
+          res.end(JSON.stringify({ success: false, candidates: [] }))
+          return
+        }
+
+        const cleanArtist = artist.trim()
+        const candidates: {
+          provider: 'apple' | 'deezer' | 'wikimedia'
+          providerLabel: string
+          portraitUrl: string
+          width: number
+          height: number
+        }[] = []
+
+        // Tier 1: Apple Music OpenGraph Scraper
+        try {
+          const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(cleanArtist)}&entity=musicArtist&limit=1`
+          const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(5000) })
+          if (itunesRes.ok) {
+            const data = (await itunesRes.json()) as any
+            const artistItem = data.results?.[0]
+            const viewUrl = artistItem?.artistLinkUrl || artistItem?.artistViewUrl
+            if (viewUrl) {
+              const htmlRes = await fetch(viewUrl, {
+                headers: {
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                },
+                signal: AbortSignal.timeout(5000),
+              })
+              if (htmlRes.ok) {
+                const html = await htmlRes.text()
+                const match = html.match(/<meta\s+(?:property|name)=["']og:image["']\s+content=["']([^"']+)["']/i)
+                  || html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']og:image["']/i)
+                if (match && match[1]) {
+                  const ogUrl = match[1]
+                  const hiResUrl = ogUrl
+                    .replace(/\/\d+x\d+[a-zA-Z]*\.(jpg|png|webp)/i, '/1000x1000bb.jpg')
+                    .replace(/\/\d+x\d+cw\.(jpg|png|webp)/i, '/1000x1000bb.jpg')
+                  candidates.push({
+                    provider: 'apple',
+                    providerLabel: 'Apple Music Editorial (1000×1000)',
+                    portraitUrl: hiResUrl,
+                    width: 1000,
+                    height: 1000,
+                  })
+                }
+              }
+            }
+          }
+        } catch {}
+
+        // Tier 2: Deezer Public Artist API (Zero-Auth, Instant JSON)
+        try {
+          const deezerUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(cleanArtist)}&limit=1`
+          const deezerRes = await fetch(deezerUrl, { signal: AbortSignal.timeout(5000) })
+          if (deezerRes.ok) {
+            const data = (await deezerRes.json()) as any
+            const first = data.data?.[0]
+            if (first && first.picture_xl && !first.picture_xl.includes('default_artist')) {
+              candidates.push({
+                provider: 'deezer',
+                providerLabel: 'Deezer Studio Headshot (1000×1000)',
+                portraitUrl: first.picture_xl,
+                width: 1000,
+                height: 1000,
+              })
+            }
+          }
+        } catch {}
+
+        // Tier 3: MusicBrainz -> Wikidata -> Wikimedia Commons
+        try {
+          const mbUrl = `https://musicbrainz.org/ws/2/artist/?query=artist:${encodeURIComponent(cleanArtist)}&fmt=json&limit=1`
+          const mbRes = await fetch(mbUrl, {
+            headers: {
+              'User-Agent': 'CadenceMusicAgent/1.0.0 (https://github.com/cadence-audio)',
+              Accept: 'application/json',
+            },
+            signal: AbortSignal.timeout(5000),
+          })
+          if (mbRes.ok) {
+            const mbData = (await mbRes.json()) as any
+            const artistItem = mbData.artists?.[0]
+            if (artistItem?.id) {
+              const relUrl = `https://musicbrainz.org/ws/2/artist/${artistItem.id}?inc=url-rels&fmt=json`
+              const relRes = await fetch(relUrl, {
+                headers: {
+                  'User-Agent': 'CadenceMusicAgent/1.0.0 (https://github.com/cadence-audio)',
+                  Accept: 'application/json',
+                },
+                signal: AbortSignal.timeout(5000),
+              })
+              if (relRes.ok) {
+                const relData = (await relRes.json()) as any
+                const wikidataRel = relData.relations?.find(
+                  (r: any) => r.type === 'wikidata' || r.url?.resource?.includes('wikidata.org/wiki/')
+                )
+                if (wikidataRel?.url?.resource) {
+                  const qidMatch = wikidataRel.url.resource.match(/Q\d+/)
+                  if (qidMatch) {
+                    const qid = qidMatch[0]
+                    const wdUrl = `https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=${qid}&property=P18&format=json`
+                    const wdRes = await fetch(wdUrl, { signal: AbortSignal.timeout(5000) })
+                    if (wdRes.ok) {
+                      const wdData = (await wdRes.json()) as any
+                      const claim = wdData.claims?.P18?.[0]
+                      const filename = claim?.mainsnak?.datavalue?.value
+                      if (filename) {
+                        const commonsUrl = `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(filename)}?width=1000`
+                        candidates.push({
+                          provider: 'wikimedia',
+                          providerLabel: 'Wikimedia Commons Archive',
+                          portraitUrl: commonsUrl,
+                          width: 1000,
+                          height: 1000,
+                        })
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch {}
+
+        res.end(
+          JSON.stringify({
+            success: candidates.length > 0,
+            artist: cleanArtist,
+            candidates,
+          })
+        )
+      })
+
       server.middlewares.use('/api/musicbrainz-search', async (req, res) => {
         const url = new URL(req.url || '', `http://${req.headers.host}`)
         const artist = url.searchParams.get('artist') || ''
@@ -1848,7 +1995,7 @@ Instructions:
                   responseMimeType: 'application/json',
                 },
               },
-              timeoutMs: 20000,
+              timeoutMs: 12000,
             })
 
             res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
@@ -2070,12 +2217,182 @@ Instructions:
           }
         })
       })
+
+      // 9. Zero-Key Multi-Tier Artist Portrait Resolver
+      server.middlewares.use('/api/artist-portrait-search', async (req, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Access-Control-Allow-Origin', '*')
+
+        try {
+          const parsedUrl = new URL(req.url || '', 'http://localhost')
+          const artistQuery = (parsedUrl.searchParams.get('artist') || '').trim()
+
+          if (!artistQuery) {
+            res.statusCode = 400
+            res.end(JSON.stringify({ success: false, error: 'Missing artist parameter', candidates: [] }))
+            return
+          }
+
+          const candidates: any[] = []
+          const normQuery = artistQuery.toLowerCase()
+
+          // Tier 0: Curated High-Fidelity Studio Portraits
+          const CURATED_PORTRAITS: Record<string, { apple?: string; deezer?: string; wiki?: string }> = {
+            'a. r. rahman': {
+              apple: 'https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/4b/81/4c/4b814ce1-87a4-845a-c60f-e6082ec90795/pr_source.png/1000x1000bb.jpg',
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/95a5fbc40ff8773950efcfce2aa04618/1000x1000-000000-80-0-0.jpg',
+            },
+            'ar rahman': {
+              apple: 'https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/4b/81/4c/4b814ce1-87a4-845a-c60f-e6082ec90795/pr_source.png/1000x1000bb.jpg',
+            },
+            'ilaiyaraaja': {
+              apple: 'https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/09/b6/29/09b62947-f495-2c2e-4b68-c116c14ae6aa/pr_source.png/1000x1000bb.jpg',
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/ad5f3192461c28b7e21a8d0526e0b776/1000x1000-000000-80-0-0.jpg',
+            },
+            'shankar-ehsaan-loy': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/f1917711d9d43ad8b857dc4ce117498c/1000x1000-000000-80-0-0.jpg',
+              apple: 'https://is1-ssl.mzstatic.com/image/thumb/Features/3a/0d/13/dj.tujwzefz.jpg/1000x1000bb.jpg',
+            },
+            'udit narayan': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/6dc4b9b9a6ea861a5e1cf4142f1b4c40/1000x1000-000000-80-0-0.jpg',
+              apple: 'https://is1-ssl.mzstatic.com/image/thumb/Features125/v4/33/c4/62/33c46231-c4d6-0565-df0a-666324220b22/mza_1079313264426577821.jpg/1000x1000bb.jpg',
+            },
+            'sonu nigam': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/b86a8779b5c3ff6f3f01b1cb915462cf/1000x1000-000000-80-0-0.jpg',
+              apple: 'https://is1-ssl.mzstatic.com/image/thumb/Features115/v4/80/7e/8e/807e8ec2-132b-986c-48c5-9273c5cf8e24/mzl.sqsmljvv.jpg/1000x1000bb.jpg',
+            },
+            'shreya ghoshal': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/e7894a4ae74e2d3bb6976ce59ec47b59/1000x1000-000000-80-0-0.jpg',
+            },
+            'lata mangeshkar': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/ebfa68d0bb36c3427fca240ba66d69dc/1000x1000-000000-80-0-0.jpg',
+            },
+            'hariharan': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/06fa5366432b005e839e4e69b56345ec/1000x1000-000000-80-0-0.jpg',
+            },
+            's. p. balasubrahmanyam': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/e0892211f42289c89163a34a81b7a2d8/1000x1000-000000-80-0-0.jpg',
+            },
+            'salim-sulaiman': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/e0df7b5ba7cbdd48530ec3ca2b7367ae/1000x1000-000000-80-0-0.jpg',
+            },
+            'vishal-shekhar': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/e05fa75769222cfa03023fc63328ce78/1000x1000-000000-80-0-0.jpg',
+            },
+            'miles davis': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/0ab342e4313f8d8393cbe82e18b0fae0/1000x1000-000000-80-0-0.jpg',
+            },
+            'pink floyd': {
+              deezer: 'https://e-cdns-images.dzcdn.net/images/artist/68d2da88eb88f342416b23086eb29be7/1000x1000-000000-80-0-0.jpg',
+            },
+            'ludwig van beethoven': {
+              wiki: 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Beethoven.jpg/1000px-Beethoven.jpg',
+            },
+            'johann sebastian bach': {
+              wiki: 'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6a/Johann_Sebastian_Bach.jpg/1000px-Johann_Sebastian_Bach.jpg',
+            },
+            'mstislav rostropovich': {
+              wiki: 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/b2/Mstislav_Rostropovich_1965.jpg/1000px-Mstislav_Rostropovich_1965.jpg',
+            },
+          }
+
+          for (const [key, val] of Object.entries(CURATED_PORTRAITS)) {
+            if (normQuery.includes(key) || key.includes(normQuery)) {
+              if (val.apple) {
+                candidates.push({
+                  provider: 'apple',
+                  providerLabel: 'Apple Music Master',
+                  portraitUrl: val.apple,
+                  width: 1000,
+                  height: 1000,
+                })
+              }
+              if (val.deezer) {
+                candidates.push({
+                  provider: 'deezer',
+                  providerLabel: 'Deezer Studio Portrait',
+                  portraitUrl: val.deezer,
+                  width: 1000,
+                  height: 1000,
+                })
+              }
+              if (val.wiki) {
+                candidates.push({
+                  provider: 'wikimedia',
+                  providerLabel: 'Wikimedia Commons Archive',
+                  portraitUrl: val.wiki,
+                  width: 1000,
+                  height: 1000,
+                })
+              }
+              break
+            }
+          }
+
+          // Tier 1: Deezer Public REST API
+          try {
+            const deezerUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistQuery)}&limit=3`
+            const dRes = await fetch(deezerUrl, { headers: { 'User-Agent': 'Cadence/2.4 (Music Archiver)' }, signal: AbortSignal.timeout(3000) })
+            if (dRes.ok) {
+              const dData: any = await dRes.json()
+              if (dData && Array.isArray(dData.data)) {
+                for (const item of dData.data) {
+                  const pic = item.picture_xl || item.picture_big || item.picture_medium
+                  if (pic && !candidates.some((c) => c.portraitUrl === pic)) {
+                    candidates.push({
+                      provider: 'deezer',
+                      providerLabel: `Deezer (${item.name})`,
+                      portraitUrl: pic,
+                      width: 1000,
+                      height: 1000,
+                    })
+                  }
+                }
+              }
+            }
+          } catch {}
+
+          // Tier 2: Wikipedia PageImage API
+          try {
+            const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(artistQuery)}&prop=pageimages&format=json&pithumbsize=1000&origin=*`
+            const wRes = await fetch(wikiUrl, { headers: { 'User-Agent': 'Cadence/2.4 (Audiophile Desktop Player)' }, signal: AbortSignal.timeout(3000) })
+            if (wRes.ok) {
+              const wData: any = await wRes.json()
+              const pages = wData?.query?.pages || {}
+              for (const p of Object.values(pages) as any[]) {
+                if (p?.thumbnail?.source) {
+                  candidates.push({
+                    provider: 'wikimedia',
+                    providerLabel: 'Wikipedia / Wikimedia Commons',
+                    portraitUrl: p.thumbnail.source,
+                    width: p.thumbnail.width || 1000,
+                    height: p.thumbnail.height || 1000,
+                  })
+                }
+              }
+            }
+          } catch {}
+
+          res.statusCode = 200
+          res.end(
+            JSON.stringify({
+              success: true,
+              artist: artistQuery,
+              candidates,
+            })
+          )
+        } catch (err: any) {
+          res.statusCode = 200
+          res.end(JSON.stringify({ success: true, artist: '', candidates: [] }))
+        }
+      })
     },
   }
 }
 
 // https://vite.dev/config/
 export default defineConfig({
+
   plugins: [react(), tailwindcss(), localLibraryScannerPlugin()],
   optimizeDeps: {
     include: [

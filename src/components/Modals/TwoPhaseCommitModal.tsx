@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import {
   ShieldCheck,
   AlertTriangle,
@@ -19,10 +19,10 @@ import {
   Trash2,
   Image as ImageIcon,
   Timer,
-  Gauge,
-  Activity,
-  Radio,
-  Zap,
+  ChevronDown,
+  ChevronUp,
+  ChevronRight,
+  RefreshCw,
 } from 'lucide-react'
 import { Release, Track } from '../../core/types'
 import {
@@ -30,6 +30,12 @@ import {
   CommitStepProgress,
   DetailedCommitProgress,
 } from '../../core/transactionEngine'
+import {
+  analyzeHeaderPadding,
+  HeaderPaddingAnalysis,
+  CommitUnitMetrics,
+} from '../../types/commit'
+import { useAudioPlayer } from '../../context/AudioPlayerContext'
 
 interface TwoPhaseCommitModalProps {
   uncommittedTracks: Track[]
@@ -238,19 +244,41 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'preview' | 'pipeline'>('preview')
   const [filterCategory, setFilterCategory] = useState<'all' | 'metadata' | 'artwork'>('all')
+  const [commitTarget, setCommitTarget] = useState<'sidecar' | 'embedded'>('sidecar')
+  const { isPlaying, isPaused } = useAudioPlayer()
+  const isPlaybackActive = isPlaying || isPaused
   const [searchQuery, setSearchQuery] = useState('')
+
+  // Exclusion & Expansion Sets
+  const [excludedTrackIds, setExcludedTrackIds] = useState<Set<string>>(new Set())
+  const [expandedReleaseIds, setExpandedReleaseIds] = useState<Set<string>>(() => {
+    // Default: expand all albums initially for high discoverability
+    const set = new Set<string>()
+    uncommittedTracks.forEach((t) => set.add(t.releaseId || t.folderName || 'unknown'))
+    return set
+  })
+
+  // Execution & Progress State
   const [isRunning, setIsRunning] = useState(false)
   const [isCompleted, setIsCompleted] = useState(false)
   const [detailedProgress, setDetailedProgress] = useState<DetailedCommitProgress | null>(null)
-  const [committedSummary, setCommittedSummary] = useState<{ total: number; embedded: number; sidecars: number } | null>(null)
+  const [committedSummary, setCommittedSummary] = useState<{
+    total: number
+    embedded: number
+    sidecars: number
+    durationMs: number
+  } | null>(null)
+  const [failedTracks, setFailedTracks] = useState<{ trackId: string; filePath: string; error: string }[]>([])
   const [errorMessage, setErrorMessage] = useState<string>()
   const [lastTxId, setLastTxId] = useState<string>()
+  const [showTechDetails, setShowTechDetails] = useState(false)
+
   const [progressSteps, setProgressSteps] = useState<CommitStepProgress[]>([
-    { step: 'PREPARE', label: 'Phase 1: Validating storage mount locks and write access', completed: false },
-    { step: 'VERIFY_STREAM_CHECKSUM', label: 'Phase 1: Stream MD5 and Vorbis comment validation', completed: false },
-    { step: 'CREATE_BACKUP_SNAPSHOT', label: 'Phase 1: Generating atomic rollback snapshot', completed: false },
-    { step: 'WRITE_EMBEDDED_TAGS', label: 'Phase 2: Atomic write to ID3v2.4 / Vorbis Atoms', completed: false },
-    { step: 'FINALIZE', label: 'Phase 2: Updating sidecar ledger and transaction journal', completed: false },
+    { step: 'PREPARE', label: '1. Checking storage permissions, playback idle & mount locks', completed: false },
+    { step: 'VERIFY_STREAM_CHECKSUM', label: '2. Verifying audio checksums & stream integrity', completed: false },
+    { step: 'CREATE_BACKUP_SNAPSHOT', label: '3. Creating safe rollback snapshot', completed: false },
+    { step: 'WRITE_EMBEDDED_TAGS', label: '4. Updating track metadata & artwork', completed: false },
+    { step: 'FINALIZE', label: '5. Finalizing changes & updating journal', completed: false },
   ])
 
   // Compute release lookup map
@@ -260,44 +288,16 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     return map
   }, [releases])
 
-  // Compute category counts using strict real edits
-  const metadataTracksCount = useMemo(() => {
-    return uncommittedTracks.filter((t) => {
-      const rel = releaseMap.get(t.releaseId)
-      const realEdits = getTrackRealEdits(t, rel)
-      return realEdits.length > 0
-    }).length
-  }, [uncommittedTracks, releaseMap])
-
-  const artworkOnlyTracksCount = useMemo(() => {
-    return uncommittedTracks.filter((t) => {
-      const rel = releaseMap.get(t.releaseId)
-      const realEdits = getTrackRealEdits(t, rel)
-      return Boolean(t.pendingSidecarEdits?.coverArtUrl) && realEdits.length === 0
-    }).length
-  }, [uncommittedTracks, releaseMap])
-
-  // Compute total pending tag edits count (excluding artwork duplicates)
-  const totalTagEditsCount = useMemo(() => {
-    return uncommittedTracks.reduce((acc, t) => {
-      const rel = releaseMap.get(t.releaseId)
-      const realEdits = getTrackRealEdits(t, rel)
-      return acc + realEdits.length
-    }, 0)
-  }, [uncommittedTracks, releaseMap])
-
-  // Count distinct albums with staged artwork
-  const totalArtworkAlbumsCount = useMemo(() => {
-    const relSet = new Set<string>()
+  // Pre-calculate padding analysis for all uncommitted tracks
+  const paddingMap = useMemo(() => {
+    const map = new Map<string, HeaderPaddingAnalysis>()
     uncommittedTracks.forEach((t) => {
-      if (t.pendingSidecarEdits?.coverArtUrl) {
-        relSet.add(t.releaseId || t.folderName || 'unknown')
-      }
+      map.set(t.id, analyzeHeaderPadding(t))
     })
-    return relSet.size
+    return map
   }, [uncommittedTracks])
 
-  // Filtered tracks based on category and search
+  // Filtered tracks based on category and search query
   const filteredTracks = useMemo(() => {
     let list = uncommittedTracks.filter((t) => {
       const rel = releaseMap.get(t.releaseId)
@@ -312,10 +312,8 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
         return getTrackRealEdits(t, rel).length > 0
       })
     } else if (filterCategory === 'artwork') {
-      list = list.filter((t) => {
-        const rel = releaseMap.get(t.releaseId)
-        return Boolean(t.pendingSidecarEdits?.coverArtUrl) && getTrackRealEdits(t, rel).length === 0
-      })
+      // "With Artwork Updates": includes any tracks that have staged cover art
+      list = list.filter((t) => Boolean(t.pendingSidecarEdits?.coverArtUrl))
     }
 
     if (!searchQuery.trim()) return list
@@ -330,11 +328,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     )
   }, [uncommittedTracks, releaseMap, filterCategory, searchQuery])
 
-  // Group tracks by release/album
+  // Group filtered tracks by release / album
   const groupedByRelease = useMemo(() => {
     const map = new Map<string, { release?: Release; tracks: Track[] }>()
     filteredTracks.forEach((t) => {
-      const relId = t.releaseId || 'unknown'
+      const relId = t.releaseId || t.folderName || 'unknown'
       if (!map.has(relId)) {
         const rel = releases.find((r) => r.id === relId)
         map.set(relId, { release: rel, tracks: [] })
@@ -344,33 +342,172 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     return Array.from(map.entries())
   }, [filteredTracks, releases])
 
-  const handleStartCommit = async () => {
+  // Decoupled Metrics: All Staged Items
+  const allMetrics: CommitUnitMetrics = useMemo(() => {
+    const relSet = new Set<string>()
+    let tagEdits = 0
+    const artAlbums = new Set<string>()
+
+    uncommittedTracks.forEach((t) => {
+      const rel = releaseMap.get(t.releaseId)
+      relSet.add(t.releaseId || t.folderName || 'unknown')
+      tagEdits += getTrackRealEdits(t, rel).length
+      if (t.pendingSidecarEdits?.coverArtUrl) {
+        artAlbums.add(t.releaseId || t.folderName || 'unknown')
+      }
+    })
+
+    return {
+      albumCount: relSet.size,
+      audioTrackCount: uncommittedTracks.length,
+      tagEditCount: tagEdits,
+      coverArtUpdateCount: artAlbums.size,
+    }
+  }, [uncommittedTracks, releaseMap])
+
+  // Tracks selected for commit (taking excludedTrackIds into account)
+  const activeTracksToCommit = useMemo(() => {
+    return uncommittedTracks.filter((t) => !excludedTrackIds.has(t.id))
+  }, [uncommittedTracks, excludedTrackIds])
+
+  // Dynamic Decoupled Metrics for currently selected/included items
+  const activeMetrics: CommitUnitMetrics = useMemo(() => {
+    const relSet = new Set<string>()
+    let tagEdits = 0
+    const artAlbums = new Set<string>()
+
+    activeTracksToCommit.forEach((t) => {
+      const rel = releaseMap.get(t.releaseId)
+      relSet.add(t.releaseId || t.folderName || 'unknown')
+      tagEdits += getTrackRealEdits(t, rel).length
+      if (t.pendingSidecarEdits?.coverArtUrl) {
+        artAlbums.add(t.releaseId || t.folderName || 'unknown')
+      }
+    })
+
+    return {
+      albumCount: relSet.size,
+      audioTrackCount: activeTracksToCommit.length,
+      tagEditCount: tagEdits,
+      coverArtUpdateCount: artAlbums.size,
+    }
+  }, [activeTracksToCommit, releaseMap])
+
+  // Category counts for filter tabs
+  const metadataTracksCount = useMemo(() => {
+    return uncommittedTracks.filter((t) => {
+      const rel = releaseMap.get(t.releaseId)
+      return getTrackRealEdits(t, rel).length > 0
+    }).length
+  }, [uncommittedTracks, releaseMap])
+
+  const artworkTracksCount = useMemo(() => {
+    return uncommittedTracks.filter((t) => Boolean(t.pendingSidecarEdits?.coverArtUrl)).length
+  }, [uncommittedTracks])
+
+  // Preflight Verification Check
+  const preflight = useMemo(() => {
+    return transactionEngine.runPreflightChecks(activeTracksToCommit, isPlaybackActive)
+  }, [activeTracksToCommit, isPlaybackActive])
+
+  // Exclude / Include Handlers
+  const toggleTrackExclusion = (trackId: string) => {
+    setExcludedTrackIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(trackId)) next.delete(trackId)
+      else next.add(trackId)
+      return next
+    })
+  }
+
+  const toggleReleaseExclusion = (relId: string, relTracks: Track[]) => {
+    setExcludedTrackIds((prev) => {
+      const next = new Set(prev)
+      const allExcluded = relTracks.every((t) => next.has(t.id))
+      if (allExcluded) {
+        relTracks.forEach((t) => next.delete(t.id))
+      } else {
+        relTracks.forEach((t) => next.add(t.id))
+      }
+      return next
+    })
+  }
+
+  const toggleReleaseExpanded = (relId: string) => {
+    setExpandedReleaseIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(relId)) next.delete(relId)
+      else next.add(relId)
+      return next
+    })
+  }
+
+  // Commit Execution Handler with Adaptive Sidecar Verification
+  const handleStartCommit = async (tracksToRun: Track[] = activeTracksToCommit) => {
+    if (tracksToRun.length === 0 || !preflight.canProceed) return
+
     setIsRunning(true)
-    setActiveTab('pipeline')
     setErrorMessage(undefined)
     setDetailedProgress(null)
+    setFailedTracks([])
 
-    const initialCount = uncommittedTracks.length
+    // If writing embedded headers, immediately show pipeline progress
+    if (commitTarget === 'embedded') {
+      setActiveTab('pipeline')
+    }
+
+    const startTime = Date.now()
+    const description = `Batch Commit ${tracksToRun.length} tracks to ${
+      commitTarget === 'sidecar' ? 'Album Sidecars' : 'Embedded Headers'
+    }`
+
     const result = await transactionEngine.executeTwoPhaseCommit(
-      uncommittedTracks,
-      `Batch Commit ${uncommittedTracks.length} tracks to embedded headers`,
+      tracksToRun,
+      description,
       (updatedSteps) => setProgressSteps(updatedSteps),
-      (progress) => setDetailedProgress(progress)
+      (progress) => setDetailedProgress(progress),
+      {
+        destination: commitTarget,
+        isPlaybackActive,
+      }
     )
 
+    const duration = Date.now() - startTime
     setIsRunning(false)
-    if (result.success) {
+
+    if (result.success && (!result.failedTracks || result.failedTracks.length === 0)) {
       setCommittedSummary({
-        total: result.committedCount ?? initialCount,
+        total: result.committedCount ?? tracksToRun.length,
         embedded: result.embeddedHeadersCount ?? 0,
-        sidecars: result.sidecarsCount ?? initialCount,
+        sidecars: result.sidecarsCount ?? tracksToRun.length,
+        durationMs: duration,
       })
       setIsCompleted(true)
       setLastTxId(result.transactionId)
       onSuccess()
+
+      // Adaptive Sidecar Execution: If Sidecar commit finishes < 250ms with zero errors, close smoothly
+      if (commitTarget === 'sidecar' && duration < 250) {
+        onClose()
+      } else {
+        // Long-running or embedded: stay on progress view so user sees completion
+        setActiveTab('pipeline')
+      }
     } else {
-      setErrorMessage(result.error || 'Transaction aborted.')
+      // Errors occurred or partial failures: stay in/switch to pipeline view
+      setActiveTab('pipeline')
+      setErrorMessage(result.error || 'Transaction encountered write errors on disk.')
+      if (result.failedTracks && result.failedTracks.length > 0) {
+        setFailedTracks(result.failedTracks)
+      }
     }
+  }
+
+  const handleRetryFailed = () => {
+    if (failedTracks.length === 0) return
+    const failedSet = new Set(failedTracks.map((f) => f.trackId))
+    const retryTracks = uncommittedTracks.filter((t) => failedSet.has(t.id))
+    handleStartCommit(retryTracks)
   }
 
   const handleRollback = () => {
@@ -384,255 +521,330 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-start justify-center pt-[52px] animate-in fade-in duration-200">
       <div
         data-tutorial-id="modal-staged-commit-pipeline"
-        className="bg-[#12151E] border border-white/[0.12] rounded-2xl w-full max-w-4xl max-h-[90vh] shadow-2xl overflow-hidden flex flex-col glow-cyan animate-in fade-in zoom-in-95 duration-150"
+        className="bg-[#121318] border-x border-b border-white/[0.08] rounded-t-none rounded-b-2xl w-full max-w-5xl max-h-[calc(92vh-52px)] shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-hidden flex flex-col animate-in slide-in-from-top-6 duration-240 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] will-change-transform"
       >
-        {/* Header */}
+        {/* 1. Modal Header with Trust Badges */}
         <div className="p-4 px-6 border-b border-white/[0.08] flex items-center justify-between bg-white/[0.02]">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#10B981]/15 border border-[#10B981]/30 flex items-center justify-center text-[#10B981]">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div className="flex flex-col text-left">
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-[#F1F5F9]">Staged for Commit</h2>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 font-semibold uppercase tracking-wider">
-                  2-Phase Safe Parity
+              <div className="flex items-center gap-2.5">
+                <h2 className="text-base font-bold text-slate-100">Review & Commit Changes</h2>
+                <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Staged Locally (Untouched)</span>
+                </span>
+                <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5">
+                  <Timer className="w-3.5 h-3.5" />
+                  <span>Rollback Journal Enabled</span>
                 </span>
               </div>
-              <span className="text-xs text-[#94A3B8]">
-                Review all staged sidecar modifications before transactional commit to audio headers.
+              <span className="text-xs text-slate-400 mt-0.5">
+                Inspect pending field diffs grouped by album authority before saving to storage.
               </span>
             </div>
           </div>
           {!isRunning && (
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-[#64748B] hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
+              title="Close commit review"
             >
               <X className="w-5 h-5" />
             </button>
           )}
         </div>
 
-        {/* Tab & Metric Navigation Bar */}
-        <div className="px-6 py-2.5 border-b border-white/[0.06] bg-[#0E1017] flex items-center justify-between gap-4 shrink-0">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setActiveTab('preview')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
-                activeTab === 'preview'
-                  ? 'bg-white/[0.1] text-white border border-white/20'
-                  : 'text-[#94A3B8] hover:text-white'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5 text-[#00F5FF]" />
-              <span>Changes Preview ({uncommittedTracks.length})</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('pipeline')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
-                activeTab === 'pipeline'
-                  ? 'bg-white/[0.1] text-white border border-white/20'
-                  : 'text-[#94A3B8] hover:text-white'
-              }`}
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
-              <span>Safety Pipeline (5 Steps)</span>
-            </button>
-          </div>
-
-          {/* Quick Metrics */}
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06] text-[#94A3B8]">
-              <Disc3 className="w-3 h-3 text-[#00F5FF]" />
+        {/* 2. Decoupled Summary Metrics Strip (Distinct from Filter Tabs) */}
+        <div className="px-6 py-2.5 bg-[#0f1015] border-b border-white/[0.06] flex items-center justify-between gap-4 flex-wrap shrink-0">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mr-1">
+              Staged Batch:
+            </span>
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.03] border border-white/[0.06] text-zinc-300">
+              <Disc3 className="w-3.5 h-3.5 text-cyan-400" />
               <span>
-                <strong className="text-white">{groupedByRelease.length}</strong> Albums
+                <strong className="text-white font-semibold">{allMetrics.albumCount}</strong> Albums
               </span>
             </div>
-            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06] text-[#94A3B8]">
-              <FileCode className="w-3 h-3 text-[#ADFF2F]" />
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.03] border border-white/[0.06] text-zinc-300">
+              <Music className="w-3.5 h-3.5 text-emerald-400" />
               <span>
-                <strong className="text-white">{totalTagEditsCount}</strong> Tag Edits
+                <strong className="text-white font-semibold">{allMetrics.audioTrackCount}</strong> Audio Track Files
               </span>
             </div>
-            {totalArtworkAlbumsCount > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06] text-[#94A3B8]">
-                <ImageIcon className="w-3 h-3 text-[#C084FC]" />
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.03] border border-white/[0.06] text-zinc-300">
+              <FileCode className="w-3.5 h-3.5 text-amber-400" />
+              <span>
+                <strong className="text-white font-semibold">{allMetrics.tagEditCount}</strong> Tag Edits
+              </span>
+            </div>
+            {allMetrics.coverArtUpdateCount > 0 && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.03] border border-white/[0.06] text-zinc-300">
+                <ImageIcon className="w-3.5 h-3.5 text-purple-400" />
                 <span>
-                  <strong className="text-white">{totalArtworkAlbumsCount}</strong> Art Updates
+                  <strong className="text-white font-semibold">{allMetrics.coverArtUpdateCount}</strong> Cover Art Updates
                 </span>
               </div>
             )}
           </div>
+
+          {/* View Switcher: Diff Review vs Execution Drawer */}
+          <div className="flex items-center gap-1.5 bg-black/40 p-0.5 rounded-lg border border-white/[0.06]">
+            <button
+              type="button"
+              onClick={() => setActiveTab('preview')}
+              className={`px-3 py-1 rounded-md text-xs font-mono font-medium transition-all cursor-pointer ${
+                activeTab === 'preview'
+                  ? 'bg-white/[0.12] text-white shadow-sm border border-white/10'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Diff Review
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('pipeline')}
+              className={`px-3 py-1 rounded-md text-xs font-mono font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeTab === 'pipeline'
+                  ? 'bg-white/[0.12] text-white shadow-sm border border-white/10'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <span>Execution Log</span>
+              {isRunning && <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />}
+            </button>
+          </div>
         </div>
 
-        {/* Content Area */}
+        {/* 3. Main Body Viewport */}
         <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 text-left">
           {activeTab === 'preview' ? (
             <>
-              {/* Filter Tabs & Search Bar */}
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  {/* Category Filter Pills */}
-                  <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/[0.06]">
-                    <button
-                      onClick={() => setFilterCategory('all')}
-                      className={`px-3 py-1 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer ${
-                        filterCategory === 'all'
-                          ? 'bg-white/[0.12] text-white shadow-sm'
-                          : 'text-[#94A3B8] hover:text-white'
-                      }`}
-                    >
-                      All Staged ({uncommittedTracks.length})
-                    </button>
-                    <button
-                      onClick={() => setFilterCategory('metadata')}
-                      className={`px-3 py-1 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
-                        filterCategory === 'metadata'
-                          ? 'bg-[#10B981]/20 text-[#10B981] border border-[#10B981]/30 shadow-sm'
-                          : 'text-[#94A3B8] hover:text-white'
-                      }`}
-                    >
-                      <Music className="w-3 h-3" />
-                      <span>Tag & Metadata Edits ({metadataTracksCount})</span>
-                    </button>
-                    <button
-                      onClick={() => setFilterCategory('artwork')}
-                      className={`px-3 py-1 rounded-lg text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
-                        filterCategory === 'artwork'
-                          ? 'bg-[#00F5FF]/20 text-[#00F5FF] border border-[#00F5FF]/30 shadow-sm'
-                          : 'text-[#94A3B8] hover:text-white'
-                      }`}
-                    >
-                      <ImageIcon className="w-3 h-3" />
-                      <span>Cover Artwork Only ({artworkOnlyTracksCount})</span>
-                    </button>
-                  </div>
-
-                  {/* Search Input */}
-                  <div className="relative flex-1 min-w-[200px]">
-                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#64748B]" />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Filter by title, artist, album, path..."
-                      className="w-full pl-9 pr-3 py-1.5 bg-black/40 border border-white/[0.08] rounded-xl text-xs text-white placeholder:text-[#64748B] focus:outline-none focus:border-[#00F5FF]/50 font-mono"
-                    />
-                  </div>
+              {/* Category Filter Tabs & Search Bar */}
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/[0.06]">
+                  <button
+                    type="button"
+                    onClick={() => setFilterCategory('all')}
+                    className={`px-3 py-1 rounded-lg text-xs font-mono font-medium transition-all cursor-pointer ${
+                      filterCategory === 'all'
+                        ? 'bg-white/[0.12] text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    All Changes ({uncommittedTracks.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFilterCategory('metadata')}
+                    className={`px-3 py-1 rounded-lg text-xs font-mono font-medium flex items-center gap-1.5 transition-all cursor-pointer ${
+                      filterCategory === 'metadata'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Music className="w-3 h-3" />
+                    <span>Tag Edits ({metadataTracksCount})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFilterCategory('artwork')}
+                    className={`px-3 py-1 rounded-lg text-xs font-mono font-medium flex items-center gap-1.5 transition-all cursor-pointer ${
+                      filterCategory === 'artwork'
+                        ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30 shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <ImageIcon className="w-3 h-3" />
+                    <span>With Artwork Updates ({artworkTracksCount})</span>
+                  </button>
                 </div>
 
-                {/* Safe Non-Destructive Sidecar Staging Banner */}
-                <div className="p-3 px-4 rounded-xl bg-gradient-to-r from-[#00F5FF]/10 via-white/[0.02] to-transparent border border-[#00F5FF]/20 text-xs flex items-start gap-3">
-                  <ShieldCheck className="w-4 h-4 text-[#00F5FF] shrink-0 mt-0.5" />
-                  <div className="flex-1 flex flex-col gap-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-white font-mono">In-Memory / IndexedDB Sidecar Staging</span>
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30">
-                        Audio Files 100% Untouched
-                      </span>
-                    </div>
-                    <p className="text-[#94A3B8] text-[11px] leading-relaxed">
-                      All physical WAV/FLAC audio files on disk retain their original headers and file timestamps. Changes are staged non-destructively in local sidecar cache. You can safely discard unwanted changes using the buttons below.
-                    </p>
-                  </div>
+                {/* Search Bar */}
+                <div className="relative flex-1 min-w-[220px]">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Filter by title, artist, album, path..."
+                    className="w-full pl-9 pr-3 py-1.5 bg-black/40 border border-white/[0.08] rounded-xl text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 font-mono"
+                  />
                 </div>
               </div>
 
+              {/* Preflight Transport Warning if Playback Active */}
+              {!preflight.playbackIdle && (
+                <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 flex items-center justify-between gap-3 animate-in fade-in">
+                  <div className="flex items-center gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>
+                      <strong>Audiophile Transport Purity Lock Active:</strong> AudioEngine is currently playing or paused. Commit execution is locked until playback is stopped to prevent storage bus jitter.
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/30 text-amber-300 shrink-0">
+                    Playback Active
+                  </span>
+                </div>
+              )}
+
+              {/* Album Grouped Primary Review Diff */}
               {uncommittedTracks.length === 0 ? (
                 <div className="p-12 rounded-2xl bg-white/[0.01] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center gap-2">
-                  <CheckCircle2 className="w-10 h-10 text-[#10B981]/50" />
+                  <CheckCircle2 className="w-10 h-10 text-emerald-500/50" />
                   <h3 className="text-sm font-bold text-white">No Pending Changes Staged</h3>
-                  <p className="text-xs text-[#94A3B8] max-w-sm">
-                    All audio headers and sidecars are currently bit-perfect and synchronized with the relational library.
+                  <p className="text-xs text-zinc-400 max-w-sm">
+                    All audio headers and sidecars are currently synchronized and bit-perfect with your library.
                   </p>
                 </div>
               ) : filteredTracks.length === 0 ? (
                 <div className="p-12 rounded-2xl bg-white/[0.01] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center gap-2">
-                  <Search className="w-10 h-10 text-[#64748B]/50" />
+                  <Search className="w-10 h-10 text-zinc-500/50" />
                   <h3 className="text-sm font-bold text-white">No Matching Staged Changes</h3>
-                  <p className="text-xs text-[#94A3B8] max-w-sm">
+                  <p className="text-xs text-zinc-400 max-w-sm">
                     No staged tracks match the selected filter category or search query.
                   </p>
                 </div>
               ) : (
                 <div className="flex flex-col gap-4">
-                  {groupedByRelease.map(([relId, { release, tracks }]) => {
+                  {groupedByRelease.map(([relId, { release, tracks: relTracks }]) => {
                     const albumTitle =
                       release?.title ||
-                      tracks[0]?.pendingSidecarEdits?.album ||
-                      tracks[0]?.folderName ||
+                      relTracks[0]?.pendingSidecarEdits?.album ||
+                      relTracks[0]?.folderName ||
                       'Album Release'
-                    const folderName = release?.folderName || tracks[0]?.folderName
-                    const stagedCoverArt = tracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)?.pendingSidecarEdits?.coverArtUrl
+                    const folderName = release?.folderName || relTracks[0]?.folderName
+                    const stagedCoverArt = relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)
+                      ?.pendingSidecarEdits?.coverArtUrl
                     const currentCoverArt =
                       release?.artwork?.originalFrontCoverUrl ||
                       (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt
                         ? release.artwork.frontCoverUrl
-                        : tracks[0]?.filePath
-                        ? `/api/track-art?file=${encodeURIComponent(tracks[0].filePath)}`
+                        : relTracks[0]?.filePath
+                        ? `/api/track-art?file=${encodeURIComponent(relTracks[0].filePath)}`
                         : undefined)
+
+                    const isExpanded = expandedReleaseIds.has(relId)
+                    const allTracksExcluded = relTracks.every((t) => excludedTrackIds.has(t.id))
+                    const someTracksExcluded = relTracks.some((t) => excludedTrackIds.has(t.id))
 
                     return (
                       <div
                         key={relId}
-                        className="rounded-2xl border border-white/[0.08] bg-[#0E1017]/80 overflow-hidden shadow-lg"
+                        className={`rounded-2xl border transition-all ${
+                          allTracksExcluded
+                            ? 'border-white/[0.04] bg-[#0c0d11]/60 opacity-60'
+                            : 'border-white/[0.08] bg-[#0E1017]/90 shadow-lg'
+                        }`}
                       >
                         {/* Album Group Header */}
-                        <div className="p-3.5 px-4 bg-white/[0.03] border-b border-white/[0.06] flex items-center justify-between">
-                          <div className="flex items-center gap-3 truncate min-w-0">
-                            <div className="w-9 h-9 rounded-lg bg-[#00F5FF]/10 border border-[#00F5FF]/30 flex items-center justify-center shrink-0 text-[#00F5FF]">
-                              <Disc3 className="w-4 h-4" />
+                        <div
+                          onClick={() => toggleReleaseExpanded(relId)}
+                          className="p-3.5 px-4 bg-white/[0.02] hover:bg-white/[0.04] border-b border-white/[0.06] flex items-center justify-between gap-3 cursor-pointer transition-colors"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            {/* Album Checkbox */}
+                            <div
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                toggleReleaseExclusion(relId, relTracks)
+                              }}
+                              className="w-5 h-5 flex items-center justify-center shrink-0 cursor-pointer"
+                              title={allTracksExcluded ? 'Include album in commit' : 'Exclude album from commit'}
+                            >
+                              <div
+                                className={`w-4 h-4 rounded flex items-center justify-center transition-all ${
+                                  !allTracksExcluded && !someTracksExcluded
+                                    ? 'bg-emerald-500 border border-emerald-400 text-black'
+                                    : someTracksExcluded && !allTracksExcluded
+                                    ? 'bg-emerald-500/40 border border-emerald-400/60'
+                                    : 'bg-zinc-900 border border-zinc-700'
+                                }`}
+                              >
+                                {!allTracksExcluded && <Check className="w-3 h-3 stroke-[3]" />}
+                              </div>
                             </div>
-                            <div className="flex flex-col truncate min-w-0">
+
+                            {/* Album Artwork or Disc Icon */}
+                            <div className="w-10 h-10 rounded-lg bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                              {stagedCoverArt || currentCoverArt ? (
+                                <img
+                                  src={stagedCoverArt || currentCoverArt}
+                                  alt="Cover"
+                                  className="w-full h-full object-cover"
+                                  onError={(e) => {
+                                    ;(e.target as HTMLElement).style.display = 'none'
+                                  }}
+                                />
+                              ) : (
+                                <Disc3 className="w-5 h-5 text-cyan-400" />
+                              )}
+                            </div>
+
+                            {/* Album Meta */}
+                            <div className="flex flex-col min-w-0 text-left">
                               <div className="flex items-center gap-2">
-                                <span className="text-xs font-bold text-white truncate font-mono">
+                                <span className="text-xs font-bold text-white truncate">
                                   {albumTitle}
                                 </span>
                                 {folderName && (
                                   <span
-                                    className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#00F5FF]/10 text-[#00F5FF] border border-[#00F5FF]/20 flex items-center gap-1 shrink-0"
+                                    className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 flex items-center gap-1 shrink-0"
                                     title={`Physical Folder: ${folderName}`}
                                   >
                                     <Folder className="w-3 h-3" />
-                                    <span>{folderName}</span>
+                                    <span className="truncate max-w-[200px]">{folderName}</span>
                                   </span>
                                 )}
                               </div>
-                              <span className="text-[11px] text-[#94A3B8] truncate mt-0.5">
-                                {release?.artistCredit || tracks[0]?.artistCredit || 'Artist'}
+                              <span className="text-[11px] text-zinc-400 truncate mt-0.5 font-mono">
+                                {release?.artistCredit || relTracks[0]?.artistCredit || 'Various Artists'}
                               </span>
                             </div>
                           </div>
+
                           <div className="flex items-center gap-2 shrink-0">
                             {stagedCoverArt && (
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#C084FC]/15 text-[#C084FC] border border-[#C084FC]/30 font-semibold">
-                                Archival Art Staged
+                              <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                                Cover Art Updated
                               </span>
                             )}
-                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/[0.05] text-[#CBD5E1] shrink-0 border border-white/10">
-                              {tracks.length} track{tracks.length > 1 ? 's' : ''} staged
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-zinc-300 border border-white/10">
+                              {relTracks.length} track{relTracks.length > 1 ? 's' : ''}
                             </span>
                             {onDiscardRelease && (
                               <button
-                                onClick={() => onDiscardRelease(relId)}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  onDiscardRelease(relId)
+                                }}
                                 title="Discard all staged changes for this album"
-                                className="p-1 rounded text-[#64748B] hover:text-[#F43F5E] hover:bg-white/[0.06] transition-all cursor-pointer"
+                                className="p-1 rounded text-zinc-400 hover:text-rose-400 hover:bg-white/[0.06] transition-all cursor-pointer"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             )}
+                            <div className="p-1 text-zinc-400">
+                              {isExpanded ? (
+                                <ChevronDown className="w-4 h-4 text-cyan-400" />
+                              ) : (
+                                <ChevronRight className="w-4 h-4 text-zinc-400" />
+                              )}
+                            </div>
                           </div>
                         </div>
 
-                        {/* Staged Album Artwork Comparison Box */}
-                        {stagedCoverArt && (
-                          <div className="p-3 px-4 bg-black/40 border-b border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        {/* Staged Album Artwork Comparison (if present) */}
+                        {isExpanded && stagedCoverArt && (
+                          <div className="p-3.5 px-4 bg-black/40 border-b border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div className="flex items-center gap-4">
-                              {/* Current Artwork */}
                               <div className="flex items-center gap-2.5">
                                 <div className="w-12 h-12 rounded-lg bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
                                   {currentCoverArt ? (
@@ -641,44 +853,41 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                       alt="Current Cover"
                                       className="w-full h-full object-cover"
                                       onError={(e) => {
-                                        (e.target as HTMLElement).style.display = 'none'
+                                        ;(e.target as HTMLElement).style.display = 'none'
                                       }}
                                     />
                                   ) : (
-                                    <Disc3 className="w-6 h-6 text-[#64748B]" />
+                                    <Disc3 className="w-6 h-6 text-zinc-500" />
                                   )}
                                 </div>
                                 <div className="flex flex-col text-left">
-                                  <span className="text-[10px] font-mono text-[#94A3B8] uppercase tracking-wider">Current Disk Art</span>
-                                  <span className="text-xs font-mono font-medium text-[#CBD5E1]">
-                                    {release?.artwork?.resolution || 'Local Audio Header'}
+                                  <span className="text-[10px] text-zinc-400 font-mono uppercase tracking-wider">
+                                    Current Artwork
+                                  </span>
+                                  <span className="text-xs text-zinc-300 font-mono">
+                                    {release?.artwork?.resolution || 'Disk file'}
                                   </span>
                                 </div>
                               </div>
 
-                              {/* Arrow */}
-                              <div className="flex items-center text-[#00F5FF] shrink-0 px-1">
+                              <div className="flex items-center text-cyan-400 shrink-0 px-1">
                                 <ArrowRight className="w-4 h-4" />
                               </div>
 
-                              {/* Staged Archival Cover */}
                               <div className="flex items-center gap-2.5">
-                                <div className="w-12 h-12 rounded-lg bg-black/60 border border-[#00F5FF]/40 overflow-hidden flex items-center justify-center shrink-0 shadow-md shadow-[#00F5FF]/10">
+                                <div className="w-12 h-12 rounded-lg bg-black/60 border border-emerald-500/40 overflow-hidden flex items-center justify-center shrink-0 shadow-md shadow-emerald-500/10">
                                   <img
                                     src={stagedCoverArt}
-                                    alt="Staged Archival Cover"
+                                    alt="New Cover"
                                     className="w-full h-full object-cover"
-                                    onError={(e) => {
-                                      (e.target as HTMLElement).style.display = 'none'
-                                    }}
                                   />
                                 </div>
                                 <div className="flex flex-col text-left">
-                                  <span className="text-[10px] font-mono text-[#10B981] font-bold uppercase tracking-wider">
+                                  <span className="text-[10px] text-emerald-400 font-mono uppercase tracking-wider font-semibold">
                                     Staged Archival Cover
                                   </span>
-                                  <span className="text-xs font-mono font-bold text-[#10B981] truncate max-w-[220px]" title={stagedCoverArt}>
-                                    Cover Art Archive / Online
+                                  <span className="text-xs text-emerald-300 font-mono">
+                                    {relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'}
                                   </span>
                                 </div>
                               </div>
@@ -686,117 +895,129 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 
                             {onDiscardReleaseArtwork && (
                               <button
+                                type="button"
                                 onClick={() => onDiscardReleaseArtwork(relId)}
-                                className="px-2.5 py-1 rounded-lg text-[11px] font-mono text-[#94A3B8] hover:text-[#F43F5E] hover:bg-white/[0.05] border border-transparent hover:border-[#F43F5E]/30 transition-all cursor-pointer flex items-center gap-1 shrink-0 self-end sm:self-auto"
-                                title="Discard staged cover art for this album and keep disk artwork"
+                                className="px-2.5 py-1 text-xs font-mono rounded-lg border border-white/10 hover:border-rose-400/50 hover:bg-rose-500/10 text-zinc-400 hover:text-rose-300 transition-all cursor-pointer"
                               >
-                                <RotateCcw className="w-3 h-3" />
-                                <span>Keep Disk Art</span>
+                                Revert Artwork
                               </button>
                             )}
                           </div>
                         )}
 
-                        {/* Staged Tracks in this Album */}
-                        <div className="divide-y divide-white/[0.04]">
-                          {tracks.map((track) => {
-                            const realEdits = getTrackRealEdits(track, release)
-                            const hasTrackMetadataEdits = realEdits.length > 0
+                        {/* Track-Level Diff List */}
+                        {isExpanded && (
+                          <div className="divide-y divide-white/[0.04]">
+                            {relTracks.map((track) => {
+                              const realEdits = getTrackRealEdits(track, release)
+                              const isTrackExcluded = excludedTrackIds.has(track.id)
+                              const paddingInfo = paddingMap.get(track.id)
 
-                            return (
-                              <div key={track.id} className="p-3 px-4 flex flex-col gap-2 hover:bg-white/[0.01] transition-colors">
-                                {/* Track Title Bar */}
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="flex items-center gap-2 truncate min-w-0">
-                                    <span className="text-xs font-mono font-bold text-white truncate">
-                                      {track.trackNumber ? `#${String(track.trackNumber).padStart(2, '0')} • ` : ''}
-                                      {track.title}
-                                    </span>
-                                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-white/[0.05] text-[#94A3B8] shrink-0">
-                                      {track.sampleRateStr} {track.format}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center gap-1.5 shrink-0">
-                                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 font-semibold uppercase shrink-0">
-                                      Staged in Sidecar
-                                    </span>
-                                    {onDiscardTrack && (
+                              return (
+                                <div
+                                  key={track.id}
+                                  className={`p-3 px-4 flex flex-col gap-2 transition-colors ${
+                                    isTrackExcluded
+                                      ? 'bg-black/20 opacity-50'
+                                      : 'hover:bg-white/[0.01]'
+                                  }`}
+                                >
+                                  {/* Track Item Row Header */}
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                      {/* Track Checkbox */}
                                       <button
-                                        onClick={(e) => {
-                                          e.stopPropagation()
-                                          onDiscardTrack(track.id)
-                                        }}
-                                        title="Discard staged edits for this track and revert to synced"
-                                        className="p-1 rounded text-[#64748B] hover:text-[#F43F5E] hover:bg-white/[0.06] transition-all cursor-pointer"
+                                        type="button"
+                                        role="checkbox"
+                                        aria-checked={!isTrackExcluded}
+                                        onClick={() => toggleTrackExclusion(track.id)}
+                                        className={`w-4 h-4 rounded flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                                          !isTrackExcluded
+                                            ? 'bg-emerald-500 border border-emerald-400 text-black'
+                                            : 'bg-zinc-900 border border-zinc-700'
+                                        }`}
+                                        title={isTrackExcluded ? 'Include track' : 'Exclude track'}
                                       >
-                                        <X className="w-3 h-3" />
+                                        {!isTrackExcluded && <Check className="w-3 h-3 stroke-[3]" />}
                                       </button>
-                                    )}
-                                  </div>
-                                </div>
 
-                                {/* Physical File Path */}
-                                <div className="text-[10px] font-mono text-[#64748B] truncate flex items-center gap-1.5">
-                                  <HardDrive className="w-3 h-3 shrink-0 text-[#64748B]" />
-                                  <span className="truncate">{track.filePath}</span>
-                                </div>
+                                      <div className="w-6 text-[11px] font-mono text-zinc-500 shrink-0">
+                                        {track.trackNumber ? `#${String(track.trackNumber).padStart(2, '0')}` : '—'}
+                                      </div>
 
-                                {/* Field-by-Field Diff Comparison Table */}
-                                {hasTrackMetadataEdits ? (
-                                  <div className="mt-1 rounded-xl bg-black/40 border border-white/[0.06] overflow-hidden">
-                                    <div className="grid grid-cols-12 gap-2 p-2 bg-white/[0.02] border-b border-white/[0.04] text-[10px] font-mono text-[#94A3B8] font-semibold uppercase tracking-wider">
-                                      <div className="col-span-3">Target Field</div>
-                                      <div className="col-span-4">Current Value on Disk</div>
-                                      <div className="col-span-1 text-center"></div>
-                                      <div className="col-span-4">Staged Value to Commit</div>
+                                      <span className="text-xs font-semibold text-zinc-100 truncate">
+                                        {track.title}
+                                      </span>
                                     </div>
-                                    <div className="divide-y divide-white/[0.03] text-xs font-mono">
-                                      {realEdits.map((diff) => {
-                                        const IconComponent = diff.icon
-                                        return (
-                                          <div key={diff.key} className="grid grid-cols-12 gap-2 p-2 items-center hover:bg-white/[0.02]">
-                                            <div className="col-span-3 text-[#CBD5E1] font-semibold flex items-center gap-1.5 truncate">
-                                              <IconComponent className="w-3 h-3 text-[#00F5FF] shrink-0" />
-                                              <span>{diff.label}</span>
+
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      {/* Header Write Strategy Badge (When Embed Headers is selected) */}
+                                      {commitTarget === 'embedded' && paddingInfo && (
+                                        <span
+                                          className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                                            paddingInfo.requiresFullRewrite
+                                              ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                                              : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                          }`}
+                                          title={paddingInfo.reason}
+                                        >
+                                          {paddingInfo.requiresFullRewrite ? 'Stream Rewrite' : 'In-Place Overwrite'}
+                                        </span>
+                                      )}
+
+                                      {onDiscardTrack && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onDiscardTrack(track.id)}
+                                          title="Discard staged edits for this track"
+                                          className="p-1 rounded text-zinc-500 hover:text-rose-400 transition-colors cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Field Diffs Table */}
+                                  {realEdits.length > 0 ? (
+                                    <div className="ml-6 mt-1 rounded-xl bg-black/40 border border-white/[0.04] overflow-hidden text-xs">
+                                      <div className="grid grid-cols-12 gap-3 px-3 py-1.5 bg-white/[0.02] border-b border-white/[0.04] text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                                        <div className="col-span-3">TAG FIELD</div>
+                                        <div className="col-span-4">CURRENT ON-DISK</div>
+                                        <div className="col-span-5 text-emerald-400">PROPOSED VALUE</div>
+                                      </div>
+                                      <div className="divide-y divide-white/[0.03]">
+                                        {realEdits.map((diff) => (
+                                          <div
+                                            key={diff.key}
+                                            className="grid grid-cols-12 gap-3 px-3 py-2 items-center font-mono text-[11px]"
+                                          >
+                                            <div className="col-span-3 text-zinc-400 flex items-center gap-1.5 truncate">
+                                              <diff.icon className="w-3 h-3 text-zinc-500 shrink-0" />
+                                              <span className="truncate">{diff.label}</span>
                                             </div>
-                                            <div className="col-span-4 text-[#F43F5E]/80 line-through truncate" title={diff.current}>
+                                            <div className="col-span-4 text-zinc-500 truncate" title={diff.current}>
                                               {diff.current}
                                             </div>
-                                            <div className="col-span-1 flex justify-center text-[#10B981]">
-                                              <ArrowRight className="w-3 h-3" />
-                                            </div>
-                                            <div className="col-span-4 text-[#10B981] font-bold truncate" title={diff.proposed}>
-                                              {diff.proposed}
+                                            <div className="col-span-5 text-zinc-100 font-semibold truncate flex items-center gap-1.5" title={diff.proposed}>
+                                              <span className="text-zinc-600 font-normal shrink-0">→</span>
+                                              <span className="text-emerald-300 truncate">{diff.proposed}</span>
                                             </div>
                                           </div>
-                                        )
-                                      })}
+                                        ))}
+                                      </div>
                                     </div>
-                                  </div>
-                                ) : (
-                                  <div className="mt-1 p-2 px-3 rounded-lg bg-white/[0.02] border border-white/[0.04] text-[11px] font-mono text-[#94A3B8] flex items-center justify-between">
-                                    <span className="flex items-center gap-1.5 text-[#64748B]">
-                                      <Check className="w-3.5 h-3.5 text-[#10B981]" />
-                                      <span>Audio tags in sync with disk headers • Album artwork staged above</span>
-                                    </span>
-                                    {onDiscardTrack && (
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation()
-                                          onDiscardTrack(track.id)
-                                        }}
-                                        title="Unstage this track"
-                                        className="text-[10px] text-[#64748B] hover:text-[#F43F5E] underline cursor-pointer"
-                                      >
-                                        Unstage
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )
-                          })}
-                        </div>
+                                  ) : (
+                                    <div className="ml-6 text-[11px] font-mono text-zinc-500 flex items-center gap-1.5">
+                                      <Check className="w-3 h-3 text-emerald-400" />
+                                      <span>Audio tags identical to current file • Album artwork updated</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
                       </div>
                     )
                   })}
@@ -804,306 +1025,328 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
               )}
             </>
           ) : (
-            /* Safety Pipeline Tab */
+            /* 4. Execution Pipeline & Drawer View */
             <div className="flex flex-col gap-4">
-              {/* Live Commit Telemetry & Progress HUD (Active or Last Run) */}
-              {(isRunning || detailedProgress || isCompleted) && (
-                <div className="p-4 rounded-2xl bg-gradient-to-br from-[#0F172A]/90 via-[#0B0F19] to-black border border-white/[0.12] shadow-xl flex flex-col gap-4 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 w-64 h-32 bg-[#00F5FF]/5 rounded-full blur-3xl pointer-events-none" />
-
-                  {/* Header Bar: Status & Percentage */}
+              {isRunning ? (
+                /* Active Execution Progress Hero */
+                <div className="p-6 rounded-2xl bg-gradient-to-br from-[#0F172A]/90 via-[#0B0F19] to-black border border-white/[0.12] shadow-xl flex flex-col gap-4 relative overflow-hidden text-left">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-2.5">
-                      {isRunning ? (
-                        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[#00F5FF]/15 border border-[#00F5FF]/30 text-[#00F5FF] text-xs font-mono font-semibold animate-pulse">
-                          <span className="w-2 h-2 rounded-full bg-[#00F5FF] animate-ping" />
-                          <span>COMMITTING IN PROGRESS</span>
-                        </div>
-                      ) : isCompleted ? (
-                        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[#10B981]/15 border border-[#10B981]/30 text-[#10B981] text-xs font-mono font-semibold">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>COMMIT COMPLETE</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-white/[0.06] text-[#94A3B8] text-xs font-mono">
-                          <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
-                          <span>READY TO COMMIT</span>
-                        </div>
-                      )}
-                      <span className="text-xs font-mono text-[#94A3B8]">
+                      <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-xs font-semibold">
+                        <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                        <span>Writing Changes to Storage...</span>
+                      </div>
+                      <span className="text-xs text-slate-400 font-mono">
                         {detailedProgress
-                          ? `${detailedProgress.processedTracks} of ${detailedProgress.totalTracks} tracks processed`
-                          : `${uncommittedTracks.length} tracks queued`}
+                          ? `${detailedProgress.processedTracks} of ${detailedProgress.totalTracks} tracks`
+                          : `${activeTracksToCommit.length} tracks in queue`}
                       </span>
                     </div>
 
-                    {/* Big Percentage */}
-                    <div className="flex items-baseline gap-1 font-mono">
-                      <span className="text-2xl font-black text-white tracking-tight">
-                        {isCompleted ? '100' : detailedProgress ? detailedProgress.percent : '0'}
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-2xl font-bold text-white tracking-tight font-mono">
+                        {detailedProgress ? detailedProgress.percent : '0'}
                       </span>
-                      <span className="text-sm font-bold text-[#00F5FF]">%</span>
+                      <span className="text-sm font-semibold text-cyan-400 font-mono">%</span>
                     </div>
                   </div>
 
-                  {/* Glowing Animated Progress Bar */}
-                  <div className="w-full h-3 bg-black/70 rounded-full overflow-hidden border border-white/10 p-0.5 relative shadow-inner">
+                  {/* Progress Bar */}
+                  <div className="w-full h-2.5 bg-black/70 rounded-full overflow-hidden border border-white/10 p-0.5 relative shadow-inner">
                     <div
-                      className={`h-full rounded-full transition-all duration-300 ${
-                        isCompleted
-                          ? 'bg-gradient-to-r from-[#10B981] to-[#ADFF2F] shadow-[0_0_12px_rgba(16,185,129,0.5)]'
-                          : 'bg-gradient-to-r from-[#00F5FF] via-[#10B981] to-[#ADFF2F] shadow-[0_0_14px_rgba(0,245,255,0.6)]'
-                      }`}
+                      className="h-full rounded-full transition-all duration-300 bg-gradient-to-r from-cyan-400 via-emerald-400 to-lime-400 shadow-[0_0_14px_rgba(0,245,255,0.5)]"
                       style={{
-                        width: `${isCompleted ? 100 : Math.max(0, Math.min(100, detailedProgress?.percent ?? 0))}%`,
+                        width: `${Math.max(0, Math.min(100, detailedProgress?.percent ?? 0))}%`,
                       }}
                     />
                   </div>
 
-                  {/* Telemetry Metric Cards Grid */}
-                  <div className="grid grid-cols-3 gap-3 font-mono">
-                    {/* ETA Card */}
-                    <div className="p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-[#00F5FF]/10 border border-[#00F5FF]/20 flex items-center justify-center text-[#00F5FF] shrink-0">
-                        <Timer className="w-4 h-4" />
-                      </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-[10px] text-[#64748B] uppercase font-semibold">Estimated Time (ETA)</span>
-                        <span className="text-xs font-bold text-white truncate">
-                          {isCompleted ? 'Done' : isRunning ? formatDuration(detailedProgress?.etaSeconds) : '--'}
-                        </span>
-                        <span className="text-[10px] text-[#94A3B8]">
-                          Elapsed: {formatElapsed(detailedProgress?.elapsedMs || 0)}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Speed / Throughput Card */}
-                    <div className="p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-[#ADFF2F]/10 border border-[#ADFF2F]/20 flex items-center justify-center text-[#ADFF2F] shrink-0">
-                        <Zap className="w-4 h-4" />
-                      </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-[10px] text-[#64748B] uppercase font-semibold">Speed / Throughput</span>
-                        <span className="text-xs font-bold text-[#ADFF2F] truncate">
-                          {detailedProgress?.throughputItemsPerSec ? `${detailedProgress.throughputItemsPerSec} files/s` : '--'}
-                        </span>
-                        <span className="text-[10px] text-[#94A3B8]">
-                          Batch {detailedProgress?.currentBatchIndex || 1} of {detailedProgress?.totalBatches || 1}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Active Sub-Phase Card */}
-                    <div className="p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-[#C084FC]/10 border border-[#C084FC]/20 flex items-center justify-center text-[#C084FC] shrink-0">
-                        <Activity className="w-4 h-4" />
-                      </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-[10px] text-[#64748B] uppercase font-semibold">Active Sub-Phase</span>
-                        <span className="text-xs font-bold text-white truncate" title={detailedProgress?.phaseLabel}>
-                          {isCompleted ? 'All Phases Completed' : detailedProgress?.phaseLabel || 'Validating Mounts'}
-                        </span>
-                        <span className="text-[10px] text-[#94A3B8]">2-Phase Atomic ACID</span>
-                      </div>
-                    </div>
+                  <div className="flex items-center justify-between text-xs text-slate-400 px-0.5 font-mono">
+                    <span className="flex items-center gap-1.5">
+                      <Timer className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>{formatDuration(detailedProgress?.etaSeconds)}</span>
+                    </span>
+                    <span>Elapsed: {formatElapsed(detailedProgress?.elapsedMs || 0)}</span>
                   </div>
 
-                  {/* "Currently Committing" Active Focus Card */}
-                  {isRunning && detailedProgress?.currentTrack && (
-                    <div className="p-3 rounded-xl bg-black/60 border border-[#00F5FF]/30 flex items-center justify-between gap-3 animate-in fade-in duration-200">
+                  {detailedProgress?.currentTrack && (
+                    <div className="p-3.5 rounded-xl bg-black/50 border border-cyan-500/30 flex items-center justify-between gap-3 animate-in fade-in duration-200">
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-8 h-8 rounded-lg bg-[#00F5FF]/15 border border-[#00F5FF]/30 flex items-center justify-center text-[#00F5FF] shrink-0">
+                        <div className="w-9 h-9 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0">
                           <Music className="w-4 h-4 animate-bounce" />
                         </div>
-                        <div className="flex flex-col min-w-0 font-mono text-left">
-                          <div className="flex items-center gap-2 truncate">
-                            <span className="text-xs font-bold text-white truncate">
-                              {detailedProgress.currentTrack.title || 'Untitled Track'}
-                            </span>
-                            <span className="text-[10px] text-[#94A3B8] truncate">
-                              by {detailedProgress.currentTrack.artistCredit || 'Unknown Artist'}
-                            </span>
-                          </div>
-                          <div className="text-[10px] text-[#64748B] truncate flex items-center gap-1.5 mt-0.5">
-                            <HardDrive className="w-3 h-3 text-[#64748B] shrink-0" />
-                            <span className="truncate">{detailedProgress.currentTrack.filePath}</span>
-                          </div>
+                        <div className="flex flex-col min-w-0 text-left">
+                          <span className="text-xs font-bold text-white truncate">
+                            {detailedProgress.currentTrack.title || 'Untitled Track'}
+                          </span>
+                          <span className="text-[11px] text-slate-400 truncate">
+                            {detailedProgress.currentTrack.artistCredit || 'Unknown Artist'}
+                          </span>
                         </div>
                       </div>
-
-                      <div className="shrink-0 flex items-center gap-2">
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30">
-                          Embedding ID3v2.4 & Sidecar
-                        </span>
-                        <Loader2 className="w-4 h-4 text-[#00F5FF] animate-spin shrink-0" />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Recent Activity Live Stream */}
-                  {detailedProgress?.recentCommittedTracks && detailedProgress.recentCommittedTracks.length > 0 && (
-                    <div className="flex flex-col gap-1.5 pt-1 border-t border-white/[0.06]">
-                      <div className="flex items-center justify-between text-[10px] font-mono text-[#64748B] uppercase tracking-wider">
-                        <span>Recent Commit Activity Stream</span>
-                        <span>Latest ({Math.min(5, detailedProgress.recentCommittedTracks.length)})</span>
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        {detailedProgress.recentCommittedTracks.slice(0, 4).map((trk) => (
-                          <div
-                            key={trk.id}
-                            className="px-2.5 py-1 rounded-lg bg-white/[0.02] border border-white/[0.04] flex items-center justify-between text-xs font-mono text-left"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <Check className="w-3 h-3 text-[#10B981] shrink-0 stroke-[3]" />
-                              <span className="text-white text-[11px] font-semibold truncate">{trk.title}</span>
-                              <span className="text-[#64748B] text-[10px] truncate">— {trk.artistCredit}</span>
-                            </div>
-                            <span className="text-[10px] text-[#10B981] font-mono shrink-0 ml-2">✓ Written</span>
-                          </div>
-                        ))}
-                      </div>
+                      <Loader2 className="w-4 h-4 text-cyan-400 animate-spin shrink-0" />
                     </div>
                   )}
                 </div>
+              ) : isCompleted ? (
+                /* Completed State Hero */
+                <div className="p-6 rounded-2xl bg-gradient-to-br from-emerald-950/40 via-[#0B0F19] to-black border border-emerald-500/30 shadow-xl flex flex-col items-center justify-center text-center gap-3">
+                  <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-lg shadow-emerald-500/20">
+                    <CheckCircle2 className="w-6 h-6 stroke-[2.5]" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <h3 className="text-base font-bold text-white">All Changes Committed Successfully</h3>
+                    <p className="text-xs text-zinc-400 max-w-md font-mono">
+                      {committedSummary && committedSummary.embedded > 0
+                        ? `${committedSummary.embedded} audio headers and ${committedSummary.sidecars} library records updated bit-perfectly in ${committedSummary.durationMs}ms.`
+                        : `${committedSummary?.total ?? activeTracksToCommit.length} album sidecars updated bit-perfectly on disk.`}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 mt-1">
+                    <button
+                      type="button"
+                      onClick={handleRollback}
+                      className="px-3.5 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 border border-white/10 text-xs font-mono transition-all flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Rollback This Transaction</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* Idle Technical Details Drawer */
+                <div className="p-6 rounded-2xl bg-gradient-to-br from-white/[0.03] to-black border border-white/[0.08] shadow-lg flex flex-col items-center justify-center text-center gap-3">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                    <ShieldCheck className="w-6 h-6" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <h3 className="text-base font-bold text-white">Ready to Commit Changes</h3>
+                    <p className="text-xs text-zinc-400 max-w-md font-mono">
+                      Targeting {activeTracksToCommit.length} tracks across {activeMetrics.albumCount} albums.
+                    </p>
+                  </div>
+                </div>
               )}
 
-              {/* Protocol Context Description */}
-              <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] flex flex-col gap-2 text-left">
-                <span className="text-xs font-bold text-white font-mono flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-[#10B981]" />
-                  Two-Phase Commit Protocol
-                </span>
-                <p className="text-xs text-[#94A3B8] leading-relaxed">
-                  Cadence Core uses a strict <strong className="text-white">Sidecar-First Architecture</strong>.
-                  Before writing to any audio file on TrueNAS or local storage, Phase 1 verifies mount write-locks,
-                  computes FLAC/WAV stream MD5/CRC checksums, and creates an atomic rollback snapshot.
-                  Phase 2 writes metadata into headers (ID3v2.4, Vorbis Comments, MP4 atoms) and updates the transaction journal.
-                </p>
-              </div>
-
-              {/* Progress Steps List */}
-              <div className="flex flex-col gap-2">
-                {progressSteps.map((step, idx) => (
-                  <div
-                    key={step.step}
-                    className={`p-3.5 rounded-xl border text-xs flex items-center justify-between transition-all ${
-                      step.completed
-                        ? 'bg-[#10B981]/10 border-[#10B981]/30 text-white'
-                        : step.hasError
-                        ? 'bg-[#F43F5E]/10 border-[#F43F5E]/30 text-[#F43F5E]'
-                        : isRunning && idx === progressSteps.findIndex((s) => !s.completed)
-                        ? 'bg-[#00F5FF]/10 border-[#00F5FF]/40 text-[#00F5FF]'
-                        : 'bg-white/[0.02] border-white/[0.04] text-[#64748B]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      {step.completed ? (
-                        <CheckCircle2 className="w-4 h-4 text-[#10B981]" />
-                      ) : step.hasError ? (
-                        <AlertTriangle className="w-4 h-4 text-[#F43F5E]" />
-                      ) : isRunning && idx === progressSteps.findIndex((s) => !s.completed) ? (
-                        <Loader2 className="w-4 h-4 text-[#00F5FF] animate-spin" />
-                      ) : (
-                        <div className="w-4 h-4 rounded-full border border-white/20 flex items-center justify-center text-[9px] font-mono">
-                          {idx + 1}
-                        </div>
-                      )}
-                      <span className="font-medium font-mono">{step.label}</span>
+              {/* Partial Failures / Retry Drawer */}
+              {failedTracks.length > 0 && (
+                <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 space-y-3 text-left">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-rose-300 font-bold text-xs">
+                      <AlertTriangle className="w-4 h-4 text-rose-400" />
+                      <span>Partial Write Failures ({failedTracks.length} tracks)</span>
                     </div>
-
-                    {step.detail && (
-                      <span className="text-[10px] font-mono text-[#94A3B8]">{step.detail}</span>
-                    )}
+                    <button
+                      type="button"
+                      onClick={handleRetryFailed}
+                      className="px-3 py-1 rounded-lg text-xs font-mono font-semibold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 transition-all cursor-pointer flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Retry Failed ({failedTracks.length})</span>
+                    </button>
                   </div>
-                ))}
+                  <div className="space-y-1 max-h-36 overflow-y-auto">
+                    {failedTracks.map((ft, idx) => (
+                      <div
+                        key={idx}
+                        className="p-2 bg-black/40 rounded-lg text-[11px] font-mono text-zinc-300 flex items-center justify-between"
+                      >
+                        <span className="truncate max-w-md">{ft.filePath}</span>
+                        <span className="text-rose-400 shrink-0">{ft.error}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Technical Pipeline Steps Log */}
+              <div className="rounded-xl border border-white/[0.06] overflow-hidden bg-white/[0.01]">
+                <button
+                  type="button"
+                  onClick={() => setShowTechDetails(!showTechDetails)}
+                  className="w-full p-3.5 px-4 flex items-center justify-between text-xs text-slate-300 hover:bg-white/[0.03] transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span className="font-semibold text-slate-200">Technical Preflight & Execution Log</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                    <span>{showTechDetails ? 'Hide details' : 'Show details'}</span>
+                    {showTechDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                  </div>
+                </button>
+
+                {showTechDetails && (
+                  <div className="p-4 border-t border-white/[0.06] flex flex-col gap-2 bg-black/30 text-left">
+                    {progressSteps.map((step, idx) => (
+                      <div
+                        key={step.step}
+                        className={`p-3 rounded-xl border text-xs flex items-center justify-between transition-all ${
+                          step.completed
+                            ? 'bg-emerald-500/10 border-emerald-500/30 text-white'
+                            : step.hasError
+                            ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                            : isRunning && idx === progressSteps.findIndex((s) => !s.completed)
+                            ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-300'
+                            : 'bg-white/[0.02] border-white/[0.04] text-slate-500'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 font-mono">
+                          {step.completed ? (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                          ) : step.hasError ? (
+                            <AlertTriangle className="w-4 h-4 text-rose-400" />
+                          ) : isRunning && idx === progressSteps.findIndex((s) => !s.completed) ? (
+                            <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
+                          ) : (
+                            <div className="w-4 h-4 rounded-full border border-white/20 flex items-center justify-center text-[10px]">
+                              {idx + 1}
+                            </div>
+                          )}
+                          <span className="font-medium">{step.label}</span>
+                        </div>
+                        {step.detail && <span className="text-[10px] text-slate-400 font-mono">{step.detail}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
           {/* Error Notice */}
           {errorMessage && (
-            <div className="p-3 rounded-xl bg-[#F43F5E]/10 border border-[#F43F5E]/30 text-xs text-[#F43F5E] flex items-center gap-2">
+            <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-400 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>{errorMessage}</span>
             </div>
           )}
-
-          {/* Success Notice */}
-          {isCompleted && (
-            <div className="p-3.5 rounded-xl bg-[#10B981]/10 border border-[#10B981]/30 text-xs text-[#10B981] flex items-center justify-between">
-              <div className="flex items-center gap-2 font-mono">
-                <Check className="w-4 h-4 stroke-[3]" />
-                <span>
-                  All {committedSummary?.total ?? uncommittedTracks.length} files committed bit-perfectly (
-                  {committedSummary && committedSummary.embedded > 0
-                    ? `${committedSummary.embedded} audio headers embedded, ${committedSummary.sidecars} sidecars written`
-                    : `${committedSummary?.sidecars ?? uncommittedTracks.length} sidecar ledgers updated on disk`}
-                  ).
-                </span>
-              </div>
-              <button
-                onClick={handleRollback}
-                className="text-[11px] font-mono underline hover:text-white flex items-center gap-1 cursor-pointer"
-              >
-                <RotateCcw className="w-3 h-3" />
-                Rollback Transaction
-              </button>
-            </div>
-          )}
         </div>
 
-        {/* Footer */}
-        <div className="p-4 px-6 border-t border-white/[0.08] flex items-center justify-between bg-white/[0.02]">
-          <span className="text-[11px] font-mono text-[#64748B] flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
-            <span>Two-Phase Rollback Snapshot Active</span>
-          </span>
+        {/* 4. Sticky Destination Footer Bar & Dynamic Execution CTA */}
+        <div className="p-4 px-6 border-t border-white/[0.08] bg-[#121318]/95 backdrop-blur-md flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
+          {/* Destination Selector with Explicit Audiophile Trade-Off Copy */}
           <div className="flex items-center gap-3">
+            {/* Sidecar Option */}
+            <button
+              type="button"
+              onClick={() => setCommitTarget('sidecar')}
+              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-0.5 ${
+                commitTarget === 'sidecar'
+                  ? 'bg-amber-500/[0.08] border-amber-500/40 text-zinc-100 shadow-sm'
+                  : 'bg-white/[0.02] border-white/[0.05] text-zinc-400 hover:bg-white/[0.04]'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    commitTarget === 'sidecar' ? 'bg-amber-400' : 'border border-zinc-600'
+                  }`}
+                />
+                <span className="text-xs font-mono font-semibold">Sidecar JSON (cadence-album.sidecar.json)</span>
+                <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300">
+                  Recommended
+                </span>
+              </div>
+              <span className="text-[10px] text-zinc-400 font-sans pl-4">
+                Zero audio file checksum mutation • Preserves bitstream hashes • Non-portable to external UPnP
+              </span>
+            </button>
+
+            {/* Embedded Header Option */}
+            <button
+              type="button"
+              onClick={() => setCommitTarget('embedded')}
+              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-0.5 ${
+                commitTarget === 'embedded'
+                  ? 'bg-purple-500/[0.08] border-purple-500/40 text-zinc-100 shadow-sm'
+                  : 'bg-white/[0.02] border-white/[0.05] text-zinc-400 hover:bg-white/[0.04]'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    commitTarget === 'embedded' ? 'bg-purple-400' : 'border border-zinc-600'
+                  }`}
+                />
+                <span className="text-xs font-mono font-semibold">Embed Headers (FLAC Vorbis / ID3v2.4 / ALAC / DSF)</span>
+                <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-white/[0.06] text-zinc-400">
+                  Mutates File
+                </span>
+              </div>
+              <span className="text-[10px] text-zinc-400 font-sans pl-4">
+                Portable tags for standalone UPnP streamers • Mutates container file hashes • Audio bit-identical
+              </span>
+            </button>
+          </div>
+
+          {/* Action Buttons with Real-Time Dynamic Count */}
+          <div className="flex items-center gap-3 shrink-0">
             {onDiscardAll && !isCompleted && uncommittedTracks.length > 0 && (
               <button
+                type="button"
                 onClick={onDiscardAll}
                 disabled={isRunning}
-                className="px-3.5 py-2 rounded-xl bg-[#F43F5E]/15 hover:bg-[#F43F5E]/25 text-[#F43F5E] border border-[#F43F5E]/30 font-mono font-semibold text-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                title="Discard all staged sidecar edits without writing anything to disk"
+                className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 font-mono text-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                title="Discard all pending staged edits"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Discard Staged ({uncommittedTracks.length})</span>
+                <span>Discard All</span>
               </button>
             )}
-            {onDiscardAllArtwork && !isCompleted && totalArtworkAlbumsCount > 0 && (
-              <button
-                onClick={onDiscardAllArtwork}
-                disabled={isRunning}
-                className="px-3 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-[#CBD5E1] border border-white/[0.1] font-mono font-medium text-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                title="Discard staged online cover art across all albums and keep original disk artwork while preserving track tag edits"
-              >
-                <RotateCcw className="w-3.5 h-3.5 text-[#00F5FF]" />
-                <span>Discard Artwork Only ({totalArtworkAlbumsCount})</span>
-              </button>
-            )}
+
             <button
+              type="button"
               onClick={onClose}
               disabled={isRunning}
-              className="px-4 py-2 rounded-lg text-xs font-mono font-medium text-[#94A3B8] hover:text-white cursor-pointer"
+              className="px-4 py-2 rounded-xl text-xs font-mono text-zinc-400 hover:text-white cursor-pointer transition-colors"
             >
               {isCompleted ? 'Close' : 'Cancel'}
             </button>
+
             {!isCompleted && uncommittedTracks.length > 0 && (
               <button
-                onClick={handleStartCommit}
-                disabled={isRunning}
-                className="px-5 py-2 rounded-xl bg-[#10B981] text-black font-mono font-bold text-xs hover:bg-[#10B981]/90 transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-lg shadow-[#10B981]/20"
+                type="button"
+                onClick={() => handleStartCommit()}
+                disabled={isRunning || !preflight.canProceed || activeTracksToCommit.length === 0}
+                title={
+                  !preflight.playbackIdle
+                    ? 'Transport active. Stop playback before committing changes.'
+                    : !preflight.storageWritable
+                    ? 'Storage mount is read-only locked.'
+                    : activeTracksToCommit.length === 0
+                    ? 'All staged tracks are currently excluded.'
+                    : undefined
+                }
+                className={`px-5 py-2 rounded-xl text-xs font-mono font-semibold transition-all flex items-center gap-2 shadow-lg cursor-pointer ${
+                  !preflight.canProceed || activeTracksToCommit.length === 0
+                    ? 'bg-zinc-800 text-zinc-500 border border-zinc-700 cursor-not-allowed'
+                    : isRunning
+                    ? 'bg-amber-500/50 text-black cursor-wait'
+                    : 'bg-amber-400 hover:bg-amber-300 text-black shadow-amber-400/20'
+                }`}
               >
                 {isRunning ? (
                   <>
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Committing Phase 1 & 2...
+                    <span>Committing...</span>
+                  </>
+                ) : !preflight.playbackIdle ? (
+                  <>
+                    <span>🔒 Pause Playback to Save</span>
+                  </>
+                ) : !preflight.storageWritable ? (
+                  <>
+                    <span>🔒 Storage Read-Only</span>
                   </>
                 ) : (
                   <>
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    Commit Staged Changes ({uncommittedTracks.length})
+                    <ShieldCheck className="w-3.5 h-3.5 stroke-[2.5]" />
+                    <span>
+                      {commitTarget === 'sidecar'
+                        ? `Write ${activeMetrics.albumCount} Album Sidecar${activeMetrics.albumCount === 1 ? '' : 's'}`
+                        : `Update ${activeMetrics.audioTrackCount} Audio File${activeMetrics.audioTrackCount === 1 ? '' : 's'}`}
+                    </span>
                   </>
                 )}
               </button>

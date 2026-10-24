@@ -2,8 +2,8 @@ use std::process::Command;
 use tauri::{AppHandle, State};
 
 use crate::db::{
-    is_directory_accessible, AppDb, DbOperations, DbRelease, DbSkippedFile, DbStorageMount,
-    DbTrack, DbWatchedFolder, StorageAccessibilityReport,
+    is_directory_accessible, AppDb, DbOperations, DbPlaylist, DbPlaylistWithTracks, DbRelease,
+    DbSkippedFile, DbStorageMount, DbTrack, DbWatchedFolder, StorageAccessibilityReport,
 };
 use crate::scanner::{ScanProgressPayload, ScannerController};
 
@@ -260,3 +260,154 @@ pub fn show_item_in_folder(path: String) -> Result<(), String> {
     }
     Ok(())
 }
+
+// --- Canonical Relational Artists ---
+
+#[tauri::command]
+pub fn db_get_canonical_artists(db: State<'_, AppDb>) -> Result<Vec<crate::db::DbArtistSummary>, String> {
+    let mut conn = db.conn.lock();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM canonical_artists", [], |r| r.get(0)).unwrap_or(0);
+    if count == 0 {
+        let _ = crate::db::DbOperations::backfill_artist_credits_from_tracks(&mut conn);
+    }
+    crate::db::DbOperations::get_canonical_artists(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_get_canonical_artist_detail(
+    db: State<'_, AppDb>,
+    artist_id: String,
+) -> Result<Option<crate::db::DbArtistDetail>, String> {
+    let conn = db.conn.lock();
+    crate::db::DbOperations::get_canonical_artist_detail(&conn, &artist_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_set_artist_portrait(
+    db: State<'_, AppDb>,
+    artist_id: String,
+    portrait_url: String,
+    status: Option<String>,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    let st = status.as_deref().unwrap_or("enriched");
+    crate::db::DbOperations::set_artist_portrait(&conn, &artist_id, &portrait_url, st).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_backfill_artist_credits(db: State<'_, AppDb>) -> Result<usize, String> {
+    let mut conn = db.conn.lock();
+    crate::db::DbOperations::backfill_artist_credits_from_tracks(&mut conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_search_catalog(
+    db: State<'_, AppDb>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<crate::db::DbCatalogSearchResults, String> {
+    let conn = db.conn.lock();
+    crate::db::DbOperations::search_catalog(&conn, &query, limit.unwrap_or(5)).map_err(|e| e.to_string())
+}
+
+// Playlists
+#[tauri::command]
+pub fn db_get_playlists(db: State<'_, AppDb>) -> Result<Vec<DbPlaylist>, String> {
+    let conn = db.conn.lock();
+    DbOperations::get_playlists(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_get_playlist_details(
+    db: State<'_, AppDb>,
+    playlist_id: String,
+) -> Result<Option<DbPlaylistWithTracks>, String> {
+    let conn = db.conn.lock();
+    DbOperations::get_playlist_details(&conn, &playlist_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_create_playlist(
+    db: State<'_, AppDb>,
+    id: String,
+    title: String,
+    description: Option<String>,
+    cover_art_url: Option<String>,
+    tags: Option<String>,
+    listening_notes: Option<String>,
+    track_ids: Vec<String>,
+) -> Result<DbPlaylist, String> {
+    let mut conn = db.conn.lock();
+    DbOperations::create_playlist(
+        &mut conn,
+        &id,
+        &title,
+        description.as_deref(),
+        cover_art_url.as_deref(),
+        tags.as_deref(),
+        listening_notes.as_deref(),
+        &track_ids,
+    ).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_update_playlist(
+    db: State<'_, AppDb>,
+    id: String,
+    title: String,
+    description: Option<String>,
+    cover_art_url: Option<String>,
+    tags: Option<String>,
+    listening_notes: Option<String>,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    DbOperations::update_playlist(
+        &conn,
+        &id,
+        &title,
+        description.as_deref(),
+        cover_art_url.as_deref(),
+        tags.as_deref(),
+        listening_notes.as_deref(),
+    ).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_delete_playlist(
+    db: State<'_, AppDb>,
+    id: String,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    DbOperations::delete_playlist(&conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_add_tracks_to_playlist(
+    db: State<'_, AppDb>,
+    playlist_id: String,
+    track_ids: Vec<String>,
+) -> Result<(), String> {
+    let mut conn = db.conn.lock();
+    DbOperations::add_tracks_to_playlist(&mut conn, &playlist_id, &track_ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_remove_track_from_playlist(
+    db: State<'_, AppDb>,
+    playlist_id: String,
+    position: i64,
+) -> Result<(), String> {
+    let mut conn = db.conn.lock();
+    DbOperations::remove_track_from_playlist(&mut conn, &playlist_id, position).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_reorder_playlist_tracks(
+    db: State<'_, AppDb>,
+    playlist_id: String,
+    track_ids: Vec<String>,
+) -> Result<(), String> {
+    let mut conn = db.conn.lock();
+    DbOperations::reorder_playlist_tracks(&mut conn, &playlist_id, &track_ids).map_err(|e| e.to_string())
+}
+

@@ -21,11 +21,16 @@
         "center": true,
         "decorations": true,
         "transparent": false,
-        "theme": "Dark"
+        "theme": "Dark",
+        "dragDropEnabled": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**", "$LOCALAPPDATA/**"]
+      }
     }
   },
   "bundle": {

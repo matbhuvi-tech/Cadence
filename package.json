@@ -12,6 +12,10 @@
     "test:pilot": "tsx src/test/testCadenceCopilotMatrix.ts",
     "test:norm": "tsx src/test/testNormalizationRules.ts",
     "test:backdrop": "tsx src/test/testBackdropAnalyzer.ts",
+    "test:artists": "tsx src/test/testArtistTokenizer.ts",
+    "test:audit": "tsx src/test/testAuditHygieneDataBinding.ts",
+    "test:commit": "tsx src/test/testCommitArchitecture.ts",
+    "test:startup": "tsx src/test/testAppStartup.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

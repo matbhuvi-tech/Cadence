@@ -8,11 +8,9 @@ import {
   Table,
   Sparkles,
   Command,
-  FileCode,
   ShieldCheck,
   RotateCcw,
   Music4,
-  Volume2,
   Compass,
   Bot,
   WifiOff,
@@ -20,8 +18,9 @@ import {
   RefreshCw,
   Server,
   Smartphone,
+  PanelRight,
 } from 'lucide-react'
-import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode } from './core/types'
+import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
 import { auditService } from './services/auditService'
 import { storagePersistence } from './core/storagePersistence'
@@ -29,7 +28,10 @@ import { IngestionResult } from './services/libraryImporter'
 import { LeftRail } from './components/LeftRail/LeftRail'
 import { FacetSelections } from './components/LeftRail/FacetedFilters'
 import { DataCanvas, CanvasViewMode } from './components/CenterStage/DataCanvas'
-import { RightPanel, RightPanelTab } from './components/RightPanel/RightPanel'
+import { EntityTab } from './components/CenterStage/AlbumCoverGrid'
+import { resolveCurateTargetTrack } from './core/scopeUtils'
+import { RightPanelTab } from './components/RightPanel/RightPanel'
+import { UnifiedRightSidebar } from './components/RightPanel/UnifiedRightSidebar'
 import { OmniCommandBar, CommandItem } from './components/CommandBar/OmniCommandBar'
 import { TwoPhaseCommitModal } from './components/Modals/TwoPhaseCommitModal'
 import { BatchRuleModal } from './components/Modals/BatchRuleModal'
@@ -56,6 +58,10 @@ import { FocusedWorkbench } from './components/CenterStage/FocusedWorkbench'
 import { SanctuaryListeningLounge } from './components/AudioPlayer/SanctuaryListeningLounge'
 import { ScanProgressPayload, WatchedFolder, SkippedFile } from './core/types'
 import { backdropAnalyzer } from './services/backdropAnalyzer'
+import { CreatePlaylistModal } from './components/Modals/CreatePlaylistModal'
+import { EditPlaylistModal } from './components/Modals/EditPlaylistModal'
+import { AddTracksToPlaylistModal } from './components/Modals/AddTracksToPlaylistModal'
+import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
 
 function AppContent() {
   // Primary Graph State
@@ -81,6 +87,46 @@ function AppContent() {
   const [activeTriageFilter, setActiveTriageFilter] = useState<string | undefined>()
   const [selectedMountId, setSelectedMountId] = useState<string | undefined>()
   const [selectedFolderFilter, setSelectedFolderFilter] = useState<string | undefined>()
+
+  // Entity Navigation & Drilldown State (Composers / Artists / Albums)
+  const [activeCoverTab, setActiveCoverTab] = useState<EntityTab>('albums')
+  const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null)
+  const [selectedArtist, setSelectedArtist] = useState<string | null>(null)
+  const [selectedComposer, setSelectedComposer] = useState<string | null>(null)
+
+  // Active Entity Scope (Compound hierarchy awareness)
+  const activeEntityScope = useMemo<ActiveEntityScope | null>(() => {
+    if (selectedAlbumId) {
+      const album = releases.find((r) => r.id === selectedAlbumId)
+      const title = album?.title || 'Selected Album'
+      if (selectedComposer) {
+        return {
+          type: 'album',
+          name: title,
+          albumId: selectedAlbumId,
+          parentEntity: selectedComposer,
+          parentType: 'composer',
+        }
+      }
+      if (selectedArtist) {
+        return {
+          type: 'album',
+          name: title,
+          albumId: selectedAlbumId,
+          parentEntity: selectedArtist,
+          parentType: 'artist',
+        }
+      }
+      return { type: 'album', name: title, albumId: selectedAlbumId }
+    }
+    if (selectedComposer) {
+      return { type: 'composer', name: selectedComposer }
+    }
+    if (selectedArtist) {
+      return { type: 'artist', name: selectedArtist }
+    }
+    return null
+  }, [selectedAlbumId, selectedComposer, selectedArtist, releases])
 
   // Modals & Overlays
   const [isAgentDrawerOpen, setIsAgentDrawerOpen] = useState(false)
@@ -121,7 +167,44 @@ function AppContent() {
   const [focusedWorkbenchTrack, setFocusedWorkbenchTrack] = useState<Track | null>(null)
   const [isWindowDragOver, setIsWindowDragOver] = useState<boolean>(false)
 
-  const { togglePlayPause, nextTrack, prevTrack, toggleMute } = useAudioPlayer()
+  // Playlist State & Modals
+  const [playlists, setPlaylists] = useState<Playlist[]>([])
+  const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null)
+  const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState(false)
+  const [isEditPlaylistOpen, setIsEditPlaylistOpen] = useState(false)
+  const [editingPlaylist, setEditingPlaylist] = useState<Playlist | null>(null)
+  const [isAddTracksModalOpen, setIsAddTracksModalOpen] = useState(false)
+  const [tracksToAdd, setTracksToAdd] = useState<Track[]>([])
+  const [initialPlaylistTracks, setInitialPlaylistTracks] = useState<Track[]>([])
+
+  const {
+    togglePlayPause,
+    nextTrack,
+    prevTrack,
+    toggleMute,
+    isRightSidebarOpen,
+    setIsRightSidebarOpen,
+    rightSidebarTab,
+    setRightSidebarTab,
+    toggleRightSidebar,
+  } = useAudioPlayer()
+
+  const refreshPlaylists = async () => {
+    try {
+      const data = await sqliteLibraryService.getPlaylists()
+      setPlaylists(data)
+      if (selectedPlaylist) {
+        const updated = data.find((p) => p.id === selectedPlaylist.id)
+        if (updated) setSelectedPlaylist(updated)
+      }
+    } catch (err) {
+      console.warn('[App] Failed to load playlists:', err)
+    }
+  }
+
+  useEffect(() => {
+    refreshPlaylists()
+  }, [])
 
   const showToast = (msg: string) => {
     setToastMessage(msg)
@@ -139,12 +222,29 @@ function AppContent() {
       if (e.code === 'Space') {
         e.preventDefault()
         togglePlayPause()
+      } else if (
+        ((e.ctrlKey || e.metaKey) && (e.key === 'u' || e.key === 'U')) ||
+        (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'q' || e.key === 'Q'))
+      ) {
+        e.preventDefault()
+        toggleRightSidebar('queue')
       } else if ((e.ctrlKey || e.metaKey) && e.key === '1') {
         e.preventDefault()
         setTopMode('library')
+        setFocusedWorkbenchTrack(null)
       } else if ((e.ctrlKey || e.metaKey) && e.key === '2') {
         e.preventDefault()
+        handleOpenCurate()
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '3') {
+        e.preventDefault()
         setTopMode('maintain')
+        setFocusedWorkbenchTrack(null)
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'i' || e.key === 'I')) {
+        e.preventDefault()
+        toggleRightSidebar('inspector')
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'e' || e.key === 'E')) {
+        e.preventDefault()
+        handleOpenCurate()
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'l' || e.key === 'L')) {
         e.preventDefault()
         setIsSanctuaryOpen((prev) => !prev)
@@ -153,6 +253,8 @@ function AppContent() {
           setFocusedWorkbenchTrack(null)
         } else if (isSanctuaryOpen) {
           setIsSanctuaryOpen(false)
+        } else if (isRightSidebarOpen) {
+          setIsRightSidebarOpen(false)
         }
       } else if (e.code === 'ArrowRight' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault()
@@ -187,23 +289,39 @@ function AppContent() {
       }
     }
 
+    const handleAddTracksEvent = (e: CustomEvent<Track[]>) => {
+      if (e.detail && e.detail.length > 0) {
+        setTracksToAdd(e.detail)
+        setIsAddTracksModalOpen(true)
+      }
+    }
+
     window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('cadence:toast' as any, handleToastEvent as any)
+    window.addEventListener('cadence:add-tracks-playlist' as any, handleAddTracksEvent as any)
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('cadence:toast' as any, handleToastEvent as any)
+      window.removeEventListener('cadence:add-tracks-playlist' as any, handleAddTracksEvent as any)
     }
-  }, [togglePlayPause, nextTrack, prevTrack, toggleMute])
+  }, [togglePlayPause, nextTrack, prevTrack, toggleMute, toggleRightSidebar, tracks, selectedTrackId, focusedWorkbenchTrack, isSanctuaryOpen, isRightSidebarOpen, setIsRightSidebarOpen])
 
   // Window drag and drop detection for audio folders & files
   useEffect(() => {
     const handleDragOver = (e: DragEvent) => {
+      // Only handle OS file drags, not internal DOM drag and drop
+      const isFileDrag = e.dataTransfer?.types && Array.from(e.dataTransfer.types).includes('Files')
+      if (!isFileDrag) return
+
       e.preventDefault()
       e.stopPropagation()
       setIsWindowDragOver(true)
     }
 
     const handleDragLeave = (e: DragEvent) => {
+      const isFileDrag = e.dataTransfer?.types && Array.from(e.dataTransfer.types).includes('Files')
+      if (!isFileDrag) return
+
       e.preventDefault()
       e.stopPropagation()
       if (e.relatedTarget === null || e.clientX <= 0 || e.clientY <= 0) {
@@ -212,6 +330,9 @@ function AppContent() {
     }
 
     const handleDrop = (e: DragEvent) => {
+      const isFileDrag = e.dataTransfer?.types && Array.from(e.dataTransfer.types).includes('Files')
+      if (!isFileDrag) return
+
       e.preventDefault()
       e.stopPropagation()
       setIsWindowDragOver(false)
@@ -636,6 +757,16 @@ function AppContent() {
   // 1. Grid-scoped tracks: filter by Search, Facets (era, composer, language, format), Storage Mount, and Folder.
   // EXCLUDES activeTriageFilter so that selecting an anomaly isolates tracks in the grid without collapsing the diagnostic queue!
   const gridScopedTracks = useMemo(() => {
+    // Self-healing: if graphEngine was reloaded or emptied by HMR while React state still has tracks
+    if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
+      graphEngine.loadCustomLibrary({
+        tracks,
+        releases,
+        works,
+        auditIssues,
+        storageMounts,
+      })
+    }
     const filterState: FacetFilterState = {
       searchQuery,
       formatFilter: facets.format,
@@ -647,12 +778,12 @@ function AppContent() {
       masteringFilter: facets.mastering,
       storageMountFilter: selectedMountId,
     }
-    let result = graphEngine.filterTracks(filterState)
+    let result = graphEngine.filterTracks(filterState, tracks, releases)
     if (selectedFolderFilter) {
       result = result.filter((t) => (t.filePath || '').replace(/\\/g, '/').startsWith(selectedFolderFilter))
     }
     return result
-  }, [searchQuery, facets, selectedMountId, selectedFolderFilter, tracks])
+  }, [searchQuery, facets, selectedMountId, selectedFolderFilter, tracks, releases, works, auditIssues, storageMounts])
 
   // 2. Dynamic hygiene diagnostics & health score scoped to the active grid slice
   const scopedAuditResult = useMemo(() => {
@@ -713,6 +844,23 @@ function AppContent() {
   // Current active selections
   const currentTrack = tracks.find((t) => t.id === selectedTrackId) || tracks[0]
   const currentRelease = currentTrack ? releases.find((r) => r.id === currentTrack.releaseId) : releases[0]
+
+  // Scoped Curate Trigger Handler
+  const handleOpenCurate = () => {
+    const trk = resolveCurateTargetTrack({
+      tracks,
+      releases,
+      selectedTrackId,
+      selectedAlbumId,
+      selectedArtist,
+      selectedComposer,
+      currentPlayingTrack: currentTrack,
+    })
+    if (trk) {
+      setFocusedWorkbenchTrack(trk)
+    }
+    setTopMode('library')
+  }
 
   // Library statistics
   const stats = useMemo(() => graphEngine.getStats(), [tracks, storageMounts, auditIssues])
@@ -793,9 +941,11 @@ function AppContent() {
     if (relTracks.length > 0) {
       setSelectedTrackId(relTracks[0].id)
     }
+    setIsRightSidebarOpen(true)
+    setRightSidebarTab('inspector')
   }
 
-  const handleToggleTrackSelection = (trackId: string, isMulti: boolean) => {
+  const handleToggleTrackSelection = (trackId: string, _isMulti: boolean) => {
     setSelectedTrackIds((prev) => {
       const next = new Set(prev)
       if (next.has(trackId)) {
@@ -863,44 +1013,26 @@ function AppContent() {
     graphEngine.updateTrackSidecar(currentTrack.id, editsToStage)
 
     if (currentRelease) {
+      const releaseUpdates: {
+        title?: string
+        releaseYear?: number
+        coverArtUrl?: string
+        backdropUrl?: string
+      } = {}
       if (mergedFields.releaseTitle && mergedFields.releaseTitle !== currentRelease.title) {
-        graphEngine.updateReleaseNames(currentRelease.id, { title: mergedFields.releaseTitle })
+        releaseUpdates.title = mergedFields.releaseTitle
       }
       if (mergedFields.year && !isNaN(Number(mergedFields.year))) {
-        currentRelease.releaseYear = Number(mergedFields.year)
-      }
-      if (mergedFields.label) {
-        currentRelease.label = mergedFields.label
-      }
-      if (mergedFields.catalogNo) {
-        currentRelease.catalogNumber = mergedFields.catalogNo
-      }
-      if (mergedFields.barcode) {
-        currentRelease.barcodeUpc = mergedFields.barcode
+        releaseUpdates.releaseYear = Number(mergedFields.year)
       }
       if (mergedFields.coverArtUrl) {
-        currentRelease.artwork.frontCoverUrl = mergedFields.coverArtUrl
-        if (mergedFields.coverResolution) {
-          currentRelease.artwork.resolution = mergedFields.coverResolution
-        }
+        releaseUpdates.coverArtUrl = mergedFields.coverArtUrl
       }
       if (mergedFields.backdropUrl) {
-        if (!currentRelease.artwork) {
-          currentRelease.artwork = {
-            frontCoverUrl: mergedFields.coverArtUrl || currentRelease.coverArtUrl || '',
-            backdropUrl: mergedFields.backdropUrl,
-            resolution: 'Custom',
-            width: 2400,
-            height: 2400,
-            dpi: 300,
-            colorProfile: 'sRGB',
-            isLowRes: false,
-            hasBookletPdf: false,
-          }
-        } else {
-          currentRelease.artwork.backdropUrl = mergedFields.backdropUrl
-        }
-        currentRelease.backdropUrl = mergedFields.backdropUrl
+        releaseUpdates.backdropUrl = mergedFields.backdropUrl
+      }
+      if (Object.keys(releaseUpdates).length > 0) {
+        graphEngine.updateReleaseDetails(currentRelease.id, releaseUpdates)
       }
     }
 
@@ -942,6 +1074,14 @@ function AppContent() {
         showToast(`Updated "${res.release.title}" & staged edits across ${res.affectedTracksCount} tracks`)
       } else {
         showToast(`Updated "${res.release.title}"`)
+      }
+
+      // Edge Case 1: Release-level rename updates active entity scope
+      if (selectedComposer && updates.composerName && updates.composerName !== selectedComposer) {
+        setSelectedComposer(updates.composerName)
+      }
+      if (selectedArtist && updates.artistCredit && updates.artistCredit !== selectedArtist) {
+        setSelectedArtist(updates.artistCredit)
       }
     }
   }
@@ -1207,89 +1347,120 @@ function AppContent() {
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0D0E12] text-[#F1F5F9] select-none font-sans">
-      {/* Refined Ergonomic Master Navigation Switchboard */}
-      <header className="h-14 border-b border-white/[0.08] bg-[#12151D]/80 backdrop-blur-xl px-4 flex items-center justify-between shrink-0 z-30">
-        {/* Brand & Library Stats */}
+      {/* Apple HIG Unified macOS-Style Toolbar */}
+      <header className="h-[52px] border-b border-white/[0.06] bg-[#0C0D10]/95 backdrop-blur-2xl px-3.5 flex items-center justify-between shrink-0 z-30 select-none">
+        {/* Left: Brand Lockup & Telemetry Monospace */}
         <div className="flex items-center gap-3">
-          <div data-tutorial-id="header-brand" className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#00F5FF] to-[#8B5CF6] flex items-center justify-center text-black font-extrabold text-sm shadow-md">
-              <Music4 className="w-4 h-4 stroke-[2.5]" />
+          <div data-tutorial-id="header-brand" className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-[7px] bg-gradient-to-b from-[#2A2B32] to-[#16171B] border border-white/10 flex items-center justify-center text-[#D4AF37] shadow-sm">
+              <Music4 className="w-3.5 h-3.5" />
             </div>
             <div className="flex flex-col text-left">
-              <span className="font-extrabold tracking-tight text-sm text-[#F1F5F9] leading-none">
-                CADENCE PRO
-              </span>
-              <span className="text-[9px] font-mono text-[#00F5FF] tracking-wider uppercase font-semibold">
-                Relational Music Engine
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="font-semibold tracking-wider text-[12px] text-[#EDEDED] leading-none">
+                  CADENCE
+                </span>
+                <span className="text-[10px] font-mono text-[#D4AF37] font-medium leading-none">
+                  PRO
+                </span>
+              </div>
             </div>
           </div>
 
-          <div className="h-4 w-[1px] bg-white/10 mx-1 hidden sm:block" />
+          <div className="h-3.5 w-[1px] bg-white/[0.08] mx-0.5 hidden sm:block" />
 
-          <div className="hidden lg:flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
-            <span>{tracks.length} Tracks</span>
+          <div className="hidden lg:flex items-center gap-1.5 text-[11px] font-mono text-[#8E8E93]">
+            <span>{tracks.length} tracks</span>
             <span>·</span>
-            <span className="text-[#00F5FF] font-semibold">{stats.highResPercentage}% Hi-Res</span>
+            <span className="text-[#EDEDED]">{stats.highResPercentage}% Hi-Res</span>
           </div>
         </div>
 
-        {/* PRIMARY OBJECT & OPERATION SWITCHBOARD */}
-        <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10 shadow-inner">
+        {/* Center: Apple 3-Way Segmented Control */}
+        <div className="flex items-center p-0.5 rounded-[9px] bg-black/40 border border-white/[0.08] shadow-inner">
           <button
             onClick={() => {
               setTopMode('library')
               setFocusedWorkbenchTrack(null)
             }}
-            className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-              topMode === 'library'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                : 'text-slate-400 hover:text-white'
+            title="Listening Room & Album Library (⌘1)"
+            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
+              topMode === 'library' && !focusedWorkbenchTrack
+                ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
+                : 'text-[#8E8E93] hover:text-[#EDEDED]'
             }`}
           >
-            <span>📚</span>
-            <span>Library</span>
-            <span className="text-[10px] text-slate-500 font-mono hidden md:inline">⌘1</span>
+            <span>Listen</span>
+            <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘1</span>
           </button>
 
           <button
-            onClick={() => setTopMode('maintain')}
-            className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-              topMode === 'maintain'
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                : 'text-slate-400 hover:text-white'
+            onClick={handleOpenCurate}
+            title="Precision Metadata Workbench (⌘2)"
+            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
+              focusedWorkbenchTrack
+                ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
+                : 'text-[#8E8E93] hover:text-[#EDEDED]'
             }`}
           >
-            <span>🛠️</span>
-            <span>Maintain</span>
-            {impactedAlbumsCount > 0 && (
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 font-mono border border-amber-500/30">
-                ⚠️ {impactedAlbumsCount}
-              </span>
-            )}
+            <span>Curate</span>
             {uncommittedCount > 0 && (
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-lime-500/20 text-lime-300 font-mono border border-lime-500/30">
-                💾 {uncommittedCount}
+              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-[#D4AF37]/20 text-[#D4AF37] font-mono font-medium">
+                {uncommittedCount}
               </span>
             )}
-            <span className="text-[10px] text-slate-500 font-mono hidden md:inline">⌘2</span>
+            <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘2</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setTopMode('maintain')
+              setFocusedWorkbenchTrack(null)
+            }}
+            title="Library Hygiene & Storage Audit (⌘3)"
+            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
+              topMode === 'maintain'
+                ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
+                : 'text-[#8E8E93] hover:text-[#EDEDED]'
+            }`}
+          >
+            <span>Audit</span>
+            {impactedAlbumsCount > 0 && (
+              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 font-mono font-medium">
+                {impactedAlbumsCount}
+              </span>
+            )}
+            <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘3</span>
           </button>
         </div>
 
-        {/* Right Header: Ingestion Action, Spotlight, Copilot, Activity */}
-        <div className="flex items-center gap-2 relative">
+        {/* Right Toolbar Actions */}
+        <div className="flex items-center gap-2">
+          {/* Uncommitted changes staging badge */}
+          {uncommittedCount > 0 && (
+            <button
+              onClick={() => setIsCommitModalOpen(true)}
+              title="Review Staged Non-Destructive Changes"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-[7px] bg-[#D4AF37]/15 hover:bg-[#D4AF37]/25 text-[#D4AF37] border border-[#D4AF37]/30 text-[11px] font-medium transition-all cursor-pointer"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37] animate-pulse" />
+              <span>{uncommittedCount} Staged</span>
+            </button>
+          )}
+
+          {/* Unified Spotlight Search Trigger */}
           <button
-            onClick={() => setIsImportModalOpen(true)}
-            title="Import Music Folder (⌘O)"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-500/20 to-teal-500/20 hover:from-cyan-500/30 hover:to-teal-500/30 border border-cyan-500/40 text-cyan-300 hover:text-white text-xs font-semibold shadow-md transition-all cursor-pointer"
+            data-tutorial-id="btn-spotlight-cmd"
+            onClick={() => setIsCommandBarOpen(true)}
+            title="Spotlight Search & Command Palette (⌘K)"
+            className="flex items-center gap-2 px-2.5 py-1 rounded-[7px] bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-[11px] text-[#8E8E93] hover:text-[#EDEDED] transition-all cursor-pointer"
           >
-            <FolderPlus className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="hidden sm:inline">Add Music</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-cyan-300 font-mono border border-cyan-500/30">
-              ⌘O
-            </span>
+            <Command className="w-3.5 h-3.5 text-[#8E8E93]" />
+            <span className="hidden sm:inline">Search</span>
+            <kbd className="text-[10px] px-1 py-0.2 rounded bg-black/40 text-[#636366] font-mono">⌘K</kbd>
           </button>
 
+          {/* Activity telemetry */}
           <ActivityPill
             telemetry={scanTelemetry}
             onClick={() => setIsActivityPopoverOpen((prev) => !prev)}
@@ -1305,48 +1476,46 @@ function AppContent() {
             }}
           />
 
+          {/* AI Copilot Drawer */}
           <button
             data-tutorial-id="btn-cadence-agent"
             onClick={() => setIsAgentDrawerOpen((prev) => !prev)}
-            title="Cadence Embedded AI Agent Copilot (⌘J)"
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all shadow-md cursor-pointer ${
+            title="Cadence Music Agent Copilot (⌘J)"
+            className={`p-1.5 rounded-[7px] border transition-all cursor-pointer ${
               isAgentDrawerOpen
-                ? 'bg-[#ADFF2F]/25 border-[#ADFF2F] text-[#ADFF2F] shadow-[#ADFF2F]/20'
-                : 'bg-gradient-to-r from-[#8B5CF6]/20 to-[#00F5FF]/20 hover:from-[#8B5CF6]/30 hover:to-[#00F5FF]/30 border-[#8B5CF6]/40 text-[#F1F5F9] hover:text-white'
+                ? 'bg-[#D4AF37]/20 border-[#D4AF37]/40 text-[#D4AF37]'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
             }`}
           >
-            <Bot className="w-3.5 h-3.5 text-[#ADFF2F]" />
-            <span className="hidden sm:inline">AI Copilot</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-[#ADFF2F] font-mono border border-[#ADFF2F]/30">
-              ⌘J
-            </span>
+            <Sparkles className="w-3.5 h-3.5" />
           </button>
 
-          <button
-            data-tutorial-id="btn-spotlight-cmd"
-            onClick={() => setIsCommandBarOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.08] border border-white/[0.08] text-xs font-mono text-[#94A3B8] hover:text-white transition-all shadow-sm cursor-pointer"
-          >
-            <Command className="w-3.5 h-3.5 text-[#00F5FF]" />
-            <span className="hidden sm:inline">Spotlight</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/40 text-[#64748B]">
-              ⌘K
-            </span>
-          </button>
-
+          {/* Mobile Remote Modal */}
           <button
             onClick={() => setIsRemoteModalOpen(true)}
-            title="Cadence Mobile Remote (Couch Controller QR Code)"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-xs font-mono text-cyan-400 hover:text-white transition-all shadow-sm cursor-pointer"
+            title="Mobile Remote QR Controller"
+            className="p-1.5 rounded-[7px] bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED] transition-all cursor-pointer"
           >
-            <Smartphone className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="hidden md:inline">Remote</span>
+            <Smartphone className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Contextual Inspector Toggle (⌘I) */}
+          <button
+            onClick={() => toggleRightSidebar('inspector')}
+            title={isRightSidebarOpen && rightSidebarTab === 'inspector' ? 'Hide Track & Album Inspector (⌘I)' : 'Show Track & Album Inspector (⌘I)'}
+            className={`p-1.5 rounded-[7px] border transition-all cursor-pointer ${
+              isRightSidebarOpen && rightSidebarTab === 'inspector'
+                ? 'bg-white/[0.15] border-white/[0.15] text-white'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
+            }`}
+          >
+            <PanelRight className="w-3.5 h-3.5" />
           </button>
         </div>
       </header>
 
       {/* Main Workspace Stage */}
-      {topMode === 'maintain' ? (
+      {topMode === 'maintain' && (
         <MaintainCockpit
           tracks={tracks}
           releases={releases}
@@ -1364,6 +1533,13 @@ function AppContent() {
             auditService.runFullCatalogAudit()
             refreshFromEngine()
             showToast('Catalog hygiene diagnostic scan updated.')
+          }}
+          onDiscardTrackEdits={(trackIds: string[]) => {
+            trackIds.forEach((id) => graphEngine.discardTrackEdits(id))
+            refreshFromEngine()
+            persistCurrentLibrary()
+            auditService.runFullCatalogAudit()
+            showToast(`Discarded staged edits for ${trackIds.length} track(s).`)
           }}
           onApplyPathRestructure={(pattern: string) => {
             const previews = tracks.map((t) => {
@@ -1397,57 +1573,117 @@ function AppContent() {
           onRefreshLibrary={handleRefreshLibrary}
           showToast={showToast}
           onSwitchToLibrary={() => setTopMode('library')}
+          activeEntityScope={activeEntityScope}
+          onClearEntityScope={() => {
+            setSelectedAlbumId(null)
+            setSelectedArtist(null)
+            setSelectedComposer(null)
+          }}
         />
-      ) : (
-        <div className="flex-1 flex overflow-hidden">
-          {/* 1. Left Rail: Normalized Navigation */}
-          <LeftRail
-            auditIssues={scopedAuditIssues}
-            activeTriageFilter={activeTriageFilter}
-            onSelectTriageFilter={setActiveTriageFilter}
-            onRemediateAudit={handleRemediateAudit}
-            healthScore={scopedHealthScore}
-            isFilteredScope={isGridFilterActive}
-            scopeTrackCount={gridScopedTracks.length}
-            totalTrackCount={tracks.length}
-            onRefreshAudit={() => {
-              auditService.runFullCatalogAudit()
-              refreshFromEngine()
-              showToast('Catalog hygiene diagnostic scan updated.')
-            }}
-            onOpenNormalizationRules={() => setIsNormalizationRulesModalOpen(true)}
-            facets={facets}
-            onFacetChange={setFacets}
-            onResetFacets={() => setFacets({})}
-            storageMounts={storageMounts}
-            onToggleReadOnly={handleToggleReadOnly}
-            selectedMountId={selectedMountId}
-            onSelectMount={setSelectedMountId}
-            selectedFolderFilter={selectedFolderFilter}
-            onSelectFolderFilter={setSelectedFolderFilter}
-            onOpenStorageManager={() => {
-              setTopMode('maintain')
-              setMaintainSubTab('storage_mounts')
-            }}
-            onOpenImportModal={() => setIsImportModalOpen(true)}
-            watchedFolders={watchedFolders}
-            tracks={tracks}
-            releases={releases}
-            viewMode={viewMode}
-            onViewModeChange={setViewMode}
-          />
+      )}
 
-          {/* 2. Center Stage: Data Canvas OR Focused Workbench OR Storage Offline View */}
-          {focusedWorkbenchTrack ? (
-            <FocusedWorkbench
-              track={focusedWorkbenchTrack}
-              release={releases.find((r) => r.id === focusedWorkbenchTrack.releaseId)}
+      <div className={`flex-1 flex overflow-hidden ${topMode === 'maintain' ? 'hidden' : ''}`}>
+        {/* 1. Left Rail: Normalized Navigation */}
+        <LeftRail
+          auditIssues={scopedAuditIssues}
+          activeTriageFilter={activeTriageFilter}
+          onSelectTriageFilter={setActiveTriageFilter}
+          onRemediateAudit={handleRemediateAudit}
+          healthScore={scopedHealthScore}
+          isFilteredScope={isGridFilterActive}
+          scopeTrackCount={gridScopedTracks.length}
+          totalTrackCount={tracks.length}
+          onRefreshAudit={() => {
+            auditService.runFullCatalogAudit()
+            refreshFromEngine()
+            showToast('Catalog hygiene diagnostic scan updated.')
+          }}
+          onOpenNormalizationRules={() => setIsNormalizationRulesModalOpen(true)}
+          facets={facets}
+          onFacetChange={setFacets}
+          onResetFacets={() => setFacets({})}
+          storageMounts={storageMounts}
+          onToggleReadOnly={handleToggleReadOnly}
+          selectedMountId={selectedMountId}
+          onSelectMount={setSelectedMountId}
+          selectedFolderFilter={selectedFolderFilter}
+          onSelectFolderFilter={setSelectedFolderFilter}
+          onOpenStorageManager={() => {
+            setTopMode('maintain')
+            setMaintainSubTab('storage_mounts')
+          }}
+          onOpenImportModal={() => setIsImportModalOpen(true)}
+          watchedFolders={watchedFolders}
+          tracks={tracks}
+          releases={releases}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
+          playlists={playlists}
+          selectedPlaylistId={selectedPlaylist?.id}
+          onSelectPlaylist={(pl) => {
+            setSelectedPlaylist(pl)
+            setViewMode('playlist_detail')
+          }}
+          onOpenCreatePlaylist={() => {
+            setInitialPlaylistTracks([])
+            setIsCreatePlaylistOpen(true)
+          }}
+        />
+
+        {/* 2. Center Stage: Data Canvas OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
+        {focusedWorkbenchTrack ? (
+          <FocusedWorkbench
+            track={focusedWorkbenchTrack}
+            release={releases.find((r) => r.id === focusedWorkbenchTrack.releaseId)}
+            allTracks={tracks}
+            onClose={() => setFocusedWorkbenchTrack(null)}
+            onApplyEdits={(edits) => {
+              graphEngine.updateTrackSidecar(focusedWorkbenchTrack.id, edits)
+              refreshFromEngine()
+              persistCurrentLibrary()
+
+              // Edge Case 1: Reactive Renaming Refinement
+              if (selectedComposer && edits.composerName && edits.composerName !== selectedComposer) {
+                const remaining = graphEngine.getAllTracks().filter((t) => {
+                  const rel = graphEngine.getAllReleases().find((r) => r.id === t.releaseId)
+                  return (
+                    (t.composerName || '').toLowerCase().trim() === selectedComposer.toLowerCase().trim() ||
+                    (rel?.composerName || '').toLowerCase().trim() === selectedComposer.toLowerCase().trim()
+                  )
+                })
+                if (remaining.length === 0) {
+                  setSelectedComposer(edits.composerName)
+                }
+              }
+
+              if (selectedArtist && edits.artistCredit && edits.artistCredit !== selectedArtist) {
+                const remaining = graphEngine.getAllTracks().filter((t) => {
+                  const rel = graphEngine.getAllReleases().find((r) => r.id === t.releaseId)
+                  return (
+                    (t.artistCredit || '').toLowerCase().trim() === selectedArtist.toLowerCase().trim() ||
+                    (rel?.artistCredit || '').toLowerCase().trim() === selectedArtist.toLowerCase().trim()
+                  )
+                })
+                if (remaining.length === 0) {
+                  setSelectedArtist(edits.artistCredit)
+                }
+              }
+            }}
+            showToast={showToast}
+          />
+          ) : viewMode === 'playlist_detail' && selectedPlaylist ? (
+            <PlaylistDetailView
+              playlist={selectedPlaylist}
               allTracks={tracks}
-              onClose={() => setFocusedWorkbenchTrack(null)}
-              onApplyEdits={(edits) => {
-                graphEngine.updateTrackSidecar(focusedWorkbenchTrack.id, edits)
-                refreshFromEngine()
-                persistCurrentLibrary()
+              allReleases={releases}
+              onBackToLibrary={() => setViewMode('cover_grid')}
+              onOpenEditPlaylist={(pl) => {
+                setEditingPlaylist(pl)
+                setIsEditPlaylistOpen(true)
+              }}
+              onOpenAddTracksModal={(trks) => {
+                setTracksToAdd(trks)
+                setIsAddTracksModalOpen(true)
               }}
               showToast={showToast}
             />
@@ -1561,6 +1797,8 @@ function AppContent() {
                 works={works}
                 releases={releases}
                 tracks={filteredTracks}
+                facets={facets}
+                onFacetChange={setFacets}
                 selectedTrackId={selectedTrackId}
                 onSelectTrack={setSelectedTrackId}
                 selectedTrackIds={selectedTrackIds}
@@ -1584,31 +1822,67 @@ function AppContent() {
                   setSelectedMountId(undefined)
                   setSelectedFolderFilter(undefined)
                   setSearchQuery('')
+                  if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
+                    graphEngine.loadCustomLibrary({
+                      tracks,
+                      releases,
+                      works,
+                      auditIssues,
+                      storageMounts,
+                    })
+                  }
                 }}
                 activeTriageIssue={activeTriageIssue}
                 onClearTriageFilter={() => setActiveTriageFilter(undefined)}
                 onRemediateTriageIssue={handleRemediateAudit}
+                activeCoverTab={activeCoverTab}
+                onActiveCoverTabChange={setActiveCoverTab}
+                selectedAlbumId={selectedAlbumId}
+                onSelectAlbumId={setSelectedAlbumId}
+                selectedArtist={selectedArtist}
+                onSelectArtist={setSelectedArtist}
+                selectedComposer={selectedComposer}
+                onSelectComposer={setSelectedComposer}
               />
             </div>
           )}
 
-          {/* 3. Right Panel: Contextual Action Surface */}
-          <RightPanel
-            track={currentTrack}
-            release={currentRelease}
-            allReleases={releases}
-            selectedTrackIds={selectedTrackIds}
-            activeTab={rightPanelTab}
-            onTabChange={setRightPanelTab}
-            onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
-            onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
-            onAddCredit={handleAddCredit}
-            onApplyMerge={handleApplyMerge}
-            onReverifyChecksum={handleReverifyChecksum}
-            onOpenFocusedWorkbench={(t) => setFocusedWorkbenchTrack(t)}
-          />
+          {/* 3. Unified Right Sidebar: Queue, Playlists, and Inspector (⌘I / Q) */}
+          {isRightSidebarOpen && (
+            <UnifiedRightSidebar
+              track={currentTrack}
+              release={currentRelease}
+              allReleases={releases}
+              selectedTrackIds={selectedTrackIds}
+              activeInspectorTab={rightPanelTab}
+              onInspectorTabChange={setRightPanelTab}
+              onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
+              onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
+              onAddCredit={handleAddCredit}
+              onApplyMerge={handleApplyMerge}
+              onReverifyChecksum={handleReverifyChecksum}
+              onOpenFocusedWorkbench={(t) => setFocusedWorkbenchTrack(t)}
+              onOpenCreatePlaylist={(trks) => {
+                setInitialPlaylistTracks(trks || [])
+                setIsCreatePlaylistOpen(true)
+              }}
+              onOpenEditPlaylist={(pl) => {
+                setEditingPlaylist(pl)
+                setIsEditPlaylistOpen(true)
+              }}
+              onOpenAddTracksModal={(trks) => {
+                setTracksToAdd(trks)
+                setIsAddTracksModalOpen(true)
+              }}
+              onSelectPlaylistDetail={(pl) => {
+                setSelectedPlaylist(pl)
+                setViewMode('playlist_detail')
+              }}
+              onClose={() => setIsRightSidebarOpen(false)}
+              showToast={showToast}
+            />
+          )}
         </div>
-      )}
 
       {/* Guided Tutorial Interactive Tour & Headless Agent Protocol */}
       <GuidedTutorialModal
@@ -1646,6 +1920,68 @@ function AppContent() {
         isOpen={isCommandBarOpen}
         onClose={() => setIsCommandBarOpen(false)}
         commands={commands}
+        initialQuery={searchQuery}
+        onOpenAgent={(prompt) => {
+          setIsAgentDrawerOpen(true)
+          if (prompt) {
+            window.dispatchEvent(new CustomEvent('cadence:agent:prompt', { detail: prompt }))
+          }
+        }}
+        onSelectEntity={(entity) => {
+          // Safe navigation: selects/focuses entity, never mutates AudioEngine playback!
+          if (entity.type === 'album') {
+            const relTracks = tracks.filter((t) => t.releaseId === entity.id)
+            if (relTracks.length > 0) {
+              setSelectedTrackId(relTracks[0].id)
+            }
+            setViewMode('cover_grid')
+          } else if (entity.type === 'track') {
+            setSelectedTrackId(entity.id)
+          } else if (entity.type === 'artist') {
+            const isComposer = entity.role === 'Composer'
+            if (isComposer) {
+              setFacets((prev) => ({ ...prev, composer: entity.name }))
+            } else {
+              setSearchQuery(entity.name)
+            }
+          }
+        }}
+        onInspectEntity={(entity) => {
+          // Non-destructive Sidecar Diff Inspector
+          if (entity.type === 'album') {
+            handleInspectRelease(entity.id)
+            setRightPanelTab('diff')
+          } else if (entity.type === 'track') {
+            setSelectedTrackId(entity.id)
+            setIsRightSidebarOpen(true)
+            setRightSidebarTab('inspector')
+            setRightPanelTab('diff')
+          } else if (entity.type === 'artist') {
+            const isComposer = entity.role === 'Composer'
+            if (isComposer) {
+              setFacets((prev) => ({ ...prev, composer: entity.name }))
+            } else {
+              setSearchQuery(entity.name)
+            }
+          }
+        }}
+        onEnrichEntity={(entity) => {
+          if (entity.type === 'album') {
+            const relTracks = tracks.filter((t) => t.releaseId === entity.id)
+            if (relTracks.length > 0) {
+              setSelectedTrackIds(new Set(relTracks.map((t) => t.id)))
+            }
+          } else if (entity.type === 'track') {
+            setSelectedTrackIds(new Set([entity.id]))
+          }
+          setIsBatchDiffModalOpen(true)
+        }}
+        onApplyFacetFilter={(newFacets, residual) => {
+          setFacets((prev) => ({ ...prev, ...newFacets }))
+          if (residual && residual.trim()) {
+            setSearchQuery(residual.trim())
+          }
+        }}
       />
 
       {/* Staged for Commit Modal */}
@@ -1679,7 +2015,7 @@ function AppContent() {
             showToast(`Discarded ${count} staged edits for album`)
           }}
           onDiscardReleaseArtwork={(releaseId) => {
-            const count = graphEngine.discardReleaseArtwork(releaseId)
+            graphEngine.discardReleaseArtwork(releaseId)
             refreshFromEngine()
             persistCurrentLibrary()
             showToast(`Discarded staged cover art for album`)
@@ -1742,6 +2078,11 @@ function AppContent() {
         dispatcherContext={agentDispatcherContext}
         tracks={tracks}
         releases={releases}
+        currentRelease={currentRelease}
+        currentTrack={currentTrack}
+        activeTriageLabel={activeTriageIssue?.title}
+        activeFilterCount={gridScopedTracks.length}
+        isGridFiltered={isGridFilterActive}
       />
 
       {/* Comprehensive Library & Storage Management Modal */}
@@ -1791,6 +2132,59 @@ function AppContent() {
       <SanctuaryListeningLounge
         isOpen={isSanctuaryOpen}
         onClose={() => setIsSanctuaryOpen(false)}
+      />
+
+      {/* Create Playlist Modal */}
+      <CreatePlaylistModal
+        isOpen={isCreatePlaylistOpen}
+        onClose={() => setIsCreatePlaylistOpen(false)}
+        initialTracks={initialPlaylistTracks}
+        allReleases={releases}
+        onPlaylistCreated={(newPl) => {
+          refreshPlaylists()
+          setSelectedPlaylist(newPl)
+          setViewMode('playlist_detail')
+        }}
+        showToast={showToast}
+      />
+
+      {/* Edit Playlist Modal */}
+      <EditPlaylistModal
+        isOpen={isEditPlaylistOpen}
+        onClose={() => {
+          setIsEditPlaylistOpen(false)
+          setEditingPlaylist(null)
+        }}
+        playlist={editingPlaylist}
+        onPlaylistUpdated={(updated) => {
+          refreshPlaylists()
+          if (selectedPlaylist?.id === updated.id) {
+            setSelectedPlaylist(updated)
+          }
+        }}
+        onPlaylistDeleted={(deletedId) => {
+          refreshPlaylists()
+          if (selectedPlaylist?.id === deletedId) {
+            setSelectedPlaylist(null)
+            setViewMode('cover_grid')
+          }
+        }}
+        showToast={showToast}
+      />
+
+      {/* Add Tracks to Playlist Modal */}
+      <AddTracksToPlaylistModal
+        isOpen={isAddTracksModalOpen}
+        onClose={() => {
+          setIsAddTracksModalOpen(false)
+          setTracksToAdd([])
+        }}
+        tracksToAdd={tracksToAdd}
+        onOpenCreateNew={() => {
+          setInitialPlaylistTracks(tracksToAdd)
+          setIsCreatePlaylistOpen(true)
+        }}
+        showToast={showToast}
       />
 
       {/* Global Drag-and-Drop Ingestion Overlay */}

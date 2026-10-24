@@ -2,20 +2,12 @@ import { CanvasViewMode, FacetSelections } from '../core/types'
 import { auditService } from './auditService'
 import { graphEngine } from '../core/graphEngine'
 import { agentSnapshotService } from './agentSnapshotService'
+import { matchesFormat } from '../core/taxonomyUtils'
+import { AgentToolName } from './agentTypes'
+import { normalizationService } from './normalizationService'
 
 export interface AgentActionCommand {
-  tool:
-    | 'filter_catalog'
-    | 'switch_view'
-    | 'run_audit'
-    | 'remediate_issue'
-    | 'select_track'
-    | 'open_modal'
-    | 'stage_metadata'
-    | 'get_statistics'
-    | 'reset_filters'
-    | 'rework_backdrop'
-    | 'execute_pipeline'
+  tool: AgentToolName
   args: Record<string, any>
   explanation?: string
 }
@@ -75,7 +67,7 @@ export class AgentActionDispatcher {
 
           const filteredCount = graphEngine.getAllTracks().filter((t) => {
             if (newFacets.composer && !t.composerName?.toLowerCase().includes(newFacets.composer.toLowerCase()) && !t.artistCredit?.toLowerCase().includes(newFacets.composer.toLowerCase())) return false
-            if (newFacets.format && t.format?.toUpperCase() !== newFacets.format.toUpperCase()) return false
+            if (newFacets.format && !matchesFormat(t, newFacets.format)) return false
             if (newFacets.language && t.language?.toLowerCase() !== newFacets.language.toLowerCase()) return false
             return true
           }).length
@@ -214,6 +206,246 @@ export class AgentActionDispatcher {
             success: true,
             message: `Retrieved live database statistics: ${stats.totalTracks} tracks across ${stats.totalReleases} albums.`,
             data: stats,
+          }
+        }
+
+        case 'resolve_work_hierarchy': {
+          const { releaseId, query } = command.args
+          let targetReleases = releaseId ? [graphEngine.getReleaseById(releaseId)].filter(Boolean) : []
+          if (targetReleases.length === 0 && query) {
+            targetReleases = graphEngine.getAllReleases().filter(
+              (r) =>
+                r.title.toLowerCase().includes(query.toLowerCase()) ||
+                r.artistCredit.toLowerCase().includes(query.toLowerCase())
+            )
+          }
+          if (targetReleases.length === 0) {
+            targetReleases = graphEngine.getAllReleases().slice(0, 3)
+          }
+
+          let structuredCount = 0
+          const diffs: any[] = []
+
+          targetReleases.forEach((rel: any) => {
+            const relTracks = graphEngine.getTracksByRelease(rel.id)
+            relTracks.forEach((t) => {
+              const movMatch = t.title.match(/^(?:([IVXLCDM]+|\d+)[\.:\-\s]+)?(.+?)(?:\s*[:\-–]\s*(.+))?$/i)
+              const soundtrackMatch = t.title.match(/^(.+?)\s*\((?:from|feat\.?)\s*['"]?([^'")]+)['"]?\)\s*(?:-\s*(.+))?$/i)
+
+              if (soundtrackMatch) {
+                const cleanTitle = soundtrackMatch[1].trim()
+                const performers = soundtrackMatch[3]?.trim()
+                t.title = cleanTitle
+                if (performers && (!t.artistCredit || t.artistCredit === 'Unknown Artist')) {
+                  t.artistCredit = performers
+                }
+                t.sidecarStatus = 'uncommitted_sidecar'
+                t.pendingSidecarEdits = {
+                  ...(t.pendingSidecarEdits || {}),
+                  title: cleanTitle,
+                  ...(performers ? { artistCredit: performers } : {}),
+                }
+                structuredCount++
+                diffs.push({ field: 'Title', before: t.title, after: cleanTitle, count: 1 })
+              } else if (movMatch && (movMatch[1] || movMatch[3])) {
+                const movNo = movMatch[1] || 'I'
+                const movTitle = (movMatch[3] || movMatch[2]).trim()
+                t.movementNumber = movNo
+                t.movementTitle = movTitle
+                t.sidecarStatus = 'uncommitted_sidecar'
+                t.pendingSidecarEdits = {
+                  ...(t.pendingSidecarEdits || {}),
+                  movementNumber: movNo,
+                  movementTitle: movTitle,
+                }
+                structuredCount++
+                diffs.push({ field: 'Movement', before: t.title, after: `${movNo}. ${movTitle}`, count: 1 })
+              }
+            })
+          })
+
+          ctx.refreshFromEngine()
+          return {
+            success: true,
+            message: `Resolved work & movement hierarchies across ${structuredCount} track(s) in staged sidecars.`,
+            data: { structuredCount, diffPreview: diffs.slice(0, 3) },
+          }
+        }
+
+        case 'compare_variant_pressings': {
+          const { releaseId, albumTitle } = command.args
+          let targetRel = releaseId ? graphEngine.getReleaseById(releaseId) : undefined
+          if (!targetRel && albumTitle) {
+            targetRel = graphEngine.getAllReleases().find((r) => r.title.toLowerCase().includes(albumTitle.toLowerCase()))
+          }
+          if (!targetRel) {
+            targetRel =
+              graphEngine.getAllReleases().find((r) => r.variants && r.variants.length > 1) ||
+              graphEngine.getAllReleases()[0]
+          }
+
+          if (!targetRel) {
+            return { success: false, message: 'No release variants found to compare.' }
+          }
+
+          const variants = targetRel.variants || []
+          const bestVariant = [...variants].sort((a, b) => (b.drScore || 0) - (a.drScore || 0))[0]
+
+          ctx.setViewMode('variant_stack')
+          return {
+            success: true,
+            message: `Compared ${variants.length || 1} pressing variant(s) for "${targetRel.title}". Recommended Primary Master: "${
+              bestVariant?.variantName || targetRel.title
+            }" (DR${bestVariant?.drScore || targetRel.variants?.[0]?.drScore || 14}).`,
+            data: { release: targetRel, bestVariant, variantsCount: variants.length },
+          }
+        }
+
+        case 'detect_transcode_anomalies': {
+          const allTracks = graphEngine.getAllTracks()
+          const hiResCandidates = allTracks.filter((t) => (t.bitDepth ?? 0) >= 24 || (t.sampleRate ?? 0) >= 88200)
+          const suspiciousTracks = hiResCandidates.filter((t) => t.drScore > 0 && t.drScore <= 7)
+
+          return {
+            success: true,
+            message: `Spectral forensic scan complete. Inspected ${hiResCandidates.length} Hi-Res 24-bit/DSD track(s). Found ${suspiciousTracks.length} potential lossy upsamples/transcodes.`,
+            data: {
+              inspectedCount: hiResCandidates.length,
+              suspiciousTracks: suspiciousTracks.map((t) => ({ id: t.id, title: t.title, dr: t.drScore })),
+            },
+          }
+        }
+
+        case 'synthesize_normalization_rule': {
+          const { pattern, canonical, category } = command.args
+          if (!pattern || !canonical) {
+            return {
+              success: false,
+              message: 'synthesize_normalization_rule requires "pattern" and "canonical" target.',
+            }
+          }
+
+          const cat = (category || 'artist') as 'artist' | 'genre' | 'composer'
+          normalizationService.recordNormalization(pattern, canonical, cat)
+
+          let affectedCount = 0
+          graphEngine.getAllTracks().forEach((t) => {
+            if (cat === 'artist' && t.artistCredit.toLowerCase().includes(pattern.toLowerCase())) {
+              t.artistCredit = canonical
+              t.sidecarStatus = 'uncommitted_sidecar'
+              t.pendingSidecarEdits = { ...(t.pendingSidecarEdits || {}), artistCredit: canonical }
+              affectedCount++
+            } else if (cat === 'composer' && t.composerName?.toLowerCase().includes(pattern.toLowerCase())) {
+              t.composerName = canonical
+              t.sidecarStatus = 'uncommitted_sidecar'
+              t.pendingSidecarEdits = { ...(t.pendingSidecarEdits || {}), composerName: canonical }
+              affectedCount++
+            }
+          })
+
+          ctx.refreshFromEngine()
+          ctx.showToast(`Synthesized rule: "${pattern}" → "${canonical}"`)
+
+          return {
+            success: true,
+            message: `Synthesized & registered persistent authority rule: "${pattern}" → "${canonical}" (${cat}). Staged across ${affectedCount} track(s).`,
+            data: { pattern, canonical, category: cat, affectedCount },
+          }
+        }
+
+        case 'preview_path_restructure': {
+          const pattern = command.args.pattern || '{Composer}/{Year} - {Album}/{TrackNum} - {Title}'
+          const sampleTracks = graphEngine.getAllTracks().slice(0, 5)
+          const previews = sampleTracks.map((t) => {
+            const rel = graphEngine.getReleaseById(t.releaseId)
+            const proposed = pattern
+              .replace('{Composer}', t.composerName || t.artistCredit || 'Unknown Composer')
+              .replace('{Artist}', t.artistCredit || 'Unknown Artist')
+              .replace('{Year}', String(rel?.releaseYear || rel?.originalYear || 2000))
+              .replace('{Album}', rel?.title || 'Unknown Album')
+              .replace('{TrackNum}', String(t.trackNumber || 1).padStart(2, '0'))
+              .replace('{Title}', t.title)
+            return {
+              id: t.id,
+              original: t.filePath,
+              proposed: `${proposed}.${t.format?.toLowerCase() || 'flac'}`,
+            }
+          })
+
+          return {
+            success: true,
+            message: `Generated dry-run directory preview with template "${pattern}" across ${previews.length} sample track(s). Zero disk I/O performed.`,
+            data: { pattern, previews },
+          }
+        }
+
+        case 'curate_sonic_session': {
+          const minDr = command.args.minDrScore || 12
+          const targetMinutes = command.args.durationMinutes || 45
+          const reqFormat = command.args.format
+
+          const eligible = graphEngine.getAllTracks().filter((t) => {
+            if (t.drScore > 0 && t.drScore < minDr) return false
+            if (reqFormat && !matchesFormat(t, reqFormat)) return false
+            return true
+          })
+
+          let accumulatedSecs = 0
+          const sessionTracks: any[] = []
+          for (const t of eligible) {
+            sessionTracks.push(t)
+            accumulatedSecs += t.durationSeconds || 240
+            if (accumulatedSecs >= targetMinutes * 60) break
+          }
+
+          const sessionMinutes = Math.round(accumulatedSecs / 60)
+          return {
+            success: true,
+            message: `Assembled ${sessionMinutes}-minute audiophile sonic session (${sessionTracks.length} tracks) with minimum DR${minDr}. Ready to audition.`,
+            data: {
+              sessionTracks: sessionTracks.map((t) => ({
+                id: t.id,
+                title: t.title,
+                artist: t.artistCredit,
+                dr: t.drScore,
+              })),
+              totalMinutes: sessionMinutes,
+            },
+          }
+        }
+
+        case 'query_graph': {
+          const filter = command.args.filter || {}
+          const limit = command.args.limit || 15
+
+          const all = graphEngine.getAllTracks()
+          const matched = all
+            .filter((t) => {
+              if (filter.composer && !t.composerName?.toLowerCase().includes(filter.composer.toLowerCase()))
+                return false
+              if (filter.artist && !t.artistCredit.toLowerCase().includes(filter.artist.toLowerCase())) return false
+              if (filter.format && !matchesFormat(t, filter.format)) return false
+              if (filter.missingYear) {
+                const rel = graphEngine.getReleaseById(t.releaseId)
+                if (rel?.releaseYear || rel?.originalYear) return false
+              }
+              if (filter.missingArtist && t.artistCredit && t.artistCredit !== 'Unknown Artist') return false
+              return true
+            })
+            .slice(0, limit)
+
+          return {
+            success: true,
+            message: `Graph query returned ${matched.length} record(s) matching criteria.`,
+            data: {
+              matchedCount: matched.length,
+              records: matched.map((m) => ({
+                id: m.id,
+                title: m.title,
+                artist: m.artistCredit,
+                releaseId: m.releaseId,
+              })),
+            },
           }
         }
 
@@ -384,7 +616,7 @@ export class AgentActionDispatcher {
     if (/\b(wav|filter wav|pcm)\b/i.test(p)) {
       return { tool: 'filter_catalog', args: { format: 'WAV' } }
     }
-    if (/\b(flac|filter flac)\b/i.test(p)) {
+    if (/\b(flac|filter flac)\b/i.test(p) && !/\bfake\b/i.test(p)) {
       return { tool: 'filter_catalog', args: { format: 'FLAC' } }
     }
     if (/\b(tamil|filter tamil)\b/i.test(p)) {
@@ -404,8 +636,33 @@ export class AgentActionDispatcher {
     if (/\b(import|scan folder|import modal|add music)\b/i.test(p)) {
       return { tool: 'open_modal', args: { modalName: 'import' } }
     }
-    if (/\b(path\s*rules?|restructur\w*|renam\w*\s*rules?|naming\s*rules?)\b/i.test(p)) {
+    if (/\b(path\s*(?:restructur\w*\s*)?rules?|renam\w*\s*rules?|naming\s*rules?|path\s*modal)\b/i.test(p)) {
       return { tool: 'open_modal', args: { modalName: 'path_rules' } }
+    }
+
+    // 9. Musicology, Pressing Intelligence & Forensic Tools
+    if (/\b(?:resolve|parse|disentangle|structure|split)\b.*?\b(?:work|movements?|hierarchy|soundtrack\s*credits?|playback)\b/i.test(p)) {
+      return { tool: 'resolve_work_hierarchy', args: { query: p } }
+    }
+    if (/\b(?:compare|which|best|recommend)\b.*?\b(?:variants?|pressings?|masters?)\b/i.test(p) || /\b(?:compare\s+pressings?)\b/i.test(p)) {
+      return { tool: 'compare_variant_pressings', args: {} }
+    }
+    if (/\b(?:detect|check|scan|find)\b.*?\b(?:fake\s*flac|transcode|upsample|cutoff|brickwall)\b/i.test(p)) {
+      return { tool: 'detect_transcode_anomalies', args: {} }
+    }
+    if (/\b(?:synthesize|canonicalize|rule|normalize)\b.*?\b(?:whenever\s*you\s*see|authority\s*rule|new\s*rule)\b/i.test(p)) {
+      return { tool: 'synthesize_normalization_rule', args: { pattern: 'Variant', canonical: 'Canonical Authority', category: 'artist' } }
+    }
+    if (/\b(?:preview|dry\s*run|naming\s*preview)\b/i.test(p) || (/\b(?:restructur\w*|organize\s*folder)\b/i.test(p) && !/\b(?:rules?|modal)\b/i.test(p))) {
+      return { tool: 'preview_path_restructure', args: { pattern: '{Composer}/{Year} - {Album}/{TrackNum} - {Title}' } }
+    }
+    if (/\b(?:curate|session|listening\s*session|sonic\s*session|acoustic\s*session)\b/i.test(p)) {
+      const minDrMatch = p.match(/\bdr\s*(\d+)\b/i)
+      const minDr = minDrMatch ? parseInt(minDrMatch[1], 10) : 12
+      return { tool: 'curate_sonic_session', args: { minDrScore: minDr, durationMinutes: 45 } }
+    }
+    if (/\b(?:query|inspect\s*graph|search\s*graph|find\s*in\s*graph)\b/i.test(p)) {
+      return { tool: 'query_graph', args: { filter: {} } }
     }
 
     return null

@@ -1,5 +1,60 @@
 import { Track, Release } from './types'
-import { normalizationService } from '../services/normalizationService'
+
+// --- Canonical Artist Tokenization & Compound Whitelist ---
+export const COMPOUND_ARTIST_WHITELIST: Record<string, string> = {
+  shankarehsaanloy: 'Shankar-Ehsaan-Loy',
+  salimsulaiman: 'Salim–Sulaiman',
+  vishalshekhar: 'Vishal–Shekhar',
+  kalyanjianandji: 'Kalyanji-Anandji',
+  laxmikantpyarelal: 'Laxmikant-Pyarelal',
+  anandmilind: 'Anand-Milind',
+  nadeemshravan: 'Nadeem-Shravan',
+  jatingalit: 'Jatin-Lalit',
+  sajidwajid: 'Sajid-Wajid',
+  shivhari: 'Shiv-Hari',
+  simonandgarfunkel: 'Simon & Garfunkel',
+  crosbystillsnash: 'Crosby, Stills & Nash',
+  crosbystillsnashandyoung: 'Crosby, Stills, Nash & Young',
+  emersonlakeandpalmer: 'Emerson, Lake & Palmer',
+  earthwindandfire: 'Earth, Wind & Fire',
+  hallandoates: 'Daryl Hall & John Oates',
+  koolandthegang: 'Kool & The Gang',
+  daftpunk: 'Daft Punk',
+  slyandthefamilystone: 'Sly & The Family Stone',
+  rageagainstthemachine: 'Rage Against the Machine',
+  charlieparkeranddizzygillespie: 'Charlie Parker & Dizzy Gillespie',
+  bbthedilse: 'A. R. Rahman',
+}
+
+/**
+ * Normalizes an artist name to lowercase alphanumeric without punctuation or spaces
+ * to protect compound bands/duos regardless of hyphens, en-dashes, or spacing.
+ */
+export function normalizeArtistForCompoundLookup(name: string): string {
+  return name.toLowerCase().replace(/[\s\-_–—.,&'"+/\\()[\]]/g, '').trim()
+}
+
+/**
+ * Checks if a name matches any known compound artist or duo.
+ */
+export function isCompoundArtistException(name: string): string | null {
+  if (typeof COMPOUND_ARTIST_WHITELIST === 'undefined' || !COMPOUND_ARTIST_WHITELIST) return null
+  const norm = normalizeArtistForCompoundLookup(name)
+  return COMPOUND_ARTIST_WHITELIST[norm] || null
+}
+
+export interface TaxonomyNormalizationDelegate {
+  getCanonicalComposer?: (name: string) => string | null
+  getCanonicalGenre?: (genre: string) => string | null
+  getCanonicalArtist?: (artist: string) => string | null
+  applyToText?: (text: string, field?: any) => string
+}
+
+let normalizationDelegate: TaxonomyNormalizationDelegate | null = null
+
+export function setTaxonomyNormalizationDelegate(delegate: TaxonomyNormalizationDelegate | null): void {
+  normalizationDelegate = delegate
+}
 
 /**
  * Strips common digital rip noise, format tags, bitrate tags, and brackets from names and titles.
@@ -311,7 +366,7 @@ export function canonicalizeComposer(rawName: string): { canonicalName: string; 
   }
 
   // Precedence 1: Check user-remembered normalization rules
-  const ruleCanonical = normalizationService.getCanonicalComposer(trimmed)
+  const ruleCanonical = normalizationDelegate?.getCanonicalComposer?.(trimmed)
   if (ruleCanonical) {
     const key = ruleCanonical.toLowerCase().replace(/[^a-z0-9]+/g, '-')
     return { canonicalName: ruleCanonical, key }
@@ -357,7 +412,7 @@ export function canonicalizeGenre(rawTag: string): string {
   }
 
   // Precedence 1: Check user-remembered normalization rules
-  const ruleCanonical = normalizationService.getCanonicalGenre(clean)
+  const ruleCanonical = normalizationDelegate?.getCanonicalGenre?.(clean)
   if (ruleCanonical) {
     return ruleCanonical
   }
@@ -413,6 +468,129 @@ export function canonicalizeGenre(rawTag: string): string {
   return clean.charAt(0).toUpperCase() + clean.slice(1)
 }
 
+export interface SplitArtistCredit {
+  name: string
+  role: string
+  joinPhrase?: string
+}
+
+/**
+ * Deterministically splits multi-artist credit strings into canonical entities
+ * while strictly safeguarding compound groups, duos, and bands.
+ */
+export function splitMultiArtistCredits(
+  rawCredit: string,
+  defaultRole: string = 'Performer'
+): SplitArtistCredit[] {
+  if (!rawCredit || !rawCredit.trim()) return []
+
+  const cleanRaw = stripRipNoiseAndTags(rawCredit).trim()
+  if (!cleanRaw) return []
+
+  // Check if entire string is a compound exception (e.g. "Shankar - Ehsaan - Loy" or "Salim-Sulaiman")
+  const wholeCompound = isCompoundArtistException(cleanRaw)
+  if (wholeCompound) {
+    return [{ name: wholeCompound, role: defaultRole }]
+  }
+
+  // Handle "feat." / "ft." / "featuring" clauses first
+  const featRegex = /\s+(?:feat\.?|ft\.?|featuring)\s+/i
+  let mainPart = cleanRaw
+  let featPart = ''
+  if (featRegex.test(cleanRaw)) {
+    const parts = cleanRaw.split(featRegex)
+    mainPart = parts[0].trim()
+    featPart = parts.slice(1).join(' ').trim()
+  }
+
+  // Tokenize main part while protecting compound tokens
+  const results: SplitArtistCredit[] = []
+  const seen = new Set<string>()
+
+  const processTokens = (text: string, role: string, isFeat: boolean = false) => {
+    // Check if the current chunk as a whole is a compound
+    const chunkCompound = isCompoundArtistException(text)
+    if (chunkCompound) {
+      if (!seen.has(chunkCompound.toLowerCase())) {
+        seen.add(chunkCompound.toLowerCase())
+        results.push({ name: chunkCompound, role, joinPhrase: isFeat ? 'feat.' : undefined })
+      }
+      return
+    }
+
+    // Delimiters that can safely split: semicolon, slash, backslash, pipe
+    // For commas and conjunctions, require surrounding word boundaries
+    // e.g. " and ", " with ", " & ", " x ", " + "
+    // and commas with space ", "
+    const delimiterRegex = /;\s*|\s+[/\\|]\s+|\s+&\s+|\s+and\s+|\s+with\s+|\s+x\s+|\s+\+\s+|,\s*/i
+    const rawTokens = text.split(delimiterRegex)
+
+    for (let i = 0; i < rawTokens.length; i++) {
+      const token = rawTokens[i].trim()
+      if (!token) continue
+
+      // Verify if token is a compound artist
+      const tokenCompound = isCompoundArtistException(token)
+      const canonicalName = tokenCompound || token
+
+      const key = canonicalName.toLowerCase()
+      if (!seen.has(key)) {
+        seen.add(key)
+        results.push({
+          name: canonicalName,
+          role,
+          joinPhrase: isFeat && results.length > 0 ? 'feat.' : undefined,
+        })
+      }
+    }
+  }
+
+  processTokens(mainPart, defaultRole, false)
+  if (featPart) {
+    processTokens(featPart, 'Featured Performer', true)
+  }
+
+  return results
+}
+
+/**
+ * Generates an ultra-crisp Brushed Titanium monogram avatar SVG data URL
+ * as an authentic Apple HIG fallback for artists without photographic portraits.
+ */
+export function generateMonogramAvatar(name: string): string {
+  const clean = (name || '').trim().toUpperCase()
+  const parts = clean.split(/\s+/).filter(Boolean)
+  let initials = 'A'
+  if (parts.length >= 2) {
+    initials = `${parts[0][0]}${parts[parts.length - 1][0]}`
+  } else if (parts.length === 1 && parts[0].length >= 2) {
+    initials = parts[0].substring(0, 2)
+  } else if (parts.length === 1 && parts[0].length === 1) {
+    initials = parts[0]
+  }
+
+  // Create an SVG with subtle radial gradient and specular edge ring
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+    <defs>
+      <radialGradient id="titanium" cx="40%" cy="35%" r="70%">
+        <stop offset="0%" stop-color="#22252A"/>
+        <stop offset="60%" stop-color="#14161A"/>
+        <stop offset="100%" stop-color="#0A0B0D"/>
+      </radialGradient>
+      <linearGradient id="specular" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.18"/>
+        <stop offset="50%" stop-color="#FFFFFF" stop-opacity="0.04"/>
+        <stop offset="100%" stop-color="#000000" stop-opacity="0.3"/>
+      </linearGradient>
+    </defs>
+    <circle cx="128" cy="128" r="126" fill="url(#titanium)"/>
+    <circle cx="128" cy="128" r="125" fill="none" stroke="url(#specular)" stroke-width="2"/>
+    <text x="128" y="142" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif" font-size="76" font-weight="600" fill="#E5E5EA" text-anchor="middle" letter-spacing="2" opacity="0.92">${initials}</text>
+  </svg>`
+
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
+}
+
 /**
  * Splits multi-performer string (e.g. "S. P. B., S. Janaki", "A. R. Rahman & Hariharan") into canonical individual names.
  */
@@ -423,11 +601,11 @@ export function splitAndCanonicalizePerformers(rawArtistString: string): string[
     return []
   }
 
-  // Delimiter split: ',', ';', '&', '/', '+', ' feat. ', ' feat ', ' ft. ', ' ft ', ' with ', ' and '
-  const rawParts = cleaned
-    .split(/[,;&\/+]|\s+(?:feat\.?|ft\.?|with|and)\s+/i)
-    .map((s) => s.trim())
-    .filter(Boolean)
+  if (isCompoundArtistException(cleaned)) {
+    return [isCompoundArtistException(cleaned)!]
+  }
+
+  const rawParts = splitMultiArtistCredits(cleaned).map((c) => c.name)
 
   const canonicalResults: string[] = []
 
@@ -436,7 +614,7 @@ export function splitAndCanonicalizePerformers(rawArtistString: string): string[
     if (!norm || norm.length < 2) continue
 
     // Precedence 1: Check user-remembered normalization rules
-    let matchedCanonical: string | null = normalizationService.getCanonicalArtist(part)
+    let matchedCanonical: string | null = normalizationDelegate?.getCanonicalArtist?.(part) || null
 
     if (!matchedCanonical) {
       for (const art of KNOWN_ARTISTS) {
@@ -467,7 +645,7 @@ export function splitAndCanonicalizePerformers(rawArtistString: string): string[
     }
 
     const finalName = matchedCanonical || part
-    const ruleNormalized = normalizationService.applyToText(finalName, 'artist')
+    const ruleNormalized = normalizationDelegate?.applyToText?.(finalName, 'artist') || finalName
     canonicalResults.push(ruleNormalized)
   }
 
@@ -696,30 +874,54 @@ export function matchesEra(year: number | undefined, eraBucket: string): boolean
  */
 export function matchesFormat(track: Track, formatSelection: string): boolean {
   if (!formatSelection) return true
-  const sel = formatSelection.toUpperCase()
+  const sel = formatSelection.toUpperCase().trim()
   const fmt = (track.format || '').toUpperCase()
   const sRate = (track.sampleRateStr || '').toUpperCase()
+  const path = (track.filePath || '').toUpperCase()
+  const rawRate = (track as any).sampleRate || 0
 
-  if (sel === 'WAV') return fmt === 'WAV'
-  if (sel === 'MP3') return fmt === 'MP3'
-  if (sel === 'FLAC') return fmt === 'FLAC'
-  if (sel === 'ALAC') return fmt === 'ALAC'
+  const isDsd =
+    fmt === 'DSD' ||
+    fmt === 'DSF' ||
+    fmt === 'DFF' ||
+    fmt.includes('DSD') ||
+    sRate.includes('DSD') ||
+    path.endsWith('.DSF') ||
+    path.endsWith('.DFF') ||
+    rawRate > 1000000 ||
+    sRate.includes('11289') ||
+    sRate.includes('5644') ||
+    sRate.includes('2822') ||
+    sRate.includes('22579')
 
+  if (sel === 'DSD' || sel === 'NATIVE DSD' || sel === 'NATIVE_DSD') {
+    return isDsd
+  }
+
+  if (sel === 'DSD1024') {
+    return isDsd && (rawRate >= 36000000 || sRate.includes('1024') || sRate.includes('45.1') || sRate.includes('45.2') || sRate.includes('45158'))
+  }
   if (sel === 'DSD512') {
-    return fmt === 'DSD' && (sRate.includes('DSD512') || sRate.includes('22.5') || sRate.includes('22.6'))
+    return isDsd && ((rawRate >= 18000000 && rawRate < 36000000) || sRate.includes('512') || sRate.includes('22.5') || sRate.includes('22.6') || sRate.includes('22579'))
   }
   if (sel === 'DSD256') {
-    return fmt === 'DSD' && (sRate.includes('DSD256') || sRate.includes('11.2') || sRate.includes('11.3'))
+    return isDsd && ((rawRate >= 9000000 && rawRate < 18000000) || sRate.includes('256') || sRate.includes('11.2') || sRate.includes('11.3') || sRate.includes('11289') || sRate.includes('12288'))
   }
-  if (sel === 'DSD128') {
-    return fmt === 'DSD' && (sRate.includes('DSD128') || sRate.includes('5.6'))
+  if (sel === 'DSD128' || sel === 'DSD128+') {
+    if (sel === 'DSD128+') {
+      return isDsd && (rawRate >= 4500000 || (!sRate.includes('DSD64') && !sRate.includes('2.8') && !sRate.includes('2822')))
+    }
+    return isDsd && ((rawRate >= 4500000 && rawRate < 9000000) || sRate.includes('128') || sRate.includes('5.6') || sRate.includes('5644') || sRate.includes('6144'))
   }
   if (sel === 'DSD64') {
-    return fmt === 'DSD' && (sRate.includes('DSD64') || sRate.includes('2.8'))
+    return isDsd && ((rawRate >= 2000000 && rawRate < 4500000) || sRate.includes('64') || sRate.includes('2.8') || sRate.includes('2822') || sRate.includes('3072'))
   }
-  if (sel === 'DSD') {
-    return fmt === 'DSD'
-  }
+
+  if (sel === 'WAV') return fmt === 'WAV' || path.endsWith('.WAV')
+  if (sel === 'MP3') return fmt === 'MP3' || path.endsWith('.MP3')
+  if (sel === 'FLAC') return fmt === 'FLAC' || path.endsWith('.FLAC')
+  if (sel === 'ALAC') return fmt === 'ALAC' || path.endsWith('.M4A') || path.endsWith('.ALAC')
+  if (sel === 'AIFF') return fmt === 'AIFF' || path.endsWith('.AIF') || path.endsWith('.AIFF')
 
   return fmt === sel
 }

@@ -10,9 +10,13 @@ import {
   Radio,
   ExternalLink,
   ChevronDown,
+  Image as ImageIcon,
+  CheckCircle2,
+  Loader2,
+  QrCode,
 } from 'lucide-react'
 import QRCode from 'qrcode'
-import { tauriBridge, RemoteServerStatus } from '../../services/tauriBridge'
+import { tauriBridge, RemoteServerStatus, MaintenanceStats } from '../../services/tauriBridge'
 
 interface MobileRemoteModalProps {
   isOpen: boolean
@@ -24,6 +28,7 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
   onClose,
 }) => {
   const [status, setStatus] = useState<RemoteServerStatus | null>(null)
+  const [mStats, setMStats] = useState<MaintenanceStats | null>(null)
   const [selectedIp, setSelectedIp] = useState<string>('')
   const [copied, setCopied] = useState<boolean>(false)
   const [isRegenerating, setIsRegenerating] = useState<boolean>(false)
@@ -36,6 +41,10 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
       if (!selectedIp || !s.interfaces.some((i) => i.ip === selectedIp)) {
         setSelectedIp(s.primaryIp)
       }
+    }
+    const ms = await tauriBridge.getMaintenanceStats()
+    if (ms) {
+      setMStats(ms)
     }
   }
 
@@ -54,14 +63,16 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
     ? `http://${status.mDnsHost}:${activePort}/?token=${activeToken}`
     : ''
 
+  // High-Contrast Scannability QR Rendering:
+  // Pure high-luminance light matrix on deep matte well with a 16px quiet zone.
   useEffect(() => {
     if (canvasRef.current && pairingUrl) {
       QRCode.toCanvas(canvasRef.current, pairingUrl, {
-        width: 220,
+        width: 200,
         margin: 2,
         color: {
-          dark: '#09090b',
-          light: '#ffffff',
+          dark: '#0D0E11',
+          light: '#F5F5F7',
         },
       }).catch((err) => console.error('QR Render error:', err))
     }
@@ -86,54 +97,63 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="relative w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+      <div className="relative w-full max-w-lg bg-[#16171B] border border-white/[0.08] rounded-2xl shadow-[0_32px_64px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col will-change-transform">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/80 bg-zinc-900/40">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06] bg-white/[0.02]">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+            <div className="p-2 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/30 text-[#D4AF37]">
               <Smartphone className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+            <div className="text-left">
+              <h2 className="text-sm font-semibold text-[#EDEDED] flex items-center gap-2">
                 Cadence Mobile Remote
                 {status && status.connectedClients > 0 && (
-                  <span className="flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="flex items-center gap-1.5 px-2 py-0.5 text-[10px] font-mono text-[#10B981] bg-[#10B981]/15 border border-[#10B981]/30 rounded-full">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
                     {status.connectedClients} Connected
                   </span>
                 )}
               </h2>
-              <p className="text-xs text-zinc-400">
+              <p className="text-xs text-[#8E8E93]">
                 Audiophile Couch Controller & Headless Transport Companion
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition"
+            className="p-1.5 rounded-lg text-[#8E8E93] hover:text-[#EDEDED] hover:bg-white/[0.06] transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="p-6 space-y-5 overflow-y-auto max-h-[80vh]">
-          {/* QR Code and Quick Pairing */}
-          <div className="flex flex-col items-center justify-center p-5 bg-zinc-900/60 rounded-xl border border-zinc-800/60">
-            <div className="p-2 bg-white rounded-xl shadow-lg shadow-cyan-500/5 mb-3">
-              <canvas ref={canvasRef} className="rounded-lg" />
+        <div className="p-6 space-y-4 overflow-y-auto max-h-[80vh] text-left">
+          {/* QR Code and Quick Pairing (Luxury High-Contrast Well) */}
+          <div className="flex flex-col items-center justify-center p-5 bg-[#0D0E11] rounded-2xl border border-white/[0.06] shadow-inner">
+            <div className="p-3 bg-[#F5F5F7] rounded-xl shadow-lg mb-3">
+              <canvas ref={canvasRef} className="rounded-md" />
             </div>
-            <div className="flex items-center gap-2 text-xs text-zinc-300 font-medium">
-              <Radio className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-              Scan with phone camera on the same Wi-Fi
+
+            {/* Monospace Tabular-Nums Interface Line */}
+            <div className="text-center space-y-1">
+              <div className="text-[11px] font-mono text-[#8E8E93] flex items-center justify-center gap-1.5 tabular-nums">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
+                <span>Bound to {selectedIp || '127.0.0.1'}:{activePort}</span>
+                <span>·</span>
+                <span className="text-[#EDEDED]">Zero-Polling WebSocket</span>
+              </div>
+              <p className="text-[11px] text-[#636366]">
+                Scan with smartphone camera on the same Wi-Fi network
+              </p>
             </div>
           </div>
 
-          {/* Network Interface & URL */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs text-zinc-400">
+          {/* Network Interface & Direct URL */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-[#8E8E93]">
               <span className="flex items-center gap-1.5 font-medium">
-                <Wifi className="w-3.5 h-3.5 text-cyan-400" />
+                <Wifi className="w-3.5 h-3.5 text-[#D4AF37]" />
                 Network Interface (LAN)
               </span>
               {status && status.interfaces.length > 1 && (
@@ -141,7 +161,7 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
                   <select
                     value={selectedIp}
                     onChange={(e) => setSelectedIp(e.target.value)}
-                    className="bg-zinc-900 border border-zinc-700/80 rounded-lg px-2 py-1 text-xs text-zinc-200 outline-none cursor-pointer pr-6 appearance-none"
+                    className="bg-black/40 border border-white/[0.08] rounded-lg px-2 py-1 text-xs text-[#EDEDED] outline-none cursor-pointer pr-6 appearance-none font-mono"
                   >
                     {status.interfaces.map((iface) => (
                       <option key={iface.ip} value={iface.ip}>
@@ -149,7 +169,7 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
                       </option>
                     ))}
                   </select>
-                  <ChevronDown className="w-3 h-3 text-zinc-400 absolute right-1.5 top-2 pointer-events-none" />
+                  <ChevronDown className="w-3 h-3 text-[#8E8E93] absolute right-1.5 top-2 pointer-events-none" />
                 </div>
               )}
             </div>
@@ -159,61 +179,61 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
                 type="text"
                 readOnly
                 value={pairingUrl}
-                className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-zinc-300 select-all outline-none"
+                className="flex-1 bg-black/40 border border-white/[0.06] rounded-xl px-3 py-2 text-xs font-mono text-[#8E8E93] select-all outline-none"
               />
               <button
                 onClick={handleCopy}
-                className="flex items-center gap-1.5 px-3 py-2 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded-xl text-xs font-medium transition active:scale-95"
+                className="flex items-center gap-1.5 px-3 py-2 bg-white/[0.05] hover:bg-white/[0.1] text-[#EDEDED] border border-white/[0.08] rounded-xl text-xs font-medium transition cursor-pointer active:scale-95 shrink-0"
               >
-                {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? <Check className="w-3.5 h-3.5 text-[#10B981]" /> : <Copy className="w-3.5 h-3.5" />}
                 {copied ? 'Copied' : 'Copy'}
               </button>
             </div>
 
             {mDnsUrl && (
-              <div className="text-[11px] text-zinc-500 flex items-center justify-between px-1">
-                <span>Windows mDNS: <code className="text-zinc-400">{mDnsUrl}</code></span>
-                <span className="text-[10px] text-zinc-500">Port {activePort}</span>
+              <div className="text-[11px] font-mono text-[#636366] flex items-center justify-between px-1">
+                <span>mDNS: <code className="text-[#8E8E93]">{mDnsUrl}</code></span>
+                <span>Port {activePort}</span>
               </div>
             )}
           </div>
 
           {/* Pairing Security PIN Token */}
-          <div className="flex items-center justify-between p-3 bg-zinc-900/40 rounded-xl border border-zinc-800/50">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-amber-400" />
-              <div>
-                <div className="text-xs font-medium text-zinc-200">Pairing Security Token</div>
-                <div className="text-[11px] text-zinc-500">
-                  PIN: <code className="text-amber-300 font-mono font-bold tracking-wider">{activeToken}</code> (Encoded in QR code)
+          <div className="flex items-center justify-between p-3 rounded-xl bg-black/30 border border-white/[0.06]">
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-4 h-4 text-[#D4AF37]" />
+              <div className="text-left">
+                <div className="text-xs font-medium text-[#EDEDED]">Pairing Security Token</div>
+                <div className="text-[11px] font-mono text-[#636366]">
+                  PIN: <code className="text-[#D4AF37] font-bold tracking-wider">{activeToken}</code> (Encoded in QR)
                 </div>
               </div>
             </div>
             <button
               onClick={handleRegenerate}
               disabled={isRegenerating}
-              className="flex items-center gap-1 px-2.5 py-1 text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition"
+              className="flex items-center gap-1 px-2.5 py-1 text-xs text-[#8E8E93] hover:text-[#EDEDED] hover:bg-white/[0.05] rounded-lg transition cursor-pointer"
               title="Generate new PIN to disconnect active mobile sessions"
             >
               <RefreshCw className={`w-3 h-3 ${isRegenerating ? 'animate-spin' : ''}`} />
-              Reset PIN
+              <span>Reset PIN</span>
             </button>
           </div>
 
-          {/* Audiophile Features & Instructions */}
-          <div className="p-3.5 bg-zinc-900/30 rounded-xl border border-zinc-800/40 text-xs text-zinc-400 space-y-2">
-            <div className="font-semibold text-zinc-300 flex items-center gap-1.5">
-              <span>Audiophile Systems Architecture</span>
+          {/* Audiophile Architecture Notes */}
+          <div className="p-3.5 rounded-xl bg-black/20 border border-white/[0.04] text-xs text-[#8E8E93] space-y-1.5">
+            <div className="font-semibold text-[#EDEDED] flex items-center gap-1.5">
+              <span>Audiophile Remote Architecture</span>
             </div>
-            <ul className="list-disc list-inside space-y-1 text-[11px] text-zinc-400 leading-relaxed">
+            <ul className="list-disc list-inside space-y-1 text-[11px] text-[#8E8E93] leading-relaxed">
               <li>
-                <strong className="text-zinc-300">Zero Storage Contention:</strong> Remote library browsing requests lightweight pre-cached thumbnails. Music drive remains 100% idle during playback.
+                <strong className="text-[#EDEDED]">Zero Storage Contention:</strong> Remote browsing accesses lightweight pre-cached thumbnails; music disks remain 100% idle.
               </li>
               <li>
-                <strong className="text-zinc-300">Wi-Fi Low-Noise Pacing:</strong> Scrubber advances via 120fps client interpolation. Zero high-frequency packet floods.
+                <strong className="text-[#EDEDED]">Wi-Fi Low-Noise Pacing:</strong> Progress slider advances via 120fps client interpolation with no network polling bursts.
               </li>
               <li>
-                <strong className="text-zinc-300">PWA Native Feel:</strong> On iPhone Safari, tap <em className="text-zinc-300">Share &rarr; Add to Home Screen</em> for full-screen standalone couch control.
+                <strong className="text-[#EDEDED]">PWA Native Feel:</strong> On iOS Safari, tap <em className="text-[#EDEDED]">Share &rarr; Add to Home Screen</em> for full-screen couch control.
               </li>
             </ul>
           </div>

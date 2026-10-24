@@ -257,14 +257,14 @@ export const FacetedFilters: React.FC<FacetedFiltersProps> = ({
       else if (fmt === 'MP3') counts.MP3++
       else if (fmt === 'FLAC') counts.FLAC++
       else if (fmt === 'ALAC') counts.ALAC++
-      else if (fmt === 'DSD') {
-        if (sRate.includes('DSD512') || sRate.includes('22.5') || sRate.includes('22.6')) {
+      else if (fmt === 'DSD' || fmt === 'DSF' || fmt === 'DFF' || sRate.includes('DSD') || sRate.includes('11289')) {
+        if (sRate.includes('DSD512') || sRate.includes('22.5') || sRate.includes('22.6') || sRate.includes('22579')) {
           counts.DSD512++
-        } else if (sRate.includes('DSD256') || sRate.includes('11.2') || sRate.includes('11.3')) {
+        } else if (sRate.includes('DSD256') || sRate.includes('11.2') || sRate.includes('11.3') || sRate.includes('11289')) {
           counts.DSD256++
-        } else if (sRate.includes('DSD128') || sRate.includes('5.6')) {
+        } else if (sRate.includes('DSD128') || sRate.includes('5.6') || sRate.includes('5644')) {
           counts.DSD128++
-        } else if (sRate.includes('DSD64') || sRate.includes('2.8')) {
+        } else if (sRate.includes('DSD64') || sRate.includes('2.8') || sRate.includes('2822')) {
           counts.DSD64++
         } else {
           counts.DSD256++
@@ -359,7 +359,15 @@ export const FacetedFilters: React.FC<FacetedFiltersProps> = ({
     const dr14Count = tracks.filter((t) => t.drScore >= 14).length
     const dr10Count = tracks.filter((t) => t.drScore >= 10 && t.drScore <= 13).length
     const drLowCount = tracks.filter((t) => t.drScore > 0 && t.drScore < 10).length
-    const highRes24Count = tracks.filter((t) => t.sampleRateStr?.includes('24/') || t.format === 'DSD').length
+    const highRes24Count = tracks.filter(
+      (t) =>
+        t.sampleRateStr?.includes('24/') ||
+        t.sampleRateStr?.includes('32/') ||
+        t.format === 'DSD' ||
+        (t.format as string) === 'DSF' ||
+        (t.format as string) === 'DFF' ||
+        Boolean(t.isHighRes)
+    ).length
 
     const list = [
       { label: 'Audiophile Master (DR14+)', value: 'audiophile_dr14', count: dr14Count },

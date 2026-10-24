@@ -1,5 +1,6 @@
 import { tauriBridge } from './tauriBridge'
 import { storagePersistence } from '../core/storagePersistence'
+import { graphEngine } from '../core/graphEngine'
 import {
   Track,
   Release,
@@ -8,15 +9,169 @@ import {
   ScanProgressPayload,
   ScanCompletePayload,
   SkippedFile,
+  ArtistSummary,
+  ArtistCreditItem,
+  ArtistDetail,
+  AudioFormat,
+  Playlist,
 } from '../core/types'
-import { getCuratedAlbumArtwork } from '../core/taxonomyUtils'
-import { listen, UnlistenFn } from '@tauri-apps/api/event'
+import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar } from '../core/taxonomyUtils'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 
 export interface MigrationResult {
   migrated: boolean
   tracksCount: number
   releasesCount: number
   mountsCount: number
+}
+
+/**
+ * Formats sample rate strings and normalizes audio format for audiophile precision.
+ * Correctly distinguishes DSD rates (DSD64 to DSD1024) from linear PCM kHz clocks.
+ */
+export function formatAudioSpecs(
+  rawFormat?: string,
+  sampleRate?: number | null,
+  bitDepth?: number | null,
+  filePath?: string
+): { format: AudioFormat; sampleRateStr: string; isHighRes: boolean } {
+  const fmtUpper = (rawFormat || '').toUpperCase()
+  const pathLower = (filePath || '').toLowerCase()
+  const sRate = sampleRate || 0
+  const bits = bitDepth || 16
+
+  const isDsd =
+    fmtUpper === 'DSD' ||
+    fmtUpper === 'DSF' ||
+    fmtUpper === 'DFF' ||
+    pathLower.endsWith('.dsf') ||
+    pathLower.endsWith('.dff') ||
+    bits === 1 ||
+    sRate > 1000000
+
+  if (isDsd) {
+    let sampleRateStr = 'DSD64 (2.82MHz)'
+    if (sRate >= 36000000 || pathLower.includes('dsd1024')) {
+      sampleRateStr = 'DSD1024 (45.2MHz)'
+    } else if (sRate >= 18000000 || pathLower.includes('dsd512')) {
+      sampleRateStr = 'DSD512 (22.6MHz)'
+    } else if (
+      sRate >= 9000000 ||
+      pathLower.includes('dsd256') ||
+      pathLower.includes('11.2mhz') ||
+      pathLower.includes('11.3') ||
+      pathLower.includes('11289')
+    ) {
+      sampleRateStr = 'DSD256 (11.3MHz)'
+    } else if (
+      sRate >= 4500000 ||
+      pathLower.includes('dsd128') ||
+      pathLower.includes('5.6mhz') ||
+      pathLower.includes('5644')
+    ) {
+      sampleRateStr = 'DSD128 (5.64MHz)'
+    } else if (
+      sRate >= 2000000 ||
+      pathLower.includes('dsd64') ||
+      pathLower.includes('2.8mhz') ||
+      pathLower.includes('2822')
+    ) {
+      sampleRateStr = 'DSD64 (2.82MHz)'
+    } else if (sRate === 352800 || pathLower.includes('dxd')) {
+      sampleRateStr = 'DXD (352.8kHz)'
+    } else if (sRate > 192000) {
+      sampleRateStr = `DSD (${(sRate / 1000000).toFixed(2)}MHz)`
+    }
+
+    return {
+      format: 'DSD',
+      sampleRateStr,
+      isHighRes: true,
+    }
+  }
+
+  // PCM formats
+  let format: AudioFormat = 'FLAC'
+  if (fmtUpper === 'WAV' || pathLower.endsWith('.wav')) format = 'WAV'
+  else if (fmtUpper === 'ALAC' || pathLower.endsWith('.alac') || pathLower.endsWith('.m4a')) format = 'ALAC'
+  else if (fmtUpper === 'MP3' || pathLower.endsWith('.mp3')) format = 'MP3'
+  else if (fmtUpper === 'AAC' || pathLower.endsWith('.aac')) format = 'AAC'
+  else format = 'FLAC'
+
+  // Audiophile guard: Valid linear PCM sample rates are never below 8000 Hz
+  const effectiveRate = sRate >= 8000 ? sRate : 44100
+  const khz = (effectiveRate / 1000).toFixed(effectiveRate % 1000 === 0 ? 0 : 1)
+  const sampleRateStr = `${bits}/${khz}kHz`
+  const isHighRes = effectiveRate > 48000 || bits > 16
+
+  return { format, sampleRateStr, isHighRes }
+}
+
+/**
+ * Robust parser converting polymorphic rate strings (e.g., "16/44.1", "24/96", "44.1kHz", "DSD64")
+ * into bit-accurate sampleRate (Hz) and bitDepth (bits) integers.
+ */
+export function parseAudioSpecsFromString(
+  sampleRateStr?: string,
+  existingSampleRate?: number | null,
+  existingBitDepth?: number | null
+): { sampleRate: number | null; bitDepth: number | null } {
+  let sampleRate: number | null = existingSampleRate && existingSampleRate >= 8000 ? existingSampleRate : null
+  let bitDepth: number | null = existingBitDepth && existingBitDepth > 0 ? existingBitDepth : null
+
+  if (sampleRate && bitDepth) {
+    return { sampleRate, bitDepth }
+  }
+
+  const str = (sampleRateStr || '').trim()
+  if (!str) return { sampleRate: sampleRate || 44100, bitDepth: bitDepth || 16 }
+
+  // 1. DSD clocks
+  if (/dsd1024/i.test(str)) {
+    return { sampleRate: 45158400, bitDepth: 1 }
+  } else if (/dsd512/i.test(str)) {
+    return { sampleRate: 22579200, bitDepth: 1 }
+  } else if (/dsd256/i.test(str)) {
+    return { sampleRate: 11289600, bitDepth: 1 }
+  } else if (/dsd128/i.test(str)) {
+    return { sampleRate: 5644800, bitDepth: 1 }
+  } else if (/dsd64/i.test(str) || /dsd/i.test(str)) {
+    return { sampleRate: 2822400, bitDepth: 1 }
+  }
+
+  // 2. Dual notation "16/44.1" or "24/96" or "24/192.0"
+  const slashMatch = str.match(/^(\d{1,2})\s*[\/|\\]\s*(\d+(?:\.\d+)?)/)
+  if (slashMatch) {
+    const bits = parseInt(slashMatch[1], 10)
+    const rateKhz = parseFloat(slashMatch[2])
+    const rateHz = Math.round(rateKhz < 1000 ? rateKhz * 1000 : rateKhz)
+    return {
+      sampleRate: sampleRate || rateHz,
+      bitDepth: bitDepth || bits,
+    }
+  }
+
+  // 3. Clocks ending with kHz e.g. "44.1kHz", "96kHz"
+  const khzMatch = str.match(/(\d+(?:\.\d+)?)\s*khz/i)
+  if (khzMatch) {
+    const rateKhz = parseFloat(khzMatch[1])
+    const rateHz = Math.round(rateKhz < 1000 ? rateKhz * 1000 : rateKhz)
+    return {
+      sampleRate: sampleRate || rateHz,
+      bitDepth: bitDepth || 16,
+    }
+  }
+
+  // 4. Raw Hz clock e.g. "44100", "96000"
+  const num = parseInt(str, 10)
+  if (!isNaN(num) && num >= 8000) {
+    return {
+      sampleRate: sampleRate || num,
+      bitDepth: bitDepth || 16,
+    }
+  }
+
+  return { sampleRate: sampleRate || 44100, bitDepth: bitDepth || 16 }
 }
 
 export class SqliteLibraryService {
@@ -104,8 +259,8 @@ export class SqliteLibraryService {
           composer: t.composerName || null,
           durationSecs: t.durationSeconds || t.duration || 0,
           format: t.format,
-          sampleRate: t.sampleRateStr ? parseInt(t.sampleRateStr) : null,
-          bitDepth: null,
+          sampleRate: parseAudioSpecsFromString(t.sampleRateStr, t.sampleRate, t.bitDepth).sampleRate,
+          bitDepth: parseAudioSpecsFromString(t.sampleRateStr, t.sampleRate, t.bitDepth).bitDepth,
           channels: null,
           drScore: t.drScore != null ? t.drScore : null,
           drSource: t.drSource || null,
@@ -281,9 +436,16 @@ export class SqliteLibraryService {
         accurateRipConfidence: 100,
         drScore: t.drScore || 0,
         drSource: t.drScore ? 'estimated' : undefined,
-        sampleRateStr: t.sampleRate ? `${(t.sampleRate / 1000).toFixed(1)}kHz` : '44.1kHz',
-        format: (t.format || 'FLAC') as any,
-        isHighRes: (t.sampleRate || 0) > 48000 || (t.bitDepth || 16) > 16,
+        ...(() => {
+          const specs = formatAudioSpecs(t.format, t.sampleRate, t.bitDepth, t.filePath)
+          return {
+            sampleRateStr: specs.sampleRateStr,
+            format: specs.format,
+            isHighRes: specs.isHighRes,
+            sampleRate: t.sampleRate || undefined,
+            bitDepth: t.bitDepth || undefined,
+          }
+        })(),
         isOnline: t.isOnline,
         credits: [],
         masterReleaseId: t.releaseId,
@@ -298,6 +460,17 @@ export class SqliteLibraryService {
         timestamp: s.timestamp,
         isIgnored: s.isIgnored,
       }))
+
+      // Recompute accurate tracksCount for each release from loaded tracks
+      const releaseTrackCounts = new Map<string, number>()
+      tracks.forEach((t) => {
+        if (t.releaseId) {
+          releaseTrackCounts.set(t.releaseId, (releaseTrackCounts.get(t.releaseId) || 0) + 1)
+        }
+      })
+      releases.forEach((r) => {
+        r.tracksCount = releaseTrackCounts.get(r.id) || r.tracksCount || 0
+      })
 
       return {
         tracks,
@@ -326,6 +499,7 @@ export class SqliteLibraryService {
     if (!tauriBridge.isTauri()) return
 
     this.cleanupListeners()
+    const { listen } = await import('@tauri-apps/api/event')
 
     if (handlers.onProgress) {
       this.unlistenProgress = await listen<ScanProgressPayload>(
@@ -362,9 +536,16 @@ export class SqliteLibraryService {
           accurateRipConfidence: 100,
           drScore: t.drScore || 0,
           drSource: t.drScore ? 'estimated' : undefined,
-          sampleRateStr: t.sampleRate ? `${(t.sampleRate / 1000).toFixed(1)}kHz` : '44.1kHz',
-          format: (t.format || 'FLAC') as any,
-          isHighRes: (t.sampleRate || 0) > 48000,
+          ...(() => {
+            const specs = formatAudioSpecs(t.format, t.sampleRate, t.bitDepth, t.filePath)
+            return {
+              sampleRateStr: specs.sampleRateStr,
+              format: specs.format,
+              isHighRes: specs.isHighRes,
+              sampleRate: t.sampleRate || undefined,
+              bitDepth: t.bitDepth || undefined,
+            }
+          })(),
           isOnline: t.isOnline !== false,
           credits: [],
           masterReleaseId: t.releaseId,
@@ -398,7 +579,7 @@ export class SqliteLibraryService {
           },
           variants: [],
           discsCount: 1,
-          tracksCount: 0,
+          tracksCount: convertedTracks.filter((ct) => ct.releaseId === r.id).length || 0,
           genreTags: r.genreTags ? JSON.parse(r.genreTags) : [],
           storageMountId: '',
         }))
@@ -525,8 +706,8 @@ export class SqliteLibraryService {
           composer: t.composerName || null,
           durationSecs: t.durationSeconds || 0,
           format: t.format,
-          sampleRate: t.sampleRateStr ? parseInt(t.sampleRateStr) : null,
-          bitDepth: null,
+          sampleRate: parseAudioSpecsFromString(t.sampleRateStr, t.sampleRate, t.bitDepth).sampleRate,
+          bitDepth: parseAudioSpecsFromString(t.sampleRateStr, t.sampleRate, t.bitDepth).bitDepth,
           channels: null,
           drScore: t.drScore != null ? t.drScore : null,
           drSource: t.drSource || null,
@@ -548,6 +729,352 @@ export class SqliteLibraryService {
     }
   }
 
+  // --- Canonical Relational Artists ---
+
+  /**
+   * Retrieves canonical artists with aggregate album and track counts.
+   * Leverages SQLite canonical_artists + track_artist_credits in native desktop mode,
+   * or falls back to in-memory credit splitting in mock/browser mode.
+   */
+  public async getCanonicalArtists(
+    fallbackReleases?: Release[],
+    fallbackTracks?: Track[]
+  ): Promise<ArtistSummary[]> {
+    if (tauriBridge.isTauri()) {
+      try {
+        const raw = await tauriBridge.dbGetCanonicalArtists()
+        if (raw && raw.length > 0) {
+          return raw.map((a: any) => {
+            const rawRole = a.primaryRole || a.primary_role || 'Performer'
+            const normRole = rawRole === 'Primary' || rawRole === 'Featured' ? 'Performer' : rawRole
+            const rawRoles: string[] = a.roles && a.roles.length > 0 ? a.roles : [rawRole]
+            const normRoles = Array.from(
+              new Set(
+                rawRoles.map((r) =>
+                  r === 'Primary' || r === 'Featured' ? 'Performer' : r
+                )
+              )
+            )
+            return {
+              id: a.id,
+              name: a.name,
+              sortName: a.sortName || a.sort_name,
+              portraitUrl: a.portraitUrl || a.portrait_url,
+              portraitStatus: (a.portraitStatus || a.portrait_status || 'pending') as any,
+              primaryRole: normRole,
+              albumsCount: a.albumsCount ?? a.albums_count ?? 0,
+              tracksCount: a.tracksCount ?? a.tracks_count ?? 0,
+              roles: normRoles,
+              eraActive: a.eraActive || a.era_active,
+            }
+          })
+        }
+      } catch (err) {
+        console.warn('[SqliteLibraryService] Failed to load canonical artists from SQLite:', err)
+      }
+    }
+
+    if (fallbackReleases && fallbackTracks) {
+      return this.deriveCanonicalArtistsFromState(fallbackReleases, fallbackTracks)
+    }
+    return []
+  }
+
+  /**
+   * Retrieves detailed discography and appearing tracks for an individual canonical artist.
+   */
+  public async getCanonicalArtistDetail(
+    artistId: string,
+    fallbackReleases: Release[] = [],
+    fallbackTracks: Track[] = []
+  ): Promise<ArtistDetail | null> {
+    if (tauriBridge.isTauri()) {
+      try {
+        const res = await tauriBridge.dbGetCanonicalArtistDetail(artistId)
+        if (res && res.artist) {
+          const rawArtist = res.artist
+          const rawRole = rawArtist.primaryRole || rawArtist.primary_role || 'Performer'
+          const normRole = rawRole === 'Primary' || rawRole === 'Featured' ? 'Performer' : rawRole
+          const rawRoles: string[] = res.roles && res.roles.length > 0 ? res.roles : [rawRole]
+          const normRoles = Array.from(
+            new Set(
+              rawRoles.map((r) =>
+                r === 'Primary' || r === 'Featured' ? 'Performer' : r
+              )
+            )
+          )
+          const artist = {
+            id: rawArtist.id,
+            name: rawArtist.name,
+            sortName: rawArtist.sortName || rawArtist.sort_name,
+            mbid: rawArtist.mbid,
+            appleArtistId: rawArtist.appleArtistId || rawArtist.apple_artist_id,
+            portraitUrl: rawArtist.portraitUrl || rawArtist.portrait_url,
+            portraitStatus: rawArtist.portraitStatus || rawArtist.portrait_status,
+            bioSummary: rawArtist.bioSummary || rawArtist.bio_summary,
+            eraActive: rawArtist.eraActive || rawArtist.era_active,
+            primaryRole: normRole,
+            createdAt: rawArtist.createdAt || rawArtist.created_at || new Date().toISOString(),
+          }
+
+          const discography: Release[] = (res.discography || []).map((r: any) => {
+            const rawCover = r.frontCoverUrl || r.front_cover_url || ''
+            const coverArtUrl = rawCover || getCuratedAlbumArtwork(r.title, r.composerName || r.artistCredit)
+            return {
+              id: r.id,
+              masterReleaseId: r.id,
+              title: r.title,
+              folderName: r.folderName || r.folder_name,
+              folderPath: r.folderPath || r.folder_path,
+              targetFolderPath: r.targetFolderPath || r.target_folder_path,
+              artistCredit: r.artistCredit || r.artist_credit,
+              composerName: r.composerName || r.composer_name,
+              releaseYear: r.releaseYear || r.release_year || 0,
+              originalYear: r.releaseYear || r.release_year || 0,
+              label: 'Lossless Master',
+              catalogNumber: 'CAD-001',
+              mediaFormat: 'Lossless Audio',
+              country: 'Global',
+              matrixRunout: '',
+              artwork: {
+                frontCoverUrl: coverArtUrl,
+                backdropUrl: r.backdropUrl || r.backdrop_url,
+                resolution: '3000x3000px',
+                width: 3000,
+                height: 3000,
+                dpi: 300,
+                colorProfile: 'sRGB',
+                isLowRes: false,
+                hasBookletPdf: false,
+              },
+              genres: r.genreTags ? r.genreTags.split(',').map((g: string) => g.trim()) : [],
+              tracks: [],
+              isLocalOnline: true,
+              storageMountId: 'mount-main',
+            }
+          })
+
+          const appearingTracks: ArtistCreditItem[] = (res.appearingTracks || res.appearing_tracks || []).map((item: any) => ({
+            trackId: item.trackId || item.track_id,
+            trackTitle: item.trackTitle || item.track_title,
+            trackNumber: item.trackNumber ?? item.track_number,
+            releaseId: item.releaseId || item.release_id,
+            releaseTitle: item.releaseTitle || item.release_title,
+            releaseYear: item.releaseYear ?? item.release_year,
+            role: item.role === 'Primary' || item.role === 'Featured' ? 'Performer' : (item.role || 'Performer'),
+            format: item.format || 'FLAC',
+            sampleRate: item.sampleRate ?? item.sample_rate,
+            bitDepth: item.bitDepth ?? item.bit_depth,
+            drScore: item.drScore ?? item.dr_score,
+            durationSecs: item.durationSecs ?? item.duration_secs ?? 0,
+            fullArtistCredit: item.fullArtistCredit || item.full_artist_credit,
+            coArtists: item.coArtists || item.co_artists || [],
+          }))
+
+          return {
+            artist,
+            albumsCount: res.albumsCount ?? res.albums_count ?? discography.length,
+            tracksCount: res.tracksCount ?? res.tracks_count ?? appearingTracks.length,
+            roles: normRoles,
+            discography,
+            appearingTracks,
+          }
+        }
+      } catch (err) {
+        console.warn(`[SqliteLibraryService] Error fetching detail for artist ${artistId}:`, err)
+      }
+    }
+
+    // In-memory fallback
+    const summaries = this.deriveCanonicalArtistsFromState(fallbackReleases, fallbackTracks)
+    const summary = summaries.find((s) => s.id === artistId || s.name.toLowerCase() === artistId.toLowerCase())
+    if (!summary) return null
+
+    const normName = summary.name.toLowerCase()
+    const matchingReleases = fallbackReleases.filter(
+      (r) =>
+        (r.composerName && r.composerName.toLowerCase().includes(normName)) ||
+        (r.artistCredit && r.artistCredit.toLowerCase().includes(normName))
+    )
+
+    const appearingTracks: ArtistCreditItem[] = []
+    for (const t of fallbackTracks) {
+      const isComposer = Boolean(t.composerName?.toLowerCase().includes(normName))
+      const isPerformer = Boolean(t.artistCredit?.toLowerCase().includes(normName))
+      if (isComposer || isPerformer) {
+        const splits = splitMultiArtistCredits(t.artistCredit || '')
+        const coArtists = splits.map((s) => s.name).filter((n) => n.toLowerCase() !== normName)
+        const rel = fallbackReleases.find((r) => r.id === t.releaseId)
+
+        appearingTracks.push({
+          trackId: t.id,
+          trackTitle: t.title,
+          trackNumber: t.trackNumber,
+          releaseId: t.releaseId,
+          releaseTitle: rel?.title || (t as any).albumTitle || 'Unknown Release',
+          releaseYear: rel?.releaseYear ?? (t as any).releaseYear,
+          role: isComposer ? 'Composer' : 'Performer',
+          format: t.format,
+          sampleRate: t.sampleRate,
+          bitDepth: t.bitDepth,
+          drScore: t.drScore,
+          durationSecs: t.durationSeconds || 0,
+          fullArtistCredit: t.artistCredit || summary.name,
+          coArtists,
+        })
+      }
+    }
+
+    return {
+      artist: {
+        id: summary.id,
+        name: summary.name,
+        portraitUrl: summary.portraitUrl,
+        portraitStatus: summary.portraitStatus,
+        primaryRole: summary.primaryRole,
+        createdAt: new Date().toISOString(),
+      },
+      albumsCount: matchingReleases.length,
+      tracksCount: appearingTracks.length,
+      roles: summary.roles,
+      discography: matchingReleases,
+      appearingTracks,
+    }
+  }
+
+  /**
+   * Persists an artist's chosen photographic portrait.
+   */
+  public async setArtistPortrait(
+    artistId: string,
+    portraitUrl: string,
+    status: string = 'enriched'
+  ): Promise<void> {
+    if (tauriBridge.isTauri()) {
+      await tauriBridge.dbSetArtistPortrait(artistId, portraitUrl, status)
+    }
+  }
+
+  /**
+   * Derives a full relational canonical artist collection from in-memory state,
+   * splitting compound strings while protecting compound band/duo entities.
+   */
+  public deriveCanonicalArtistsFromState(releases: Release[], tracks: Track[]): ArtistSummary[] {
+    const artistMap = new Map<
+      string,
+      {
+        id: string
+        name: string
+        albums: Set<string>
+        tracks: Set<string>
+        roles: Set<string>
+      }
+    >()
+
+    // 1. Process Releases
+    for (const r of releases) {
+      if (r.composerName) {
+        const key = r.composerName.trim().toLowerCase()
+        if (!artistMap.has(key)) {
+          artistMap.set(key, {
+            id: `art-${key.replace(/[^a-z0-9]/g, '_')}`,
+            name: r.composerName.trim(),
+            albums: new Set(),
+            tracks: new Set(),
+            roles: new Set(['Composer']),
+          })
+        }
+        const entry = artistMap.get(key)!
+        entry.albums.add(r.id)
+        entry.roles.add('Composer')
+      }
+
+      if (r.artistCredit) {
+        const splits = splitMultiArtistCredits(r.artistCredit, 'Performer')
+        for (const s of splits) {
+          const key = s.name.trim().toLowerCase()
+          if (!artistMap.has(key)) {
+            artistMap.set(key, {
+              id: `art-${key.replace(/[^a-z0-9]/g, '_')}`,
+              name: s.name.trim(),
+              albums: new Set(),
+              tracks: new Set(),
+              roles: new Set(),
+            })
+          }
+          const entry = artistMap.get(key)!
+          entry.albums.add(r.id)
+          entry.roles.add(s.role)
+        }
+      }
+    }
+
+    // 2. Process Tracks
+    for (const t of tracks) {
+      if (t.composerName) {
+        const key = t.composerName.trim().toLowerCase()
+        if (!artistMap.has(key)) {
+          artistMap.set(key, {
+            id: `art-${key.replace(/[^a-z0-9]/g, '_')}`,
+            name: t.composerName.trim(),
+            albums: new Set(),
+            tracks: new Set(),
+            roles: new Set(['Composer']),
+          })
+        }
+        const entry = artistMap.get(key)!
+        if (t.releaseId) entry.albums.add(t.releaseId)
+        entry.tracks.add(t.id)
+        entry.roles.add('Composer')
+      }
+
+      if (t.artistCredit) {
+        const splits = splitMultiArtistCredits(t.artistCredit, 'Performer')
+        for (const s of splits) {
+          const key = s.name.trim().toLowerCase()
+          if (!artistMap.has(key)) {
+            artistMap.set(key, {
+              id: `art-${key.replace(/[^a-z0-9]/g, '_')}`,
+              name: s.name.trim(),
+              albums: new Set(),
+              tracks: new Set(),
+              roles: new Set(),
+            })
+          }
+          const entry = artistMap.get(key)!
+          if (t.releaseId) entry.albums.add(t.releaseId)
+          entry.tracks.add(t.id)
+          entry.roles.add(s.role)
+        }
+      }
+    }
+
+    const summaries: ArtistSummary[] = []
+    for (const item of artistMap.values()) {
+      if (item.tracks.size === 0 && item.albums.size === 0) continue
+      const rolesArr = Array.from(item.roles)
+      const primaryRole = rolesArr.includes('Composer')
+        ? 'Composer'
+        : rolesArr.includes('Performer')
+        ? 'Performer'
+        : rolesArr[0] || 'Performer'
+
+      summaries.push({
+        id: item.id,
+        name: item.name,
+        albumsCount: item.albums.size,
+        tracksCount: item.tracks.size,
+        roles: rolesArr,
+        primaryRole,
+        portraitStatus: 'pending',
+      })
+    }
+
+    // Sort by albums count desc, then name asc
+    summaries.sort((a, b) => b.albumsCount - a.albumsCount || a.name.localeCompare(b.name))
+    return summaries
+  }
+
   public cleanupListeners(): void {
     if (this.unlistenProgress) {
       this.unlistenProgress()
@@ -562,6 +1089,454 @@ export class SqliteLibraryService {
       this.unlistenComplete = null
     }
   }
+
+  /**
+   * High-speed catalog search for Omnibar intent resolution (<10ms).
+   * Queries in-memory graphEngine first, zero disk I/O.
+   */
+  public async searchCatalog(
+    query: string,
+    limit: number = 5
+  ): Promise<{
+    albums: Release[]
+    tracks: Track[]
+    artists: ArtistSummary[]
+  }> {
+    const memResults = graphEngine.searchCatalog(query, limit)
+    if (
+      memResults.albums.length > 0 ||
+      memResults.tracks.length > 0 ||
+      memResults.artists.length > 0
+    ) {
+      return {
+        albums: memResults.albums,
+        tracks: memResults.tracks,
+        artists: memResults.artists.map((a) => ({
+          id: a.id,
+          name: a.name,
+          primaryRole: a.role,
+          albumsCount: a.albumsCount,
+          tracksCount: a.tracksCount,
+          roles: [a.role],
+          portraitUrl: a.portraitUrl,
+        })),
+      }
+    }
+
+    if (tauriBridge.isTauri()) {
+      try {
+        const raw = await tauriBridge.dbSearchCatalog(query, limit)
+        if (raw) {
+          const albums: Release[] = (raw.albums || []).map((r: any) => ({
+            id: r.id,
+            masterReleaseId: r.id,
+            title: r.title,
+            folderName: r.folderName || r.folder_name,
+            folderPath: r.folderPath || r.folder_path,
+            targetFolderPath: r.targetFolderPath || r.target_folder_path,
+            artistCredit: r.artistCredit || r.artist_credit,
+            composerName: r.composerName || r.composer_name,
+            releaseYear: r.releaseYear || r.release_year || 0,
+            originalYear: r.releaseYear || r.release_year || 0,
+            label: 'Lossless Master',
+            catalogNumber: 'CAD-001',
+            mediaFormat: 'Lossless Audio',
+            country: 'Global',
+            matrixRunout: '',
+            artwork: {
+              frontCoverUrl: r.frontCoverUrl || r.front_cover_url || '',
+              backdropUrl: r.backdropUrl || r.backdrop_url,
+              resolution: '3000x3000px',
+              width: 3000,
+              height: 3000,
+              dpi: 300,
+              colorProfile: 'sRGB',
+              isLowRes: false,
+              hasBookletPdf: false,
+            },
+            coverArtUrl: r.frontCoverUrl || r.front_cover_url || '',
+            variants: [],
+            discsCount: 1,
+            tracksCount: 10,
+            genreTags: r.genreTags ? JSON.parse(r.genreTags) : [],
+            storageMountId: 'mount-user-local',
+          }))
+
+          const tracks: Track[] = (raw.tracks || []).map((t: any) => {
+            const specs = formatAudioSpecs(t.format, t.sampleRate || t.sample_rate, t.bitDepth || t.bit_depth, t.filePath || t.file_path)
+            return {
+              id: t.id,
+              releaseId: t.releaseId || t.release_id,
+              recordingId: t.id,
+              trackNumber: t.trackNumber ?? t.track_number ?? 1,
+              discNumber: 1,
+              title: t.title,
+              artistCredit: t.artistCredit || t.artist_credit,
+              composerName: t.composer || t.composerName,
+              workTitle: t.workTitle || t.work_title,
+              movementNumber: t.movementNumber || t.movement_number,
+              movementTitle: t.movementTitle || t.movement_title,
+              durationSeconds: t.durationSecs || t.duration_secs || 0,
+              filePath: t.filePath || t.file_path,
+              fileSize: t.fileSize || t.file_size || 0,
+              storageMountId: t.mountId || t.mount_id || 'mount-user-local',
+              sidecarStatus: (t.sidecarStatus || t.sidecar_status || 'synced') as any,
+              modifiedTimestamp: new Date().toISOString(),
+              checksumValid: true,
+              accurateRipConfidence: 100,
+              drScore: t.drScore ?? t.dr_score ?? 12,
+              sampleRateStr: specs.sampleRateStr,
+              format: specs.format,
+              isHighRes: specs.isHighRes,
+              sampleRate: t.sampleRate || t.sample_rate,
+              bitDepth: t.bitDepth || t.bit_depth,
+              credits: [],
+              masterReleaseId: t.releaseId || t.release_id,
+            }
+          })
+
+          const artists: ArtistSummary[] = (raw.artists || []).map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            sortName: a.sortName || a.sort_name,
+            portraitUrl: a.portraitUrl || a.portrait_url,
+            portraitStatus: (a.portraitStatus || a.portrait_status || 'pending') as any,
+            primaryRole: a.primaryRole || a.primary_role || 'Performer',
+            albumsCount: a.albumsCount ?? a.albums_count ?? 0,
+            tracksCount: a.tracksCount ?? a.tracks_count ?? 0,
+            roles: a.roles || [a.primaryRole || 'Performer'],
+            eraActive: a.eraActive || a.era_active,
+          }))
+
+          return { albums, tracks, artists }
+        }
+      } catch (err) {
+        console.warn('[SqliteLibraryService] searchCatalog SQLite fallback failed:', err)
+      }
+    }
+
+    return { albums: [], tracks: [], artists: [] }
+  }
+
+  // ==========================================
+  // Playlists & Curated Archival Stacks
+  // ==========================================
+
+  private inMemoryPlaylists: Map<string, { playlist: Playlist; tracks: Track[] }> = new Map()
+
+  public async getPlaylists(): Promise<Playlist[]> {
+    if (tauriBridge.isTauri()) {
+      try {
+        const raw = await tauriBridge.dbGetPlaylists()
+        if (Array.isArray(raw)) {
+          return raw.map((p) => ({
+            id: p.id,
+            title: p.title,
+            description: p.description,
+            coverArtUrl: p.coverArtUrl,
+            createdAt: p.createdAt,
+            updatedAt: p.updatedAt,
+            tags: p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : [],
+            listeningNotes: p.listeningNotes,
+            tracksCount: p.tracksCount || 0,
+            totalDurationSecs: p.totalDurationSecs || 0,
+            formatBreakdown: p.formatBreakdown || '',
+          }))
+        }
+      } catch (err) {
+        console.warn('[SqliteLibraryService] getPlaylists error:', err)
+      }
+    }
+
+    return Array.from(this.inMemoryPlaylists.values()).map((item) => item.playlist)
+  }
+
+  public async getPlaylistDetails(playlistId: string): Promise<Playlist | null> {
+    if (tauriBridge.isTauri()) {
+      try {
+        const raw = await tauriBridge.dbGetPlaylistDetails(playlistId)
+        if (raw) {
+          const p = raw.playlist || raw
+          const rawTracks = raw.tracks || []
+          const tracks: Track[] = rawTracks.map((t: any) => {
+            const specs = formatAudioSpecs(t.format, t.sampleRate, t.bitDepth, t.filePath)
+            return {
+              id: t.id,
+              releaseId: t.releaseId || t.release_id,
+              recordingId: t.id,
+              trackNumber: t.trackNumber || t.track_number || 1,
+              discNumber: 1,
+              title: t.title || 'Untitled',
+              artistCredit: t.artistCredit || t.artist_credit || 'Unknown Artist',
+              albumTitle: t.albumTitle || t.album_title || 'Unknown Album',
+              duration: t.durationSecs || t.duration_secs || 0,
+              durationSeconds: t.durationSecs || t.duration_secs || 0,
+              filePath: t.filePath || t.file_path,
+              fileName: t.fileName || t.file_name || '',
+              fileSize: t.fileSize || t.file_size || 0,
+              storageMountId: t.mountId || t.mount_id || 'mount-user-local',
+              sidecarStatus: (t.sidecarStatus || t.sidecar_status || 'synced') as any,
+              modifiedTimestamp: new Date().toISOString(),
+              checksumValid: true,
+              accurateRipConfidence: 100,
+              drScore: t.drScore ?? t.dr_score ?? 12,
+              sampleRateStr: specs.sampleRateStr,
+              format: specs.format,
+              isHighRes: specs.isHighRes,
+              sampleRate: t.sampleRate || t.sample_rate,
+              bitDepth: t.bitDepth || t.bit_depth,
+              credits: [],
+              masterReleaseId: t.releaseId || t.release_id,
+            }
+          })
+
+          const formatBreakdown = computePlaylistFormatBreakdown(tracks)
+          const totalDurationSecs = tracks.reduce((acc, tr) => acc + (tr.durationSeconds || tr.duration || 0), 0)
+
+          return {
+            id: p.id,
+            title: p.title,
+            description: p.description,
+            coverArtUrl: p.coverArtUrl,
+            createdAt: p.createdAt,
+            updatedAt: p.updatedAt,
+            tags: p.tags ? (typeof p.tags === 'string' ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : p.tags) : [],
+            listeningNotes: p.listeningNotes,
+            tracksCount: tracks.length,
+            totalDurationSecs,
+            formatBreakdown,
+            trackIds: tracks.map((t) => t.id),
+            tracks,
+          }
+        }
+      } catch (err) {
+        console.warn('[SqliteLibraryService] getPlaylistDetails error:', err)
+      }
+    }
+
+    const item = this.inMemoryPlaylists.get(playlistId)
+    if (item) {
+      return {
+        ...item.playlist,
+        tracks: item.tracks,
+        trackIds: item.tracks.map((t) => t.id),
+      }
+    }
+    return null
+  }
+
+  public async createPlaylist(params: {
+    title: string
+    description?: string
+    coverArtUrl?: string
+    tags?: string[]
+    listeningNotes?: string
+    tracks?: Track[]
+    trackIds?: string[]
+  }): Promise<Playlist> {
+    const id = `playlist-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
+    const tracks = params.tracks || []
+    const trackIds = params.trackIds || tracks.map((t) => t.id)
+    const tagsStr = (params.tags || []).join(', ')
+    const now = new Date().toISOString()
+    const totalDurationSecs = tracks.reduce((acc, t) => acc + (t.durationSeconds || t.duration || 0), 0)
+    const formatBreakdown = computePlaylistFormatBreakdown(tracks)
+
+    const playlist: Playlist = {
+      id,
+      title: params.title.trim() || 'Untitled Playlist',
+      description: params.description,
+      coverArtUrl: params.coverArtUrl,
+      createdAt: now,
+      updatedAt: now,
+      tags: params.tags || [],
+      listeningNotes: params.listeningNotes,
+      tracksCount: tracks.length,
+      totalDurationSecs,
+      formatBreakdown,
+      trackIds,
+      tracks,
+    }
+
+    if (tauriBridge.isTauri()) {
+      try {
+        await tauriBridge.dbCreatePlaylist({
+          id,
+          title: playlist.title,
+          description: playlist.description,
+          coverArtUrl: playlist.coverArtUrl,
+          tags: tagsStr,
+          listeningNotes: playlist.listeningNotes,
+          trackIds,
+        })
+      } catch (err) {
+        console.warn('[SqliteLibraryService] dbCreatePlaylist failed, fallback to memory:', err)
+      }
+    }
+
+    this.inMemoryPlaylists.set(id, { playlist, tracks })
+    return playlist
+  }
+
+  public async updatePlaylist(id: string, updates: Partial<Playlist>): Promise<void> {
+    const item = this.inMemoryPlaylists.get(id)
+    if (item) {
+      item.playlist = { ...item.playlist, ...updates, updatedAt: new Date().toISOString() }
+      this.inMemoryPlaylists.set(id, item)
+    }
+
+    if (tauriBridge.isTauri()) {
+      try {
+        await tauriBridge.dbUpdatePlaylist({
+          id,
+          title: updates.title || item?.playlist.title || 'Untitled',
+          description: updates.description,
+          coverArtUrl: updates.coverArtUrl,
+          tags: Array.isArray(updates.tags) ? updates.tags.join(', ') : updates.tags,
+          listeningNotes: updates.listeningNotes,
+        })
+      } catch (err) {
+        console.warn('[SqliteLibraryService] dbUpdatePlaylist error:', err)
+      }
+    }
+  }
+
+  public async deletePlaylist(id: string): Promise<void> {
+    this.inMemoryPlaylists.delete(id)
+    if (tauriBridge.isTauri()) {
+      try {
+        await tauriBridge.dbDeletePlaylist(id)
+      } catch (err) {
+        console.warn('[SqliteLibraryService] dbDeletePlaylist error:', err)
+      }
+    }
+  }
+
+  public async addTracksToPlaylist(playlistId: string, newTracks: Track[]): Promise<void> {
+    const item = this.inMemoryPlaylists.get(playlistId)
+    if (item) {
+      item.tracks.push(...newTracks)
+      item.playlist.tracksCount = item.tracks.length
+      item.playlist.totalDurationSecs = item.tracks.reduce((acc, t) => acc + (t.durationSeconds || t.duration || 0), 0)
+      item.playlist.formatBreakdown = computePlaylistFormatBreakdown(item.tracks)
+      item.playlist.updatedAt = new Date().toISOString()
+      this.inMemoryPlaylists.set(playlistId, item)
+    }
+
+    if (tauriBridge.isTauri()) {
+      try {
+        await tauriBridge.dbAddTracksToPlaylist(playlistId, newTracks.map((t) => t.id))
+      } catch (err) {
+        console.warn('[SqliteLibraryService] dbAddTracksToPlaylist error:', err)
+      }
+    }
+  }
+
+  public async removeTrackFromPlaylist(playlistId: string, position: number): Promise<void> {
+    const item = this.inMemoryPlaylists.get(playlistId)
+    if (item && position >= 0 && position < item.tracks.length) {
+      item.tracks.splice(position, 1)
+      item.playlist.tracksCount = item.tracks.length
+      item.playlist.totalDurationSecs = item.tracks.reduce((acc, t) => acc + (t.durationSeconds || t.duration || 0), 0)
+      item.playlist.formatBreakdown = computePlaylistFormatBreakdown(item.tracks)
+      item.playlist.updatedAt = new Date().toISOString()
+      this.inMemoryPlaylists.set(playlistId, item)
+    }
+
+    if (tauriBridge.isTauri()) {
+      try {
+        await tauriBridge.dbRemoveTrackFromPlaylist(playlistId, position)
+      } catch (err) {
+        console.warn('[SqliteLibraryService] dbRemoveTrackFromPlaylist error:', err)
+      }
+    }
+  }
+
+  public async reorderPlaylistTracks(playlistId: string, trackIds: string[]): Promise<void> {
+    const item = this.inMemoryPlaylists.get(playlistId)
+    if (item) {
+      const trackMap = new Map(item.tracks.map((t) => [t.id, t]))
+      item.tracks = trackIds.map((id) => trackMap.get(id)).filter(Boolean) as Track[]
+      item.playlist.updatedAt = new Date().toISOString()
+      this.inMemoryPlaylists.set(playlistId, item)
+    }
+
+    if (tauriBridge.isTauri()) {
+      try {
+        await tauriBridge.dbReorderPlaylistTracks(playlistId, trackIds)
+      } catch (err) {
+        console.warn('[SqliteLibraryService] dbReorderPlaylistTracks error:', err)
+      }
+    }
+  }
+}
+
+/**
+ * Computes a high-fidelity format breakdown for a set of tracks,
+ * e.g., "14 tracks • DSD/FLAC hybrid" or "10 tracks • Pure DSD256" or "12 tracks • 24/192 FLAC"
+ */
+export function computePlaylistFormatBreakdown(tracks: Track[]): string {
+  if (!tracks || tracks.length === 0) return '0 tracks • Empty'
+
+  let dsdCount = 0
+  let flacCount = 0
+  let wavCount = 0
+  let maxDsdRate = ''
+
+  for (const t of tracks) {
+    const fmt = (t.format || '').toUpperCase()
+    if (fmt.includes('DSD') || fmt.includes('DSF') || fmt.includes('DFF')) {
+      dsdCount++
+      if (t.sampleRateStr?.includes('DSD256')) maxDsdRate = 'DSD256'
+      else if (!maxDsdRate && t.sampleRateStr?.includes('DSD128')) maxDsdRate = 'DSD128'
+      else if (!maxDsdRate && t.sampleRateStr?.includes('DSD64')) maxDsdRate = 'DSD64'
+    } else if (fmt.includes('FLAC') || fmt.includes('ALAC')) {
+      flacCount++
+    } else if (fmt.includes('WAV')) {
+      wavCount++
+    }
+  }
+
+  if (dsdCount > 0 && flacCount > 0) {
+    return `${tracks.length} tracks • DSD/FLAC hybrid`
+  }
+  if (dsdCount > 0) {
+    return `${tracks.length} tracks • Pure ${maxDsdRate || 'DSD'}`
+  }
+  if (flacCount > 0) {
+    const hasHiRes = tracks.some((t) => t.isHighRes)
+    return `${tracks.length} tracks • ${hasHiRes ? 'Hi-Res FLAC' : 'Lossless FLAC'}`
+  }
+  if (wavCount > 0) {
+    return `${tracks.length} tracks • Pure WAV`
+  }
+  return `${tracks.length} tracks • Mixed audio`
+}
+
+/**
+ * Extracts up to 4 unique artwork URLs from a list of tracks or their releases
+ * to generate a 4-grid composite cover art thumbnail.
+ */
+export function generatePlaylist4GridArtwork(tracks: Track[], allReleases?: Release[]): string[] {
+  if (!tracks || tracks.length === 0) return []
+  const uniqueArts: string[] = []
+  const relMap = new Map<string, string>()
+  if (allReleases) {
+    for (const r of allReleases) {
+      const art = r.coverArtUrl || r.artwork?.frontCoverUrl
+      if (art) relMap.set(r.id, art)
+    }
+  }
+
+  for (const t of tracks) {
+    const art = relMap.get(t.releaseId)
+    if (art && !uniqueArts.includes(art)) {
+      uniqueArts.push(art)
+      if (uniqueArts.length === 4) break
+    }
+  }
+
+  return uniqueArts
 }
 
 export const sqliteLibraryService = new SqliteLibraryService()

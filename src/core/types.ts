@@ -34,6 +34,57 @@ export interface Credit {
   instrumentOrDetail?: string
 }
 
+export interface ArtistSummary {
+  id: string
+  name: string
+  sortName?: string
+  portraitUrl?: string
+  portraitStatus?: 'pending' | 'enriched' | 'not_found' | 'manual_override'
+  primaryRole: string
+  albumsCount: number
+  tracksCount: number
+  roles: string[]
+  eraActive?: string
+}
+
+export interface ArtistCreditItem {
+  trackId: string
+  trackTitle: string
+  trackNumber?: number
+  releaseId: string
+  releaseTitle: string
+  releaseYear?: number
+  role: string
+  format: string
+  sampleRate?: number
+  bitDepth?: number
+  drScore?: number
+  durationSecs: number
+  fullArtistCredit: string
+  coArtists: string[]
+}
+
+export interface ArtistDetail {
+  artist: {
+    id: string
+    name: string
+    sortName?: string
+    mbid?: string
+    appleArtistId?: string
+    portraitUrl?: string
+    portraitStatus?: string
+    bioSummary?: string
+    eraActive?: string
+    primaryRole: string
+    createdAt: string
+  }
+  albumsCount: number
+  tracksCount: number
+  roles: string[]
+  discography: Release[]
+  appearingTracks: ArtistCreditItem[]
+}
+
 export interface Movement {
   sequence: number
   movementNumber: string // "I", "II", "Act I Sc. 2"
@@ -156,12 +207,21 @@ export interface Release {
   isCollected?: boolean
 }
 
+export interface ActiveEntityScope {
+  type: 'composer' | 'artist' | 'album'
+  name: string
+  albumId?: string
+  parentEntity?: string
+  parentType?: 'composer' | 'artist'
+}
+
 export type CanvasViewMode =
   | 'cover_grid'
   | 'virtual_table'
   | 'work_movement'
   | 'variant_stack'
   | 'folder_tree'
+  | 'playlist_detail'
 
 export interface FacetSelections {
   era?: string
@@ -210,6 +270,10 @@ export interface Track {
   sampleRateStr: string
   format: AudioFormat
   isHighRes?: boolean
+  sampleRate?: number
+  bitDepth?: number
+  acousticFingerprint?: string
+  audioStreamMd5?: string
   credits: Credit[]
   masterReleaseId: string
   isOnline?: boolean
@@ -295,6 +359,15 @@ export type AuditCategory =
   | 'compilation_conflict'
   | 'unformatted_backdrop'
 
+export type TagFieldType =
+  | 'ALBUMARTIST'
+  | 'ARTIST'
+  | 'COMPOSER'
+  | 'TRACK_NUMBER'
+  | 'COVER_ART'
+  | 'METADATA'
+  | 'BACKDROP'
+
 export interface AuditIssue {
   id: string
   category: AuditCategory
@@ -308,6 +381,15 @@ export interface AuditIssue {
   isAutoFixable?: boolean
   fixActionLabel?: string
   manualActionHint?: string
+  tagField?: TagFieldType
+  detectedValue?: string
+  proposedAction?: string
+  parentEntity?: string
+  canonicalTarget?: string
+  currentValue?: string
+  targetValue?: string
+  isRoleConflict?: boolean
+  confidence?: 'high_confidence_typo' | 'role_review_required'
 }
 
 export type DiffSource = 'current' | 'itunes' | 'musicbrainz' | 'ai' | 'discogs' | 'manual'
@@ -334,3 +416,46 @@ export interface TransactionSnapshot {
   backupManifestHash: string
   phase: 'prepared' | 'committed' | 'rolled_back'
 }
+
+export interface PlaybackStatePayload {
+  isPlaying: boolean
+  isPaused: boolean
+  currentFile: string | null
+  positionSecs: number
+  durationSecs: number
+  volume: number
+  activeDevice?: string
+  streamInfo?: any
+  purityMode?: boolean
+  isBitPerfect?: boolean
+  outputSampleRate?: number
+  outputChannels?: number
+  deviceType?: string
+}
+
+export interface Playlist {
+  id: string
+  title: string
+  description?: string
+  coverArtUrl?: string
+  createdAt: string
+  updatedAt: string
+  tags?: string[]
+  listeningNotes?: string
+  tracksCount: number
+  totalDurationSecs: number
+  formatBreakdown: string // e.g. "14 tracks • DSD/FLAC hybrid"
+  trackIds?: string[]
+  tracks?: Track[]
+}
+
+export interface SampleRateTransition {
+  fromSampleRate?: number
+  toSampleRate?: number
+  fromFormat: string
+  toFormat: string
+  isSameFamily: boolean // 44.1 family vs 48 family vs DSD
+  warningLabel: string
+  settlingDelayMs: number
+}
+

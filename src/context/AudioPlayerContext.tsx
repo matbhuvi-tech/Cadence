@@ -1,6 +1,64 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react'
-import { Track, Release } from '../core/types'
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { Track, Release, Playlist, SampleRateTransition } from '../core/types'
 import { tauriBridge, AudioStreamTelemetry } from '../services/tauriBridge'
+import { sqliteLibraryService } from '../services/sqliteLibraryService'
+
+export function computeSampleRateTransition(
+  current: Track | null,
+  next: Track | null,
+  settlingDelayMs: number = 350
+): SampleRateTransition | null {
+  if (!current || !next) return null
+
+  const getFamily = (rate?: number): '44' | '48' | 'unknown' => {
+    if (!rate) return 'unknown'
+    if (rate % 44100 === 0) return '44'
+    if (rate % 48000 === 0) return '48'
+    return 'unknown'
+  }
+
+  const fromFmt = (current.format || 'PCM').toUpperCase()
+  const toFmt = (next.format || 'PCM').toUpperCase()
+  const fromRate = current.sampleRate
+  const toRate = next.sampleRate
+
+  const fromIsDsd = fromFmt.includes('DSD') || fromFmt.includes('DSF') || fromFmt.includes('DFF')
+  const toIsDsd = toFmt.includes('DSD') || toFmt.includes('DSF') || toFmt.includes('DFF')
+
+  if (fromIsDsd !== toIsDsd) {
+    const effectiveDelay = Math.max(settlingDelayMs, 500)
+    return {
+      fromSampleRate: fromRate,
+      toSampleRate: toRate,
+      fromFormat: fromFmt,
+      toFormat: toFmt,
+      isSameFamily: false,
+      warningLabel: `Cross-domain transition (${fromFmt} → ${toFmt}) • Hardware relay switch ~${effectiveDelay}ms`,
+      settlingDelayMs: effectiveDelay,
+    }
+  }
+
+  if (fromRate && toRate && fromRate !== toRate) {
+    const famFrom = getFamily(fromRate)
+    const famTo = getFamily(toRate)
+    const isSameFam = famFrom !== 'unknown' && famFrom === famTo
+    const effectiveDelay = isSameFam ? Math.min(settlingDelayMs, 200) : settlingDelayMs
+
+    return {
+      fromSampleRate: fromRate,
+      toSampleRate: toRate,
+      fromFormat: fromFmt,
+      toFormat: toFmt,
+      isSameFamily: isSameFam,
+      warningLabel: isSameFam
+        ? `Clock multiplier change (${(fromRate / 1000).toFixed(1)}k → ${(toRate / 1000).toFixed(1)}k) • Fast lock ~${effectiveDelay}ms`
+        : `Cross-family clock switch (${(fromRate / 1000).toFixed(1)}k → ${(toRate / 1000).toFixed(1)}k) • DAC re-sync ~${effectiveDelay}ms`,
+      settlingDelayMs: effectiveDelay,
+    }
+  }
+
+  return null
+}
 
 interface AudioPlayerContextType {
   currentTrack: Track | null
@@ -26,6 +84,7 @@ interface AudioPlayerContextType {
   upnpDevices: any[]
   playTrack: (track: Track, queueContext?: Track[], release?: Release) => Promise<void>
   togglePlayPause: () => Promise<void>
+  stop: () => Promise<void>
   nextTrack: () => Promise<void>
   prevTrack: () => Promise<void>
   seek: (seconds: number) => Promise<void>
@@ -37,7 +96,33 @@ interface AudioPlayerContextType {
   refreshDevices: () => Promise<void>
   togglePurityMode: (enabled?: boolean) => Promise<void>
   discoverUpnpDevices: () => Promise<any[]>
+  // Queue & Playlist & Gapless additions
+  upcomingTracks: Track[]
+  nextTrackTransition: SampleRateTransition | null
+  addToQueue: (tracks: Track | Track[]) => void
+  playNext: (tracks: Track | Track[]) => void
+  removeFromQueue: (upcomingIndex: number) => void
+  reorderQueue: (fromIndex: number, toIndex: number) => void
+  clearQueue: () => void
+  setFullQueue: (tracks: Track[], startIndex?: number) => void
+  saveQueueAsPlaylist: (name: string, description?: string) => Promise<Playlist | null>
+  isQueueDrawerOpen: boolean
+  toggleQueueDrawer: (open?: boolean) => void
+  queueDrawerTab: 'queue' | 'playlists'
+  setQueueDrawerTab: (tab: 'queue' | 'playlists') => void
+  isGapless: boolean
+  toggleGapless: (enabled?: boolean) => void
+  settlingDelayMs: number
+  setSettlingDelay: (ms: number) => Promise<void>
+  // Unified Right Sidebar State
+  rightSidebarTab: RightSidebarTab
+  setRightSidebarTab: (tab: RightSidebarTab) => void
+  isRightSidebarOpen: boolean
+  setIsRightSidebarOpen: React.Dispatch<React.SetStateAction<boolean>>
+  toggleRightSidebar: (tab?: RightSidebarTab) => void
 }
+
+export type RightSidebarTab = 'queue' | 'playlists' | 'inspector'
 
 const AudioPlayerContext = createContext<AudioPlayerContextType | null>(null)
 
@@ -56,8 +141,12 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [isShuffle, setIsShuffle] = useState<boolean>(false)
   const [streamTelemetry, setStreamTelemetry] = useState<AudioStreamTelemetry | null>(null)
   const [activeDevice, setActiveDevice] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('cadence:active_device') || 'Default System Audio'
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        return localStorage.getItem('cadence:active_device') || 'Default System Audio'
+      }
+    } catch {
+      // In restricted WebView2 or private browsing, localStorage may throw SecurityError
     }
     return 'Default System Audio'
   })
@@ -69,6 +158,28 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [deviceType, setDeviceType] = useState<string | undefined>('wasapi_shared')
   const [upnpDevices, setUpnpDevices] = useState<any[]>([])
 
+  // Unified Right Sidebar & Gapless Playback State
+  const [isRightSidebarOpen, setIsRightSidebarOpen] = useState<boolean>(false)
+  const [rightSidebarTab, setRightSidebarTab] = useState<RightSidebarTab>('queue')
+  const [isGapless, setIsGapless] = useState<boolean>(() => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        return localStorage.getItem('cadence:is_gapless') !== 'false'
+      }
+    } catch {}
+    return true
+  })
+  const [settlingDelayMs, setSettlingDelayMsState] = useState<number>(() => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const val = localStorage.getItem('cadence:settling_delay_ms')
+        if (val) return parseInt(val, 10) || 350
+      }
+    } catch {}
+    return 350
+  })
+
+  const hasPreloadedNextRef = useRef<string | null>(null)
   const prevVolumeRef = useRef<number>(1)
   const pollIntervalRef = useRef<any>(null)
   const stateRef = useRef({ queue, queueIndex, repeatMode, isShuffle, currentTrack })
@@ -133,6 +244,24 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           if (status.deviceType !== undefined) {
             setDeviceType(status.deviceType)
           }
+
+          // Audiophile Invariant #1 & #3 Gapless Pre-loading Check:
+          // Once 2 seconds have elapsed and the playback buffer is stable, pre-stage the immediate next track
+          if (
+            isGapless &&
+            status.positionSecs > 2 &&
+            queueIndex + 1 < queue.length
+          ) {
+            const nextTrackCandidate = queue[queueIndex + 1]
+            if (
+              nextTrackCandidate?.filePath &&
+              hasPreloadedNextRef.current !== nextTrackCandidate.id
+            ) {
+              hasPreloadedNextRef.current = nextTrackCandidate.id
+              tauriBridge.prepareNextTrack(nextTrackCandidate.filePath).catch(() => {})
+            }
+          }
+
           // Auto advance if track ended
           if (
             status.durationSecs > 0 &&
@@ -140,6 +269,12 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
             !status.isPaused
           ) {
             handleAutoAdvance()
+          }
+
+          // Self-heal: If the backend engine is idle and not playing, reconcile UI state
+          if (!status.isPlaying && !status.isPaused && !status.currentFile) {
+            setIsPlaying(false)
+            setIsPaused(false)
           }
         } catch (e) {
           // ignore polling error
@@ -272,15 +407,44 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
 
     if (isPlaying) {
-      await tauriBridge.pause()
+      try {
+        await tauriBridge.pause()
+      } catch (err) {
+        console.error('[AudioPlayer] Pause failed:', err)
+      }
       setIsPlaying(false)
       setIsPaused(true)
     } else {
-      await tauriBridge.resume()
-      setIsPlaying(true)
-      setIsPaused(false)
+      // If we are legitimately in a paused state and the backend has an active loaded file, resume
+      if (isPaused) {
+        try {
+          const status = await tauriBridge.getPlaybackStatus()
+          if (status.isPaused && status.currentFile) {
+            await tauriBridge.resume()
+            setIsPlaying(true)
+            setIsPaused(false)
+            return
+          }
+        } catch (e) {
+          console.warn('[AudioPlayer] Resume check failed, falling back to playTrack:', e)
+        }
+      }
+
+      // If playback was stopped, idle, or not yet initialized in the engine, trigger full playback
+      await playTrack(currentTrack)
     }
-  }, [currentTrack, isPlaying, queue, playTrack])
+  }, [currentTrack, isPlaying, isPaused, queue, playTrack])
+
+  // Stop Playback
+  const stop = useCallback(async () => {
+    try {
+      await tauriBridge.stop()
+    } catch (err) {
+      console.error('[AudioPlayer] Stop failed:', err)
+    }
+    setIsPlaying(false)
+    setIsPaused(false)
+  }, [])
 
   // Next Track
   const nextTrack = useCallback(async () => {
@@ -371,7 +535,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const selectDevice = useCallback(async (device: string) => {
     setActiveDevice(device)
     if (typeof window !== 'undefined') {
-      localStorage.setItem('cadence:active_device', device)
+      try {
+        localStorage.setItem('cadence:active_device', device)
+      } catch {}
     }
     await tauriBridge.setAudioDevice(device)
   }, [])
@@ -420,7 +586,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       }
       setAvailableDevices(merged)
 
-      const savedDevice = typeof window !== 'undefined' ? localStorage.getItem('cadence:active_device') : null
+      let savedDevice: string | null = null
+      try {
+        savedDevice = typeof window !== 'undefined' && window.localStorage ? localStorage.getItem('cadence:active_device') : null
+      } catch {}
       // Check if savedDevice is an unintended display monitor/TV
       const isSavedMonitor = savedDevice && /odyssey|oled|tv|monitor|screen|display/i.test(savedDevice)
 
@@ -437,7 +606,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const streamerLabel = `[UPnP] ${audiophileStreamer.friendlyName}`
         setActiveDevice(streamerLabel)
         if (typeof window !== 'undefined') {
-          localStorage.setItem('cadence:active_device', streamerLabel)
+          try {
+            localStorage.setItem('cadence:active_device', streamerLabel)
+          } catch {}
         }
         await tauriBridge.setAudioDevice(streamerLabel)
       } else if (savedDevice && merged.includes(savedDevice)) {
@@ -450,6 +621,222 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       console.error('[AudioPlayerContext] refreshDevices error:', e)
     }
   }, [activeDevice])
+
+  // Upcoming tracks derived from current queue & queueIndex
+  const upcomingTracks = useMemo(() => {
+    if (queueIndex < 0 || queueIndex >= queue.length - 1) return []
+    return queue.slice(queueIndex + 1)
+  }, [queue, queueIndex])
+
+  const nextTrackCandidate = upcomingTracks.length > 0 ? upcomingTracks[0] : null
+
+  const nextTrackTransition = useMemo(() => {
+    return computeSampleRateTransition(currentTrack, nextTrackCandidate, settlingDelayMs)
+  }, [currentTrack, nextTrackCandidate, settlingDelayMs])
+
+  const toggleGapless = useCallback((enabled?: boolean) => {
+    setIsGapless((prev) => {
+      const nextVal = typeof enabled === 'boolean' ? enabled : !prev
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          localStorage.setItem('cadence:is_gapless', nextVal ? 'true' : 'false')
+        }
+      } catch {}
+      if (!nextVal) {
+        hasPreloadedNextRef.current = null
+        tauriBridge.invalidateNextTrack().catch(() => {})
+      }
+      return nextVal
+    })
+  }, [])
+
+  const setSettlingDelay = useCallback(async (ms: number) => {
+    const clamped = Math.max(0, Math.min(2000, ms))
+    setSettlingDelayMsState(clamped)
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.setItem('cadence:settling_delay_ms', clamped.toString())
+      }
+    } catch {}
+    await tauriBridge.setSettlingDelayMs(clamped)
+  }, [])
+
+  const toggleRightSidebar = useCallback((tab?: RightSidebarTab) => {
+    setIsRightSidebarOpen((prevOpen) => {
+      if (!tab) return !prevOpen
+      if (prevOpen && rightSidebarTab === tab) {
+        return false
+      }
+      setRightSidebarTab(tab)
+      return true
+    })
+  }, [rightSidebarTab])
+
+  const toggleQueueDrawer = useCallback((open?: boolean) => {
+    if (typeof open === 'boolean') {
+      setIsRightSidebarOpen(open)
+      if (open && rightSidebarTab !== 'queue' && rightSidebarTab !== 'playlists') {
+        setRightSidebarTab('queue')
+      }
+    } else {
+      toggleRightSidebar('queue')
+    }
+  }, [rightSidebarTab, toggleRightSidebar])
+
+  const setQueueDrawerTab = useCallback((tab: 'queue' | 'playlists') => {
+    setRightSidebarTab(tab)
+    setIsRightSidebarOpen(true)
+  }, [])
+
+  const addToQueue = useCallback((tracks: Track | Track[]) => {
+    const newItems = Array.isArray(tracks) ? tracks : [tracks]
+    if (newItems.length === 0) return
+
+    setQueue((prev) => [...prev, ...newItems])
+
+    if (!currentTrack && queue.length === 0) {
+      playTrack(newItems[0], newItems)
+    }
+  }, [currentTrack, queue.length, playTrack])
+
+  const playNext = useCallback((tracks: Track | Track[]) => {
+    const newItems = Array.isArray(tracks) ? tracks : [tracks]
+    if (newItems.length === 0) return
+
+    // Invalidate staged next track buffer because slot 0 is mutating
+    hasPreloadedNextRef.current = null
+    tauriBridge.invalidateNextTrack().catch(() => {})
+
+    setQueue((prev) => {
+      if (prev.length === 0) return newItems
+      const curQueueIndex = stateRef.current.queueIndex
+      const insertIdx = curQueueIndex >= 0 ? curQueueIndex + 1 : 0
+
+      // Deduplicate: if any of newItems already exist in the upcoming portion of the queue,
+      // remove their old occurrences so they are moved forward rather than duplicated.
+      const newItemKeys = new Set(newItems.map((t) => t.id || t.filePath))
+      const history = prev.slice(0, insertIdx)
+      const upcoming = prev.slice(insertIdx).filter((t) => !newItemKeys.has(t.id || t.filePath))
+
+      return [...history, ...newItems, ...upcoming]
+    })
+
+    // Pre-stage the new immediate next track
+    if (isGapless && newItems[0]?.filePath) {
+      hasPreloadedNextRef.current = newItems[0].id
+      tauriBridge.prepareNextTrack(newItems[0].filePath).catch(() => {})
+    }
+  }, [isGapless])
+
+  const removeFromQueue = useCallback((upcomingIndex: number) => {
+    const curQueueIndex = stateRef.current.queueIndex
+    const absIdx = curQueueIndex + 1 + upcomingIndex
+    if (absIdx < 0 || absIdx >= queue.length) return
+
+    if (upcomingIndex === 0) {
+      // Immediate next track was removed; invalidate staged buffer
+      hasPreloadedNextRef.current = null
+      tauriBridge.invalidateNextTrack().catch(() => {})
+    }
+
+    setQueue((prev) => prev.filter((_, idx) => idx !== absIdx))
+
+    // If there is still an upcoming track after removal, stage it
+    if (upcomingIndex === 0 && isGapless) {
+      const nextItem = queue[absIdx + 1]
+      if (nextItem?.filePath) {
+        hasPreloadedNextRef.current = nextItem.id
+        tauriBridge.prepareNextTrack(nextItem.filePath).catch(() => {})
+      }
+    }
+  }, [queue, isGapless])
+
+  const reorderQueue = useCallback((fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return
+
+    // If either the source or destination was slot 0, the immediate next track changed
+    if (fromIndex === 0 || toIndex === 0) {
+      hasPreloadedNextRef.current = null
+      tauriBridge.invalidateNextTrack().catch(() => {})
+    }
+
+    setQueue((prev) => {
+      const curQueueIndex = stateRef.current.queueIndex
+      const effectiveIndex = curQueueIndex >= 0 ? curQueueIndex : 0
+      const absFrom = effectiveIndex + 1 + fromIndex
+      const absTo = effectiveIndex + 1 + toIndex
+
+      if (absFrom < 0 || absFrom >= prev.length || absTo < 0 || absTo >= prev.length) {
+        return prev
+      }
+
+      const updated = [...prev]
+      const [moved] = updated.splice(absFrom, 1)
+      updated.splice(absTo, 0, moved)
+      return updated
+    })
+
+    if (isGapless) {
+      setTimeout(() => {
+        const { queue: currentQ, queueIndex: curIdx } = stateRef.current
+        const newNext = currentQ[curIdx + 1]
+        if (newNext?.filePath && hasPreloadedNextRef.current !== newNext.id) {
+          hasPreloadedNextRef.current = newNext.id
+          tauriBridge.prepareNextTrack(newNext.filePath).catch(() => {})
+        }
+      }, 50)
+    }
+  }, [isGapless])
+
+  const clearQueue = useCallback(() => {
+    hasPreloadedNextRef.current = null
+    tauriBridge.invalidateNextTrack().catch(() => {})
+
+    if (currentTrack && queueIndex >= 0) {
+      setQueue([currentTrack])
+      setQueueIndex(0)
+    } else {
+      setQueue([])
+      setQueueIndex(-1)
+    }
+  }, [currentTrack, queueIndex])
+
+  const setFullQueue = useCallback((tracks: Track[], startIndex: number = 0) => {
+    hasPreloadedNextRef.current = null
+    tauriBridge.invalidateNextTrack().catch(() => {})
+    setQueue(tracks)
+    setQueueIndex(startIndex)
+    if (startIndex >= 0 && startIndex < tracks.length) {
+      playTrack(tracks[startIndex], tracks)
+    }
+  }, [playTrack])
+
+  const saveQueueAsPlaylist = useCallback(async (name: string, description?: string): Promise<Playlist | null> => {
+    if (!name.trim()) return null
+    const tracksToSave = queue.length > 0 ? queue : currentTrack ? [currentTrack] : []
+    if (tracksToSave.length === 0) return null
+
+    try {
+      const created = await sqliteLibraryService.createPlaylist({
+        title: name.trim(),
+        description: description?.trim() || undefined,
+        trackIds: tracksToSave.map((t) => t.id),
+        tracks: tracksToSave,
+      })
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('cadence:toast', {
+            detail: `Saved ${tracksToSave.length} tracks to playlist "${name}"`,
+          })
+        )
+      }
+      return created
+    } catch (err) {
+      console.error('[AudioPlayerContext] saveQueueAsPlaylist error:', err)
+      return null
+    }
+  }, [queue, currentTrack])
 
   return (
     <AudioPlayerContext.Provider
@@ -477,6 +864,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         upnpDevices,
         playTrack,
         togglePlayPause,
+        stop,
         nextTrack,
         prevTrack,
         seek,
@@ -488,6 +876,28 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         refreshDevices,
         togglePurityMode,
         discoverUpnpDevices,
+        upcomingTracks,
+        nextTrackTransition,
+        addToQueue,
+        playNext,
+        removeFromQueue,
+        reorderQueue,
+        clearQueue,
+        setFullQueue,
+        saveQueueAsPlaylist,
+        isQueueDrawerOpen: isRightSidebarOpen && (rightSidebarTab === 'queue' || rightSidebarTab === 'playlists'),
+        toggleQueueDrawer,
+        queueDrawerTab: rightSidebarTab === 'playlists' ? 'playlists' : 'queue',
+        setQueueDrawerTab,
+        rightSidebarTab,
+        setRightSidebarTab,
+        isRightSidebarOpen,
+        setIsRightSidebarOpen,
+        toggleRightSidebar,
+        isGapless,
+        toggleGapless,
+        settlingDelayMs,
+        setSettlingDelay,
       }}
     >
       {children}

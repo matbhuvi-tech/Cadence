@@ -1,12 +1,14 @@
 pub mod audio;
 pub mod commands;
 pub mod db;
+pub mod maintenance;
 pub mod remote;
 pub mod scanner;
 
 use audio::AudioEngine;
 use commands::audio::*;
 use commands::library::*;
+use commands::maintenance::*;
 use commands::remote::*;
 use commands::scanner::*;
 use db::AppDb;
@@ -17,6 +19,7 @@ use tauri::Manager;
 pub fn run() {
     let audio_engine = AudioEngine::new();
     let engine_for_remote = audio_engine.clone();
+    let engine_for_maintenance = audio_engine.clone();
     let scanner_controller = ScannerController::new();
 
     tauri::Builder::default()
@@ -36,7 +39,7 @@ pub fn run() {
             let remote_state = std::sync::Arc::new(crate::remote::RemoteState::new(
                 engine_for_remote.clone(),
                 app_db.clone(),
-                artwork_cache_dir,
+                artwork_cache_dir.clone(),
                 token_path,
             ));
             remote_state.set_app_handle(app.handle().clone());
@@ -48,8 +51,18 @@ pub fn run() {
                 }
             });
 
+            // Start low-priority background maintenance worker (runs only when AudioEngine is idle)
+            let maintenance_worker = crate::maintenance::MaintenanceWorker::new(
+                engine_for_maintenance,
+                app_db.clone(),
+                artwork_cache_dir,
+            );
+            maintenance_worker.set_app_handle(app.handle().clone());
+            maintenance_worker.start();
+
             app.manage(app_db);
             app.manage(remote_state);
+            app.manage(maintenance_worker);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -67,6 +80,9 @@ pub fn run() {
             discover_upnp_devices,
             get_stream_buffer_info,
             set_stream_buffer_limit,
+            prepare_next_track,
+            invalidate_next_track,
+            set_settling_delay_ms,
             scan_directory_native,
             read_cover_art_base64,
             commit_track_tags_native,
@@ -74,6 +90,12 @@ pub fn run() {
             get_remote_server_info,
             regenerate_pairing_token,
             sync_desktop_queue_to_remote,
+            // Maintenance commands
+            get_maintenance_stats,
+            get_portrait_sync_stats,
+            toggle_maintenance_pause,
+            notify_artist_portrait_resolved,
+            force_enrich_now,
             // SQLite Library & Storage commands
             check_storage_mounts_accessibility,
             check_path_accessible,
@@ -99,6 +121,20 @@ pub fn run() {
             cancel_library_scan,
             get_scan_status,
             show_item_in_folder,
+            db_get_canonical_artists,
+            db_get_canonical_artist_detail,
+            db_set_artist_portrait,
+            db_backfill_artist_credits,
+            db_search_catalog,
+            // Playlists
+            db_get_playlists,
+            db_get_playlist_details,
+            db_create_playlist,
+            db_update_playlist,
+            db_delete_playlist,
+            db_add_tracks_to_playlist,
+            db_remove_track_from_playlist,
+            db_reorder_playlist_tracks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cadence Core application");

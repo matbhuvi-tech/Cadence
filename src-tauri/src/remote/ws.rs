@@ -36,6 +36,11 @@ pub enum ClientCommand {
     PrevTrack,
     JumpToQueueIndex { index: usize },
     PlayRelease { release_id: String },
+    PlayTrackInRelease { release_id: String, track_id: String },
+    QueueTrack { file_path: String, #[serde(default)] play_next: Option<bool> },
+    QueueRelease { release_id: String, #[serde(default)] play_next: Option<bool> },
+    RemoveFromQueue { index: usize, #[serde(default)] track_id: Option<String> },
+    ClearQueue,
 }
 
 pub async fn ws_handler(
@@ -209,6 +214,21 @@ async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
         ClientCommand::PlayRelease { release_id } => {
             play_release(state, &release_id).await;
         }
+        ClientCommand::PlayTrackInRelease { release_id, track_id } => {
+            play_release_track(state, &release_id, &track_id).await;
+        }
+        ClientCommand::QueueTrack { file_path, play_next } => {
+            queue_track(state, &file_path, play_next.unwrap_or(false)).await;
+        }
+        ClientCommand::QueueRelease { release_id, play_next } => {
+            queue_release(state, &release_id, play_next.unwrap_or(false)).await;
+        }
+        ClientCommand::RemoveFromQueue { index, track_id } => {
+            remove_from_queue(state, index, track_id).await;
+        }
+        ClientCommand::ClearQueue => {
+            clear_queue(state).await;
+        }
     }
 }
 
@@ -260,47 +280,48 @@ async fn jump_queue(state: &RemoteState, index: usize) {
     }
 }
 
-async fn play_release(state: &RemoteState, release_id: &str) {
-    let tracks = {
-        let conn = state.db.conn.lock();
-        let query = (|| -> rusqlite::Result<Vec<crate::remote::state::RemoteTrackItem>> {
-            let mut stmt = conn.prepare(
-                "SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
-                        file_size, mtime, title, artist_credit, album_title, release_year, track_number,
-                        genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
-                        dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
-                        work_title, movement_number, movement_title, created_at
-                 FROM tracks WHERE release_id = ?1 AND is_online = 1
-                 ORDER BY track_number ASC",
-            )?;
-            let rows = stmt.query_map([release_id], |row| {
-                let sr: Option<u32> = row.get(18)?;
-                let bd: Option<u8> = row.get(19)?;
-                let is_high_res = sr.unwrap_or(0) > 48000 || bd.unwrap_or(0) > 16;
-                Ok(crate::remote::state::RemoteTrackItem {
-                    id: row.get(0)?,
-                    title: row.get(9)?,
-                    artist: row.get(10)?,
-                    album: row.get(11)?,
-                    file_path: row.get(5)?,
-                    duration_secs: row.get(16)?,
-                    format: row.get(17)?,
-                    sample_rate: sr,
-                    bit_depth: bd,
-                    is_high_res,
-                })
-            })?;
-            let mut list = Vec::new();
-            for r in rows {
-                if let Ok(t) = r {
-                    list.push(t);
-                }
+fn query_release_tracks(state: &RemoteState, release_id: &str) -> Vec<crate::remote::state::RemoteTrackItem> {
+    let conn = state.db.conn.lock();
+    let query = (|| -> rusqlite::Result<Vec<crate::remote::state::RemoteTrackItem>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
+                    file_size, mtime, title, artist_credit, album_title, release_year, track_number,
+                    genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
+                    dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
+                    work_title, movement_number, movement_title, created_at
+             FROM tracks WHERE release_id = ?1 AND is_online = 1
+             ORDER BY track_number ASC",
+        )?;
+        let rows = stmt.query_map([release_id], |row| {
+            let sr: Option<u32> = row.get(18)?;
+            let bd: Option<u8> = row.get(19)?;
+            let is_high_res = sr.unwrap_or(0) > 48000 || bd.unwrap_or(0) > 16;
+            Ok(crate::remote::state::RemoteTrackItem {
+                id: row.get(0)?,
+                title: row.get(9)?,
+                artist: row.get(10)?,
+                album: row.get(11)?,
+                file_path: row.get(5)?,
+                duration_secs: row.get(16)?,
+                format: row.get(17)?,
+                sample_rate: sr,
+                bit_depth: bd,
+                is_high_res,
+            })
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            if let Ok(t) = r {
+                list.push(t);
             }
-            Ok(list)
-        })();
-        query.unwrap_or_default()
-    };
+        }
+        Ok(list)
+    })();
+    query.unwrap_or_default()
+}
 
+async fn play_release(state: &RemoteState, release_id: &str) {
+    let tracks = query_release_tracks(state, release_id);
     if !tracks.is_empty() {
         let first_path = tracks[0].file_path.clone();
         {
@@ -313,4 +334,143 @@ async fn play_release(state: &RemoteState, release_id: &str) {
         state.broadcast_state_change(&status);
         state.broadcast_queue_update();
     }
+}
+
+async fn play_release_track(state: &RemoteState, release_id: &str, track_id: &str) {
+    let tracks = query_release_tracks(state, release_id);
+    if !tracks.is_empty() {
+        let target_idx = tracks.iter().position(|t| t.id == track_id).unwrap_or(0);
+        let target_path = tracks[target_idx].file_path.clone();
+        {
+            let mut q = state.queue.lock();
+            q.items = tracks;
+            q.current_index = target_idx as isize;
+        }
+        let _ = state.engine.play_track(&target_path);
+        let status = state.engine.get_status();
+        state.broadcast_state_change(&status);
+        state.broadcast_queue_update();
+    }
+}
+
+async fn queue_track(state: &RemoteState, file_path: &str, play_next: bool) {
+    let item: Option<crate::remote::state::RemoteTrackItem> = {
+        let conn = state.db.conn.lock();
+        let query = (|| -> rusqlite::Result<Option<crate::remote::state::RemoteTrackItem>> {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, artist_credit, album_title, file_path, duration_secs, format, sample_rate, bit_depth
+                 FROM tracks WHERE file_path = ?1 OR id = ?1 LIMIT 1",
+            )?;
+            let mut rows = stmt.query_map([file_path], |row| {
+                let sr: Option<u32> = row.get(7)?;
+                let bd: Option<u8> = row.get(8)?;
+                let is_high_res = sr.unwrap_or(0) > 48000 || bd.unwrap_or(0) > 16;
+                Ok(crate::remote::state::RemoteTrackItem {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    file_path: row.get(4)?,
+                    duration_secs: row.get(5)?,
+                    format: row.get(6)?,
+                    sample_rate: sr,
+                    bit_depth: bd,
+                    is_high_res,
+                })
+            })?;
+            if let Some(r) = rows.next() {
+                Ok(r.ok())
+            } else {
+                Ok(None)
+            }
+        })();
+        query.unwrap_or(None)
+    };
+
+    if let Some(track) = item {
+        {
+            let mut q = state.queue.lock();
+            if play_next && !q.items.is_empty() && q.current_index >= 0 {
+                let insert_idx = ((q.current_index as usize) + 1).min(q.items.len());
+                q.items.insert(insert_idx, track);
+            } else {
+                q.items.push(track);
+            }
+        }
+        state.broadcast_queue_update();
+    }
+}
+
+async fn queue_release(state: &RemoteState, release_id: &str, play_next: bool) {
+    let tracks = query_release_tracks(state, release_id);
+    if !tracks.is_empty() {
+        {
+            let mut q = state.queue.lock();
+            if play_next && !q.items.is_empty() && q.current_index >= 0 {
+                let mut insert_idx = ((q.current_index as usize) + 1).min(q.items.len());
+                for t in tracks {
+                    q.items.insert(insert_idx, t);
+                    insert_idx += 1;
+                }
+            } else {
+                q.items.extend(tracks);
+            }
+        }
+        state.broadcast_queue_update();
+    }
+}
+
+async fn remove_from_queue(state: &RemoteState, index: usize, track_id: Option<String>) {
+    let removed = {
+        let mut q = state.queue.lock();
+        let target_idx = if index < q.items.len() && (track_id.is_none() || Some(&q.items[index].id) == track_id.as_ref()) {
+            Some(index)
+        } else if let Some(ref tid) = track_id {
+            q.items.iter().position(|t| &t.id == tid)
+        } else {
+            None
+        };
+
+        if let Some(idx) = target_idx {
+            q.items.remove(idx);
+            let cur = q.current_index;
+            if (idx as isize) < cur {
+                q.current_index = cur - 1;
+                None
+            } else if (idx as isize) == cur {
+                if idx < q.items.len() {
+                    Some(q.items[idx].file_path.clone())
+                } else {
+                    q.current_index = -1;
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(next_file) = removed {
+        let _ = state.engine.play_track(&next_file);
+        let status = state.engine.get_status();
+        state.broadcast_state_change(&status);
+    }
+    state.broadcast_queue_update();
+}
+
+async fn clear_queue(state: &RemoteState) {
+    {
+        let mut q = state.queue.lock();
+        if q.current_index >= 0 && (q.current_index as usize) < q.items.len() {
+            let active = q.items[q.current_index as usize].clone();
+            q.items = vec![active];
+            q.current_index = 0;
+        } else {
+            q.items.clear();
+            q.current_index = -1;
+        }
+    }
+    state.broadcast_queue_update();
 }

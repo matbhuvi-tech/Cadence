@@ -87,3 +87,24 @@ pub fn set_stream_buffer_limit(engine: State<'_, AudioEngine>, limit_mb: u64) ->
     engine.get_upnp_manager().set_buffer_limit_mb(limit_mb)
 }
 
+#[tauri::command]
+pub fn prepare_next_track(
+    engine: State<'_, AudioEngine>,
+    file_path: String,
+) -> Result<bool, String> {
+    engine.prepare_next_track(&file_path)
+}
+
+#[tauri::command]
+pub fn invalidate_next_track(engine: State<'_, AudioEngine>) -> Result<(), String> {
+    engine.invalidate_next_track()
+}
+
+#[tauri::command]
+pub fn set_settling_delay_ms(
+    engine: State<'_, AudioEngine>,
+    delay_ms: u64,
+) -> Result<(), String> {
+    engine.set_settling_delay_ms(delay_ms)
+}
+

@@ -9,6 +9,7 @@ export interface CatalogStatistics {
   totalWorks: number
   totalStorageMounts: number
   healthScore: number
+  lastAuditTimestamp: string | null
   totalAnomalies: number
   uncommittedSidecars: number
   
@@ -91,8 +92,9 @@ export class AgentSnapshotService {
       // Formats
       const fmt = t.format || 'FLAC'
       formatCounts[fmt] = (formatCounts[fmt] || 0) + 1
-      if (fmt === 'DSD') dsdCount++
-      if (t.sampleRateStr?.includes('24/') || fmt === 'DSD') hiRes24BitCount++
+      const fmtStr = String(fmt)
+      if (fmtStr === 'DSD' || fmtStr === 'DSF' || fmtStr === 'DFF' || t.sampleRateStr?.includes('DSD')) dsdCount++
+      if (t.sampleRateStr?.includes('24/') || t.sampleRateStr?.includes('32/') || fmtStr === 'DSD' || fmtStr === 'DSF' || fmtStr === 'DFF' || t.isHighRes) hiRes24BitCount++
 
       // Dynamic Range
       if (t.drScore > 0) {
@@ -211,6 +213,7 @@ export class AgentSnapshotService {
       totalWorks: works.length,
       totalStorageMounts: mounts.length,
       healthScore: audit.healthScore,
+      lastAuditTimestamp: auditService.lastAuditTimestamp,
       totalAnomalies: audit.issues.reduce((acc, i) => acc + i.affectedCount, 0),
       uncommittedSidecars,
       formatCounts,

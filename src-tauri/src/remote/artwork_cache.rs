@@ -25,6 +25,21 @@ impl ArtworkCache {
         }
     }
 
+    /// Check if a 300x300 thumbnail already exists in NVMe AppData cache (zero audio storage bus reads).
+    pub fn get_cached_only(&self, id: &str) -> Option<(Vec<u8>, &'static str)> {
+        let safe_id: String = id
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let cached_path = self.cache_dir.join(format!("{}.jpg", safe_id));
+        if cached_path.is_file() {
+            if let Ok(bytes) = fs::read(&cached_path) {
+                return Some((bytes, "image/jpeg"));
+            }
+        }
+        None
+    }
+
     /// Retrieve or generate a 300x300 thumbnail for the given track/release.
     /// Returns (image_bytes, mime_type).
     pub fn get_or_create_thumbnail(
@@ -32,17 +47,8 @@ impl ArtworkCache {
         id: &str,
         source_audio_path: Option<&str>,
     ) -> Option<(Vec<u8>, &'static str)> {
-        let safe_id: String = id
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect();
-        let cached_path = self.cache_dir.join(format!("{}.jpg", safe_id));
-
-        // 1. If already cached in AppData NVMe, return immediately! (Zero disk reads on audio drive)
-        if cached_path.is_file() {
-            if let Ok(bytes) = fs::read(&cached_path) {
-                return Some((bytes, "image/jpeg"));
-            }
+        if let Some(cached) = self.get_cached_only(id) {
+            return Some(cached);
         }
 
         // 2. AUDIOPHILE GUARD: If audio is currently playing, DO NOT touch the audio storage bus!
@@ -57,8 +63,21 @@ impl ArtworkCache {
             return None;
         }
 
-        // Try extracting embedded cover art first, then adjacent folder art
+        let safe_id: String = id
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let cached_path = self.cache_dir.join(format!("{}.jpg", safe_id));
+
+        // Try extracting embedded cover art first (with native DSF tail seeking), then adjacent folder art
         let raw_bytes: Option<Vec<u8>> = (|| {
+            let ext_lower = audio_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            if ext_lower == "dsf" {
+                if let Some(dsf_art) = crate::maintenance::worker::extract_dsf_artwork(audio_path) {
+                    return Some(dsf_art);
+                }
+            }
+
             if let Ok(tagged_file) = Probe::open(audio_path).and_then(|p| p.read()) {
                 if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
                     if let Some(pic) = tag.pictures().first() {

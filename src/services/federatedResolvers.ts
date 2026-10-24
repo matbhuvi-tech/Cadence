@@ -972,6 +972,33 @@ export class FederatedResolversService {
 
     return results
   }
+
+  /**
+   * Search for high-resolution artist portraits via 4-tier waterfall:
+   * Tier 1: Apple Music OpenGraph (1000x1000px)
+   * Tier 2: Deezer Public Artist API (1000x1000px)
+   * Tier 3: MusicBrainz -> Wikidata -> Wikimedia Commons (1000px)
+   */
+  public async searchArtistPortraits(artistName: string): Promise<ArtistPortraitCandidate[]> {
+    if (!artistName || !artistName.trim()) return []
+    try {
+      const url = `${this.getBaseUrl()}/api/artist-portrait-search?artist=${encodeURIComponent(artistName.trim())}`
+      const res = await fetch(url)
+      if (!res.ok) return []
+      const data = await res.json()
+      return data.candidates || []
+    } catch {
+      return []
+    }
+  }
+}
+
+export interface ArtistPortraitCandidate {
+  provider: 'apple' | 'deezer' | 'wikimedia'
+  providerLabel: string
+  portraitUrl: string
+  width: number
+  height: number
 }
 
 export const federatedResolversService = new FederatedResolversService()

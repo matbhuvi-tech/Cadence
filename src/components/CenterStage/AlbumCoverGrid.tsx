@@ -1,31 +1,28 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import {
   Play,
   Shuffle,
   ArrowLeft,
   ChevronRight,
   SlidersHorizontal,
-  Sparkles,
   Disc3,
-  Calendar,
   Layers,
   Star,
   Heart,
-  Folder,
-  Music,
   User,
   Search,
-  CheckCircle2,
-  AlertTriangle,
   Flame,
   Volume2,
-  Clock,
+  ArrowUpToLine,
+  ListPlus,
+  BookmarkPlus,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
-import { getCuratedAlbumArtwork } from '../../core/taxonomyUtils'
+import { getCuratedAlbumArtwork, generateMonogramAvatar } from '../../core/taxonomyUtils'
+import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
-import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { IntegrityScanner } from '../../services/integrityScanner'
+import { ArtistsView } from './ArtistsView'
 
 interface AlbumCoverGridProps {
   releases: Release[]
@@ -50,11 +47,24 @@ interface AlbumCoverGridProps {
     }
   ) => void
   onOpenBatchDiff?: () => void
+  activeTab?: EntityTab
+  onActiveTabChange?: (tab: EntityTab) => void
+  sortBy?: SortBy
+  onSortByChange?: (sortBy: SortBy) => void
+  cardSize?: CardSize
+  onCardSizeChange?: (cardSize: CardSize) => void
+  hideSubHeader?: boolean
+  selectedAlbumId?: string | null
+  onSelectAlbumId?: (albumId: string | null) => void
+  selectedArtist?: string | null
+  onSelectArtist?: (artist: string | null) => void
+  selectedComposer?: string | null
+  onSelectComposer?: (composer: string | null) => void
 }
 
-type EntityTab = 'albums' | 'artists' | 'composers'
-type SortBy = 'year_desc' | 'year_asc' | 'artist_asc' | 'title_asc' | 'dr_desc'
-type CardSize = 'compact' | 'standard' | 'large'
+export type EntityTab = 'albums' | 'artists' | 'composers'
+export type SortBy = 'year_desc' | 'year_asc' | 'artist_asc' | 'title_asc' | 'dr_desc'
+export type CardSize = 'compact' | 'standard' | 'large'
 
 interface AlbumCardData {
   id: string
@@ -84,19 +94,70 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
   onInspectRelease,
   onCustomizeRelease,
   onUpdateReleaseDetails,
-  onOpenBatchDiff,
+  onOpenBatchDiff: _onOpenBatchDiff,
+  activeTab: propActiveTab,
+  onActiveTabChange,
+  sortBy: propSortBy,
+  onSortByChange,
+  cardSize: propCardSize,
+  onCardSizeChange,
+  hideSubHeader = false,
+  selectedAlbumId: propSelectedAlbumId,
+  onSelectAlbumId: propOnSelectAlbumId,
+  selectedArtist: propSelectedArtist,
+  onSelectArtist: propOnSelectArtist,
+  selectedComposer: propSelectedComposer,
+  onSelectComposer: propOnSelectComposer,
 }) => {
-  const { playTrack, currentTrack, isPlaying } = useAudioPlayer()
+  const { playTrack, currentTrack, isPlaying, playNext, addToQueue } = useAudioPlayer()
 
-  const [activeTab, setActiveTab] = useState<EntityTab>('albums')
+  const [internalActiveTab, setInternalActiveTab] = useState<EntityTab>('albums')
   const [searchFilter, setSearchFilter] = useState('')
-  const [sortBy, setSortBy] = useState<SortBy>('year_desc')
-  const [cardSize, setCardSize] = useState<CardSize>('standard')
+  const [internalSortBy, setInternalSortBy] = useState<SortBy>('year_desc')
+  const [internalCardSize, setInternalCardSize] = useState<CardSize>('standard')
 
-  // Inline drill-down navigation state
-  const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null)
-  const [selectedArtist, setSelectedArtist] = useState<string | null>(null)
-  const [selectedComposer, setSelectedComposer] = useState<string | null>(null)
+  const activeTab = propActiveTab ?? internalActiveTab
+  const setActiveTab = onActiveTabChange ?? setInternalActiveTab
+
+  const sortBy = propSortBy ?? internalSortBy
+  const setSortBy = onSortByChange ?? setInternalSortBy
+
+  const cardSize = propCardSize ?? internalCardSize
+  const setCardSize = onCardSizeChange ?? setInternalCardSize
+
+  // Inline drill-down navigation state (lifted or internal)
+  const [internalSelectedAlbumId, setInternalSelectedAlbumId] = useState<string | null>(null)
+  const [internalSelectedArtist, setInternalSelectedArtist] = useState<string | null>(null)
+  const [internalSelectedComposer, setInternalSelectedComposer] = useState<string | null>(null)
+
+  const selectedAlbumId = propSelectedAlbumId !== undefined ? propSelectedAlbumId : internalSelectedAlbumId
+  const setSelectedAlbumId = propOnSelectAlbumId ?? setInternalSelectedAlbumId
+
+  const selectedArtist = propSelectedArtist !== undefined ? propSelectedArtist : internalSelectedArtist
+  const setSelectedArtist = propOnSelectArtist ?? setInternalSelectedArtist
+
+  const selectedComposer = propSelectedComposer !== undefined ? propSelectedComposer : internalSelectedComposer
+  const setSelectedComposer = propOnSelectComposer ?? setInternalSelectedComposer
+
+  // Map of canonical artist/composer name (lowercase) -> portraitUrl
+  const [composerPortraits, setComposerPortraits] = useState<Map<string, string>>(new Map())
+
+  useEffect(() => {
+    sqliteLibraryService
+      .getCanonicalArtists(releases, tracks)
+      .then((artists) => {
+        const map = new Map<string, string>()
+        artists.forEach((a) => {
+          if (a.portraitUrl) {
+            map.set(a.name.toLowerCase().trim(), a.portraitUrl)
+          }
+        })
+        setComposerPortraits(map)
+      })
+      .catch((err) => {
+        console.warn('[AlbumCoverGrid] Failed to load composer portraits:', err)
+      })
+  }, [releases, tracks])
 
   // Group tracks into robust AlbumCardData objects (both unfiltered and filtered)
   const { unfilteredCards, albumCards } = useMemo(() => {
@@ -229,9 +290,13 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
   // Drilldown Filtered Albums for Selected Composer
   const composerFilteredAlbums = useMemo(() => {
     if (!selectedComposer) return []
-    return unfilteredCards.filter(
-      (a) => (a.composerName || 'Contemporary').toLowerCase() === selectedComposer.toLowerCase()
-    )
+    const norm = selectedComposer.toLowerCase().trim()
+    return unfilteredCards.filter((a) => {
+      if ((a.composerName || '').toLowerCase().trim() === norm) return true
+      return a.tracks.some(
+        (t) => (t.composerName || (t as any).composer || '').toLowerCase().trim() === norm
+      )
+    })
   }, [unfilteredCards, selectedComposer])
 
   // Group by Artists
@@ -247,17 +312,60 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     return Array.from(map.values()).sort((a, b) => b.albums.length - a.albums.length)
   }, [albumCards])
 
-  // Group by Composers
+  // Group by Composers across entire library (both release-level and track-level compositions)
   const composerGroups = useMemo(() => {
-    const map = new Map<string, { composer: string; albums: AlbumCardData[]; tracksCount: number }>()
+    const map = new Map<
+      string,
+      { composer: string; albums: AlbumCardData[]; albumIds: Set<string>; tracksCount: number }
+    >()
+
     albumCards.forEach((album) => {
-      const comp = album.composerName || 'Contemporary'
-      const cur = map.get(comp) || { composer: comp, albums: [], tracksCount: 0 }
-      cur.albums.push(album)
-      cur.tracksCount += album.tracks.length
-      map.set(comp, cur)
+      // Collect all distinct composers that contributed to this album
+      const albumComposers = new Map<string, { name: string; count: number }>()
+
+      // 1. Release-level composer
+      if (album.composerName && album.composerName.trim()) {
+        const rawComp = album.composerName.trim()
+        const norm = rawComp.toLowerCase()
+        albumComposers.set(norm, { name: rawComp, count: 0 })
+      }
+
+      // 2. Track-level composers
+      album.tracks.forEach((t) => {
+        const trackComp = (t.composerName || (t as any).composer || '').trim()
+        if (trackComp) {
+          const norm = trackComp.toLowerCase()
+          const cur = albumComposers.get(norm) || { name: trackComp, count: 0 }
+          cur.count += 1
+          albumComposers.set(norm, cur)
+        }
+      })
+
+      // Add this album to each contributing composer's group
+      albumComposers.forEach((info, norm) => {
+        const cur = map.get(norm) || {
+          composer: info.name,
+          albums: [],
+          albumIds: new Set<string>(),
+          tracksCount: 0,
+        }
+        if (!cur.albumIds.has(album.id)) {
+          cur.albumIds.add(album.id)
+          cur.albums.push(album)
+        }
+        cur.tracksCount += info.count > 0 ? info.count : album.tracks.length
+        map.set(norm, cur)
+      })
     })
-    return Array.from(map.values()).sort((a, b) => b.albums.length - a.albums.length)
+
+    return Array.from(map.values())
+      .map(({ composer, albums, tracksCount }) => ({ composer, albums, tracksCount }))
+      .sort(
+        (a, b) =>
+          b.albums.length - a.albums.length ||
+          b.tracksCount - a.tracksCount ||
+          a.composer.localeCompare(b.composer)
+      )
   }, [albumCards])
 
   const handleEditAlbum = (album: AlbumCardData, e?: React.MouseEvent) => {
@@ -348,16 +456,16 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     return `${mins} min ${secs} sec`
   }
 
-  const sizeClasses = {
-    compact: 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3.5',
-    standard: 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-5',
-    large: 'grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6',
-  }
+  // Responsive auto-fill grid column calculation (prevents window edge clipping)
+  const gridStyle = useMemo(() => {
+    const minWidth = cardSize === 'compact' ? 140 : cardSize === 'large' ? 240 : 180
+    return {
+      gridTemplateColumns: `repeat(auto-fill, minmax(${minWidth}px, 1fr))`,
+    }
+  }, [cardSize])
 
-  // Render a Single Album Card
+  // Render a Single Album Card (Apple HIG Borderless Lockup)
   const renderAlbumCard = (album: AlbumCardData) => {
-    const drClass = IntegrityScanner.getDrBadgeClass(album.avgDr)
-
     return (
       <div
         key={album.id}
@@ -370,14 +478,18 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
             onInspectRelease(album.release.id)
           }
         }}
-        className="group/card flex flex-col bg-[#12151D]/60 hover:bg-[#161B26] border border-white/[0.08] hover:border-[#00F5FF]/50 rounded-2xl p-3 transition-all duration-200 cursor-pointer shadow-lg hover:shadow-2xl hover:shadow-[#00F5FF]/10 relative select-none"
+        className="group/card flex flex-col cursor-pointer select-none transition-all duration-200 hover:-translate-y-1 relative"
       >
-        {/* Artwork Container */}
-        <div className="relative aspect-square w-full rounded-xl overflow-hidden bg-black/80 border border-white/[0.1] shadow-inner mb-3">
-          {/* Always present fallback background */}
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-[#1E2536] via-[#141824] to-[#0A0D14] text-[#64748B] p-3 text-center">
-            <Disc3 className="w-12 h-12 text-[#38BDF8]/40 mb-1 group-hover/card:rotate-45 transition-transform duration-500" />
-            <span className="text-[10px] font-mono text-slate-400 line-clamp-2 px-1">
+        {/* Borderless 1:1 Artwork Container with 8px radius and Inner Specular Ring */}
+        <div
+          className={`relative aspect-square w-full rounded-lg overflow-hidden bg-[#131418] apple-album-shadow mb-2.5 transition-shadow duration-300 ${
+            album.variantsCount > 1 ? 'pressing-stack-layer' : ''
+          }`}
+        >
+          {/* Fallback Artwork Background */}
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-[#1C1D24] via-[#14151B] to-[#0C0D10] text-[#636366] p-3 text-center">
+            <Disc3 className="w-10 h-10 text-white/20 mb-1 group-hover/card:rotate-45 transition-transform duration-700" />
+            <span className="text-[10px] font-mono text-[#8E8E93] line-clamp-2 px-1">
               {album.title}
             </span>
           </div>
@@ -386,7 +498,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
             <img
               src={album.coverArtUrl}
               alt={album.title}
-              className="absolute inset-0 w-full h-full object-cover group-hover/card:scale-105 transition-transform duration-300 z-[1]"
+              className="absolute inset-0 w-full h-full object-cover rounded-lg group-hover/card:scale-[1.03] transition-transform duration-500 z-[1]"
               loading="lazy"
               onError={(e) => {
                 ;(e.target as HTMLElement).style.display = 'none'
@@ -394,11 +506,14 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
             />
           ) : null}
 
-          {/* Top-Right Badges: Format & Staged Status */}
+          {/* Ultra-thin inner specular ring for sleeve boundary against dark backgrounds */}
+          <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10 pointer-events-none z-10" />
+
+          {/* Top-Right Badges: Staged Status & Editions */}
           <div className="absolute top-2 right-2 flex items-center gap-1 z-10">
             {album.stagedCount > 0 && (
               <span
-                className="px-1.5 py-0.5 rounded-md bg-[#F59E0B] text-black font-mono font-bold text-[9px] shadow-md flex items-center gap-1"
+                className="px-2 py-0.5 rounded-full bg-[#F59E0B] text-black font-mono font-bold text-[9px] shadow-md flex items-center gap-1"
                 title={`${album.stagedCount} uncommitted sidecar edits`}
               >
                 <span className="w-1.5 h-1.5 rounded-full bg-black animate-pulse" />
@@ -406,142 +521,26 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               </span>
             )}
 
-            {album.formats.length > 0 && (
-              <span className="px-1.5 py-0.5 rounded-md bg-black/75 backdrop-blur-md text-white font-mono font-semibold text-[10px] border border-white/20 shadow-md">
-                {album.formats[0]}
+            {album.variantsCount > 1 && (
+              <span
+                className="px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[#E5E5EA] border border-white/15 font-mono text-[9px] shadow-sm flex items-center gap-1"
+                title={`${album.variantsCount} Master Editions Stacked`}
+              >
+                <Layers className="w-2.5 h-2.5 text-[#D4AF37]" />
+                <span>{album.variantsCount} Editions</span>
               </span>
             )}
           </div>
 
-          {/* Top-Left: High-Res or Masterpiece indicator */}
-          <div className="absolute top-2 left-2 flex items-center gap-1 z-10">
-            {album.isMasterpiece && (
-              <span className="px-1.5 py-0.5 rounded-md bg-gradient-to-r from-amber-500 to-orange-500 text-black font-bold text-[9px] shadow-md flex items-center gap-0.5">
-                <Flame className="w-2.5 h-2.5 fill-current" />
-                <span>Masterpiece</span>
-              </span>
-            )}
-          </div>
-
-          {/* Hover Overlay: Play & Quick Edit Actions */}
-          <div className="absolute inset-0 bg-black/60 opacity-0 group-hover/card:opacity-100 transition-opacity duration-200 flex items-center justify-center gap-2 backdrop-blur-[2px] z-10">
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                handlePlayAlbum(album)
-              }}
-              className="w-11 h-11 rounded-full bg-[#00F5FF] hover:bg-[#00F5FF]/90 text-black flex items-center justify-center shadow-xl hover:scale-110 active:scale-95 transition-all cursor-pointer"
-              title="Play Album"
-            >
-              <Play className="w-5 h-5 fill-current ml-0.5" />
-            </button>
-
-            <button
-              onClick={(e) => handleEditAlbum(album, e)}
-              className="w-9 h-9 rounded-full bg-white/20 hover:bg-white/30 text-white backdrop-blur-md border border-white/20 flex items-center justify-center shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer"
-              title="Customize Album Metadata & Artwork"
-            >
-              <SlidersHorizontal className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        {/* Album Details */}
-        <div className="flex flex-col min-w-0 flex-1">
-          {/* Title */}
-          <span
-            className="font-bold text-sm text-[#F1F5F9] truncate group-hover/card:text-[#00F5FF] transition-colors"
-            title={album.title}
+          {/* Top-Left: Favorite Quick Toggle (Visible on hover or when favorited) */}
+          <div
+            className={`absolute top-2 left-2 z-10 transition-opacity duration-200 ${
+              album.isFavorite ? 'opacity-100' : 'opacity-0 group-hover/card:opacity-100'
+            }`}
           >
-            {album.title}
-          </span>
-
-          {/* Artist / Performer (Clickable to jump to artist) */}
-          <span
-            onClick={(e) => {
-              e.stopPropagation()
-              setSelectedArtist(album.artistCredit || 'Various Artists')
-              setSelectedAlbumId(null)
-              setSelectedComposer(null)
-            }}
-            className="text-xs text-[#94A3B8] hover:text-[#00F5FF] hover:underline truncate mt-0.5 font-medium transition-colors cursor-pointer"
-            title={`Filter by artist: ${album.artistCredit}`}
-          >
-            {album.artistCredit}
-          </span>
-
-          {/* Composer Pill (Clickable to jump to composer) */}
-          {album.composerName && album.composerName !== album.artistCredit && (
-            <span
-              onClick={(e) => {
-                e.stopPropagation()
-                setSelectedComposer(album.composerName)
-                setSelectedAlbumId(null)
-                setSelectedArtist(null)
-              }}
-              className="text-[10px] text-[#EC4899] hover:text-[#F472B6] hover:underline font-mono truncate mt-0.5 flex items-center gap-1 cursor-pointer transition-colors"
-              title={`Filter by composer: ${album.composerName}`}
-            >
-              <span>🎼</span>
-              <span className="truncate">{album.composerName}</span>
-            </span>
-          )}
-
-          {/* Card Footer: Year • Tracks • DR • Pressings */}
-          <div className="mt-2.5 pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px] font-mono text-[#64748B] flex-wrap gap-1">
-            <div className="flex items-center gap-1.5">
-              {album.releaseYear && (
-                <span className="text-[#94A3B8] font-semibold">{album.releaseYear}</span>
-              )}
-              <span className="text-white/20">&bull;</span>
-              <span>{album.tracks.length} tracks</span>
-            </div>
-
-            <div className="flex items-center gap-1.5 shrink-0">
-              {album.avgDr > 0 && (
-                <div
-                  className={`px-1.5 py-0.2 rounded font-mono font-bold text-[10px] border ${drClass.bg} ${drClass.text}`}
-                  title={`Average Dynamic Range: DR${album.avgDr}`}
-                >
-                  DR{album.avgDr}
-                </div>
-              )}
-              {album.variantsCount > 1 && (
-                <span
-                  className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-0.5"
-                  title={`${album.variantsCount} Master Pressings Stacked`}
-                >
-                  <Layers className="w-2.5 h-2.5" />
-                  <span>{album.variantsCount}</span>
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Rating Stars row (Clickable) + Favorite Heart */}
-          <div className="mt-2 flex items-center justify-between pt-1">
-            <div className="flex items-center gap-0.5">
-              {[1, 2, 3, 4, 5].map((star) => (
-                <button
-                  key={star}
-                  onClick={(e) => handleSetRating(album, star, e)}
-                  className="p-0.5 hover:scale-125 transition-transform cursor-pointer"
-                  title={`Rate ${star} star${star > 1 ? 's' : ''}`}
-                >
-                  <Star
-                    className={`w-3 h-3 ${
-                      album.rating >= star
-                        ? 'text-amber-400 fill-amber-400'
-                        : 'text-white/20 hover:text-amber-400/60'
-                    }`}
-                  />
-                </button>
-              ))}
-            </div>
-
             <button
               onClick={(e) => handleToggleFavorite(album, e)}
-              className="p-1 text-[#64748B] hover:text-[#F43F5E] cursor-pointer transition-colors"
+              className="w-7 h-7 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white/80 hover:text-[#F43F5E] flex items-center justify-center transition-colors cursor-pointer shadow-sm"
               title={album.isFavorite ? 'Remove Favorite' : 'Mark Favorite'}
             >
               <Heart
@@ -550,6 +549,78 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                 }`}
               />
             </button>
+          </div>
+
+          {/* Hover Overlay: Frosted Glass Play Button & Edit Trigger */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover/card:opacity-100 transition-opacity duration-200 flex items-end justify-between p-3 z-10 pointer-events-none">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                handlePlayAlbum(album)
+              }}
+              className="w-10 h-10 rounded-full bg-white/95 hover:bg-white text-black flex items-center justify-center shadow-2xl hover:scale-105 active:scale-95 transition-all cursor-pointer pointer-events-auto"
+              title="Play Album"
+            >
+              <Play className="w-4 h-4 fill-current ml-0.5" />
+            </button>
+
+            <button
+              onClick={(e) => handleEditAlbum(album, e)}
+              className="w-8 h-8 rounded-full bg-black/60 hover:bg-black/80 text-white/90 backdrop-blur-md border border-white/20 flex items-center justify-center shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer pointer-events-auto"
+              title="Curate Album Metadata & Artwork"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Clean Editorial 3-Line Typography Lockup */}
+        <div className="flex flex-col min-w-0">
+          {/* Line 1: Album Title */}
+          <span
+            className="font-semibold text-[13px] text-[#F5F5F7] truncate leading-tight group-hover/card:text-white transition-colors"
+            title={album.title}
+          >
+            {album.title}
+          </span>
+
+          {/* Line 2: Primary Artist / Composer */}
+          <span
+            onClick={(e) => {
+              e.stopPropagation()
+              setSelectedArtist(album.artistCredit || 'Various Artists')
+              setSelectedAlbumId(null)
+              setSelectedComposer(null)
+            }}
+            className="text-[12px] text-[#8E8E93] hover:text-white truncate mt-1 leading-tight transition-colors cursor-pointer"
+            title={`Filter by artist: ${album.artistCredit}`}
+          >
+            {album.artistCredit}
+          </span>
+
+          {/* Line 3: Monospace Micro-Telemetry (Year · Format · DR) */}
+          <div className="text-[11px] font-mono text-[#636366] tabular-nums mt-1 flex items-center gap-1.5 truncate">
+            {album.releaseYear && <span>{album.releaseYear}</span>}
+            {album.releaseYear && album.formats.length > 0 && <span className="text-white/20">·</span>}
+            {album.formats.length > 0 && (
+              <span className={album.formats[0].includes('DSD') || album.formats[0] === 'DSF' || album.formats[0] === 'DFF' ? 'text-[#818CF8]' : ''}>
+                {album.formats[0]}
+              </span>
+            )}
+            {album.sampleRates.length > 0 && album.sampleRates[0] !== '0.0kHz' && (
+              <>
+                <span className="text-white/20">·</span>
+                <span>{album.sampleRates[0]}</span>
+              </>
+            )}
+            {album.avgDr > 0 && (
+              <>
+                <span className="text-white/20">·</span>
+                <span className={album.avgDr >= 12 ? 'text-[#D4AF37] font-semibold' : ''}>
+                  DR{album.avgDr}
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -726,6 +797,33 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               </button>
 
               <button
+                onClick={() => {
+                  addToQueue(album.tracks)
+                  window.dispatchEvent(
+                    new CustomEvent('cadence:toast', { detail: `Added ${album.tracks.length} tracks to queue` })
+                  )
+                }}
+                className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer"
+                title="Add album tracks to queue"
+              >
+                <ListPlus className="w-4 h-4 text-emerald-400" />
+                <span>Queue</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  window.dispatchEvent(
+                    new CustomEvent('cadence:add-tracks-playlist', { detail: album.tracks })
+                  )
+                }}
+                className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer"
+                title="Add album tracks to a playlist"
+              >
+                <BookmarkPlus className="w-4 h-4 text-amber-400" />
+                <span>Playlist</span>
+              </button>
+
+              <button
                 onClick={(e) => handleEditAlbum(album, e)}
                 className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer"
               >
@@ -885,9 +983,55 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                         )}
                       </div>
 
-                      {/* Duration */}
-                      <div className="col-span-1 text-right text-xs font-mono text-[#64748B]">
-                        {formatDuration(track.durationSeconds || track.duration)}
+                      {/* Duration & Hover Quick Actions */}
+                      <div className="col-span-1 flex items-center justify-end gap-1.5 text-right relative">
+                        <span className="text-xs font-mono text-[#64748B] group-hover/tr:hidden">
+                          {formatDuration(track.durationSeconds || track.duration)}
+                        </span>
+
+                        <div className="hidden group-hover/tr:flex items-center gap-1 animate-fadeIn">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              playNext(track)
+                              window.dispatchEvent(
+                                new CustomEvent('cadence:toast', { detail: `Queued "${track.title}" to play next` })
+                              )
+                            }}
+                            title="Play Next"
+                            className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors"
+                          >
+                            <ArrowUpToLine className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              addToQueue(track)
+                              window.dispatchEvent(
+                                new CustomEvent('cadence:toast', { detail: `Added "${track.title}" to queue` })
+                              )
+                            }}
+                            title="Add to Queue"
+                            className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors"
+                          >
+                            <ListPlus className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              window.dispatchEvent(
+                                new CustomEvent('cadence:add-tracks-playlist', { detail: [track] })
+                              )
+                            }}
+                            title="Add to Playlist..."
+                            className="p-1 rounded text-neutral-400 hover:text-white hover:bg-white/10 transition-colors"
+                          >
+                            <BookmarkPlus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )
@@ -938,7 +1082,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                 playTrack(artistTracks[0], artistTracks)
               }
             }}
-            className="px-5 py-2.5 rounded-xl bg-[#00F5FF] hover:bg-[#00F5FF]/90 text-black font-bold text-xs flex items-center gap-2 shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer shrink-0"
+            className="px-5 py-2.5 rounded-xl bg-white hover:bg-white/90 active:scale-95 text-black font-semibold text-xs flex items-center gap-2 shadow-lg transition-all cursor-pointer shrink-0"
           >
             <Play className="w-4 h-4 fill-current" />
             <span>Play All</span>
@@ -947,10 +1091,10 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
         {/* Artist Albums Grid */}
         <div>
-          <h2 className="text-xs uppercase font-mono tracking-wider text-slate-400 font-bold mb-3 px-1">
+          <h2 className="text-xs uppercase font-mono tracking-wider text-[#8E8E93] font-bold mb-3 px-1">
             Albums & Releases
           </h2>
-          <div className={`grid ${sizeClasses[cardSize]}`}>
+          <div className="grid gap-5" style={gridStyle}>
             {albums.map((album) => renderAlbumCard(album))}
           </div>
         </div>
@@ -960,31 +1104,45 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
   // Render Composer Detail View
   const renderComposerDetail = (composerName: string, albums: AlbumCardData[]) => {
-    const composerTracks = albums.flatMap((a) => a.tracks)
+    const norm = composerName.toLowerCase().trim()
+    const composerTracks = albums.flatMap((a) => {
+      const specific = a.tracks.filter(
+        (t) => (t.composerName || (t as any).composer || '').toLowerCase().trim() === norm
+      )
+      return specific.length > 0 ? specific : a.tracks
+    })
+    const heroPortrait =
+      composerPortraits.get(norm) ||
+      albums[0]?.coverArtUrl ||
+      generateMonogramAvatar(composerName)
+
     return (
       <div className="flex flex-col gap-6 max-w-6xl mx-auto w-full">
         {/* Composer Hero */}
         <div className="flex items-center justify-between gap-6 p-6 rounded-2xl bg-gradient-to-r from-[#2A1826] via-[#16121B] to-[#0D0E12] border border-white/[0.08] shadow-xl">
           <div className="flex items-center gap-5">
-            <div className="w-20 h-20 rounded-full overflow-hidden bg-black/60 border-2 border-[#EC4899]/60 shadow-lg shrink-0 flex items-center justify-center text-3xl">
-              {albums[0]?.coverArtUrl ? (
+            <div className="w-20 h-20 rounded-full overflow-hidden bg-black/60 border-2 border-[#818CF8]/60 shadow-lg shrink-0 flex items-center justify-center text-3xl">
+              {heroPortrait ? (
                 <img
-                  src={albums[0].coverArtUrl}
+                  src={heroPortrait}
                   alt={composerName}
                   className="w-full h-full object-cover"
+                  onError={(e) => {
+                    ;(e.target as HTMLImageElement).src = generateMonogramAvatar(composerName)
+                  }}
                 />
               ) : (
                 '🎼'
               )}
             </div>
             <div>
-              <div className="text-xs font-mono uppercase tracking-wider text-[#EC4899] font-semibold">
+              <div className="text-xs font-mono uppercase tracking-wider text-[#818CF8] font-semibold">
                 Composer Catalog & Works
               </div>
               <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-0.5">
                 {composerName}
               </h1>
-              <div className="text-xs text-slate-400 font-mono mt-1">
+              <div className="text-xs text-[#8E8E93] font-mono mt-1">
                 {albums.length} Release{albums.length > 1 ? 's' : ''} &bull; {composerTracks.length} Works / Movements
               </div>
             </div>
@@ -996,7 +1154,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                 playTrack(composerTracks[0], composerTracks)
               }
             }}
-            className="px-5 py-2.5 rounded-xl bg-[#EC4899] hover:bg-[#EC4899]/90 text-white font-bold text-xs flex items-center gap-2 shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer shrink-0"
+            className="px-5 py-2.5 rounded-xl bg-white hover:bg-white/90 active:scale-95 text-black font-semibold text-xs flex items-center gap-2 shadow-lg transition-all cursor-pointer shrink-0"
           >
             <Play className="w-4 h-4 fill-current" />
             <span>Play Works</span>
@@ -1005,10 +1163,10 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
         {/* Composer Albums Grid */}
         <div>
-          <h2 className="text-xs uppercase font-mono tracking-wider text-slate-400 font-bold mb-3 px-1">
+          <h2 className="text-xs uppercase font-mono tracking-wider text-[#8E8E93] font-bold mb-3 px-1">
             Compositions & Albums
           </h2>
-          <div className={`grid ${sizeClasses[cardSize]}`}>
+          <div className="grid gap-5" style={gridStyle}>
             {albums.map((album) => renderAlbumCard(album))}
           </div>
         </div>
@@ -1018,216 +1176,357 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
   return (
     <div className="flex-1 min-h-0 flex flex-col h-full bg-[#0D0E12] select-none overflow-hidden">
-      {/* 1. Sub-Header Toolbar with Breadcrumbs & Controls */}
-      <div className="px-5 py-3 bg-[#12151D] border-b border-white/[0.08] flex items-center justify-between gap-4 shrink-0 flex-wrap">
-        {/* Left: Breadcrumbs or Entity tabs */}
-        {selectedAlbum ? (
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setSelectedAlbumId(null)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#00F5FF]/50"
-            >
-              <ArrowLeft className="w-3.5 h-3.5 text-[#00F5FF]" />
-              <span>
-                {selectedArtist
-                  ? `Back to ${selectedArtist}`
-                  : selectedComposer
-                  ? `Back to ${selectedComposer}`
-                  : 'Back to Albums'}
-              </span>
-            </button>
-            <span className="text-white/20">&bull;</span>
-            <div className="flex items-center gap-1.5 text-xs font-mono text-[#94A3B8]">
-              <span
-                onClick={() => {
-                  setSelectedAlbumId(null)
-                  setSelectedArtist(null)
-                  setSelectedComposer(null)
-                  setActiveTab('albums')
-                }}
-                className="hover:text-white cursor-pointer"
-              >
-                Albums
-              </span>
-              {selectedArtist && (
-                <>
-                  <ChevronRight className="w-3 h-3 text-white/30" />
-                  <span
-                    onClick={() => setSelectedAlbumId(null)}
-                    className="hover:text-white cursor-pointer text-cyan-400"
-                  >
-                    {selectedArtist}
-                  </span>
-                </>
-              )}
-              {selectedComposer && (
-                <>
-                  <ChevronRight className="w-3 h-3 text-white/30" />
-                  <span
-                    onClick={() => setSelectedAlbumId(null)}
-                    className="hover:text-white cursor-pointer text-pink-400"
-                  >
-                    {selectedComposer}
-                  </span>
-                </>
-              )}
-              <ChevronRight className="w-3 h-3 text-white/30" />
-              <span className="text-white font-semibold truncate max-w-[200px] sm:max-w-xs">
-                {selectedAlbum.title}
-              </span>
-            </div>
-          </div>
-        ) : selectedArtist ? (
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setSelectedArtist(null)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#00F5FF]/50"
-            >
-              <ArrowLeft className="w-3.5 h-3.5 text-[#00F5FF]" />
-              <span>All Artists</span>
-            </button>
-            <span className="text-white/20">&bull;</span>
-            <div className="flex items-center gap-1.5 text-xs font-mono text-[#94A3B8]">
-              <span
-                onClick={() => setSelectedArtist(null)}
-                className="hover:text-white cursor-pointer"
-              >
-                Artists
-              </span>
-              <ChevronRight className="w-3 h-3 text-white/30" />
-              <span className="text-cyan-400 font-semibold">{selectedArtist}</span>
-            </div>
-          </div>
-        ) : selectedComposer ? (
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setSelectedComposer(null)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#EC4899]/50"
-            >
-              <ArrowLeft className="w-3.5 h-3.5 text-[#EC4899]" />
-              <span>All Composers</span>
-            </button>
-            <span className="text-white/20">&bull;</span>
-            <div className="flex items-center gap-1.5 text-xs font-mono text-[#94A3B8]">
-              <span
-                onClick={() => setSelectedComposer(null)}
-                className="hover:text-white cursor-pointer"
-              >
-                Composers
-              </span>
-              <ChevronRight className="w-3 h-3 text-white/30" />
-              <span className="text-pink-400 font-semibold">{selectedComposer}</span>
-            </div>
-          </div>
-        ) : (
-          /* Normal tabs: Albums, Artists, Composers */
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.04] border border-white/[0.08]">
-              <button
-                onClick={() => {
-                  setActiveTab('albums')
-                  setSelectedAlbumId(null)
-                  setSelectedArtist(null)
-                  setSelectedComposer(null)
-                }}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activeTab === 'albums'
-                    ? 'bg-[#00F5FF] text-black shadow-sm'
-                    : 'text-[#94A3B8] hover:text-white'
-                }`}
-              >
-                Albums ({albumCards.length})
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab('artists')
-                  setSelectedAlbumId(null)
-                  setSelectedArtist(null)
-                  setSelectedComposer(null)
-                }}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activeTab === 'artists'
-                    ? 'bg-[#00F5FF] text-black shadow-sm'
-                    : 'text-[#94A3B8] hover:text-white'
-                }`}
-              >
-                Artists ({artistGroups.length})
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTab('composers')
-                  setSelectedAlbumId(null)
-                  setSelectedArtist(null)
-                  setSelectedComposer(null)
-                }}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activeTab === 'composers'
-                    ? 'bg-[#00F5FF] text-black shadow-sm'
-                    : 'text-[#94A3B8] hover:text-white'
-                }`}
-              >
-                Composers ({composerGroups.length})
-              </button>
-            </div>
-
-            <span className="text-white/20">&bull;</span>
-            <span className="text-xs font-mono text-[#64748B]">
-              {tracks.length} Tracks in Library
-            </span>
-          </div>
-        )}
-
-        {/* Right: Quick Search, Sort, Size Slider (hidden in album detail for focus) */}
-        {!selectedAlbum && (
-          <div className="flex items-center gap-3">
-            {/* Quick Filter */}
-            <div className="relative flex items-center">
-              <Search className="w-3.5 h-3.5 text-[#64748B] absolute left-2.5 pointer-events-none" />
-              <input
-                type="text"
-                placeholder="Filter grid..."
-                value={searchFilter}
-                onChange={(e) => setSearchFilter(e.target.value)}
-                className="pl-8 pr-3 py-1 rounded-lg bg-black/40 border border-white/[0.1] text-xs text-white placeholder-[#64748B] focus:border-[#00F5FF] focus:outline-none w-40 md:w-52 transition-all font-sans"
-              />
-            </div>
-
-            {/* Sort By Dropdown */}
-            <div className="flex items-center gap-1.5 text-xs text-[#94A3B8]">
-              <span className="text-[11px] font-mono">Sort:</span>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as SortBy)}
-                className="bg-black/40 border border-white/[0.1] rounded-lg px-2.5 py-1 text-xs text-[#CBD5E1] focus:border-[#00F5FF] focus:outline-none cursor-pointer"
-              >
-                <option value="year_desc">Year (Newest First)</option>
-                <option value="year_asc">Year (Oldest First)</option>
-                <option value="artist_asc">Artist (A-Z)</option>
-                <option value="title_asc">Album Title (A-Z)</option>
-                <option value="dr_desc">Dynamic Range (Avg DR)</option>
-              </select>
-            </div>
-
-            {/* Card Size Selector */}
-            <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-[11px] font-mono text-[#94A3B8]">
-              {(['compact', 'standard', 'large'] as CardSize[]).map((size) => (
+      {/* 1. Sub-Header Toolbar: only render if drill-down is active OR hideSubHeader is false */}
+      {hideSubHeader ? (
+        (selectedAlbum || selectedArtist || selectedComposer) && (
+          <div className="px-6 py-2.5 bg-[#121316]/70 border-b border-white/[0.05] flex items-center justify-between gap-4 shrink-0">
+            <div className="flex items-center gap-3">
+              {/* Context-aware Back Button */}
+              {selectedAlbum ? (
                 <button
-                  key={size}
-                  onClick={() => setCardSize(size)}
-                  className={`px-2 py-0.5 rounded capitalize transition-all cursor-pointer ${
-                    cardSize === size ? 'bg-white/10 text-white font-bold' : 'hover:text-white'
+                  onClick={() => setSelectedAlbumId(null)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#D4AF37]/50"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5 text-[#D4AF37]" />
+                  <span>
+                    {selectedArtist
+                      ? `Back to ${selectedArtist}`
+                      : selectedComposer
+                      ? `Back to ${selectedComposer}`
+                      : 'Back to Albums'}
+                  </span>
+                </button>
+              ) : selectedArtist ? (
+                <button
+                  onClick={() => setSelectedArtist(null)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#D4AF37]/50"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5 text-[#D4AF37]" />
+                  <span>All Artists</span>
+                </button>
+              ) : selectedComposer ? (
+                <button
+                  onClick={() => setSelectedComposer(null)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#818CF8]/50"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5 text-[#818CF8]" />
+                  <span>All Composers</span>
+                </button>
+              ) : null}
+
+              <span className="text-white/20">&bull;</span>
+
+              {/* Precise 3-Level Breadcrumbs */}
+              <div className="flex items-center gap-1.5 text-xs font-mono text-[#8E8E93]">
+                {activeTab === 'composers' || selectedComposer ? (
+                  <>
+                    <span
+                      onClick={() => {
+                        setSelectedAlbumId(null)
+                        setSelectedArtist(null)
+                        setSelectedComposer(null)
+                        setActiveTab('composers')
+                      }}
+                      className="hover:text-white cursor-pointer"
+                    >
+                      Composers
+                    </span>
+                    {selectedComposer && (
+                      <>
+                        <ChevronRight className="w-3 h-3 text-white/30" />
+                        <span
+                          onClick={() => setSelectedAlbumId(null)}
+                          className={`cursor-pointer ${
+                            selectedAlbum ? 'text-[#818CF8] hover:text-white' : 'text-[#818CF8] font-semibold'
+                          }`}
+                        >
+                          {selectedComposer}
+                        </span>
+                      </>
+                    )}
+                  </>
+                ) : activeTab === 'artists' || selectedArtist ? (
+                  <>
+                    <span
+                      onClick={() => {
+                        setSelectedAlbumId(null)
+                        setSelectedArtist(null)
+                        setSelectedComposer(null)
+                        setActiveTab('artists')
+                      }}
+                      className="hover:text-white cursor-pointer"
+                    >
+                      Artists
+                    </span>
+                    {selectedArtist && (
+                      <>
+                        <ChevronRight className="w-3 h-3 text-white/30" />
+                        <span
+                          onClick={() => setSelectedAlbumId(null)}
+                          className={`cursor-pointer ${
+                            selectedAlbum ? 'text-[#D4AF37] hover:text-white' : 'text-[#D4AF37] font-semibold'
+                          }`}
+                        >
+                          {selectedArtist}
+                        </span>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <span
+                    onClick={() => {
+                      setSelectedAlbumId(null)
+                      setSelectedArtist(null)
+                      setSelectedComposer(null)
+                      setActiveTab('albums')
+                    }}
+                    className="hover:text-white cursor-pointer"
+                  >
+                    Albums
+                  </span>
+                )}
+
+                {selectedAlbum && (
+                  <>
+                    <ChevronRight className="w-3 h-3 text-white/30" />
+                    <span className="text-white font-semibold truncate max-w-[200px] sm:max-w-xs">
+                      {selectedAlbum.title}
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="px-6 py-2.5 bg-[#12151D] border-b border-white/[0.08] flex items-center justify-between gap-4 shrink-0 flex-wrap">
+          {/* Left: Breadcrumbs or Entity tabs */}
+          {selectedAlbum ? (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setSelectedAlbumId(null)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#D4AF37]/50"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span>
+                  {selectedArtist
+                    ? `Back to ${selectedArtist}`
+                    : selectedComposer
+                    ? `Back to ${selectedComposer}`
+                    : 'Back to Albums'}
+                </span>
+              </button>
+              <span className="text-white/20">&bull;</span>
+              <div className="flex items-center gap-1.5 text-xs font-mono text-[#8E8E93]">
+                {selectedComposer || activeTab === 'composers' ? (
+                  <>
+                    <span
+                      onClick={() => {
+                        setSelectedAlbumId(null)
+                        setSelectedArtist(null)
+                        setSelectedComposer(null)
+                        setActiveTab('composers')
+                      }}
+                      className="hover:text-white cursor-pointer"
+                    >
+                      Composers
+                    </span>
+                    {selectedComposer && (
+                      <>
+                        <ChevronRight className="w-3 h-3 text-white/30" />
+                        <span
+                          onClick={() => setSelectedAlbumId(null)}
+                          className="hover:text-white cursor-pointer text-[#818CF8]"
+                        >
+                          {selectedComposer}
+                        </span>
+                      </>
+                    )}
+                  </>
+                ) : selectedArtist || activeTab === 'artists' ? (
+                  <>
+                    <span
+                      onClick={() => {
+                        setSelectedAlbumId(null)
+                        setSelectedArtist(null)
+                        setSelectedComposer(null)
+                        setActiveTab('artists')
+                      }}
+                      className="hover:text-white cursor-pointer"
+                    >
+                      Artists
+                    </span>
+                    {selectedArtist && (
+                      <>
+                        <ChevronRight className="w-3 h-3 text-white/30" />
+                        <span
+                          onClick={() => setSelectedAlbumId(null)}
+                          className="hover:text-white cursor-pointer text-[#D4AF37]"
+                        >
+                          {selectedArtist}
+                        </span>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <span
+                    onClick={() => {
+                      setSelectedAlbumId(null)
+                      setSelectedArtist(null)
+                      setSelectedComposer(null)
+                      setActiveTab('albums')
+                    }}
+                    className="hover:text-white cursor-pointer"
+                  >
+                    Albums
+                  </span>
+                )}
+                <ChevronRight className="w-3 h-3 text-white/30" />
+                <span className="text-white font-semibold truncate max-w-[200px] sm:max-w-xs">
+                  {selectedAlbum.title}
+                </span>
+              </div>
+            </div>
+          ) : selectedArtist ? (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setSelectedArtist(null)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#D4AF37]/50"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span>All Artists</span>
+              </button>
+              <span className="text-white/20">&bull;</span>
+              <div className="flex items-center gap-1.5 text-xs font-mono text-[#8E8E93]">
+                <span
+                  onClick={() => setSelectedArtist(null)}
+                  className="hover:text-white cursor-pointer"
+                >
+                  Artists
+                </span>
+                <ChevronRight className="w-3 h-3 text-white/30" />
+                <span className="text-[#D4AF37] font-semibold">{selectedArtist}</span>
+              </div>
+            </div>
+          ) : selectedComposer ? (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setSelectedComposer(null)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.1] text-xs font-semibold text-white transition-all cursor-pointer shadow-sm hover:border-[#818CF8]/50"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-[#818CF8]" />
+                <span>All Composers</span>
+              </button>
+              <span className="text-white/20">&bull;</span>
+              <div className="flex items-center gap-1.5 text-xs font-mono text-[#8E8E93]">
+                <span
+                  onClick={() => setSelectedComposer(null)}
+                  className="hover:text-white cursor-pointer"
+                >
+                  Composers
+                </span>
+                <ChevronRight className="w-3 h-3 text-white/30" />
+                <span className="text-[#818CF8] font-semibold">{selectedComposer}</span>
+              </div>
+            </div>
+          ) : (
+            /* Subtle Translucent Switcher */
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.04] border border-white/[0.08]">
+                <button
+                  onClick={() => {
+                    setActiveTab('albums')
+                    setSelectedAlbumId(null)
+                    setSelectedArtist(null)
+                    setSelectedComposer(null)
+                  }}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    activeTab === 'albums'
+                      ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
+                      : 'text-[#8E8E93] hover:text-white'
                   }`}
                 >
-                  {size}
+                  Albums ({albumCards.length})
                 </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+                <button
+                  onClick={() => {
+                    setActiveTab('artists')
+                    setSelectedAlbumId(null)
+                    setSelectedArtist(null)
+                    setSelectedComposer(null)
+                  }}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    activeTab === 'artists'
+                      ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
+                      : 'text-[#8E8E93] hover:text-white'
+                  }`}
+                >
+                  Artists ({artistGroups.length})
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveTab('composers')
+                    setSelectedAlbumId(null)
+                    setSelectedArtist(null)
+                    setSelectedComposer(null)
+                  }}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    activeTab === 'composers'
+                      ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
+                      : 'text-[#8E8E93] hover:text-white'
+                  }`}
+                >
+                  Composers ({composerGroups.length})
+                </button>
+              </div>
 
-      {/* 2. Main Scrollable Container */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-5 pb-32">
+              <span className="text-white/20">&bull;</span>
+              <span className="text-xs font-mono text-[#8E8E93]">
+                {tracks.length} Tracks in Library
+              </span>
+            </div>
+          )}
+
+          {/* Right: Sort and Card Size Selector */}
+          {!selectedAlbum && (
+            <div className="flex items-center gap-3">
+              {/* Sort By Dropdown */}
+              <div className="flex items-center gap-1.5 text-xs text-[#8E8E93]">
+                <span className="text-[11px] font-mono">Sort:</span>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SortBy)}
+                  className="bg-black/40 border border-white/[0.1] rounded-lg px-2.5 py-1 text-xs text-[#CBD5E1] focus:border-[#D4AF37] focus:outline-none cursor-pointer"
+                >
+                  <option value="year_desc">Year (Newest First)</option>
+                  <option value="year_asc">Year (Oldest First)</option>
+                  <option value="artist_asc">Artist (A-Z)</option>
+                  <option value="title_asc">Album Title (A-Z)</option>
+                  <option value="dr_desc">Dynamic Range (Avg DR)</option>
+                </select>
+              </div>
+
+              {/* Card Size Selector */}
+              <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-[11px] font-mono text-[#8E8E93]">
+                {(['compact', 'standard', 'large'] as CardSize[]).map((size) => (
+                  <button
+                    key={size}
+                    onClick={() => setCardSize(size)}
+                    className={`px-2 py-0.5 rounded capitalize transition-all cursor-pointer ${
+                      cardSize === size ? 'bg-white/10 text-white font-bold' : 'hover:text-white'
+                    }`}
+                  >
+                    {size}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 2. Main Scrollable Container with Symmetric px-6 Padding */}
+      <div className="flex-1 min-h-0 overflow-x-hidden overflow-y-auto px-6 py-5 pb-36 w-full">
         {/* VIEW 1: Album Detail Drill-down */}
         {selectedAlbum ? (
           renderAlbumDetail(selectedAlbum)
@@ -1248,82 +1547,93 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                     <p className="text-sm">No albums match your current filter.</p>
                   </div>
                 ) : (
-                  <div className={`grid ${sizeClasses[cardSize]}`}>
+                  <div className="grid gap-5" style={gridStyle}>
                     {albumCards.map((album) => renderAlbumCard(album))}
                   </div>
                 )}
               </>
             )}
 
-            {/* Artists Tab */}
+            {/* Artists Tab: Apple HIG Relational Entity System */}
             {activeTab === 'artists' && (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                {artistGroups.map((group) => (
-                  <div
-                    key={group.artist}
-                    onClick={() => {
-                      setSelectedArtist(group.artist)
-                      if (group.albums[0]?.tracks[0]) {
-                        onSelectTrack(group.albums[0].tracks[0].id)
-                      }
-                    }}
-                    className="flex flex-col items-center text-center p-4 rounded-2xl bg-[#12151D]/60 hover:bg-[#161B26] border border-white/[0.08] hover:border-[#00F5FF]/50 transition-all cursor-pointer group/art shadow-lg"
-                  >
-                    <div className="w-24 h-24 rounded-full overflow-hidden bg-black/60 border-2 border-white/10 group-hover/art:border-[#00F5FF] mb-3 shadow-md flex items-center justify-center">
-                      {group.albums[0]?.coverArtUrl ? (
-                        <img
-                          src={group.albums[0].coverArtUrl}
-                          alt={group.artist}
-                          className="w-full h-full object-cover group-hover/art:scale-105 transition-transform"
-                        />
-                      ) : (
-                        <User className="w-10 h-10 text-[#38BDF8]" />
-                      )}
-                    </div>
-                    <span className="font-bold text-sm text-[#F1F5F9] group-hover/art:text-[#00F5FF] truncate max-w-full">
-                      {group.artist}
-                    </span>
-                    <span className="text-xs font-mono text-[#94A3B8] mt-1">
-                      {group.albums.length} Album{group.albums.length > 1 ? 's' : ''} &bull; {group.tracksCount} Tracks
-                    </span>
-                  </div>
-                ))}
+              <div className="-mx-6 -my-5 min-h-[calc(100vh-280px)] flex flex-col">
+                <ArtistsView
+                  releases={releases}
+                  tracks={tracks}
+                  onSelectTrack={onSelectTrack}
+                  selectedTrackId={selectedTrackId}
+                  playbackState={{
+                    isPlaying,
+                    isPaused: false,
+                    currentFile: currentTrack?.filePath || null,
+                    positionSecs: 0,
+                    durationSecs: currentTrack?.durationSeconds || 0,
+                    volume: 1,
+                  }}
+                  onPlayAlbum={(releaseId) => {
+                    const rel = releases.find((r) => r.id === releaseId)
+                    if (rel) onInspectRelease(rel.id)
+                  }}
+                  onNavigateToRelease={(releaseId) => {
+                    onInspectRelease(releaseId)
+                  }}
+                  cardSize={cardSize}
+                  onCardSizeChange={setCardSize}
+                />
               </div>
             )}
 
             {/* Composers Tab */}
             {activeTab === 'composers' && (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                {composerGroups.map((group) => (
-                  <div
-                    key={group.composer}
-                    onClick={() => {
-                      setSelectedComposer(group.composer)
-                      if (group.albums[0]?.tracks[0]) {
-                        onSelectTrack(group.albums[0].tracks[0].id)
-                      }
-                    }}
-                    className="flex flex-col items-center text-center p-4 rounded-2xl bg-[#12151D]/60 hover:bg-[#161B26] border border-white/[0.08] hover:border-[#EC4899]/50 transition-all cursor-pointer group/comp shadow-lg"
-                  >
-                    <div className="w-24 h-24 rounded-full overflow-hidden bg-black/60 border-2 border-white/10 group-hover/comp:border-[#EC4899] mb-3 shadow-md flex items-center justify-center">
-                      {group.albums[0]?.coverArtUrl ? (
-                        <img
-                          src={group.albums[0].coverArtUrl}
-                          alt={group.composer}
-                          className="w-full h-full object-cover group-hover/comp:scale-105 transition-transform"
-                        />
-                      ) : (
-                        <div className="text-3xl">🎼</div>
-                      )}
+              <div className="grid gap-5" style={gridStyle}>
+                {composerGroups.map((group) => {
+                  const compAvatarSize =
+                    cardSize === 'compact'
+                      ? 'w-20 h-20'
+                      : cardSize === 'large'
+                      ? 'w-36 h-36'
+                      : 'w-24 h-24'
+                  const compPortrait =
+                    composerPortraits.get(group.composer.toLowerCase().trim()) ||
+                    group.albums[0]?.coverArtUrl ||
+                    generateMonogramAvatar(group.composer)
+
+                  return (
+                    <div
+                      key={group.composer}
+                      onClick={() => {
+                        setSelectedComposer(group.composer)
+                        if (group.albums[0]?.tracks[0]) {
+                          onSelectTrack(group.albums[0].tracks[0].id)
+                        }
+                      }}
+                      className="flex flex-col items-center text-center p-4 rounded-2xl bg-[#12151D]/60 hover:bg-[#161B26] border border-white/[0.08] hover:border-[#818CF8]/50 transition-all cursor-pointer group/comp shadow-lg"
+                    >
+                      <div
+                        className={`${compAvatarSize} rounded-full overflow-hidden bg-black/60 border-2 border-white/10 group-hover/comp:border-[#818CF8] mb-3 shadow-md flex items-center justify-center transition-all duration-300`}
+                      >
+                        {compPortrait ? (
+                          <img
+                            src={compPortrait}
+                            alt={group.composer}
+                            className="w-full h-full object-cover group-hover/comp:scale-105 transition-transform"
+                            onError={(e) => {
+                              ;(e.target as HTMLImageElement).src = generateMonogramAvatar(group.composer)
+                            }}
+                          />
+                        ) : (
+                          <div className="text-3xl">🎼</div>
+                        )}
+                      </div>
+                      <span className="font-bold text-sm text-[#F1F5F9] group-hover/comp:text-[#818CF8] truncate max-w-full">
+                        {group.composer}
+                      </span>
+                      <span className="text-xs font-mono text-[#8E8E93] mt-1">
+                        {group.albums.length} Release{group.albums.length > 1 ? 's' : ''} &bull; {group.tracksCount} Tracks
+                      </span>
                     </div>
-                    <span className="font-bold text-sm text-[#F1F5F9] group-hover/comp:text-[#EC4899] truncate max-w-full">
-                      {group.composer}
-                    </span>
-                    <span className="text-xs font-mono text-[#94A3B8] mt-1">
-                      {group.albums.length} Album{group.albums.length > 1 ? 's' : ''} &bull; {group.tracksCount} Works
-                    </span>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </>

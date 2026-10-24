@@ -177,6 +177,88 @@ export const AGENT_TOOL_DEFINITIONS: AgentToolDefinition[] = [
       required: ['commands'],
     },
   },
+  {
+    name: 'resolve_work_hierarchy',
+    description: 'Disentangles classical movements or complex Indian soundtrack titles into structured multi-performer & movement graph nodes.',
+    parameters: {
+      type: 'object',
+      properties: {
+        releaseId: { type: 'string' },
+        query: { type: 'string' },
+        strategy: { type: 'string', enum: ['classical_movement', 'soundtrack_performers', 'auto'] },
+      },
+    },
+  },
+  {
+    name: 'compare_variant_pressings',
+    description: 'Compares dynamic range, sample rate, bit depth, and duration across releases in a variant stack to recommend the primary master.',
+    parameters: {
+      type: 'object',
+      properties: {
+        releaseId: { type: 'string' },
+        albumTitle: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'detect_transcode_anomalies',
+    description: 'Inspects spectral frequency cutoffs (16kHz / 22kHz brickwall) to flag lossy MP3/CD transcodes masquerading as Hi-Res 24-bit.',
+    parameters: {
+      type: 'object',
+      properties: {
+        scopeTrackIds: { type: 'array', items: { type: 'string' } },
+        thresholdKhz: { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'synthesize_normalization_rule',
+    description: 'Synthesizes and permanently registers a user-defined authority normalization rule into normalizationService for future imports.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Variant string to match (e.g. "Illayaraja")' },
+        canonical: { type: 'string', description: 'Canonical authority target (e.g. "Ilaiyaraaja")' },
+        category: { type: 'string', enum: ['artist', 'genre', 'composer'] },
+      },
+      required: ['pattern', 'canonical', 'category'],
+    },
+  },
+  {
+    name: 'preview_path_restructure',
+    description: 'Generates a dry-run preview tree of physical directory and file restructuring according to dynamic path rules.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Naming template (e.g. "{Composer}/{Year} - {Album}/{TrackNum} - {Title}")' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
+    name: 'curate_sonic_session',
+    description: 'Assembles an audiophile playback queue based on dynamic range scores, high-res sample rates, and acoustic tags.',
+    parameters: {
+      type: 'object',
+      properties: {
+        minDrScore: { type: 'number', description: 'Minimum Dynamic Range score (e.g. 12 or 14)' },
+        format: { type: 'string', enum: ['FLAC', 'DSD', 'WAV'] },
+        durationMinutes: { type: 'number', description: 'Target session duration in minutes' },
+      },
+    },
+  },
+  {
+    name: 'query_graph',
+    description: 'Performs read-only inspection queries against the live graph engine for multi-attribute filtering and verification.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filter: { type: 'object' },
+        limit: { type: 'number' },
+      },
+      required: ['filter'],
+    },
+  },
 ]
 
 export function generateGeminiSystemInstruction(catalogSummary: string): string {

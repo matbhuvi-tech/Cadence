@@ -7,6 +7,7 @@ import {
   canonicalizeGenre,
   stripRipNoiseAndTags,
   getCuratedAlbumArtwork,
+  splitMultiArtistCredits,
   KNOWN_COMPOSERS,
   KNOWN_ARTISTS,
 } from '../core/taxonomyUtils'
@@ -29,6 +30,8 @@ export interface AuditEvaluationResult {
 }
 
 export class AuditService {
+  public lastAuditTimestamp: string | null = null
+
   /**
    * Computes dynamic hygiene diagnostics and health score (0-100%) for an arbitrary slice of tracks & releases.
    * This is called by the UI whenever the Virtual Grid filter (search query, format, genre, etc.) changes.
@@ -70,6 +73,13 @@ export class AuditService {
         autoFixAction: 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER',
         isAutoFixable: canResolveFromFolder,
         fixActionLabel: 'Extract from Folders',
+        tagField: 'ALBUMARTIST',
+        detectedValue: 'Unknown Artist',
+        currentValue: 'Unknown Artist',
+        targetValue: 'Extract from Folder',
+        proposedAction: 'ALBUMARTIST = Extract from Directory',
+        canonicalTarget: 'Untagged Audio Standards',
+        parentEntity: 'Untagged Audio Standards',
       })
     }
 
@@ -78,6 +88,9 @@ export class AuditService {
     tracks.forEach((t) => {
       const candidates = [t.artistCredit, t.composerName].filter((n): n is string => Boolean(n && n.trim() && n !== 'Unknown Artist'))
       candidates.forEach((name) => {
+        // Multi-artist collaboration credits must NEVER be clustered as single-artist typo variants
+        if (splitMultiArtistCredits(name).length > 1) return
+
         const norm = name.toLowerCase().replace(/[\.\s_,\-]+/g, '')
         if (!norm || norm === 'unknownartist') return
         if (!nameClusters.has(norm)) {
@@ -105,6 +118,7 @@ export class AuditService {
         const nonCanonicalIds = Array.from(
           new Set(nonCanonicalVariants.flatMap((v) => subMap.get(v)!))
         )
+        const detectedVal = nonCanonicalVariants[0] || variants[1] || ''
 
         dynamicIssues.push({
           id: `audit-name-${encodeURIComponent(normKey)}`,
@@ -120,8 +134,22 @@ export class AuditService {
           autoFixAction: 'NORMALIZE_ARTIST_NAMES',
           isAutoFixable: true,
           fixActionLabel: 'Normalize Names',
+          tagField: 'ALBUMARTIST',
+          detectedValue: detectedVal,
+          currentValue: detectedVal,
+          targetValue: canonical,
+          proposedAction: `ALBUMARTIST = "${canonical}"`,
+          canonicalTarget: canonical,
+          parentEntity: canonical,
+          isRoleConflict: false,
+          confidence: 'high_confidence_typo',
         })
-      } else if (rememberedRule && variants[0] !== rememberedRule.targetValue) {
+      } else if (
+        rememberedRule &&
+        variants[0] !== rememberedRule.targetValue &&
+        splitMultiArtistCredits(variants[0]).length <= 1 &&
+        normalizationService.isPlausibleVariant(variants[0], rememberedRule.targetValue)
+      ) {
         // All tracks in this cluster currently share a spelling, but a remembered rule dictates a different canonical form
         const allTrackIds = subMap.get(variants[0]) || []
         dynamicIssues.push({
@@ -136,8 +164,66 @@ export class AuditService {
           autoFixAction: 'NORMALIZE_ARTIST_NAMES',
           isAutoFixable: true,
           fixActionLabel: 'Normalize Names',
+          tagField: 'ALBUMARTIST',
+          detectedValue: variants[0],
+          currentValue: variants[0],
+          targetValue: rememberedRule.targetValue,
+          proposedAction: `ALBUMARTIST = "${rememberedRule.targetValue}"`,
+          canonicalTarget: rememberedRule.targetValue,
+          parentEntity: rememberedRule.targetValue,
+          isRoleConflict: false,
+          confidence: 'high_confidence_typo',
         })
       }
+    })
+
+    // 2b. Detect Performer vs. Composer Role Conflicts (Soundtracks & Compilations)
+    const singerMap = new Map<string, { parent: string; trackIds: string[]; singer: string }>()
+    tracks.forEach((t) => {
+      if (t.pendingSidecarEdits?.roleVerified) return
+      const rel = scopedReleases.find((r) => r.id === t.releaseId)
+      const parentArtist = (rel?.artistCredit || t.composerName || '').trim()
+      const trackArtist = (t.artistCredit || '').trim()
+
+      if (
+        parentArtist &&
+        trackArtist &&
+        parentArtist.toLowerCase() !== 'unknown artist' &&
+        trackArtist.toLowerCase() !== 'unknown artist' &&
+        trackArtist.toLowerCase() !== parentArtist.toLowerCase() &&
+        !normalizationService.isPlausibleVariant(trackArtist, parentArtist)
+      ) {
+        const key = `${parentArtist}:::${trackArtist}`
+        if (!singerMap.has(key)) {
+          singerMap.set(key, { parent: parentArtist, trackIds: [], singer: trackArtist })
+        }
+        singerMap.get(key)!.trackIds.push(t.id)
+      }
+    })
+
+    singerMap.forEach(({ parent, trackIds, singer }, key) => {
+      dynamicIssues.push({
+        id: `audit-role-${encodeURIComponent(key)}`,
+        category: 'compilation_conflict',
+        severity: 'info',
+        title: `Performer vs. Composer: "${singer}"`,
+        description: `Discovered ${trackIds.length} track(s) performed by "${singer}" under album authority "${parent}".`,
+        affectedCount: trackIds.length,
+        sampleTrackIds: trackIds,
+        suggestedFix: `Keep as Track Artist to preserve playback singer credits.`,
+        autoFixAction: 'KEEP_TRACK_ARTIST',
+        isAutoFixable: true,
+        fixActionLabel: 'Keep Singer',
+        tagField: 'ARTIST',
+        detectedValue: singer,
+        currentValue: singer,
+        targetValue: singer,
+        proposedAction: `ARTIST = "${singer}" (Keep Singer)`,
+        canonicalTarget: parent,
+        parentEntity: parent,
+        isRoleConflict: true,
+        confidence: 'role_review_required',
+      })
     })
 
 
@@ -156,6 +242,13 @@ export class AuditService {
         autoFixAction: 'AUTOGEN_TRACK_NUMBERS',
         isAutoFixable: true,
         fixActionLabel: 'Auto-Sequence',
+        tagField: 'TRACK_NUMBER',
+        detectedValue: 'Missing Track Numbers',
+        currentValue: '0 / Null',
+        targetValue: 'Sequential (01..N)',
+        proposedAction: 'TRACKNUMBER = Sequential (01..N)',
+        canonicalTarget: 'Sequential Track Indexing',
+        parentEntity: 'Sequential Track Indexing',
       })
     }
 
@@ -186,6 +279,13 @@ export class AuditService {
           autoFixAction: 'FETCH_HIRES_ART',
           isAutoFixable: true,
           fixActionLabel: 'Fetch Online Art',
+          tagField: 'COVER_ART',
+          detectedValue: 'Low-Res Cover Art (< 800px)',
+          currentValue: '< 800px',
+          targetValue: 'Archival High-Res (Front)',
+          proposedAction: 'COVER = Archival Front Scan',
+          canonicalTarget: 'Artwork & Media Integrity',
+          parentEntity: 'Artwork & Media Integrity',
         })
       }
     }
@@ -214,6 +314,13 @@ export class AuditService {
         autoFixAction: 'SYNC_FOLDER_TO_ALBUM',
         isAutoFixable: true,
         fixActionLabel: 'Sync from Folder',
+        tagField: 'ALBUMARTIST',
+        detectedValue: compilationConflictTracks[0]?.folderName || 'Generic Title Mismatch',
+        currentValue: compilationConflictTracks[0]?.folderName || 'Generic Title',
+        targetValue: 'Sync Directory Name',
+        proposedAction: 'ALBUM = Synchronize from Directory',
+        canonicalTarget: 'Physical Directory Hierarchy',
+        parentEntity: 'Physical Directory Hierarchy',
       })
     }
 
@@ -231,55 +338,46 @@ export class AuditService {
         suggestedFix: 'Corrupted audio stream bytes. Replace or restore original FLAC from bit-perfect backup or re-rip disc.',
         isAutoFixable: false,
         manualActionHint: 'Corrupted audio stream bytes cannot be repaired by metadata sidecars. Re-rip or restore from backup.',
+        tagField: 'METADATA',
+        detectedValue: 'Stream CRC Failure',
+        currentValue: 'Corrupted Stream CRC',
+        targetValue: 'Bit-Perfect Backup',
+        proposedAction: 'Restore Stream from Bit-Perfect Backup',
+        canonicalTarget: 'Bitstream & Checksum Integrity',
+        parentEntity: 'Bitstream & Checksum Integrity',
       })
     }
 
-    // 7. Detect Uncommitted Staged Sidecars
+    // 7. Detect Uncommitted Staged Edits (Awaiting User Review & Commit)
     const uncommittedTrackIds = tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').map((t) => t.id)
     if (uncommittedTrackIds.length > 0) {
       dynamicIssues.push({
         id: 'audit-uncommitted-sidecars',
         category: 'uncommitted_sidecar',
         severity: 'info',
-        title: 'Uncommitted Staged Sidecars',
+        title: `Pending Library Edits (${uncommittedTrackIds.length} tracks)`,
         description: `Found ${uncommittedTrackIds.length} track(s) with pending metadata edits staged in memory.`,
         affectedCount: uncommittedTrackIds.length,
         sampleTrackIds: uncommittedTrackIds,
-        suggestedFix: 'Review staged sidecar diffs and commit changes via Two-Phase Commit modal.',
+        suggestedFix: 'Review and save pending changes, or discard edits to restore original tags.',
         isAutoFixable: false,
-        manualActionHint: 'Pending staged edits in memory. Open Two-Phase Commit modal to write sidecars to disk.',
+        manualActionHint: 'Pending staged edits in memory. Click Review & Save to write to disk or Discard to revert.',
+        tagField: 'METADATA',
+        detectedValue: `${uncommittedTrackIds.length} Pending Edits`,
+        currentValue: `${uncommittedTrackIds.length} Pending Edits`,
+        targetValue: 'Save Changes to Library',
+        proposedAction: 'Review & Save Pending Changes',
+        canonicalTarget: 'Pending Library Changes',
+        parentEntity: 'Pending Library Changes',
       })
-    }
-
-    // 8. Detect Unformatted or Missing Album Backdrops (Panoramic Derivation / Inlay Scans)
-    const unformattedBackdrops = backdropAnalyzer.auditLibraryBackdrops(scopedReleases, tracks)
-    if (unformattedBackdrops.length > 0) {
-      const affectedTrackIds = tracks
-        .filter((t) => unformattedBackdrops.some((u) => u.releaseId === t.releaseId))
-        .map((t) => t.id)
-
-      if (affectedTrackIds.length > 0) {
-        dynamicIssues.push({
-          id: 'audit-unformatted-backdrops',
-          category: 'unformatted_backdrop',
-          severity: 'warning',
-          title: `Unformatted Album Backdrops (${unformattedBackdrops.length} albums)`,
-          description: `Discovered ${unformattedBackdrops.length} album(s) with unformatted backgrounds (missing 2400×320 panoramic derivatives, square crops, or text-heavy inlay scans).`,
-          affectedCount: affectedTrackIds.length,
-          sampleTrackIds: affectedTrackIds,
-          suggestedFix: 'Generate 2400×320 cinematic panoramic wallpaper derivatives with organic ambient diffusion wings.',
-          autoFixAction: 'REWORK_BACKDROP',
-          isAutoFixable: true,
-          fixActionLabel: 'Format Backdrops',
-        })
-      }
     }
 
     // ==========================================
     // Calibrated Production-Grade Health Score Calculation
     // ==========================================
     const totalTracks = tracks.length
-    const activeIssues = dynamicIssues.filter((i) => i.affectedCount > 0)
+    // Exclude auto-verified role conflict issues (playback singers) from health score penalty
+    const activeIssues = dynamicIssues.filter((i) => i.affectedCount > 0 && !i.isRoleConflict)
     let totalPenalty = 0
 
     if (totalTracks > 0 && activeIssues.length > 0) {
@@ -289,14 +387,14 @@ export class AuditService {
 
         if (issue.severity === 'critical') {
           // Critical defects: e.g. untagged tracks or CRC failure
-          // Base deduction 10 points + up to 50 points proportional to library defect percentage
-          itemDeduction = Math.round(10 + ratio * 50)
+          // Base deduction 5 points + up to 25 points proportional to library defect percentage
+          itemDeduction = Math.round(5 + ratio * 25)
         } else if (issue.severity === 'warning') {
           // Warning defects: low-res art, inconsistent names, compilation mismatch
-          itemDeduction = Math.round(4 + ratio * 20)
+          itemDeduction = Math.round(2 + ratio * 12)
         } else {
           // Info defects
-          itemDeduction = Math.round(1 + ratio * 5)
+          itemDeduction = Math.round(1 + ratio * 4)
         }
 
         totalPenalty += itemDeduction
@@ -309,8 +407,8 @@ export class AuditService {
       }
     }
 
-    // Health Score between 0% and 100%
-    const healthScore = totalPenalty === 0 ? 100 : Math.max(0, Math.min(99, 100 - totalPenalty))
+    // Health Score between 10% and 100%
+    const healthScore = totalPenalty === 0 ? 100 : Math.max(10, Math.min(99, 100 - totalPenalty))
     const cleanTracks = Math.max(0, totalTracks - missingArtistTracks.length)
 
     return {
@@ -327,6 +425,7 @@ export class AuditService {
    * (or a specified scope) and persists them in graphEngine.
    */
   public runFullCatalogAudit(scopeTracks?: Track[]): AuditIssue[] {
+    this.lastAuditTimestamp = new Date().toISOString()
     const tracks = scopeTracks || graphEngine.getAllTracks()
     const releases = graphEngine.getAllReleases()
 
@@ -334,30 +433,48 @@ export class AuditService {
       return graphEngine.getAllAuditIssues()
     }
 
+    // Self-healing purge: if any tracks only contain pending backdrop edits from previous audit runs, clean them up
+    tracks.forEach((trk) => {
+      if (trk.sidecarStatus === 'uncommitted_sidecar' && trk.pendingSidecarEdits) {
+        const editKeys = Object.keys(trk.pendingSidecarEdits)
+        if (editKeys.length === 1 && editKeys[0] === 'backdropUrl') {
+          trk.sidecarStatus = 'synced'
+          trk.pendingSidecarEdits = undefined
+          graphEngine.addOrUpdateTrack(trk)
+        }
+      }
+    })
+
     const { issues: dynamicIssues } = this.computeCatalogAudit(tracks, releases)
 
     let finalIssues: AuditIssue[] = []
     if (graphEngine.isUsingCustomLibrary()) {
-      finalIssues = dynamicIssues
+      finalIssues = dynamicIssues.filter((i) => i.category !== 'unformatted_backdrop')
     } else {
-      // In demo catalog mode: merge with existing demo issues
-      const existingIssues = graphEngine.getAllAuditIssues()
+      // In demo catalog mode: merge with existing demo issues, filtering out unformatted_backdrop
+      const existingIssues = graphEngine.getAllAuditIssues().filter((i) => i.category !== 'unformatted_backdrop')
       const mergedMap = new Map<string, AuditIssue>()
       existingIssues.forEach((i) => mergedMap.set(i.id, i))
-      dynamicIssues.forEach((i) => mergedMap.set(i.id, i))
+      dynamicIssues.forEach((i) => {
+        if (i.category !== 'unformatted_backdrop') {
+          mergedMap.set(i.id, i)
+        }
+      })
       finalIssues = Array.from(mergedMap.values())
     }
 
     // Align any audit issues with active remembered normalization rules
     for (const issue of finalIssues) {
-      if (issue.autoFixAction === 'NORMALIZE_ARTIST_NAMES') {
+      if (issue.autoFixAction === 'NORMALIZE_ARTIST_NAMES' && !issue.isRoleConflict) {
         const rawNames = issue.description.match(/"([^"]+)"/g)?.map((s) => s.replace(/"/g, '')) || []
         for (const name of rawNames) {
           const normKey = normalizationService.normalizeKey(name)
           const rule = normalizationService.findRuleForCluster(normKey, rawNames, 'artist')
-          if (rule && rule.isEnabled) {
+          if (rule && rule.isEnabled && normalizationService.isPlausibleVariant(name, rule.targetValue)) {
             issue.suggestedFix = `Standardize to "${rule.targetValue}" matching remembered normalization authority.`
             issue.title = `Inconsistent Artist Name: "${rule.targetValue}" vs variants`
+            issue.parentEntity = rule.targetValue
+            issue.proposedAction = `Normalize to "${rule.targetValue}"`
             break
           }
         }
@@ -524,11 +641,13 @@ export class AuditService {
     const actionToRun = issue.autoFixAction || issueIdOrAction
     switch (actionToRun) {
       case 'NORMALIZE_ARTIST_NAMES': {
-        // Dynamically identify canonical name from suggestedFix or the first sample track
+        // Dynamically identify canonical name from suggestedFix, parentEntity, or sample track
         let canonical = ''
         const match = issue.suggestedFix.match(/to (?:canonical authority )?"([^"]+)"/)
         if (match) {
           canonical = match[1]
+        } else if (issue.parentEntity) {
+          canonical = issue.parentEntity
         } else if (issue.sampleTrackIds.length > 0) {
           const t0 = graphEngine.getTrackById(issue.sampleTrackIds[0])
           if (t0) canonical = t0.artistCredit
@@ -549,25 +668,33 @@ export class AuditService {
         trackIdsToFix.forEach((id) => {
           const trk = graphEngine.getTrackById(id)
           if (trk) {
-            const normTrk = trk.artistCredit.toLowerCase().replace(/[\.\s_,\-]+/g, '')
-            const normCanonical = canonical.toLowerCase().replace(/[\.\s_,\-]+/g, '')
-            if (normTrk === normCanonical || issue.sampleTrackIds.includes(id)) {
-              if (trk.artistCredit && trk.artistCredit !== canonical) {
-                recordedSources.add(trk.artistCredit)
-              }
-              if (trk.composerName && trk.composerName !== canonical) {
-                recordedSources.add(trk.composerName)
-              }
+            const isArtistPlausible = normalizationService.isPlausibleVariant(trk.artistCredit, canonical)
+            const isComposerPlausible = trk.composerName && normalizationService.isPlausibleVariant(trk.composerName, canonical)
+
+            let isModified = false
+            const pendingEdits: Record<string, any> = { ...(trk.pendingSidecarEdits || {}) }
+
+            // Only update artistCredit if it is genuinely a spelling/spacing/typo variant of canonical
+            // and strictly NOT a multi-artist collaboration credit
+            const isMultiArtist = splitMultiArtistCredits(trk.artistCredit).length > 1
+            if (!isMultiArtist && isArtistPlausible && trk.artistCredit !== canonical) {
+              recordedSources.add(trk.artistCredit)
               trk.artistCredit = canonical
-              if (trk.composerName && trk.composerName.toLowerCase().replace(/[\.\s_,\-]+/g, '') === normCanonical) {
-                trk.composerName = canonical
-              }
+              pendingEdits.artistCredit = canonical
+              isModified = true
+            }
+
+            // Update composerName if it is a variant
+            if (isComposerPlausible && trk.composerName !== canonical) {
+              recordedSources.add(trk.composerName!)
+              trk.composerName = canonical
+              pendingEdits.composerName = canonical
+              isModified = true
+            }
+
+            if (isModified) {
               trk.sidecarStatus = 'uncommitted_sidecar'
-              trk.pendingSidecarEdits = {
-                ...(trk.pendingSidecarEdits || {}),
-                artistCredit: canonical,
-                ...(trk.composerName === canonical ? { composerName: canonical } : {}),
-              }
+              trk.pendingSidecarEdits = pendingEdits
               count++
             }
           }
@@ -575,11 +702,11 @@ export class AuditService {
 
         // Also check if issue title or description explicitly mentions the non-canonical variant
         const vsMatch = issue.title.match(/vs\s+"([^"]+)"/) || issue.description.match(/variants?\s+"([^"]+)"/)
-        if (vsMatch && vsMatch[1] && vsMatch[1] !== canonical) {
+        if (vsMatch && vsMatch[1] && vsMatch[1] !== canonical && normalizationService.isPlausibleVariant(vsMatch[1], canonical)) {
           recordedSources.add(vsMatch[1])
         }
 
-        // Persist each normalization rule so it is remembered forever and takes precedence in future enrichment
+        // Persist each normalization rule so it is remembered forever
         recordedSources.forEach((src) => {
           normalizationService.recordNormalization(src, canonical, 'artist')
         })
@@ -587,6 +714,45 @@ export class AuditService {
         this.runFullCatalogAudit()
 
         return { success: true, message: `Normalized ${count} artist tag instances to "${canonical}" in staged sidecars.` }
+      }
+
+      case 'KEEP_TRACK_ARTIST': {
+        let count = 0
+        issue.sampleTrackIds.forEach((id) => {
+          const trk = graphEngine.getTrackById(id)
+          if (trk) {
+            trk.sidecarStatus = 'uncommitted_sidecar'
+            trk.pendingSidecarEdits = {
+              ...(trk.pendingSidecarEdits || {}),
+              roleVerified: true,
+            }
+            count++
+          }
+        })
+        this.runFullCatalogAudit()
+        return { success: true, message: `Preserved ${count} playback singer credit(s) as track artist.` }
+      }
+
+      case 'STANDARDIZE_COMPOSER_ONLY': {
+        let count = 0
+        const canonical = issue.parentEntity || ''
+        if (canonical) {
+          issue.sampleTrackIds.forEach((id) => {
+            const trk = graphEngine.getTrackById(id)
+            if (trk) {
+              trk.composerName = canonical
+              trk.sidecarStatus = 'uncommitted_sidecar'
+              trk.pendingSidecarEdits = {
+                ...(trk.pendingSidecarEdits || {}),
+                composerName: canonical,
+                roleVerified: true,
+              }
+              count++
+            }
+          })
+        }
+        this.runFullCatalogAudit()
+        return { success: true, message: `Standardized composer to "${canonical}" for ${count} track(s) while keeping singer intact.` }
       }
 
       case 'AUTOGEN_TRACK_NUMBERS': {
@@ -969,9 +1135,12 @@ export class AuditService {
         if (targetReleaseId) {
           targetReleases = targetReleases.filter((r) => r.id === targetReleaseId)
         } else if (composerQuery) {
+          const normQuery = composerQuery.toLowerCase().replace(/[\.\-_,]/g, ' ').replace(/\s+/g, ' ').trim()
           targetReleases = targetReleases.filter((r) => {
-            const matchC = r.composerName?.toLowerCase().includes(composerQuery.toLowerCase())
-            const matchA = r.artistCredit?.toLowerCase().includes(composerQuery.toLowerCase())
+            const normC = (r.composerName || '').toLowerCase().replace(/[\.\-_,]/g, ' ').replace(/\s+/g, ' ').trim()
+            const normA = (r.artistCredit || '').toLowerCase().replace(/[\.\-_,]/g, ' ').replace(/\s+/g, ' ').trim()
+            const matchC = normC.includes(normQuery) || (normC.length > 0 && normQuery.includes(normC))
+            const matchA = normA.includes(normQuery) || (normA.length > 0 && normQuery.includes(normA))
             return matchC || matchA
           })
         }

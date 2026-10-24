@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import {
   Bot,
   Sparkles,
@@ -20,10 +20,17 @@ import {
   BarChart3,
   Minimize2,
   Maximize2,
+  RotateCcw,
+  Headphones,
+  Search,
+  CornerDownLeft,
 } from 'lucide-react'
 import { agentSnapshotService, CatalogStatistics, AgentRecommendation } from '../../services/agentSnapshotService'
 import { agentActionDispatcher, AgentActionCommand, AgentDispatcherContext } from '../../services/agentActionDispatcher'
 import { Track, Release } from '../../core/types'
+import { MarkdownText } from './MarkdownText'
+import { CatalogPulseCard } from './CatalogPulseCard'
+import { MicroDiffCard } from './MicroDiffCard'
 
 export interface AgentChatMessage {
   id: string
@@ -43,7 +50,29 @@ interface EmbeddedAgentDrawerProps {
   dispatcherContext: AgentDispatcherContext
   tracks: Track[]
   releases: Release[]
+  currentRelease?: Release | null
+  currentTrack?: Track | null
+  activeTriageLabel?: string
+  activeFilterCount?: number
+  isGridFiltered?: boolean
 }
+
+const DETERMINISTIC_SUGGESTIONS = [
+  { label: 'Filter to 24-bit Hi-Res', prompt: 'Filter catalog to 24-bit and DSD audiophile tracks' },
+  { label: 'Filter to DSD tracks', prompt: 'Filter catalog to DSD format' },
+  { label: 'Filter to FLAC format', prompt: 'Filter catalog to FLAC format' },
+  { label: 'Switch to Virtual Grid', prompt: 'Switch view to virtual grid spreadsheet' },
+  { label: 'Switch to Variant Stacks', prompt: 'Switch view to variant and master pressing stacks' },
+  { label: 'Switch to Works / Movements', prompt: 'Switch view to classical works and movements' },
+  { label: 'Auto-Resolve Unknown Artists', prompt: 'Auto-extract missing artists from directory hierarchy' },
+  { label: 'Normalize fragmented genres', prompt: 'Normalize and clean up genres across albums' },
+  { label: 'Fetch 3000px Archival Artwork', prompt: 'Fetch high-resolution archival cover art from Apple Music' },
+  { label: 'Rework Virtual Grid backdrops', prompt: 'Rework and apply panoramic backdrops across catalog' },
+  { label: 'Run library health scan', prompt: 'Run hygiene check scan on library' },
+  { label: 'Show collection statistics', prompt: 'Give me a complete statistical breakdown of my library' },
+  { label: 'Review staged sidecars (Commit)', prompt: 'Open two-phase commit modal to review staged changes' },
+  { label: 'Clear all active filters', prompt: 'Clear all active catalog filters' },
+]
 
 export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
   isOpen,
@@ -51,12 +80,18 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
   dispatcherContext,
   tracks,
   releases,
+  currentRelease,
+  currentTrack,
+  activeTriageLabel,
+  activeFilterCount,
+  isGridFiltered,
 }) => {
   const [messages, setMessages] = useState<AgentChatMessage[]>([])
   const [inputPrompt, setInputPrompt] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [isExpanded, setIsExpanded] = useState(false)
   const [activeTab, setActiveTab] = useState<'chat' | 'recommendations' | 'stats'>('chat')
+  const [activeEngine, setActiveEngine] = useState<'gemini' | 'local'>('gemini')
   const [pacingCountdown, setPacingCountdown] = useState<number>(0)
   const [isThrottled429, setIsThrottled429] = useState<boolean>(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -80,34 +115,78 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
   const stats = agentSnapshotService.getCatalogStatistics(tracks)
   const recommendations = agentSnapshotService.generateRecommendations(stats)
 
-  // Initial welcome message
-  useEffect(() => {
-    if (messages.length === 0) {
-      setMessages([
-        {
-          id: 'msg-welcome',
-          role: 'agent',
-          text: `👋 **Welcome to Cadence Core Copilot!**\n\nI have live access to your **${stats.totalTracks.toLocaleString()} tracks** across **${stats.totalReleases} albums**.\n\nYou can ask me about **collection statistics**, instruct me to **filter or switch views**, or let me **auto-remediate tagging defects** across your library.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          statsSnapshot: stats,
-          recommendations,
-          suggestedActions: [
-            { label: '📊 Collection Statistics', prompt: 'Give me a complete statistical breakdown of my library' },
-            { label: '⚡ Recommend Next Actions', prompt: 'What actions do you recommend next?' },
-            { label: '📁 Auto-Resolve Unknown Artists', prompt: 'Auto-extract missing artists from directory hierarchy' },
-            { label: '🎧 Filter to Hi-Res 24-bit', prompt: 'Filter catalog to 24-bit and DSD audiophile tracks' },
-          ],
-        },
-      ])
-    }
-  }, [stats.totalTracks])
-
   // Auto-scroll to latest message
   useEffect(() => {
     if (isOpen) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
   }, [messages, isOpen, isLoading])
+
+  // Local scope override state (allows clearing scope without clicking away on canvas)
+  const [isScopeCleared, setIsScopeCleared] = useState(false)
+  const lastReleaseIdRef = useRef<string | undefined>(currentRelease?.id)
+
+  useEffect(() => {
+    if (currentRelease?.id !== lastReleaseIdRef.current) {
+      lastReleaseIdRef.current = currentRelease?.id
+      setIsScopeCleared(false)
+    }
+  }, [currentRelease?.id])
+
+  // Context-aware dynamic scope resolution
+  const scopedTracks = useMemo(() => {
+    if (isScopeCleared) return tracks
+    if (currentRelease) {
+      const relId = currentRelease.id
+      const masterId = currentRelease.masterReleaseId
+      const relTitle = (currentRelease.title || '').trim().toLowerCase()
+      const relFolder = (currentRelease.folderName || '').trim().toLowerCase()
+
+      const matched = tracks.filter((t) => {
+        if (relId && t.releaseId === relId) return true
+        if (masterId && (t.masterReleaseId === masterId || t.releaseId === masterId)) return true
+        const trackAlbum = ((t as any).album || '').trim().toLowerCase()
+        if (relTitle && trackAlbum && trackAlbum === relTitle) return true
+        const trackFolder = (t.folderName || '').trim().toLowerCase()
+        if (relFolder && trackFolder && trackFolder === relFolder) return true
+        if (relTitle && trackFolder && trackFolder === relTitle) return true
+        return false
+      })
+
+      return matched.length > 0 ? matched : [tracks.find((t) => t.id === currentTrack?.id) || tracks[0]].filter(Boolean)
+    }
+    return tracks
+  }, [tracks, currentRelease, currentTrack, isScopeCleared])
+
+  const { scopeType, scopeLabel, scopeDetail } = useMemo(() => {
+    if (!isScopeCleared && currentRelease) {
+      const count = scopedTracks.length || currentRelease.tracksCount || 0
+      return {
+        scopeType: 'album' as const,
+        scopeLabel: `Album: ${currentRelease.title}`,
+        scopeDetail: `${count} tracks`,
+      }
+    }
+    if (!isScopeCleared && activeTriageLabel) {
+      return {
+        scopeType: 'anomaly' as const,
+        scopeLabel: `Anomaly: ${activeTriageLabel}`,
+        scopeDetail: 'Triage Focus',
+      }
+    }
+    if (!isScopeCleared && isGridFiltered) {
+      return {
+        scopeType: 'filter' as const,
+        scopeLabel: 'Active Filter Slice',
+        scopeDetail: `${(activeFilterCount ?? tracks.length).toLocaleString()} tracks`,
+      }
+    }
+    return {
+      scopeType: 'catalog' as const,
+      scopeLabel: 'Catalog-wide',
+      scopeDetail: `${stats.totalTracks.toLocaleString()} tracks`,
+    }
+  }, [isScopeCleared, currentRelease, activeTriageLabel, isGridFiltered, scopedTracks.length, activeFilterCount, tracks.length, stats.totalTracks])
 
   // Direct action execution from buttons/pills
   const handleExecuteAction = async (command: AgentActionCommand) => {
@@ -129,17 +208,18 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
       chatAbortControllerRef.current.abort()
     }
     setIsLoading(false)
+    setActiveEngine('local')
     const text = pendingText || messages[messages.length - 1]?.text || inputPrompt || ''
     const localCmd = agentActionDispatcher.parseLocalIntent(text)
-    let fallbackText = 'Bypassed cloud AI. Executed with local database heuristics.'
+    let fallbackText = 'Bypassed cloud AI. Executed using local deterministic heuristics.'
     let cmdResult = undefined
     if (localCmd) {
       cmdResult = await agentActionDispatcher.executeAction(localCmd, dispatcherContext)
       fallbackText = `Executed action locally: **${cmdResult.message}**`
     } else if (text.toLowerCase().includes('stat') || text.toLowerCase().includes('count')) {
-      fallbackText = `### Live Collection Statistics (Local):\n- **Total Tracks:** ${stats.totalTracks.toLocaleString()}\n- **Albums:** ${stats.totalReleases}\n- **Health Score:** ${stats.healthScore}%\n- **Hi-Res 24-bit / DSD:** ${stats.hiRes24BitCount} tracks`
+      fallbackText = `### Live Collection Statistics (Local Engine):\n- **Total Tracks:** ${stats.totalTracks.toLocaleString()}\n- **Albums:** ${stats.totalReleases}\n- **Health Score:** ${stats.healthScore}%\n- **Hi-Res 24-bit / DSD:** ${stats.hiRes24BitCount} tracks`
     } else {
-      fallbackText = `Bypassed cloud AI. Connected to local catalog of **${stats.totalTracks} tracks**.`
+      fallbackText = `Bypassed cloud AI. Connected to live catalog of **${stats.totalTracks} tracks** via local database engine.`
     }
 
     const agentMsg: AgentChatMessage = {
@@ -191,6 +271,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
       if (chatRes.ok) {
         const data = (await chatRes.json()) as any
+        setActiveEngine('gemini')
         // If data.command is provided, use it; if data returned null/fallback but local intent recognized an action, execute localCmd
         const effectiveCommand = data.command || localCmd
 
@@ -212,8 +293,8 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
           command: effectiveCommand,
           commandResult: cmdResult,
           suggestedActions: data.suggestedActions || [
-            { label: '📊 Statistics', prompt: 'Show library statistics' },
-            { label: '⚡ Recommendations', prompt: 'What actions do you recommend next?' },
+            { label: 'Statistics', prompt: 'Show library statistics' },
+            { label: 'Recommendations', prompt: 'What actions do you recommend next?' },
           ],
         }
 
@@ -222,20 +303,22 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
         if (chatRes.status === 429) {
           setIsThrottled429(true)
         }
+        setActiveEngine('local')
         throw new Error(`Server returned HTTP ${chatRes.status}`)
       }
     } catch {
       // Offline / network failure fallback: use deterministic local intent
-      let fallbackText = 'I am connected to your live catalog database.'
+      setActiveEngine('local')
+      let fallbackText = 'I am connected to your live catalog database via local engine.'
       let cmdResult = undefined
 
       if (localCmd) {
         cmdResult = await agentActionDispatcher.executeAction(localCmd, dispatcherContext)
-        fallbackText = `Executed action: **${cmdResult.message}**`
+        fallbackText = `Executed action locally: **${cmdResult.message}**`
       } else if (textToSend.toLowerCase().includes('stat') || textToSend.toLowerCase().includes('count')) {
-        fallbackText = `### Live Collection Statistics:\n- **Total Tracks:** ${stats.totalTracks.toLocaleString()}\n- **Albums:** ${stats.totalReleases}\n- **Health Score:** ${stats.healthScore}%\n- **Hi-Res 24-bit / DSD:** ${stats.hiRes24BitCount} tracks\n- **Mean DR:** ${stats.averageDrScore}`
+        fallbackText = `### Live Collection Statistics (Local):\n- **Total Tracks:** ${stats.totalTracks.toLocaleString()}\n- **Albums:** ${stats.totalReleases}\n- **Health Score:** ${stats.healthScore}%\n- **Hi-Res 24-bit / DSD:** ${stats.hiRes24BitCount} tracks\n- **Mean DR:** ${stats.averageDrScore}`
       } else {
-        fallbackText = `I have indexed **${stats.totalTracks} tracks**. You can instruct me to filter by format, composer, or trigger automated batch hygiene cleanups.`
+        fallbackText = `I have indexed **${stats.totalTracks.toLocaleString()} tracks**. You can instruct me to filter by format, composer, or trigger automated batch hygiene cleanups.`
       }
 
       const agentMsg: AgentChatMessage = {
@@ -246,9 +329,9 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
         command: localCmd,
         commandResult: cmdResult,
         suggestedActions: [
-          { label: '📊 Library Stats', prompt: 'Give me library stats' },
-          { label: '📁 Auto-Resolve Artists', prompt: 'Extract missing artists from folder hierarchy' },
-          { label: '⚡ Next Actions', prompt: 'What actions do you recommend next?' },
+          { label: 'Library Stats', prompt: 'Give me library stats' },
+          { label: 'Auto-Resolve Artists', prompt: 'Extract missing artists from folder hierarchy' },
+          { label: 'Next Actions', prompt: 'What actions do you recommend next?' },
         ],
       }
       setMessages((prev) => [...prev, agentMsg])
@@ -256,6 +339,15 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
       setIsLoading(false)
     }
   }
+
+  // Live Autocomplete Suggestions based on typing
+  const liveAutocompleteSuggestions = useMemo(() => {
+    const q = inputPrompt.trim().toLowerCase()
+    if (q.length < 2) return []
+    return DETERMINISTIC_SUGGESTIONS.filter(
+      (s) => s.label.toLowerCase().includes(q) || s.prompt.toLowerCase().includes(q)
+    ).slice(0, 4)
+  }, [inputPrompt])
 
   if (!isOpen) return null
 
@@ -275,9 +367,15 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
               <span className="font-bold text-white text-sm tracking-wide">Cadence Copilot</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#00F5FF]/15 text-[#00F5FF] border border-[#00F5FF]/30">
-                Gemini 3.7 AI
-              </span>
+              {activeEngine === 'gemini' ? (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#00F5FF]/15 text-[#00F5FF] border border-[#00F5FF]/30">
+                  Gemini 3.7 AI
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                  Local Deterministic (Offline)
+                </span>
+              )}
             </div>
             <span className="text-[10px] text-[#94A3B8]">
               Live Database Connected &bull; {stats.totalTracks.toLocaleString()} Tracks Synced
@@ -286,17 +384,26 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
         </div>
 
         <div className="flex items-center gap-1">
+          {messages.length > 0 && (
+            <button
+              onClick={() => setMessages([])}
+              title="Reset conversation to Catalog Pulse"
+              className="p-1.5 rounded-lg hover:bg-white/[0.08] text-[#94A3B8] hover:text-white transition-colors cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
           <button
             onClick={() => setIsExpanded(!isExpanded)}
             title={isExpanded ? 'Collapse width' : 'Expand width'}
-            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-[#94A3B8] hover:text-white transition-colors"
+            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-[#94A3B8] hover:text-white transition-colors cursor-pointer"
           >
             {isExpanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
           <button
             onClick={onClose}
             title="Close Copilot (Esc)"
-            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-[#94A3B8] hover:text-white transition-colors"
+            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-[#94A3B8] hover:text-white transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -304,22 +411,22 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
       </div>
 
       {/* 2. Mode Tabs */}
-      <div className="px-4 py-2 border-b border-white/[0.06] bg-black/20 flex items-center gap-2 text-xs">
+      <div className="px-4 py-2 border-b border-white/[0.06] bg-black/20 flex items-center gap-1.5 text-xs overflow-x-auto no-scrollbar">
         <button
           onClick={() => setActiveTab('chat')}
-          className={`flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition-all ${
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 ${
             activeTab === 'chat'
               ? 'bg-[#00F5FF]/20 text-[#00F5FF] border border-[#00F5FF]/40'
               : 'text-[#94A3B8] hover:text-white hover:bg-white/[0.04]'
           }`}
         >
           <Bot className="w-3.5 h-3.5" />
-          <span>Copilot Chat</span>
+          <span>Workbench</span>
         </button>
 
         <button
           onClick={() => setActiveTab('recommendations')}
-          className={`flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition-all ${
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 ${
             activeTab === 'recommendations'
               ? 'bg-[#ADFF2F]/20 text-[#ADFF2F] border border-[#ADFF2F]/40'
               : 'text-[#94A3B8] hover:text-white hover:bg-white/[0.04]'
@@ -331,7 +438,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
         <button
           onClick={() => setActiveTab('stats')}
-          className={`flex items-center gap-1.5 px-3 py-1 rounded-lg font-medium transition-all ${
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 ${
             activeTab === 'stats'
               ? 'bg-white/[0.1] text-white border border-white/[0.2]'
               : 'text-[#94A3B8] hover:text-white hover:bg-white/[0.04]'
@@ -344,12 +451,25 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
       {/* 2.5 Context Scope & Staging Banner */}
       <div className="px-4 py-1.5 border-b border-white/[0.04] bg-white/[0.015] flex items-center justify-between text-[11px] text-[#94A3B8]">
-        <div className="flex items-center gap-2">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#00F5FF]" />
-          <span>Scope: <strong className="text-white font-medium">Catalog-wide</strong> ({stats.totalTracks.toLocaleString()} tracks)</span>
+        <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#00F5FF] shrink-0" />
+          <span className="truncate">
+            Scope: <strong className="text-white font-medium">{scopeLabel}</strong>
+            {scopeDetail && <span className="text-[#64748B]"> ({scopeDetail})</span>}
+          </span>
+          {scopeType !== 'catalog' && (
+            <button
+              onClick={() => setIsScopeCleared(true)}
+              title="Reset scope to Catalog-wide"
+              className="ml-1.5 px-1.5 py-0.5 rounded bg-white/[0.06] hover:bg-white/[0.12] text-[#94A3B8] hover:text-white text-[10px] font-mono shrink-0 cursor-pointer flex items-center gap-0.5 transition-colors"
+            >
+              <X className="w-2.5 h-2.5" />
+              <span>Clear Scope</span>
+            </button>
+          )}
         </div>
         {stats.uncommittedSidecars > 0 && (
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             <span className="text-[#ADFF2F] font-mono text-[10px] font-semibold">
               ● {stats.uncommittedSidecars} Staged
             </span>
@@ -373,155 +493,98 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
         {activeTab === 'chat' && (
           <>
-            {/* Message Thread */}
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex flex-col gap-1.5 text-xs ${
-                  msg.role === 'user'
-                    ? 'items-end'
-                    : msg.role === 'system'
-                    ? 'items-center my-1'
-                    : 'items-start'
-                }`}
-              >
-                {msg.role === 'system' ? (
-                  <div className="px-3 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-[11px] font-mono text-[#00F5FF] flex items-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981]" />
-                    <span>{msg.text}</span>
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex items-center gap-1.5 px-1 text-[10px] text-[#64748B]">
-                      <span>{msg.role === 'user' ? 'You' : 'Cadence Agent'}</span>
-                      <span>&bull;</span>
-                      <span>{msg.timestamp}</span>
+            {/* If no chat messages have been sent yet, render the Catalog Pulse Bento Card */}
+            {messages.length === 0 ? (
+              <CatalogPulseCard
+                stats={stats}
+                scopeType={scopeType}
+                scopeLabel={scopeLabel}
+                scopeDetail={scopeDetail}
+                albumTitle={currentRelease?.title}
+                onSelectAction={(prompt) => handleSubmit(prompt)}
+              />
+            ) : (
+              /* Message Thread */
+              messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex flex-col gap-1.5 text-xs ${
+                    msg.role === 'user'
+                      ? 'items-end'
+                      : msg.role === 'system'
+                      ? 'items-center my-1'
+                      : 'items-start'
+                  }`}
+                >
+                  {msg.role === 'system' ? (
+                    <div className="px-3 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-[11px] font-mono text-[#00F5FF] flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981]" />
+                      <span>{msg.text}</span>
                     </div>
-
-                    <div
-                      className={`p-3 rounded-2xl max-w-[92%] leading-relaxed ${
-                        msg.role === 'user'
-                          ? 'bg-[#00F5FF] text-black font-medium rounded-tr-sm shadow-md'
-                          : 'bg-[#151922] text-[#F1F5F9] border border-white/[0.08] rounded-tl-sm'
-                      }`}
-                    >
-                      <div className="whitespace-pre-wrap font-sans text-xs flex flex-col gap-2">
-                        {msg.text.split('\n\n').map((para, i) => (
-                          <p key={i} className="leading-relaxed">
-                            {para}
-                          </p>
-                        ))}
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-1.5 px-1 text-[10px] text-[#64748B]">
+                        <span>{msg.role === 'user' ? 'You' : 'Cadence Agent'}</span>
+                        <span>&bull;</span>
+                        <span>{msg.timestamp}</span>
                       </div>
 
-                      {/* Attached Command Result Card */}
-                      {msg.command && (
-                        <div className="mt-2.5 p-2.5 rounded-xl bg-black/40 border border-white/[0.08] flex flex-col gap-2 text-[11px]">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2 text-[#00F5FF]">
-                              <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                              <span className="font-mono font-medium">{msg.command.explanation || msg.command.tool}</span>
-                            </div>
-                            {msg.commandResult && (
-                              <span
-                                className={`px-2 py-0.5 rounded font-mono text-[10px] font-semibold shrink-0 ${
-                                  msg.commandResult.success
-                                    ? 'bg-[#10B981]/20 text-[#10B981]'
-                                    : 'bg-[#F43F5E]/20 text-[#F43F5E]'
-                                }`}
+                      <div
+                        className={`p-3 rounded-2xl max-w-[92%] leading-relaxed ${
+                          msg.role === 'user'
+                            ? 'bg-[#00F5FF] text-black font-medium rounded-tr-sm shadow-md'
+                            : 'bg-[#151922] text-[#F1F5F9] border border-white/[0.08] rounded-tl-sm'
+                        }`}
+                      >
+                        {msg.role === 'user' ? (
+                          <div className="whitespace-pre-wrap font-sans text-xs">{msg.text}</div>
+                        ) : (
+                          <MarkdownText text={msg.text} />
+                        )}
+
+                        {/* Rich Interactive Micro-Diff Card with Checkpoint Undo */}
+                        {msg.command && (
+                          <MicroDiffCard
+                            command={msg.command}
+                            commandResult={msg.commandResult || { success: true, message: 'Executed action.' }}
+                            dispatcherContext={dispatcherContext}
+                            checkpointId={msg.commandResult?.data?.snapshotId || msg.commandResult?.data?.pipelineId}
+                          />
+                        )}
+                      </div>
+
+                      {/* Clean Semantic Suggested Action Pills */}
+                      {msg.suggestedActions && msg.suggestedActions.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-1 max-w-[92%]">
+                          {msg.suggestedActions.map((action, idx) => {
+                            const isMutate =
+                              action.prompt.toLowerCase().includes('auto') ||
+                              action.prompt.toLowerCase().includes('remediate') ||
+                              action.prompt.toLowerCase().includes('fetch') ||
+                              action.prompt.toLowerCase().includes('rework') ||
+                              action.prompt.toLowerCase().includes('normalize')
+                            return (
+                              <button
+                                key={idx}
+                                onClick={() => handleSubmit(action.prompt)}
+                                className="px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-[#00F5FF]/15 border border-white/[0.08] hover:border-[#00F5FF]/30 text-[#94A3B8] hover:text-[#00F5FF] text-[11px] transition-all flex items-center gap-1.5 cursor-pointer"
                               >
-                                {msg.commandResult.success ? 'Executed' : 'Failed'}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Multi-Step Pipeline Stepper Breakdown */}
-                          {msg.command.tool === 'execute_pipeline' && msg.commandResult?.data?.stepResults && (
-                            <div className="pt-2 border-t border-white/[0.06] flex flex-col gap-1.5">
-                              <div className="flex items-center justify-between text-[10px] text-[#94A3B8]">
-                                <span>Pipeline Operations</span>
-                                <span className="font-mono text-[#00F5FF]">
-                                  {msg.commandResult.data.executed} of {msg.commandResult.data.total} completed
-                                </span>
-                              </div>
-                              <div className="flex flex-col gap-1">
-                                {msg.commandResult.data.stepResults.map((s: any, sIdx: number) => (
-                                  <div
-                                    key={sIdx}
-                                    className="flex items-center justify-between px-2 py-1 rounded bg-white/[0.03] text-[10px]"
-                                  >
-                                    <span className="text-[#CBD5E1] truncate mr-2 font-mono">
-                                      {sIdx + 1}. {s.explanation || s.message || s.tool}
-                                    </span>
-                                    <span
-                                      className={`px-1.5 py-0.2 rounded font-mono text-[9px] ${
-                                        s.success ? 'text-[#10B981] bg-[#10B981]/15' : 'text-[#F43F5E] bg-[#F43F5E]/15'
-                                      }`}
-                                    >
-                                      {s.success ? '✓ Done' : '✕ Failed'}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Single Action Result Message */}
-                          {msg.commandResult?.message && msg.command.tool !== 'execute_pipeline' && (
-                            <div className="text-[10px] text-[#94A3B8] font-mono leading-relaxed">
-                              {msg.commandResult.message}
-                            </div>
-                          )}
-
-                          {/* Non-Destructive Sidecar Commit Quick-Action */}
-                          {msg.commandResult?.success &&
-                            (msg.command.tool === 'remediate_issue' ||
-                              msg.command.tool === 'rework_backdrop' ||
-                              msg.command.tool === 'stage_metadata' ||
-                              (msg.command.tool === 'execute_pipeline' &&
-                                msg.command.args?.commands?.some(
-                                  (c: any) => c.tool === 'remediate_issue' || c.tool === 'rework_backdrop'
-                                ))) && (
-                              <div className="pt-1.5 border-t border-white/[0.06] flex items-center justify-between text-[10px]">
-                                <span className="text-[#ADFF2F] flex items-center gap-1 font-mono">
-                                  <span>●</span> Edits staged in sidecars
-                                </span>
-                                <button
-                                  onClick={() =>
-                                    handleExecuteAction({
-                                      tool: 'open_modal',
-                                      args: { modalName: 'commit' },
-                                      explanation: 'Review and commit staged sidecars to disk.',
-                                    })
-                                  }
-                                  className="px-2 py-0.5 rounded bg-[#00F5FF]/15 hover:bg-[#00F5FF]/25 text-[#00F5FF] font-medium transition-colors cursor-pointer"
-                                >
-                                  Review in Two-Phase Commit &rarr;
-                                </button>
-                              </div>
-                            )}
+                                {isMutate ? (
+                                  <Zap className="w-3 h-3 text-[#ADFF2F]" />
+                                ) : (
+                                  <Sparkles className="w-3 h-3 text-[#00F5FF]" />
+                                )}
+                                <span>{action.label.replace(/^[📊⚡📁🎧]\s*/, '')}</span>
+                              </button>
+                            )
+                          })}
                         </div>
                       )}
-                    </div>
-
-                    {/* Suggested Action Pills */}
-                    {msg.suggestedActions && msg.suggestedActions.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mt-1 max-w-[92%]">
-                        {msg.suggestedActions.map((action, idx) => (
-                          <button
-                            key={idx}
-                            onClick={() => handleSubmit(action.prompt)}
-                            className="px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-[#00F5FF]/15 border border-white/[0.08] hover:border-[#00F5FF]/30 text-[#94A3B8] hover:text-[#00F5FF] text-[11px] transition-all flex items-center gap-1 cursor-pointer"
-                          >
-                            <Zap className="w-3 h-3 text-[#ADFF2F]" />
-                            <span>{action.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            ))}
+                    </>
+                  )}
+                </div>
+              ))
+            )}
 
             {isLoading && (
               <div className="flex flex-col gap-2 p-3.5 rounded-xl bg-[#12151D] border border-white/[0.08] shadow-lg max-w-[92%] animate-in fade-in duration-150">
@@ -687,8 +750,28 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
         )}
       </div>
 
-      {/* 4. Input Console */}
+      {/* 4. Input Console with Instant Autocomplete */}
       <div className="p-3 border-t border-white/[0.08] bg-[#12151D]/90 flex flex-col gap-2">
+        {/* Instant Autocomplete Chips */}
+        {liveAutocompleteSuggestions.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 p-1.5 rounded-xl bg-black/40 border border-white/[0.06] animate-in fade-in duration-100">
+            {liveAutocompleteSuggestions.map((s, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => {
+                  setInputPrompt(s.prompt)
+                  handleSubmit(s.prompt)
+                }}
+                className="px-2 py-0.5 rounded-lg bg-white/[0.05] hover:bg-[#00F5FF]/20 text-[#CBD5E1] hover:text-[#00F5FF] text-[10px] font-mono flex items-center gap-1 transition-all cursor-pointer"
+              >
+                <Search className="w-2.5 h-2.5 text-[#00F5FF]" />
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <form
           onSubmit={(e) => {
             e.preventDefault()
