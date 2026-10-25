@@ -905,6 +905,8 @@ export class RelationalGraphEngine {
       if (trk.composerName === source || trk.artistCredit.includes(source)) {
         const nextComposer = trk.composerName === source ? canonical : trk.composerName
         const nextArtist = trk.artistCredit.replace(source, canonical)
+        const origComp = trk.composerName
+        const origArt = trk.artistCredit
         const updated = {
           ...trk,
           composerName: nextComposer,
@@ -913,6 +915,8 @@ export class RelationalGraphEngine {
           pendingSidecarEdits: {
             composerName: nextComposer,
             artistCredit: nextArtist,
+            originalComposerName: origComp,
+            originalArtistCredit: origArt,
           },
         }
         this.tracks.set(id, updated)
@@ -964,7 +968,8 @@ export class RelationalGraphEngine {
           pendingSidecarEdits: {
             ...(trk.pendingSidecarEdits || {}),
             artistCredit: nextArtist,
-            ...(nextComposer ? { composerName: nextComposer } : {}),
+            originalArtistCredit: trk.artistCredit,
+            ...(nextComposer ? { composerName: nextComposer, originalComposerName: trk.composerName } : {}),
           },
         }
         this.tracks.set(id, updated)

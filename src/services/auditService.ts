@@ -679,6 +679,7 @@ export class AuditService {
             const isMultiArtist = splitMultiArtistCredits(trk.artistCredit).length > 1
             if (!isMultiArtist && isArtistPlausible && trk.artistCredit !== canonical) {
               recordedSources.add(trk.artistCredit)
+              pendingEdits.originalArtistCredit = trk.artistCredit
               trk.artistCredit = canonical
               pendingEdits.artistCredit = canonical
               isModified = true
@@ -687,6 +688,7 @@ export class AuditService {
             // Update composerName if it is a variant
             if (isComposerPlausible && trk.composerName !== canonical) {
               recordedSources.add(trk.composerName!)
+              pendingEdits.originalComposerName = trk.composerName
               trk.composerName = canonical
               pendingEdits.composerName = canonical
               isModified = true
@@ -740,10 +742,12 @@ export class AuditService {
           issue.sampleTrackIds.forEach((id) => {
             const trk = graphEngine.getTrackById(id)
             if (trk) {
+              const origComp = trk.composerName
               trk.composerName = canonical
               trk.sidecarStatus = 'uncommitted_sidecar'
               trk.pendingSidecarEdits = {
                 ...(trk.pendingSidecarEdits || {}),
+                originalComposerName: origComp,
                 composerName: canonical,
                 roleVerified: true,
               }
@@ -784,10 +788,12 @@ export class AuditService {
               }
             }
 
+            const origTrackNum = trk.trackNumber
             trk.trackNumber = nextNo
             trk.sidecarStatus = 'uncommitted_sidecar'
             trk.pendingSidecarEdits = {
               ...(trk.pendingSidecarEdits || {}),
+              originalTrackNumber: origTrackNum,
               trackNumber: nextNo,
             }
             count++

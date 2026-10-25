@@ -30,6 +30,7 @@ import {
   Mic,
 } from 'lucide-react'
 import { Track, Release, AuditIssue, StorageMount, WatchedFolder, SkippedFile, ActiveEntityScope } from '../../core/types'
+import { graphEngine } from '../../core/graphEngine'
 import { normalizationService, NormalizationRule } from '../../services/normalizationService'
 import { auditService } from '../../services/auditService'
 import { tauriBridge, MaintenanceStats } from '../../services/tauriBridge'

@@ -61,80 +61,165 @@ function getTrackRealEdits(track: Track, release?: Release): FieldDiff[] {
   const pending = track.pendingSidecarEdits || {}
   const diffs: FieldDiff[] = []
 
-  if (pending.trackNumber !== undefined && pending.trackNumber !== track.trackNumber) {
-    diffs.push({
-      key: 'trackNumber',
-      label: 'Track Number',
-      current: track.trackNumber ? `#${String(track.trackNumber).padStart(2, '0')}` : '<none>',
-      proposed: `#${String(pending.trackNumber).padStart(2, '0')}`,
-      icon: Music,
-    })
+  // Track Number
+  if (pending.trackNumber !== undefined) {
+    const orig = (pending as any).originalTrackNumber
+    if (orig !== undefined && orig !== pending.trackNumber) {
+      diffs.push({
+        key: 'trackNumber',
+        label: 'Track Number',
+        current: orig ? `#${String(orig).padStart(2, '0')}` : '<none>',
+        proposed: `#${String(pending.trackNumber).padStart(2, '0')}`,
+        icon: Music,
+      })
+    } else if (pending.trackNumber !== track.trackNumber) {
+      diffs.push({
+        key: 'trackNumber',
+        label: 'Track Number',
+        current: track.trackNumber ? `#${String(track.trackNumber).padStart(2, '0')}` : '<none>',
+        proposed: `#${String(pending.trackNumber).padStart(2, '0')}`,
+        icon: Music,
+      })
+    }
   }
 
-  if (pending.title && pending.title !== track.title) {
-    diffs.push({
-      key: 'title',
-      label: 'Track Title',
-      current: track.title,
-      proposed: pending.title,
-      icon: Music,
-    })
+  // Title
+  if (pending.title) {
+    const orig = (pending as any).originalTitle
+    if (orig && orig !== pending.title) {
+      diffs.push({
+        key: 'title',
+        label: 'Track Title',
+        current: orig,
+        proposed: pending.title,
+        icon: Music,
+      })
+    } else if (pending.title !== track.title) {
+      diffs.push({
+        key: 'title',
+        label: 'Track Title',
+        current: track.title,
+        proposed: pending.title,
+        icon: Music,
+      })
+    }
   }
 
+  // Album Title
   const curAlbum = release?.title || track.folderName || ''
   const proposedAlbum = pending.album || pending.releaseTitle
-  if (proposedAlbum && proposedAlbum !== curAlbum) {
-    diffs.push({
-      key: 'album',
-      label: 'Album Title',
-      current: curAlbum || '<none>',
-      proposed: proposedAlbum,
-      icon: Disc3,
-    })
+  if (proposedAlbum) {
+    const orig = (pending as any).originalAlbum || (pending as any).originalReleaseTitle
+    if (orig && orig !== proposedAlbum) {
+      diffs.push({
+        key: 'album',
+        label: 'Album Title',
+        current: orig,
+        proposed: proposedAlbum,
+        icon: Disc3,
+      })
+    } else if (proposedAlbum !== curAlbum) {
+      diffs.push({
+        key: 'album',
+        label: 'Album Title',
+        current: curAlbum || '<none>',
+        proposed: proposedAlbum,
+        icon: Disc3,
+      })
+    }
   }
 
+  // Year
   const curYear = release?.releaseYear || release?.originalYear
-  if (pending.year !== undefined && !isNaN(Number(pending.year)) && Number(pending.year) !== curYear) {
-    diffs.push({
-      key: 'year',
-      label: 'Release Year',
-      current: curYear ? String(curYear) : '<empty>',
-      proposed: String(pending.year),
-      icon: Disc3,
-    })
+  if (pending.year !== undefined && !isNaN(Number(pending.year))) {
+    const orig = (pending as any).originalYear
+    if (orig !== undefined && Number(orig) !== Number(pending.year)) {
+      diffs.push({
+        key: 'year',
+        label: 'Release Year',
+        current: String(orig),
+        proposed: String(pending.year),
+        icon: Disc3,
+      })
+    } else if (Number(pending.year) !== curYear) {
+      diffs.push({
+        key: 'year',
+        label: 'Release Year',
+        current: curYear ? String(curYear) : '<empty>',
+        proposed: String(pending.year),
+        icon: Disc3,
+      })
+    }
   }
 
-  if (pending.artistCredit && pending.artistCredit !== track.artistCredit) {
-    diffs.push({
-      key: 'artistCredit',
-      label: 'Artist Credit',
-      current: track.artistCredit || '<empty>',
-      proposed: pending.artistCredit,
-      icon: User,
-    })
+  // Artist Credit
+  if (pending.artistCredit) {
+    const orig = (pending as any).originalArtistCredit
+    if (orig && orig !== pending.artistCredit) {
+      diffs.push({
+        key: 'artistCredit',
+        label: 'Artist Credit',
+        current: orig,
+        proposed: pending.artistCredit,
+        icon: User,
+      })
+    } else if (pending.artistCredit !== track.artistCredit) {
+      diffs.push({
+        key: 'artistCredit',
+        label: 'Artist Credit',
+        current: track.artistCredit || '<empty>',
+        proposed: pending.artistCredit,
+        icon: User,
+      })
+    }
   }
 
+  // Composer Name
   const curComposer = track.composerName || ''
-  if (pending.composerName && pending.composerName !== curComposer) {
-    diffs.push({
-      key: 'composerName',
-      label: 'Composer',
-      current: curComposer || '<empty>',
-      proposed: pending.composerName,
-      icon: User,
-    })
+  if (pending.composerName) {
+    const orig = (pending as any).originalComposerName
+    if (orig && orig !== pending.composerName) {
+      diffs.push({
+        key: 'composerName',
+        label: 'Composer',
+        current: orig,
+        proposed: pending.composerName,
+        icon: User,
+      })
+    } else if (pending.composerName !== curComposer) {
+      diffs.push({
+        key: 'composerName',
+        label: 'Composer',
+        current: curComposer || '<empty>',
+        proposed: pending.composerName,
+        icon: User,
+      })
+    }
   }
 
-  if (pending.discNumber !== undefined && pending.discNumber !== track.discNumber) {
-    diffs.push({
-      key: 'discNumber',
-      label: 'Disc Number',
-      current: track.discNumber ? `Disc ${track.discNumber}` : '<none>',
-      proposed: `Disc ${pending.discNumber}`,
-      icon: Disc3,
-    })
+  // Disc Number
+  if (pending.discNumber !== undefined) {
+    const orig = (pending as any).originalDiscNumber
+    if (orig !== undefined && orig !== pending.discNumber) {
+      diffs.push({
+        key: 'discNumber',
+        label: 'Disc Number',
+        current: orig ? `Disc ${orig}` : '<none>',
+        proposed: `Disc ${pending.discNumber}`,
+        icon: Disc3,
+      })
+    } else if (pending.discNumber !== track.discNumber) {
+      diffs.push({
+        key: 'discNumber',
+        label: 'Disc Number',
+        current: track.discNumber ? `Disc ${track.discNumber}` : '<none>',
+        proposed: `Disc ${pending.discNumber}`,
+        icon: Disc3,
+      })
+    }
   }
 
+  // Movement
   const curMov = track.movementNumber || ''
   if (pending.movementNumber !== undefined && pending.movementNumber !== curMov) {
     diffs.push({
@@ -196,15 +281,23 @@ function getTrackRealEdits(track: Track, release?: Release): FieldDiff[] {
         'targetFilePath',
         'credits',
         'sidecarStatus',
+        'originalArtistCredit',
+        'originalComposerName',
+        'originalTrackNumber',
+        'originalDiscNumber',
+        'originalYear',
+        'originalAlbum',
+        'originalTitle',
+        'originalReleaseTitle',
       ].includes(k)
     ) {
       const curVal = String((track as any)[k] ?? '')
       const propVal = String(val ?? '')
-      if (propVal && propVal !== curVal) {
+      if (propVal && (propVal !== curVal || !(k in track))) {
         diffs.push({
           key: k,
           label: k.replace(/([A-Z])/g, ' $1'),
-          current: curVal || '<empty>',
+          current: curVal || '<none>',
           proposed: propVal,
           icon: FileCode,
         })
@@ -299,12 +392,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 
   // Filtered tracks based on category and search query
   const filteredTracks = useMemo(() => {
-    let list = uncommittedTracks.filter((t) => {
-      const rel = releaseMap.get(t.releaseId)
-      const realEdits = getTrackRealEdits(t, rel)
-      const hasArtwork = Boolean(t.pendingSidecarEdits?.coverArtUrl)
-      return realEdits.length > 0 || hasArtwork
-    })
+    let list = uncommittedTracks
 
     if (filterCategory === 'metadata') {
       list = list.filter((t) => {
@@ -810,9 +898,17 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            {stagedCoverArt && (
+                            {stagedCoverArt ? (
                               <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
                                 Cover Art Updated
+                              </span>
+                            ) : relTracks.some((t) => getTrackRealEdits(t, release).length > 0) ? (
+                              <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                                Tag Edits Staged
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                                Sidecar Staged
                               </span>
                             )}
                             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-zinc-300 border border-white/10">
@@ -1010,7 +1106,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                   ) : (
                                     <div className="ml-6 text-[11px] font-mono text-zinc-500 flex items-center gap-1.5">
                                       <Check className="w-3 h-3 text-emerald-400" />
-                                      <span>Audio tags identical to current file • Album artwork updated</span>
+                                      <span>
+                                        {track.pendingSidecarEdits?.coverArtUrl
+                                          ? 'Audio tags identical to current file • Album artwork updated'
+                                          : 'Staged for sidecar ledger creation (cadence-album.sidecar.json) • Bit-perfect audio tags intact'}
+                                      </span>
                                     </div>
                                   )}
                                 </div>
