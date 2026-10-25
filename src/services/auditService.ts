@@ -256,6 +256,8 @@ export class AuditService {
     const lowResReleases = scopedReleases.filter(
       (r) =>
         r.artwork?.isLowRes ||
+        !r.artwork?.frontCoverUrl ||
+        !r.artwork.frontCoverUrl.trim() ||
         !r.artwork?.width ||
         r.artwork.width < 800 ||
         r.artwork.resolution === 'No Embedded Art' ||
@@ -267,6 +269,16 @@ export class AuditService {
         .map((t) => t.id)
 
       if (affectedTrackIds.length > 0) {
+        const missingCount = lowResReleases.filter(
+          (r) => !r.artwork?.frontCoverUrl || !r.artwork.frontCoverUrl.trim()
+        ).length
+        const isAllMissing = missingCount === lowResReleases.length
+        const detectedVal = isAllMissing
+          ? 'Missing Cover Artwork'
+          : missingCount > 0
+          ? `${missingCount} Missing / ${lowResReleases.length - missingCount} Low-Res (< 800px)`
+          : 'Low-Res Cover Art (< 800px)'
+
         dynamicIssues.push({
           id: 'audit-low-res-art',
           category: 'low_res_art',
@@ -275,13 +287,13 @@ export class AuditService {
           description: `Found ${lowResReleases.length} album(s) (${affectedTrackIds.length} tracks) lacking archival artwork.`,
           affectedCount: affectedTrackIds.length,
           sampleTrackIds: affectedTrackIds,
-          suggestedFix: 'Search Cover Art Archive and iTunes for archival album cover art.',
+          suggestedFix: 'Search Cover Art Archive and Apple Music for archival album cover art.',
           autoFixAction: 'FETCH_HIRES_ART',
           isAutoFixable: true,
           fixActionLabel: 'Fetch Online Art',
           tagField: 'COVER_ART',
-          detectedValue: 'Low-Res Cover Art (< 800px)',
-          currentValue: '< 800px',
+          detectedValue: detectedVal,
+          currentValue: isAllMissing ? 'No Cover Art' : '< 800px',
           targetValue: 'Archival High-Res (Front)',
           proposedAction: 'COVER = Archival Front Scan',
           canonicalTarget: 'Artwork & Media Integrity',

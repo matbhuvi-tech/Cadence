@@ -153,7 +153,7 @@ export const getIssueDetectedValue = (issue: AuditIssue, canonicalTarget: string
 
   // 5. Domain fallbacks
   if (issue.category === 'uncommitted_sidecar') return `${issue.affectedCount} Pending Edits`
-  if (issue.category === 'low_res_art') return 'Low-Res Cover (< 800px)'
+  if (issue.category === 'low_res_art') return issue.detectedValue || 'Low-Res Cover (< 800px)'
   if (issue.category === 'missing_track_num') return 'Missing Index (0 / Null)'
   if (issue.category === 'checksum_mismatch') return 'Stream CRC Failure'
   if (issue.category === 'empty_composer') return 'Unknown Artist'

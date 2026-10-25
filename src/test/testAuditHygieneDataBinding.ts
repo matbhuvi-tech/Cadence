@@ -341,6 +341,72 @@ assert.strictEqual(roleConflict?.fixActionLabel, 'Keep Singer', 'Action label mu
 
 console.log('  ✓ Collaborative tracks accurately route to "Keep Singer" without risking artist overwrite')
 
+// 7. Missing and Low-Resolution Cover Artwork Audit Detection
+console.log('\n[Test 7] Testing Missing and Low-Resolution Cover Artwork Audit Detection...')
+
+const mockNoArtRelease: Release = {
+  id: 'rel-no-art',
+  masterReleaseId: 'rel-no-art',
+  title: 'Enga Ooru Pattukaran',
+  artistCredit: 'Ilaiyaraaja',
+  releaseYear: 1987,
+  originalYear: 1987,
+  label: 'Echo',
+  catalogNumber: 'CAT-1987',
+  mediaFormat: 'Lossless Audio',
+  country: 'India',
+  matrixRunout: '',
+  artwork: {
+    frontCoverUrl: '',
+    resolution: 'No Embedded Art',
+    width: 0,
+    height: 0,
+    dpi: 72,
+    colorProfile: 'sRGB',
+    isLowRes: true,
+    hasBookletPdf: false,
+  },
+  variants: [],
+  discsCount: 1,
+  tracksCount: 1,
+  genreTags: ['Soundtrack'],
+  storageMountId: 'mount-1',
+}
+
+const mockNoArtTrack: Track = {
+  id: 'trk-no-art-01',
+  releaseId: 'rel-no-art',
+  recordingId: 'rec-no-art-01',
+  trackNumber: 1,
+  discNumber: 1,
+  title: 'Madhura Marikozhundhu',
+  artistCredit: 'Mano, K. S. Chithra',
+  composerName: 'Ilaiyaraaja',
+  durationSeconds: 280,
+  filePath: '/music/Enga Ooru Pattukaran/01.flac',
+  fileSize: 30000000,
+  storageMountId: 'mount-1',
+  sidecarStatus: 'synced',
+  modifiedTimestamp: new Date().toISOString(),
+  checksumValid: true,
+}
+
+const { issues: artAuditIssues } = auditService.computeCatalogAudit([mockNoArtTrack], [mockNoArtRelease])
+const missingCoverIssue = artAuditIssues.find((i) => i.category === 'low_res_art')
+
+assert(missingCoverIssue !== undefined, 'Audit engine must report missing cover art as an issue')
+assert.strictEqual(missingCoverIssue?.id, 'audit-low-res-art', 'Issue id must be audit-low-res-art')
+assert.strictEqual(missingCoverIssue?.tagField, 'COVER_ART', 'Tag field must be COVER_ART')
+assert.strictEqual(missingCoverIssue?.canonicalTarget, 'Artwork & Media Integrity', 'Canonical target must be Artwork & Media Integrity')
+assert.strictEqual(missingCoverIssue?.detectedValue, 'Missing Cover Artwork', 'Detected value must specify Missing Cover Artwork')
+assert.strictEqual(missingCoverIssue?.currentValue, 'No Cover Art', 'Current value must be No Cover Art')
+assert.strictEqual(missingCoverIssue?.autoFixAction, 'FETCH_HIRES_ART', 'Auto fix action must be FETCH_HIRES_ART')
+
+const detectedDisplay = getIssueDetectedValue(missingCoverIssue, 'Artwork & Media Integrity')
+assert.strictEqual(detectedDisplay, 'No Cover Art', 'MaintainCockpit detected value must display "No Cover Art"')
+
+console.log('  ✓ Missing cover art is accurately reported and flagged with "Missing Cover Artwork"')
+
 console.log('\n========================================================')
 console.log('🎉 ALL AUDIT & HYGIENE DATA-BINDING TESTS PASSED!')
 console.log('========================================================\n')

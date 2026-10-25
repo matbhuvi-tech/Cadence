@@ -404,8 +404,13 @@ export class LibraryImporter {
 
       if (!coverArtUrl) {
         coverArtUrl = getCuratedAlbumArtwork(albumTitle, artist || composer)
-        artResolution = '3000x3000px (Archival HD Scan)'
-        isLowRes = false
+        if (coverArtUrl) {
+          artResolution = '3000x3000px (Archival HD Scan)'
+          isLowRes = false
+        } else {
+          artResolution = 'No Embedded Art'
+          isLowRes = true
+        }
       }
 
       // Check anomalies
@@ -572,8 +577,8 @@ export class LibraryImporter {
           artwork: {
             frontCoverUrl: coverArtUrl,
             resolution: artResolution,
-            width: isLowRes ? 400 : 2400,
-            height: isLowRes ? 400 : 2400,
+            width: isLowRes ? (coverArtUrl ? 400 : 0) : 2400,
+            height: isLowRes ? (coverArtUrl ? 400 : 0) : 2400,
             dpi: isLowRes ? 72 : 300,
             colorProfile: 'sRGB',
             isLowRes,
