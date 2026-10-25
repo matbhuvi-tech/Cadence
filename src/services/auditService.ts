@@ -76,8 +76,8 @@ export class AuditService {
         tagField: 'ALBUMARTIST',
         detectedValue: 'Unknown Artist',
         currentValue: 'Unknown Artist',
-        targetValue: 'Extract from Folder',
-        proposedAction: 'ALBUMARTIST = Extract from Directory',
+        targetValue: 'Parse from Folder Structure',
+        proposedAction: 'Parse Artist & Composer from Folder Hierarchy',
         canonicalTarget: 'Untagged Audio Standards',
         parentEntity: 'Untagged Audio Standards',
       })
@@ -295,7 +295,7 @@ export class AuditService {
           detectedValue: detectedVal,
           currentValue: isAllMissing ? 'No Cover Art' : '< 800px',
           targetValue: 'Archival High-Res (Front)',
-          proposedAction: 'COVER = Archival Front Scan',
+          proposedAction: 'Fetch Archival Artwork (Apple Music / MusicBrainz)',
           canonicalTarget: 'Artwork & Media Integrity',
           parentEntity: 'Artwork & Media Integrity',
         })
@@ -504,7 +504,11 @@ export class AuditService {
    */
   public async remediateIssue(
     issueIdOrAction: string,
-    options?: { provider?: 'apple' | 'musicbrainz' | 'ai'; [key: string]: any }
+    options?: {
+      provider?: 'apple' | 'musicbrainz' | 'ai'
+      onProgress?: (progress: { current: number; total: number; title: string }) => void
+      [key: string]: any
+    }
   ): Promise<{ success: boolean; message: string }> {
     let issues = graphEngine.getAllAuditIssues()
     let issue = issues.find((i) => i.id === issueIdOrAction || i.autoFixAction === issueIdOrAction)
@@ -842,6 +846,8 @@ export class AuditService {
         }
 
         let updatedCount = 0
+        const total = affectedReleaseIds.size
+        let current = 0
         const providerName =
           preferredProvider === 'apple'
             ? 'Apple Music'
@@ -859,6 +865,8 @@ export class AuditService {
           const title = rel.title || sampleTrack?.folderName || sampleTrack?.title || ''
 
           if (!title) continue
+          current++
+          options?.onProgress?.({ current, total, title })
 
           try {
             // 1. First attempt with preferred provider (e.g. Apple Music)

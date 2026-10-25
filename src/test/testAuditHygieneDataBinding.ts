@@ -405,7 +405,30 @@ assert.strictEqual(missingCoverIssue?.autoFixAction, 'FETCH_HIRES_ART', 'Auto fi
 const detectedDisplay = getIssueDetectedValue(missingCoverIssue, 'Artwork & Media Integrity')
 assert.strictEqual(detectedDisplay, 'No Cover Art', 'MaintainCockpit detected value must display "No Cover Art"')
 
+const proposedArtAction = getIssueProposedAction(missingCoverIssue, 'Artwork & Media Integrity')
+assert.strictEqual(proposedArtAction, 'Fetch Archival Artwork (Apple Music / MusicBrainz)', 'Proposed action must be "Fetch Archival Artwork (Apple Music / MusicBrainz)"')
+
+// Test Folder Extraction action text
+const mockEmptyComposerIssue: AuditIssue = {
+  id: 'audit-missing-artists',
+  category: 'empty_composer',
+  severity: 'critical',
+  title: 'Untagged Audio Files',
+  description: 'Missing artists',
+  affectedCount: 1,
+  sampleTrackIds: [],
+  tagField: 'ALBUMARTIST',
+  detectedValue: 'Unknown Artist',
+  currentValue: 'Unknown Artist',
+  targetValue: 'Parse from Folder Structure',
+  proposedAction: 'Parse Artist & Composer from Folder Hierarchy',
+  canonicalTarget: 'Untagged Audio Standards',
+}
+const proposedFolderAction = getIssueProposedAction(mockEmptyComposerIssue, 'Untagged Audio Standards')
+assert.strictEqual(proposedFolderAction, 'Parse Artist & Composer from Folder Hierarchy', 'Folder extraction action must be clear and not wrapped in quotes')
+
 console.log('  ✓ Missing cover art is accurately reported and flagged with "Missing Cover Artwork"')
+console.log('  ✓ Proposed actions display clean action descriptions without misleading quotes')
 
 console.log('\n========================================================')
 console.log('🎉 ALL AUDIT & HYGIENE DATA-BINDING TESTS PASSED!')

@@ -162,7 +162,15 @@ export const getIssueDetectedValue = (issue: AuditIssue, canonicalTarget: string
 }
 
 export const getIssueProposedAction = (issue: AuditIssue, canonicalTarget: string): string => {
-  if (issue.targetValue && issue.tagField === 'ALBUMARTIST') {
+  if (issue.category === 'empty_composer') {
+    return 'Parse Artist & Composer from Folder Hierarchy'
+  }
+
+  if (issue.category === 'low_res_art') {
+    return 'Fetch Archival Artwork (Apple Music / MusicBrainz)'
+  }
+
+  if (issue.targetValue && issue.tagField === 'ALBUMARTIST' && !issue.targetValue.includes('Folder') && !issue.targetValue.includes('Extract') && !issue.targetValue.includes('Parse')) {
     return `ALBUMARTIST = "${issue.targetValue}"`
   }
 
@@ -340,6 +348,8 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   const [normalizationRules, setNormalizationRules] = useState<NormalizationRule[]>(() => normalizationService.getRules())
   const [newRulePattern, setNewRulePattern] = useState('')
   const [newRuleTarget, setNewRuleTarget] = useState('')
+  const [remediatingIssueId, setRemediatingIssueId] = useState<string | null>(null)
+  const [remediationProgress, setRemediationProgress] = useState<{ current: number; total: number; title: string } | null>(null)
   const { maintenanceStats: mStats } = useMaintenanceWorker(true)
 
   // Grouping & Staging Workbench State
@@ -548,19 +558,54 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
 
     let stagedCount = 0
     for (const id of idsToStage) {
-      await auditService.remediateIssue(id)
+      setRemediatingIssueId(id)
+      setRemediationProgress(null)
+      await auditService.remediateIssue(id, {
+        onProgress: (p: { current: number; total: number; title: string }) => {
+          setRemediationProgress(p)
+        },
+      })
       stagedCount++
     }
+    setRemediatingIssueId(null)
+    setRemediationProgress(null)
     setSelectedIssueIds(new Set())
     onRefreshAudit()
     showToast(`Staged ${stagedCount} audit fix(es) in non-destructive sidecars. Ready in Review & Save.`)
   }
 
+  const handleRemediateSingle = async (issueId: string) => {
+    setRemediatingIssueId(issueId)
+    setRemediationProgress(null)
+    try {
+      const res = await auditService.remediateIssue(issueId, {
+        onProgress: (p: { current: number; total: number; title: string }) => {
+          setRemediationProgress(p)
+        },
+      })
+      onRefreshAudit()
+      showToast(res.message)
+    } catch (err: any) {
+      showToast(err?.message || 'Remediation error')
+    } finally {
+      setRemediatingIssueId(null)
+      setRemediationProgress(null)
+    }
+  }
+
   const handleStageClusterFixes = async (cluster: IssueCluster) => {
     const ids = cluster.issues.filter((i) => !i.isRoleConflict && i.isAutoFixable).map((i) => i.id)
     for (const id of ids) {
-      await auditService.remediateIssue(id)
+      setRemediatingIssueId(id)
+      setRemediationProgress(null)
+      await auditService.remediateIssue(id, {
+        onProgress: (p: { current: number; total: number; title: string }) => {
+          setRemediationProgress(p)
+        },
+      })
     }
+    setRemediatingIssueId(null)
+    setRemediationProgress(null)
     onRefreshAudit()
     showToast(`Staged all safe fixes for "${cluster.title}". Ready in Review & Save.`)
   }
@@ -1177,7 +1222,9 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                               }}
                               className="px-3 py-1 rounded-lg text-xs font-mono font-medium border border-amber-400/30 hover:border-amber-400/60 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 transition-all cursor-pointer"
                             >
-                              Stage All Safe Fixes ({cluster.safeFixesCount})
+                              {cluster.title === 'Artwork & Media Integrity'
+                                ? `Fetch All Artwork (${cluster.safeFixesCount})`
+                                : `Stage All Safe Fixes (${cluster.safeFixesCount})`}
                             </button>
                           )}
                           <span className="text-xs text-slate-500 font-mono hidden sm:inline">
@@ -1314,13 +1361,24 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                       Discard
                                     </button>
                                   </div>
+                                ) : remediatingIssueId === issue.id ? (
+                                  <div className="flex items-center gap-2 px-3 py-1 text-xs font-mono font-medium rounded-lg border border-amber-500/40 bg-amber-500/15 text-amber-300 shrink-0">
+                                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                                    <span>
+                                      {remediationProgress
+                                        ? `Resolving ${remediationProgress.current}/${remediationProgress.total} (${remediationProgress.title.slice(0, 16)}...)`
+                                        : 'Querying Sources...'}
+                                    </span>
+                                  </div>
                                 ) : (
                                   <button
                                     type="button"
-                                    onClick={() => onRemediateAudit(issue.id)}
+                                    onClick={() => handleRemediateSingle(issue.id)}
                                     className="px-3 py-1 text-xs font-mono font-semibold rounded-lg border border-amber-500/40 hover:border-amber-400 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 transition-all cursor-pointer shrink-0"
                                   >
-                                    Stage Fix
+                                    {issue.category === 'low_res_art'
+                                      ? 'Fetch & Preview Art'
+                                      : issue.fixActionLabel || 'Stage Fix'}
                                   </button>
                                 )}
                               </div>
