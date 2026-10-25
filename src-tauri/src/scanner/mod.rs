@@ -1,3 +1,3 @@
 pub mod engine;
 
-pub use engine::{ScanCompletePayload, ScanProgressPayload, ScannerController};
+pub use engine::{PlaybackScanMode, ScanCompletePayload, ScanProgressPayload, ScannerController};

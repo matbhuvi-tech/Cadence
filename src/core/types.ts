@@ -313,7 +313,7 @@ export interface WatchedFolder {
 }
 
 export interface ScanProgressPayload {
-  stage: 'idle' | 'discovery' | 'extraction' | 'database' | 'complete' | 'cancelled'
+  stage: 'idle' | 'discovery' | 'extraction' | 'database' | 'suspended_playback' | 'complete' | 'cancelled'
   processedCount: number
   totalCount: number
   currentFile: string

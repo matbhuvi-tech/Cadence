@@ -97,6 +97,8 @@ pub struct DbSkippedFile {
     pub diagnostic_error: String,
     pub timestamp: String,
     pub is_ignored: bool,
+    #[serde(default)]
+    pub mtime: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -862,7 +864,7 @@ impl DbOperations {
     // Skipped / Quarantine Files
     pub fn get_skipped_files(conn: &Connection) -> Result<Vec<DbSkippedFile>> {
         let mut stmt = conn.prepare(
-            "SELECT id, file_path, file_name, category, diagnostic_error, timestamp, is_ignored
+            "SELECT id, file_path, file_name, category, diagnostic_error, timestamp, is_ignored, mtime
              FROM skipped_files WHERE is_ignored = 0 ORDER BY timestamp DESC",
         )?;
 
@@ -875,6 +877,7 @@ impl DbOperations {
                 diagnostic_error: row.get(4)?,
                 timestamp: row.get(5)?,
                 is_ignored: row.get::<_, i32>(6)? != 0,
+                mtime: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
             })
         })?;
 
@@ -885,14 +888,33 @@ impl DbOperations {
         Ok(list)
     }
 
+    pub fn get_ignored_skipped_files(conn: &Connection) -> Result<std::collections::HashMap<String, i64>> {
+        let mut stmt = conn.prepare(
+            "SELECT file_path, mtime FROM skipped_files WHERE is_ignored = 1"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let mtime: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+            Ok((path, mtime))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (p, m) = r?;
+            map.insert(p, m);
+        }
+        Ok(map)
+    }
+
     pub fn add_skipped_file(conn: &Connection, file: &DbSkippedFile) -> Result<()> {
         conn.execute(
-            "INSERT INTO skipped_files (id, file_path, file_name, category, diagnostic_error, timestamp, is_ignored)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO skipped_files (id, file_path, file_name, category, diagnostic_error, timestamp, is_ignored, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(file_path) DO UPDATE SET
                 diagnostic_error=excluded.diagnostic_error,
                 timestamp=excluded.timestamp,
-                category=excluded.category",
+                category=excluded.category,
+                mtime=excluded.mtime,
+                is_ignored=0",
             params![
                 file.id,
                 file.file_path,
@@ -901,6 +923,7 @@ impl DbOperations {
                 file.diagnostic_error,
                 file.timestamp,
                 if file.is_ignored { 1 } else { 0 },
+                file.mtime,
             ],
         )?;
         Ok(())
@@ -911,8 +934,18 @@ impl DbOperations {
         Ok(())
     }
 
+    pub fn ignore_all_skipped_files(conn: &Connection) -> Result<()> {
+        conn.execute("UPDATE skipped_files SET is_ignored = 1 WHERE is_ignored = 0", [])?;
+        Ok(())
+    }
+
     pub fn delete_skipped_file(conn: &Connection, id: &str) -> Result<()> {
         conn.execute("DELETE FROM skipped_files WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn remove_skipped_file_by_path(conn: &Connection, file_path: &str) -> Result<()> {
+        conn.execute("DELETE FROM skipped_files WHERE file_path = ?1", params![file_path])?;
         Ok(())
     }
 

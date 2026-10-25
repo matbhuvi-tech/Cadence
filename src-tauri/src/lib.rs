@@ -20,7 +20,7 @@ pub fn run() {
     let audio_engine = AudioEngine::new();
     let engine_for_remote = audio_engine.clone();
     let engine_for_maintenance = audio_engine.clone();
-    let scanner_controller = ScannerController::new();
+    let scanner_controller = ScannerController::new(Some(audio_engine.clone()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -113,9 +113,12 @@ pub fn run() {
             db_save_tracks_batch,
             db_get_skipped_files,
             db_ignore_skipped_file,
+            db_ignore_all_skipped_files,
             db_delete_skipped_file,
             db_get_library_stats,
             start_library_scan,
+            set_scan_playback_policy,
+            get_scan_playback_policy,
             pause_library_scan,
             resume_library_scan,
             cancel_library_scan,

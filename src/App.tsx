@@ -432,6 +432,10 @@ function AppContent() {
         setStorageMounts(dbData.storageMounts)
         setWatchedFolders(dbData.watchedFolders)
         setSkippedFiles(dbData.skippedFiles)
+        setScanTelemetry((prev) => ({
+          ...prev,
+          skippedCount: dbData.skippedFiles.length,
+        }))
 
         if (dbData.offlineMounts.length > 0) {
           setOfflineMounts(dbData.offlineMounts)
@@ -495,6 +499,13 @@ function AppContent() {
         }
       }
 
+      // Sync user's scan playback policy to Rust backend
+      const savedScanPolicy = (localStorage.getItem('cadence_scan_playback_policy') || 'purist') as
+        | 'purist'
+        | 'paced'
+        | 'unthrottled'
+      tauriBridge.setScannerPlaybackPolicy(savedScanPolicy).catch(() => {})
+
       // 3. Subscribe to real-time native scanner events
       await sqliteLibraryService.subscribeToScannerEvents({
         onProgress: (payload) => {
@@ -518,6 +529,10 @@ function AppContent() {
             if (refreshed) {
               setWatchedFolders(refreshed.watchedFolders)
               setSkippedFiles(refreshed.skippedFiles)
+              setScanTelemetry((prev) => ({
+                ...prev,
+                skippedCount: refreshed.skippedFiles.length,
+              }))
               setStorageMounts(refreshed.storageMounts)
               setOfflineMounts(refreshed.offlineMounts)
               if (refreshed.tracks.length > 0) {
@@ -546,7 +561,11 @@ function AppContent() {
 
   const handleTriggerScan = async (folderPath: string, forceFull: boolean = false) => {
     try {
-      await tauriBridge.startLibraryScan(folderPath, undefined, forceFull)
+      const savedPolicy = (localStorage.getItem('cadence_scan_playback_policy') || 'purist') as
+        | 'purist'
+        | 'paced'
+        | 'unthrottled'
+      await tauriBridge.startLibraryScan(folderPath, undefined, forceFull, savedPolicy)
       setIsActivityPopoverOpen(true)
       showToast(`Started scan of "${folderPath}"...`)
     } catch (err: any) {
@@ -575,6 +594,10 @@ function AppContent() {
     if (data) {
       setWatchedFolders(data.watchedFolders)
       setSkippedFiles(data.skippedFiles)
+      setScanTelemetry((prev) => ({
+        ...prev,
+        skippedCount: data.skippedFiles.length,
+      }))
       setStorageMounts(data.storageMounts)
 
       if (data.offlineMounts.length > 0) {
@@ -607,6 +630,34 @@ function AppContent() {
         refreshFromEngine()
         showToast(`Network folder still inaccessible (${data.offlineMounts[0].mountPath}). Albums withheld.`)
       }
+    }
+  }
+
+  const handleIgnoreSkippedFile = async (id: string) => {
+    try {
+      await tauriBridge.dbIgnoreSkippedFile(id)
+      setSkippedFiles((prev) => prev.filter((s) => s.id !== id))
+      setScanTelemetry((prev) => ({
+        ...prev,
+        skippedCount: Math.max(0, prev.skippedCount - 1),
+      }))
+      showToast('Ignored unparseable file from future scans')
+    } catch (err: any) {
+      showToast(`Error ignoring file: ${err.message || err}`)
+    }
+  }
+
+  const handleIgnoreAllSkippedFiles = async () => {
+    try {
+      await tauriBridge.dbIgnoreAllSkippedFiles()
+      setSkippedFiles([])
+      setScanTelemetry((prev) => ({
+        ...prev,
+        skippedCount: 0,
+      }))
+      showToast('Dismissed and permanently ignored all skipped files')
+    } catch (err: any) {
+      showToast(`Error dismissing skipped files: ${err.message || err}`)
     }
   }
 
@@ -1474,6 +1525,7 @@ function AppContent() {
               setTopMode('maintain')
               setIsActivityPopoverOpen(false)
             }}
+            onDismissAllSkipped={handleIgnoreAllSkippedFiles}
           />
 
           {/* AI Copilot Drawer */}
@@ -1529,6 +1581,8 @@ function AppContent() {
           onAddWatchedFolder={handleAddWatchedFolder}
           onRemoveWatchedFolder={handleRemoveWatchedFolder}
           onRemediateAudit={handleRemediateAudit}
+          onIgnoreSkippedFile={handleIgnoreSkippedFile}
+          onIgnoreAllSkippedFiles={handleIgnoreAllSkippedFiles}
           onRefreshAudit={() => {
             auditService.runFullCatalogAudit()
             refreshFromEngine()

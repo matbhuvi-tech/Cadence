@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -89,6 +90,7 @@ enum AudioWorkerMsg {
 pub struct AudioEngine {
     tx: Sender<AudioWorkerMsg>,
     upnp_manager: Arc<UpnpManager>,
+    is_playing_atomic: Arc<AtomicBool>,
 }
 
 impl AudioEngine {
@@ -96,6 +98,8 @@ impl AudioEngine {
         let (tx, rx) = channel::<AudioWorkerMsg>();
         let upnp_manager = Arc::new(UpnpManager::new());
         let upnp_worker_ref = Arc::clone(&upnp_manager);
+        let is_playing_atomic = Arc::new(AtomicBool::new(false));
+        let is_playing_worker = Arc::clone(&is_playing_atomic);
 
         // Run initial background SSDP scan on engine startup so devices like HiFi Rose are ready immediately
         let bg_upnp = Arc::clone(&upnp_manager);
@@ -303,6 +307,7 @@ impl AudioEngine {
                                     accumulated_position = Duration::ZERO;
                                     is_paused = false;
                                     current_info = Some(stream_info.clone());
+                                    is_playing_worker.store(true, Ordering::Release);
                                     let _ = responder.send(Ok(stream_info));
                                     continue;
                                 }
@@ -492,6 +497,7 @@ impl AudioEngine {
                         accumulated_position = Duration::ZERO;
                         is_paused = false;
                         current_info = Some(stream_info.clone());
+                        is_playing_worker.store(true, Ordering::Release);
 
                         let _ = responder.send(Ok(stream_info));
                     }
@@ -518,6 +524,7 @@ impl AudioEngine {
                             playback_start = None;
                             is_paused = true;
                         }
+                        is_playing_worker.store(false, Ordering::Release);
                     }
 
                     AudioWorkerMsg::Resume => {
@@ -539,6 +546,7 @@ impl AudioEngine {
                             playback_start = Some(Instant::now());
                             is_paused = false;
                         }
+                        is_playing_worker.store(true, Ordering::Release);
                     }
 
                     AudioWorkerMsg::Stop => {
@@ -559,6 +567,7 @@ impl AudioEngine {
                         is_paused = false;
                         current_file = None;
                         is_upnp_active = false;
+                        is_playing_worker.store(false, Ordering::Release);
                     }
 
                     AudioWorkerMsg::Seek { position_secs } => {
@@ -763,6 +772,7 @@ impl AudioEngine {
                         } else {
                             sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
                         };
+                        is_playing_worker.store(is_playing, Ordering::Release);
 
                         let is_bit_perfect = if is_upnp_active {
                             true // UPnP transmits identical untouched raw audio stream
@@ -861,7 +871,12 @@ impl AudioEngine {
         Self {
             tx,
             upnp_manager,
+            is_playing_atomic,
         }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.is_playing_atomic.load(Ordering::Relaxed)
     }
 
     pub fn play_track(&self, file_path: &str) -> Result<AudioStreamInfo, String> {

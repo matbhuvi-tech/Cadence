@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
-use crate::audio::stream_tuning;
+use crate::audio::{stream_tuning, AudioEngine};
 use crate::db::{
     AppDb, DbOperations, DbRelease, DbSkippedFile, DbTrack, DbWatchedFolder,
 };
@@ -181,22 +181,73 @@ pub fn read_track_sidecar(audio_path: &Path) -> TrackSidecar {
     TrackSidecar::default()
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaybackScanMode {
+    Purist = 0,
+    Paced = 1,
+    Unthrottled = 2,
+}
+
+impl PlaybackScanMode {
+    pub fn from_u8(val: u8) -> Self {
+        match val {
+            0 => PlaybackScanMode::Purist,
+            1 => PlaybackScanMode::Paced,
+            _ => PlaybackScanMode::Unthrottled,
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "paced" => PlaybackScanMode::Paced,
+            "unthrottled" => PlaybackScanMode::Unthrottled,
+            _ => PlaybackScanMode::Purist,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlaybackScanMode::Purist => "purist",
+            PlaybackScanMode::Paced => "paced",
+            PlaybackScanMode::Unthrottled => "unthrottled",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ScannerController {
     pub is_scanning: Arc<AtomicBool>,
     pub is_paused: Arc<AtomicBool>,
     pub cancel_requested: Arc<AtomicBool>,
+    pub playback_mode: Arc<AtomicU8>,
+    pub audio_engine: Arc<parking_lot::RwLock<Option<AudioEngine>>>,
     pub progress: Arc<Mutex<ScanProgressPayload>>,
 }
 
 impl ScannerController {
-    pub fn new() -> Self {
+    pub fn new(audio_engine: Option<AudioEngine>) -> Self {
         Self {
             is_scanning: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            playback_mode: Arc::new(AtomicU8::new(0)), // Default: Purist
+            audio_engine: Arc::new(parking_lot::RwLock::new(audio_engine)),
             progress: Arc::new(Mutex::new(ScanProgressPayload::default())),
         }
+    }
+
+    pub fn set_audio_engine(&self, engine: AudioEngine) {
+        *self.audio_engine.write() = Some(engine);
+    }
+
+    pub fn set_playback_mode(&self, mode: PlaybackScanMode) {
+        self.playback_mode.store(mode as u8, Ordering::SeqCst);
+    }
+
+    pub fn get_playback_mode(&self) -> PlaybackScanMode {
+        PlaybackScanMode::from_u8(self.playback_mode.load(Ordering::SeqCst))
     }
 
     pub fn pause(&self) {
@@ -251,8 +302,36 @@ impl ScannerController {
         let is_paused = Arc::clone(&self.is_paused);
         let cancel_requested = Arc::clone(&self.cancel_requested);
         let progress_state = Arc::clone(&self.progress);
+        let playback_mode = Arc::clone(&self.playback_mode);
+        let audio_engine_ref = self.audio_engine.read().clone();
 
-        tokio::task::spawn_blocking(move || {
+        let builder = std::thread::Builder::new().name("cadence-library-scanner".into());
+        let _ = builder.spawn(move || {
+            #[cfg(windows)]
+            unsafe {
+                use windows_sys::Win32::System::Threading::{
+                    GetCurrentProcess, GetCurrentThread, GetProcessAffinityMask,
+                    SetThreadAffinityMask, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                };
+
+                // 1. Drop CPU scheduling priority to BELOW_NORMAL.
+                // Avoid THREAD_MODE_BACKGROUND_BEGIN here to prevent Windows MemoryPriorityVeryLow
+                // page eviction from causing SQLite priority inversion on database locks.
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+
+                // 2. CPU Affinity Pinning: Mask off Core 0 and Core 1 (NDIS/DPC cores)
+                let mut process_mask: usize = 0;
+                let mut system_mask: usize = 0;
+                if GetProcessAffinityMask(GetCurrentProcess(), &mut process_mask, &mut system_mask) != 0 {
+                    let isolated_mask = process_mask & !0b11;
+                    if isolated_mask != 0 {
+                        SetThreadAffinityMask(GetCurrentThread(), isolated_mask);
+                    } else {
+                        // Fallback for single/dual-core systems: retain process_mask so we never set a zero mask!
+                        SetThreadAffinityMask(GetCurrentThread(), process_mask);
+                    }
+                }
+            }
             let scan_start = Instant::now();
             let mut last_progress_emit = Instant::now();
             let progress_interval = Duration::from_millis(250); // 4Hz throttled
@@ -301,6 +380,12 @@ impl ScannerController {
                     .collect()
             };
 
+            // Pre-load permanently ignored skipped files to prevent repetitive SMB/Lofty re-checks
+            let ignored_skipped_files: HashMap<String, i64> = {
+                let conn = db.conn.lock();
+                DbOperations::get_ignored_skipped_files(&conn).unwrap_or_default()
+            };
+
             // Identify or auto-create StorageMount & WatchedFolder in SQLite
             let mount_id = match mount_id_override {
                 Some(id) => {
@@ -340,6 +425,39 @@ impl ScannerController {
             let mut pending_tracks: Vec<DbTrack> = Vec::new();
             let mut pending_releases: HashMap<String, DbRelease> = HashMap::new();
 
+            let flush_batch = |pending_tracks: &mut Vec<DbTrack>,
+                                   pending_releases: &mut HashMap<String, DbRelease>,
+                                   processed_count: usize| {
+                if pending_tracks.is_empty() && pending_releases.is_empty() {
+                    return;
+                }
+                let mut conn = db.conn.lock();
+                let releases_slice: Vec<DbRelease> = pending_releases.values().cloned().collect();
+                let _ = DbOperations::upsert_releases_batch(&mut conn, &releases_slice);
+                let _ = DbOperations::upsert_tracks_batch(&mut conn, pending_tracks);
+
+                for trk in pending_tracks.iter() {
+                    let credits = DbOperations::split_multi_artist_credits(&trk.artist_credit, trk.composer.as_deref());
+                    let _ = DbOperations::upsert_track_artist_credits(&mut conn, &trk.id, &credits);
+                }
+
+                let _ = app.emit(
+                    "library://scan-chunk",
+                    &ScanChunkPayload {
+                        tracks: pending_tracks.clone(),
+                        releases: releases_slice,
+                        processed_count,
+                        total_count: total_candidates,
+                    },
+                );
+
+                pending_tracks.clear();
+                pending_releases.clear();
+            };
+
+            let mut last_playback_check = Instant::now() - Duration::from_millis(500);
+            let mut cached_is_playing = false;
+
             for (idx, path) in candidate_files.iter().enumerate() {
                 // Check cancellation
                 if cancel_requested.load(Ordering::SeqCst) {
@@ -349,6 +467,56 @@ impl ScannerController {
                 // Check pause
                 while is_paused.load(Ordering::SeqCst) && !cancel_requested.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(100));
+                }
+
+                // Rate-limited check of lightweight lock-free AudioEngine::is_playing
+                // Polled at most once every 100ms or 25 files to prevent any thread or atomic contention!
+                if idx % 25 == 0 || last_playback_check.elapsed() >= Duration::from_millis(100) {
+                    last_playback_check = Instant::now();
+                    cached_is_playing = audio_engine_ref
+                        .as_ref()
+                        .map(|e| e.is_playing())
+                        .unwrap_or(false);
+                }
+
+                let mode = PlaybackScanMode::from_u8(playback_mode.load(Ordering::Relaxed));
+                match mode {
+                    PlaybackScanMode::Purist => {
+                        if cached_is_playing {
+                            // 1. Immediately flush pending SQLite batch BEFORE entering suspend wait loop!
+                            // Guarantees all scanned tracks are visible in library and drops all database locks.
+                            flush_batch(&mut pending_tracks, &mut pending_releases, idx);
+
+                            // 2. Emit UI telemetry update indicating suspension
+                            {
+                                let mut p = progress_state.lock();
+                                p.stage = "suspended_playback".to_string();
+                                p.speed_tracks_per_sec = 0.0;
+                                let _ = app.emit("library://scan-progress", &*p);
+                            }
+
+                            // 3. Sleep loop checking lightweight lock-free is_playing and cancel
+                            while audio_engine_ref.as_ref().map(|e| e.is_playing()).unwrap_or(false)
+                                && !cancel_requested.load(Ordering::SeqCst)
+                            {
+                                std::thread::sleep(Duration::from_millis(250));
+                            }
+
+                            if cancel_requested.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            cached_is_playing = false;
+                        }
+                    }
+                    PlaybackScanMode::Paced => {
+                        if cached_is_playing {
+                            // Apply 15ms inter-file pacing sleep to prevent SMB/NIC packet bursts during playback
+                            std::thread::sleep(Duration::from_millis(15));
+                        }
+                    }
+                    PlaybackScanMode::Unthrottled => {
+                        // Full background speed regardless of playback state
+                    }
                 }
 
                 let path_str = path.to_string_lossy().to_string();
@@ -365,6 +533,14 @@ impl ScannerController {
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
 
+                // Check if permanently ignored with unchanged mtime
+                if let Some(&ignored_mtime) = ignored_skipped_files.get(&path_str) {
+                    if ignored_mtime == mtime {
+                        // File was acknowledged / ignored and has not changed on disk. Silently skip.
+                        continue;
+                    }
+                }
+
                 // Zero byte check
                 if file_size == 0 {
                     skipped_errors += 1;
@@ -379,6 +555,7 @@ impl ScannerController {
                             diagnostic_error: "Audio file size is 0 bytes on disk".to_string(),
                             timestamp: Utc::now().to_rfc3339(),
                             is_ignored: false,
+                            mtime,
                         },
                     );
                     continue;
@@ -677,6 +854,12 @@ impl ScannerController {
                                 created_at: Utc::now().to_rfc3339(),
                             });
                             imported_count += 1;
+
+                            // If this file was previously quarantined and has now been fixed, clean up the stale skipped_files entry
+                            if ignored_skipped_files.contains_key(&path_str) {
+                                let conn = db.conn.lock();
+                                let _ = DbOperations::remove_skipped_file_by_path(&conn, &path_str);
+                            }
                         } else {
                             skipped_errors += 1;
                             let conn = db.conn.lock();
@@ -690,6 +873,7 @@ impl ScannerController {
                                     diagnostic_error: format!("Lofty audio parser error: {}", err),
                                     timestamp: Utc::now().to_rfc3339(),
                                     is_ignored: false,
+                                    mtime,
                                 },
                             );
                         }
@@ -698,29 +882,7 @@ impl ScannerController {
 
                 // Batch flush to SQLite every 200 tracks
                 if pending_tracks.len() >= 200 {
-                    let mut conn = db.conn.lock();
-                    let releases_slice: Vec<DbRelease> = pending_releases.values().cloned().collect();
-                    let _ = DbOperations::upsert_releases_batch(&mut conn, &releases_slice);
-                    let _ = DbOperations::upsert_tracks_batch(&mut conn, &pending_tracks);
-
-                    // Populate relational artist credits
-                    for trk in &pending_tracks {
-                        let credits = DbOperations::split_multi_artist_credits(&trk.artist_credit, trk.composer.as_deref());
-                        let _ = DbOperations::upsert_track_artist_credits(&mut conn, &trk.id, &credits);
-                    }
-
-                    let _ = app.emit(
-                        "library://scan-chunk",
-                        &ScanChunkPayload {
-                            tracks: pending_tracks.clone(),
-                            releases: releases_slice,
-                            processed_count: idx + 1,
-                            total_count: total_candidates,
-                        },
-                    );
-
-                    pending_tracks.clear();
-                    pending_releases.clear();
+                    flush_batch(&mut pending_tracks, &mut pending_releases, idx + 1);
                 }
 
                 // Telemetry emission (throttled to 4Hz / 250ms)
@@ -760,28 +922,7 @@ impl ScannerController {
             }
 
             // Flush any remaining tracks & releases to SQLite
-            if !pending_tracks.is_empty() || !pending_releases.is_empty() {
-                let mut conn = db.conn.lock();
-                let releases_slice: Vec<DbRelease> = pending_releases.values().cloned().collect();
-                let _ = DbOperations::upsert_releases_batch(&mut conn, &releases_slice);
-                let _ = DbOperations::upsert_tracks_batch(&mut conn, &pending_tracks);
-
-                // Populate relational artist credits for final batch
-                for trk in &pending_tracks {
-                    let credits = DbOperations::split_multi_artist_credits(&trk.artist_credit, trk.composer.as_deref());
-                    let _ = DbOperations::upsert_track_artist_credits(&mut conn, &trk.id, &credits);
-                }
-
-                let _ = app.emit(
-                    "library://scan-chunk",
-                    &ScanChunkPayload {
-                        tracks: pending_tracks,
-                        releases: releases_slice,
-                        processed_count: total_candidates,
-                        total_count: total_candidates,
-                    },
-                );
-            }
+            flush_batch(&mut pending_tracks, &mut pending_releases, total_candidates);
 
             // Restore mount status to online
             {

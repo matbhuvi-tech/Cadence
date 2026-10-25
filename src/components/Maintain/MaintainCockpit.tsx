@@ -28,11 +28,13 @@ import {
   Users,
   Music,
   Mic,
+  EyeOff,
 } from 'lucide-react'
 import { Track, Release, AuditIssue, StorageMount, WatchedFolder, SkippedFile, ActiveEntityScope } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
 import { normalizationService, NormalizationRule } from '../../services/normalizationService'
 import { auditService } from '../../services/auditService'
+import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
 import { tauriBridge, MaintenanceStats } from '../../services/tauriBridge'
 import { isIssueInEntityScope } from '../../core/scopeUtils'
 
@@ -287,6 +289,8 @@ interface MaintainCockpitProps {
   onRemoveWatchedFolder?: (folderId: string) => void
   activeEntityScope?: ActiveEntityScope | null
   onClearEntityScope?: () => void
+  onIgnoreSkippedFile?: (id: string) => void
+  onIgnoreAllSkippedFiles?: () => void
 }
 
 export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
@@ -314,6 +318,8 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   onRemoveWatchedFolder,
   activeEntityScope,
   onClearEntityScope,
+  onIgnoreSkippedFile,
+  onIgnoreAllSkippedFiles,
 }) => {
   const [internalTab, setInternalTab] = useState<MaintainSubTab>('needs_attention')
   const activeTab = controlledTab ?? internalTab
@@ -334,17 +340,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   const [normalizationRules, setNormalizationRules] = useState<NormalizationRule[]>(() => normalizationService.getRules())
   const [newRulePattern, setNewRulePattern] = useState('')
   const [newRuleTarget, setNewRuleTarget] = useState('')
-  const [mStats, setMStats] = useState<MaintenanceStats | null>(null)
-
-  useEffect(() => {
-    const fetchStats = async () => {
-      const stats = await tauriBridge.getMaintenanceStats()
-      if (stats) setMStats(stats)
-    }
-    fetchStats()
-    const interval = setInterval(fetchStats, 3000)
-    return () => clearInterval(interval)
-  }, [])
+  const { maintenanceStats: mStats } = useMaintenanceWorker(true)
 
   // Grouping & Staging Workbench State
   const [groupByMode, setGroupByMode] = useState<'artist' | 'album' | 'category'>('artist')
@@ -1514,15 +1510,34 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                     <AlertTriangle className="w-4 h-4 text-rose-400" />
                     <span>Quarantined / Unparseable Files ({skippedFiles.length})</span>
                   </div>
+                  {onIgnoreAllSkippedFiles && (
+                    <button
+                      onClick={onIgnoreAllSkippedFiles}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/30 transition-colors cursor-pointer"
+                    >
+                      Dismiss All
+                    </button>
+                  )}
                 </div>
                 <div className="space-y-1.5 max-h-40 overflow-y-auto">
                   {skippedFiles.map((sf, idx) => (
                     <div
-                      key={idx}
-                      className="p-2 bg-black/40 rounded-lg border border-white/10 text-[11px] font-mono text-slate-300 flex items-center justify-between"
+                      key={sf.id || idx}
+                      className="p-2 bg-black/40 rounded-lg border border-white/10 text-[11px] font-mono text-slate-300 flex items-center justify-between gap-3"
                     >
                       <span className="truncate max-w-lg">{sf.filePath}</span>
-                      <span className="text-rose-400 shrink-0">{sf.diagnosticError || 'Failed to import'}</span>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <span className="text-rose-400">{sf.diagnosticError || 'Failed to import'}</span>
+                        {onIgnoreSkippedFile && (
+                          <button
+                            onClick={() => onIgnoreSkippedFile(sf.id)}
+                            title="Ignore and permanently dismiss this unparseable file from future scans"
+                            className="p-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-slate-400 hover:text-white transition-colors cursor-pointer"
+                          >
+                            <EyeOff className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

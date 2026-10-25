@@ -92,7 +92,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             category TEXT NOT NULL,
             diagnostic_error TEXT NOT NULL,
             timestamp TEXT NOT NULL,
-            is_ignored INTEGER NOT NULL DEFAULT 0
+            is_ignored INTEGER NOT NULL DEFAULT 0,
+            mtime INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS scan_history (
@@ -194,6 +195,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     // Non-destructive column additions for existing databases
     let _ = conn.execute("ALTER TABLE canonical_artists ADD COLUMN portrait_status TEXT NOT NULL DEFAULT 'pending'", []);
     let _ = conn.execute("ALTER TABLE canonical_artists ADD COLUMN portrait_checked_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE skipped_files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0", []);
 
     Ok(())
 }

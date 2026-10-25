@@ -580,6 +580,12 @@ class TauriBridgeService {
     }
   }
 
+  public async dbIgnoreAllSkippedFiles(): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_ignore_all_skipped_files')
+    }
+  }
+
   public async dbDeleteSkippedFile(id: string): Promise<void> {
     if (this.isTauri()) {
       await invoke('db_delete_skipped_file', { id })
@@ -645,15 +651,30 @@ class TauriBridgeService {
   public async startLibraryScan(
     folderPath: string,
     mountId?: string,
-    forceFull: boolean = false
+    forceFull: boolean = false,
+    playbackPolicy?: 'purist' | 'paced' | 'unthrottled'
   ): Promise<void> {
     if (this.isTauri()) {
       await invoke('start_library_scan', {
         folderPath,
         mountId,
         forceFull,
+        playbackPolicy,
       })
     }
+  }
+
+  public async setScannerPlaybackPolicy(policy: 'purist' | 'paced' | 'unthrottled'): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('set_scan_playback_policy', { policy })
+    }
+  }
+
+  public async getScannerPlaybackPolicy(): Promise<'purist' | 'paced' | 'unthrottled'> {
+    if (this.isTauri()) {
+      return await invoke<'purist' | 'paced' | 'unthrottled'>('get_scan_playback_policy')
+    }
+    return 'purist'
   }
 
   public async pauseLibraryScan(): Promise<void> {

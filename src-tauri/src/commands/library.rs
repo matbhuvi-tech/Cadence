@@ -185,6 +185,12 @@ pub fn db_ignore_skipped_file(db: State<'_, AppDb>, id: String) -> Result<(), St
 }
 
 #[tauri::command]
+pub fn db_ignore_all_skipped_files(db: State<'_, AppDb>) -> Result<(), String> {
+    let conn = db.conn.lock();
+    DbOperations::ignore_all_skipped_files(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn db_delete_skipped_file(db: State<'_, AppDb>, id: String) -> Result<(), String> {
     let conn = db.conn.lock();
     DbOperations::delete_skipped_file(&conn, &id).map_err(|e| e.to_string())
@@ -206,8 +212,30 @@ pub fn start_library_scan(
     folder_path: String,
     mount_id: Option<String>,
     force_full: Option<bool>,
+    playback_policy: Option<String>,
 ) -> Result<(), String> {
+    if let Some(ref policy) = playback_policy {
+        let mode = crate::scanner::engine::PlaybackScanMode::from_str(policy);
+        scanner.set_playback_mode(mode);
+    }
     scanner.start_scan(app, (*db).clone(), folder_path, mount_id, force_full.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn set_scan_playback_policy(
+    scanner: State<'_, ScannerController>,
+    policy: String,
+) -> Result<(), String> {
+    let mode = crate::scanner::engine::PlaybackScanMode::from_str(&policy);
+    scanner.set_playback_mode(mode);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_scan_playback_policy(
+    scanner: State<'_, ScannerController>,
+) -> Result<String, String> {
+    Ok(scanner.get_playback_mode().as_str().to_string())
 }
 
 #[tauri::command]

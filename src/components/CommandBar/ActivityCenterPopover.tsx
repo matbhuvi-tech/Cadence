@@ -11,15 +11,19 @@ import {
   AlertTriangle,
   FolderOpen,
   Sparkles,
+  Cpu,
+  Image as ImageIcon,
 } from 'lucide-react'
 import { ScanProgressPayload } from '../../core/types'
 import { tauriBridge } from '../../services/tauriBridge'
+import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
 
 interface ActivityCenterPopoverProps {
   isOpen: boolean
   onClose: () => void
   telemetry: ScanProgressPayload
   onOpenQuarantineModal: () => void
+  onDismissAllSkipped?: () => void
 }
 
 export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
@@ -27,13 +31,25 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
   onClose,
   telemetry,
   onOpenQuarantineModal,
+  onDismissAllSkipped,
 }) => {
+  const { maintenanceStats } = useMaintenanceWorker(isOpen)
   const [aiQuota, setAiQuota] = useState<{
     rateLimitRpm: number
     pacingIntervalMs: number
     nextSlotRemainingMs: number
     isPacingActive: boolean
   } | null>(null)
+
+  const [playbackPolicy, setPlaybackPolicy] = useState<'purist' | 'paced' | 'unthrottled'>(() => {
+    return (localStorage.getItem('cadence_scan_playback_policy') as any) || 'purist'
+  })
+
+  const handlePolicySwitch = (policy: 'purist' | 'paced' | 'unthrottled') => {
+    setPlaybackPolicy(policy)
+    localStorage.setItem('cadence_scan_playback_policy', policy)
+    tauriBridge.setScannerPlaybackPolicy(policy).catch(() => {})
+  }
 
   useEffect(() => {
     if (!isOpen) return
@@ -98,7 +114,9 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
             )}
             <span
               className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                telemetry.isPaused
+                telemetry.stage === 'suspended_playback'
+                  ? 'bg-amber-400'
+                  : telemetry.isPaused
                   ? 'bg-amber-400'
                   : telemetry.isScanning
                   ? 'bg-[#00F5FF]'
@@ -107,7 +125,9 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
             />
           </span>
           <h3 className="font-semibold text-sm tracking-wide">
-            {telemetry.isScanning
+            {telemetry.stage === 'suspended_playback'
+              ? 'Suspended (Playback Active)'
+              : telemetry.isScanning
               ? telemetry.isPaused
                 ? 'Indexing Paused'
                 : 'Library Ingestion Active'
@@ -122,13 +142,47 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
         </button>
       </div>
 
+      {/* Playback Suspended Banner */}
+      {telemetry.stage === 'suspended_playback' && (
+        <div className="mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2 text-amber-300">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span className="font-medium text-[11px]">
+              Transport Purity: Scan paused during playback to guarantee zero disk/NIC jitter.
+            </span>
+          </div>
+          <button
+            onClick={() => handlePolicySwitch('paced')}
+            className="text-[10px] font-mono underline text-amber-200 hover:text-white cursor-pointer shrink-0 ml-2"
+          >
+            Switch to Paced
+          </button>
+        </div>
+      )}
+
       {/* Multi-Stage Pipeline Bar */}
       <div className="my-4">
         <div className="flex items-center justify-between gap-1 text-[11px] mb-2">
           {stages.map((st, i) => {
             const Icon = st.icon
-            const isPassed = currentStageIdx > i || telemetry.stage === 'complete'
-            const isCurrent = currentStageIdx === i && telemetry.isScanning
+            const isAudioStage = st.key === 'audio_analysis'
+            const isAudioActive =
+              isAudioStage &&
+              Boolean(
+                maintenanceStats?.isRunning &&
+                  (maintenanceStats?.pendingItems ?? 0) > 0 &&
+                  maintenanceStats?.isIdle
+              )
+            const isAudioPassed =
+              isAudioStage &&
+              Boolean(maintenanceStats && maintenanceStats.pendingItems === 0)
+
+            const isPassed = isAudioStage
+              ? isAudioPassed
+              : currentStageIdx > i || telemetry.stage === 'complete'
+            const isCurrent = isAudioStage
+              ? isAudioActive
+              : currentStageIdx === i && telemetry.isScanning
             return (
               <div
                 key={st.key}
@@ -224,15 +278,98 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
             <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
             <span>{telemetry.skippedCount} audio files were skipped</span>
           </div>
-          <button
-            onClick={() => {
-              onClose()
-              onOpenQuarantineModal()
-            }}
-            className="text-[11px] underline font-medium hover:text-white transition-colors"
-          >
-            Review Log
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                onClose()
+                onOpenQuarantineModal()
+              }}
+              className="text-[11px] underline font-medium hover:text-white transition-colors cursor-pointer"
+            >
+              Review Log
+            </button>
+            {onDismissAllSkipped && (
+              <button
+                onClick={onDismissAllSkipped}
+                className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 transition-colors cursor-pointer"
+              >
+                Dismiss All
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Audio-Idle Background Worker Bento */}
+      {maintenanceStats && (
+        <div className="mb-4 p-3 rounded-xl bg-black/40 border border-white/[0.08] flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300">
+              <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Audio-Idle Maintenance Worker</span>
+            </div>
+            <span
+              className={`text-[9px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                maintenanceStats.statusMessage.startsWith('Suspended')
+                  ? 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                  : maintenanceStats.statusMessage.startsWith('Cooling')
+                  ? 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                  : maintenanceStats.pendingItems === 0
+                  ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
+                  : 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/20'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  maintenanceStats.statusMessage.startsWith('Suspended')
+                    ? 'bg-amber-400'
+                    : maintenanceStats.statusMessage.startsWith('Cooling')
+                    ? 'bg-amber-300 animate-pulse'
+                    : maintenanceStats.pendingItems === 0
+                    ? 'bg-emerald-400'
+                    : 'bg-cyan-400 animate-pulse'
+                }`}
+              />
+              {maintenanceStats.statusMessage.startsWith('Suspended')
+                ? 'Paused — Transport Purity'
+                : maintenanceStats.statusMessage.startsWith('Cooling')
+                ? maintenanceStats.statusMessage.match(/\d+s/)?.[0]
+                  ? `Cooldown (${maintenanceStats.statusMessage.match(/\d+s/)?.[0]})`
+                  : 'Cooldown (30s)'
+                : maintenanceStats.pendingItems === 0
+                ? 'Up to date'
+                : 'Active'}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-[#94A3B8]">
+            <span className="flex items-center gap-1.5">
+              <ImageIcon className="w-3 h-3 text-slate-400" />
+              <span>Album Covers Pre-Cached:</span>
+            </span>
+            <span className="font-mono text-white">
+              {maintenanceStats.cachedCount} / {maintenanceStats.totalItems} Albums
+            </span>
+          </div>
+
+          {/* Progress bar for artwork caching */}
+          {maintenanceStats.totalItems > 0 && (
+            <div className="w-full bg-white/[0.06] rounded-full h-1 overflow-hidden">
+              <div
+                className="bg-cyan-400 h-full transition-all duration-300"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.round((maintenanceStats.cachedCount / maintenanceStats.totalItems) * 100)
+                  )}%`,
+                }}
+              />
+            </div>
+          )}
+
+          <div className="text-[10px] text-white/40 font-mono truncate" title={maintenanceStats.statusMessage}>
+            {maintenanceStats.statusMessage}
+          </div>
         </div>
       )}
 
@@ -274,6 +411,30 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
               />
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* Audiophile Playback Policy Selector */}
+      <div className="mb-3 pt-2 border-t border-white/[0.06] flex items-center justify-between">
+        <span className="text-[11px] text-white/50">Playback Scan Policy:</span>
+        <div className="flex items-center gap-1 bg-white/[0.04] p-0.5 rounded-lg border border-white/[0.06]">
+          {(['purist', 'paced', 'unthrottled'] as const).map(p => (
+            <button
+              key={p}
+              onClick={() => handlePolicySwitch(p)}
+              className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize transition-all ${
+                playbackPolicy === p
+                  ? p === 'purist'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : p === 'paced'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                  : 'text-white/40 hover:text-white/70'
+              }`}
+            >
+              {p}
+            </button>
+          ))}
         </div>
       </div>
 
