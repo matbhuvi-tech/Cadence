@@ -37,6 +37,7 @@ tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.5", features = ["cors"] }
 local-ip-address = "0.6"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rusty-chromaprint = "0.3.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

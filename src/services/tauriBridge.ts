@@ -881,6 +881,96 @@ class TauriBridgeService {
     return () => {}
   }
 
+  public async getTrackFingerprint(trackId: string): Promise<[string, number] | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<[string, number]>('get_track_fingerprint', { trackId })
+      } catch (err) {
+        console.error('[TauriBridge] get_track_fingerprint error:', err)
+        return null
+      }
+    }
+    return null
+  }
+
+  public async dbUpdateTrackProvenance(
+    trackId: string,
+    mbid?: string,
+    originalAlbum?: string,
+    originalYear?: number
+  ): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('db_update_track_provenance', {
+          trackId,
+          mbid,
+          originalAlbum,
+          originalYear,
+        })
+      } catch (err) {
+        console.error('[TauriBridge] db_update_track_provenance error:', err)
+      }
+    }
+  }
+
+  public async dbGetCachedAcoustid(
+    fingerprint: string
+  ): Promise<[string | null, string | null, number | null, number | null] | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke('db_get_cached_acoustid', { fingerprint })
+      } catch (err) {
+        console.error('[TauriBridge] db_get_cached_acoustid error:', err)
+        return null
+      }
+    }
+    return null
+  }
+
+  public async dbCacheAcoustidResult(
+    fingerprint: string,
+    duration: number,
+    mbid?: string,
+    canonicalTitle?: string,
+    canonicalYear?: number,
+    score?: number
+  ): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('db_cache_acoustid_result', {
+          fingerprint,
+          duration,
+          mbid,
+          canonicalTitle,
+          canonicalYear,
+          score,
+        })
+      } catch (err) {
+        console.error('[TauriBridge] db_cache_acoustid_result error:', err)
+      }
+    }
+  }
+
+  public async onTrackFingerprinted(
+    callback: (payload: { trackId: string; fingerprint: string; duration: number }) => void
+  ): Promise<() => void> {
+    if (this.isTauri()) {
+      try {
+        const { listen } = await import('@tauri-apps/api/event')
+        const unlisten = await listen<{ trackId: string; fingerprint: string; duration: number }>(
+          'track-fingerprinted',
+          (event) => {
+            callback(event.payload)
+          }
+        )
+        return unlisten
+      } catch (err) {
+        console.error('[TauriBridge] onTrackFingerprinted error:', err)
+      }
+    }
+    return () => {}
+  }
+
   // ==========================================
   // Audiophile Gapless & Clock Settling
   // ==========================================

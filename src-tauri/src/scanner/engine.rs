@@ -629,6 +629,23 @@ impl ScannerController {
                         let mut composer = tag.and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
                         let has_embedded_art = tag.map(|t| !t.pictures().is_empty()).unwrap_or(false);
 
+                        let is_compilation_tag = tag
+                            .and_then(|t| t.get_string(&ItemKey::FlagCompilation))
+                            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+
+                        let album_artist = tag.and_then(|t| t.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string()));
+                        let original_album = tag.and_then(|t| t.get_string(&ItemKey::OriginalAlbumTitle).map(|s| s.to_string()));
+                        let original_year = tag.and_then(|t| t.get_string(&ItemKey::OriginalReleaseDate))
+                            .and_then(|s| s.chars().take(4).collect::<String>().parse::<i32>().ok());
+
+                        let is_various_artist = album_artist.as_ref().map(|a| {
+                            let lower = a.to_lowercase();
+                            lower == "various artists" || lower == "various" || lower == "v/a" || lower == "soundtrack"
+                        }).unwrap_or(false);
+
+                        let is_compilation = is_compilation_tag || is_various_artist;
+
                         // Read track-level sidecar if present
                         let trk_sidecar = read_track_sidecar(path);
                         if let Some(t) = trk_sidecar.title { title = t; }
@@ -704,6 +721,8 @@ impl ScannerController {
                                         front_cover_url,
                                         backdrop_url,
                                         target_folder_path: None,
+                                        is_compilation,
+                                        physical_combo_title: None,
                                         created_at: Utc::now().to_rfc3339(),
                                     },
                                 );
@@ -751,6 +770,12 @@ impl ScannerController {
                             work_title: None,
                             movement_number: None,
                             movement_title: None,
+                            is_compilation,
+                            album_artist,
+                            original_album,
+                            original_year,
+                            acoustid_fingerprint: None,
+                            musicbrainz_recording_id: None,
                             created_at: Utc::now().to_rfc3339(),
                         });
 
@@ -827,6 +852,8 @@ impl ScannerController {
                                             front_cover_url,
                                             backdrop_url,
                                             target_folder_path: None,
+                                            is_compilation: false,
+                                            physical_combo_title: None,
                                             created_at: Utc::now().to_rfc3339(),
                                         },
                                     );
@@ -874,6 +901,12 @@ impl ScannerController {
                                 work_title: None,
                                 movement_number: None,
                                 movement_title: None,
+                                is_compilation: false,
+                                album_artist: None,
+                                original_album: None,
+                                original_year: None,
+                                acoustid_fingerprint: None,
+                                musicbrainz_recording_id: None,
                                 created_at: Utc::now().to_rfc3339(),
                             });
                             imported_count += 1;
@@ -1079,19 +1112,32 @@ pub fn calculate_dr_score(
     }
 }
 
-/// Disambiguates multi-soundtrack combo CD titles (e.g. "Chinna Thambi/Dharma Dorai/Captain Prabhakaran")
-/// when the folder name or path corroborates one specific soundtrack (e.g. "Dharma Dorai CD RIP").
+/// Disambiguates multi-soundtrack combo CD titles (e.g. "Chinna Thambi/Dharma Dorai/Captain Prabhakaran" or "Needhana Andak Kuyil - Moondraam Pirai - Pakal Nilavu")
+/// when the folder name or path corroborates one specific soundtrack (e.g. "Moondraam Pirai CD RIP").
 pub fn disambiguate_combo_title(raw_title: &str, folder_name: &str) -> String {
-    let delims = ['/', ';'];
-    let has_delim = delims.iter().any(|&d| raw_title.contains(d));
-    if !has_delim {
+    let delims = [" - ", " / ", " | ", "/", ";"];
+    let matched_delim = delims.iter().find(|&&d| raw_title.contains(d));
+    if matched_delim.is_none() {
         return raw_title.to_string();
     }
+    let delim = matched_delim.unwrap();
 
     let segments: Vec<&str> = raw_title
-        .split(|c| c == '/' || c == ';')
+        .split(delim)
         .map(|s| s.trim())
-        .filter(|s| s.len() > 2)
+        .filter(|s| {
+            if s.len() <= 2 {
+                return false;
+            }
+            let lower = s.to_lowercase();
+            if lower.starts_with("cd") || lower.starts_with("disc") {
+                let rest = lower.trim_start_matches("cd").trim_start_matches("disc").trim();
+                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                    return false;
+                }
+            }
+            true
+        })
         .collect();
 
     if segments.len() <= 1 {

@@ -96,6 +96,10 @@ pub fn run() {
             toggle_maintenance_pause,
             notify_artist_portrait_resolved,
             force_enrich_now,
+            get_track_fingerprint,
+            db_update_track_provenance,
+            db_get_cached_acoustid,
+            db_cache_acoustid_result,
             // SQLite Library & Storage commands
             check_storage_mounts_accessibility,
             check_path_accessible,

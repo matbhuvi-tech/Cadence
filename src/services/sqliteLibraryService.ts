@@ -407,6 +407,14 @@ export class SqliteLibraryService {
           sampleRate: t.sampleRate || undefined,
           bitDepth: t.bitDepth || undefined,
           isOnline: t.isOnline,
+          isCompilation: Boolean(t.isCompilation),
+          albumArtist: t.albumArtist || undefined,
+          originalAlbum: t.originalAlbum || undefined,
+          originalYear: t.originalYear || undefined,
+          acoustidFingerprint: t.acoustidFingerprint || undefined,
+          musicbrainzRecordingId: t.musicbrainzRecordingId || undefined,
+          releaseTitle: (t as any).album_title || t.folderName,
+          albumTitle: (t as any).album_title || t.folderName,
           credits: [],
           masterReleaseId: t.releaseId,
         }
@@ -603,6 +611,8 @@ export class SqliteLibraryService {
             isLowRes: !coverArtUrl,
             hasBookletPdf: false,
           },
+          isCompilation: Boolean(r.isCompilation),
+          physicalComboTitle: (r as any).physicalComboTitle || r.physicalComboTitle,
           variants: groupInfo?.variants || [],
           discsCount: 1,
           tracksCount: rTracks.length,
@@ -619,8 +629,16 @@ export class SqliteLibraryService {
         releaseYear?: number
       }
 
-      const isCompilation = (title: string, folderName?: string) => {
-        const combined = `${title || ''} ${folderName || ''}`.toLowerCase()
+      const isCompilation = (r: { title: string; folderName?: string; isCompilation?: boolean; id?: string }) => {
+        if (r.isCompilation) return true
+        if (r.id) {
+          const rTracks = releaseTracksMap.get(r.id) || []
+          if (rTracks.some((t) => t.isCompilation)) return true
+          if (rTracks.some((t) => t.albumArtist && /^(various artists|various|v\/a)$/i.test(t.albumArtist.trim()))) {
+            return true
+          }
+        }
+        const combined = `${r.title || ''} ${r.folderName || ''}`.toLowerCase()
         return /\b(hits|collection|best of|anthology|platinum|duets|melodies|greatest hits|golden hits|favorites|vol\s*\d+|volume\s*\d+|top\s*\d+|super\s*hits|megahits|world of|classics|revisited|essential|tribute|celebration|unforgettable|cd\s*\d+|disc\s*\d+)\b|mania/i.test(combined)
       }
 
@@ -630,7 +648,7 @@ export class SqliteLibraryService {
 
       // Index non-compilation release titles
       releases.forEach((r) => {
-        if (!isCompilation(r.title, r.folderName) && r.title) {
+        if (!isCompilation(r) && r.title) {
           const cleanRel = stripRipNoiseAndTags(r.title).toLowerCase().trim()
           if (cleanRel.length > 2) {
             releaseTitleMap.set(cleanRel, {
@@ -646,7 +664,7 @@ export class SqliteLibraryService {
       // Index non-compilation tracks with EARLIEST release year priority
       tracks.forEach((t) => {
         const parentRel = releases.find((r) => r.id === t.releaseId)
-        if (parentRel && !isCompilation(parentRel.title, parentRel.folderName) && parentRel.title) {
+        if (parentRel && !isCompilation(parentRel) && parentRel.title) {
           const cleanTitle = stripRipNoiseAndTags(t.title).toLowerCase().trim()
           const artComp = (t.composerName || t.artistCredit || '').toLowerCase().trim()
           const year = parentRel.releaseYear || parentRel.originalYear || 9999
@@ -675,7 +693,7 @@ export class SqliteLibraryService {
       const hyphenMovieCounts = new Map<string, number>()
       tracks.forEach((t) => {
         const parentRel = releases.find((r) => r.id === t.releaseId)
-        if (parentRel && isCompilation(parentRel.title, parentRel.folderName) && t.title && t.title.includes('-')) {
+        if (parentRel && isCompilation(parentRel) && t.title && t.title.includes('-')) {
           const parts = t.title.split('-').map((p) => p.trim())
           if (parts.length === 2) {
             const p0 = stripRipNoiseAndTags(parts[0]).trim()
@@ -700,7 +718,7 @@ export class SqliteLibraryService {
           }
         }
 
-        const isParentComp = parentRel ? isCompilation(parentRel.title, parentRel.folderName) : false
+        const isParentComp = parentRel ? isCompilation(parentRel) : false
 
         // Original soundtrack albums (non-compilations) are ground-truth native masters
         if (!isParentComp) {
@@ -725,8 +743,20 @@ export class SqliteLibraryService {
 
         let orig: OriginalSoundtrackInfo | undefined
 
-        // 1. Hyphen pattern (Movie - Song or Song - Movie) against local library releases
-        if (rawTitle.includes('-')) {
+        // Layer 1: Authoritative Container / AcoustID / Sidecar Provenance
+        if (t.originalAlbum && t.originalAlbum.toLowerCase().trim() !== parentRel?.title.toLowerCase().trim()) {
+          const cleanOrig = stripRipNoiseAndTags(t.originalAlbum).toLowerCase().trim()
+          const matchedRel = releaseTitleMap.get(cleanOrig)
+          orig = {
+            albumTitle: t.originalAlbum,
+            releaseId: matchedRel?.releaseId || '',
+            masterReleaseId: matchedRel?.masterReleaseId || '',
+            releaseYear: t.originalYear || matchedRel?.releaseYear,
+          }
+        }
+
+        // Layer 2: Hyphen pattern (Movie - Song or Song - Movie) against local library releases
+        if (!orig && rawTitle.includes('-')) {
           const parts = rawTitle.split('-').map((p) => p.trim())
           if (parts.length === 2) {
             const p0 = stripRipNoiseAndTags(parts[0]).toLowerCase()

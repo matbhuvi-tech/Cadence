@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import {
   Users2,
   Plus,
@@ -6,9 +6,14 @@ import {
   Check,
   Copy,
   Film,
+  Sparkles,
+  RefreshCw,
+  Disc3,
+  ShieldCheck,
 } from 'lucide-react'
 import { Track, Credit, CreditRole } from '../../core/types'
 import { splitMultiArtistCredits, canonicalizeComposer } from '../../core/taxonomyUtils'
+import { acoustIdService } from '../../services/acoustidService'
 
 interface GranularCreditMatrixProps {
   track: Track
@@ -32,6 +37,158 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
   const [newRole, setNewRole] = useState<CreditRole>('recording_engineer')
   const [newDetail, setNewDetail] = useState('')
   const [copiedField, setCopiedField] = useState<string | null>(null)
+  const [isResolvingAcoustId, setIsResolvingAcoustId] = useState(false)
+  const [acoustIdResult, setAcoustIdResult] = useState<string | null>(null)
+  const [liveFingerprint, setLiveFingerprint] = useState<string | null>(null)
+  const [resolvedMbid, setResolvedMbid] = useState<string | null>(null)
+  const [resolvedOrigin, setResolvedOrigin] = useState<{ title: string; year?: number; isMaster?: boolean } | null>(null)
+
+  // Reset transient verification state when selecting a different track (prevents state bleed)
+  useEffect(() => {
+    setIsResolvingAcoustId(false)
+    setAcoustIdResult(null)
+    setLiveFingerprint(null)
+    setResolvedMbid(null)
+    setResolvedOrigin(null)
+    setCopiedField(null)
+    setIsAdding(false)
+  }, [track.id])
+
+  const targetRelease =
+    track.releaseTitle ||
+    (track as any).albumTitle ||
+    (track as any).album ||
+    track.folderName ||
+    ''
+
+  // Check SQLite cache on track selection if not already resolved in track object
+  useEffect(() => {
+    let isCancelled = false
+    const checkCache = async () => {
+      if (track.originalAlbum) return
+
+      let fp = track.acoustidFingerprint || track.acousticFingerprint
+      if (!fp) {
+        const fpResult = await tauriBridge.getTrackFingerprint(track.id)
+        if (fpResult && fpResult[0]) {
+          fp = fpResult[0]
+          track.acoustidFingerprint = fp
+        }
+      }
+
+      if (fp && !fp.startsWith('ERROR')) {
+        try {
+          const cached = await tauriBridge.dbGetCachedAcoustid(fp)
+          if (cached && !isCancelled) {
+            const [mbid, canonicalTitle, canonicalYear] = cached
+            if (canonicalTitle) {
+              const isMaster = Boolean(
+                targetRelease &&
+                canonicalTitle.toLowerCase().trim() === targetRelease.toLowerCase().trim()
+              )
+              track.originalAlbum = canonicalTitle
+              track.originalYear = canonicalYear || undefined
+              track.musicbrainzRecordingId = mbid || undefined
+              track.recordingId = mbid || undefined
+              setResolvedOrigin({
+                title: canonicalTitle,
+                year: canonicalYear || undefined,
+                isMaster,
+              })
+              if (mbid) setResolvedMbid(mbid)
+            }
+          }
+        } catch (e) {
+          console.warn('[CreditMatrix] Failed to read cached provenance:', e)
+        }
+      }
+    }
+    checkCache()
+    return () => {
+      isCancelled = true
+    }
+  }, [track.id, track.acoustidFingerprint, targetRelease])
+
+  // Derive effective origin from local state or SQLite track metadata
+  const effectiveOrigin = useMemo(() => {
+    if (resolvedOrigin) return resolvedOrigin
+    if (track.originalAlbum) {
+      const isMaster = Boolean(
+        targetRelease &&
+        track.originalAlbum.toLowerCase().trim() === targetRelease.toLowerCase().trim()
+      )
+      return {
+        title: track.originalAlbum,
+        year: track.originalYear,
+        isMaster,
+      }
+    }
+    if (track.canonicalAlbumTitle) {
+      const isMaster = Boolean(
+        targetRelease &&
+        track.canonicalAlbumTitle.toLowerCase().trim() === targetRelease.toLowerCase().trim()
+      )
+      return {
+        title: track.canonicalAlbumTitle,
+        year: track.canonicalReleaseYear,
+        isMaster,
+      }
+    }
+    return null
+  }, [
+    resolvedOrigin,
+    track.originalAlbum,
+    track.originalYear,
+    track.canonicalAlbumTitle,
+    track.canonicalReleaseYear,
+    targetRelease,
+  ])
+
+  const handleAcousticResolve = async () => {
+    setIsResolvingAcoustId(true)
+    setAcoustIdResult(null)
+    try {
+      const res = await acoustIdService.resolveTrackProvenance(track, true)
+      if (res?.fingerprint && !res.fingerprint.startsWith('ERROR')) {
+        setLiveFingerprint(res.fingerprint)
+        track.acoustidFingerprint = res.fingerprint
+      }
+      if (res?.mbid) {
+        setResolvedMbid(res.mbid)
+        track.musicbrainzRecordingId = res.mbid
+        track.recordingId = res.mbid
+      }
+      if (res?.canonicalTitle) {
+        track.originalAlbum = res.canonicalTitle
+        track.originalYear = res.canonicalYear
+
+        const isMaster =
+          res.isCurrentAlbumMaster ||
+          Boolean(
+            targetRelease &&
+            res.canonicalTitle.toLowerCase().trim() === targetRelease.toLowerCase().trim()
+          )
+
+        setResolvedOrigin({
+          title: res.canonicalTitle,
+          year: res.canonicalYear,
+          isMaster,
+        })
+
+        if (isMaster) {
+          setAcoustIdResult(`Master: ${res.canonicalTitle}${res.canonicalYear ? ` (${res.canonicalYear})` : ''}`)
+        } else {
+          setAcoustIdResult(`From: ${res.canonicalTitle}${res.canonicalYear ? ` (${res.canonicalYear})` : ''}`)
+        }
+      } else {
+        setAcoustIdResult('No match')
+      }
+    } catch {
+      setAcoustIdResult('Failed')
+    } finally {
+      setIsResolvingAcoustId(false)
+    }
+  }
 
   const handleCopy = (key: string, text: string) => {
     if (navigator?.clipboard) {
@@ -55,8 +212,9 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
   }
 
   const getMusicBrainzUrl = () => {
-    if (track.recordingId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(track.recordingId)) {
-      return `https://musicbrainz.org/recording/${track.recordingId}`
+    const activeMbid = resolvedMbid || track.recordingId
+    if (activeMbid && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeMbid)) {
+      return `https://musicbrainz.org/recording/${activeMbid}`
     }
     const queryParts = [track.title, track.artistCredit || track.composerName].filter(Boolean)
     return `https://musicbrainz.org/search?type=recording&query=${encodeURIComponent(queryParts.join(' '))}`
@@ -135,7 +293,8 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
     return Array.from(map.values())
   }, [track.composerName, track.artistCredit, track.credits])
 
-  const acoustIdHash = track.acousticFingerprint || 'chromaprint:AQAAuVIaShKR89'
+  const acoustIdHash =
+    liveFingerprint || track.acoustidFingerprint || track.acousticFingerprint || 'Uncalculated'
 
   return (
     <div
@@ -282,53 +441,126 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
       </div>
 
       {/* Linked Canonical Entities & Authority Records */}
-      <div className="mt-1 p-3.5 rounded-xl bg-[#121316] border border-white/[0.06] text-left text-xs shadow-sm">
-        <span className="text-[10px] font-mono text-[#8E8E93] uppercase font-semibold block mb-2.5">
-          Authority Entity Records
-        </span>
-        <div className="flex flex-col gap-2">
-          {/* Composer Entity */}
-          <div className="flex items-center justify-between text-[#8E8E93]">
-            <span>Composer Entity</span>
-            <span className="text-[#F5F5F7] font-medium truncate max-w-[170px]">
+      <div className="mt-1 p-3.5 rounded-xl bg-[#121316] border border-white/[0.06] text-left text-xs shadow-sm flex flex-col gap-3">
+        {/* Section Header */}
+        <div className="flex items-center justify-between pb-1.5 border-b border-white/[0.04]">
+          <span className="text-[10px] font-mono text-[#8E8E93] uppercase font-semibold">
+            Authority Entity Records
+          </span>
+          {effectiveOrigin && (
+            <span className={`text-[9px] font-mono font-medium px-2 py-0.5 rounded border ${
+              effectiveOrigin.isMaster
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
+                : 'bg-cyan-500/10 text-cyan-400 border-cyan-500/25'
+            }`}>
+              {effectiveOrigin.isMaster ? 'Canonical Master' : 'Soundtrack Origin'}
+            </span>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-2.5">
+          {/* 1. Composer Entity */}
+          <div className="flex items-baseline justify-between text-[#8E8E93] gap-2 pb-1.5 border-b border-white/[0.04]">
+            <span className="shrink-0 text-[11px]">Composer Entity</span>
+            <span className="text-[#F5F5F7] font-medium text-right break-words text-xs">
               {track.composerName || 'Not Cataloged'}
             </span>
           </div>
 
-          {/* Original Soundtrack / Master Provenance */}
-          {track.canonicalAlbumTitle && (
-            <div className="flex items-center justify-between text-[#8E8E93]">
-              <span>Original Soundtrack</span>
-              <span className="text-cyan-400 font-medium truncate max-w-[170px]" title={`Primary Master Release: ${track.canonicalAlbumTitle}`}>
-                {track.canonicalAlbumTitle} {track.canonicalReleaseYear ? `(${track.canonicalReleaseYear})` : ''}
-              </span>
-            </div>
-          )}
-
-          {/* AcoustID Hash with Copy Feedback (Guardrail 2) */}
-          <div className="flex items-center justify-between text-[#8E8E93]">
-            <span>AcoustID Hash</span>
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className="text-[#A1A1AA] font-mono text-[11px] truncate max-w-[130px]" title={acoustIdHash}>
-                {acoustIdHash}
-              </span>
+          {/* 2. Acoustic Origin Verification Card (No Truncation - Full User Agency) */}
+          <div className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.06] flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-[#8E8E93]">
+                <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="font-semibold text-xs text-[#D1D1D6]">Acoustic Origin</span>
+              </div>
               <button
-                onClick={() => handleCopy('acoustid', acoustIdHash)}
-                title="Copy AcoustID Chromaprint Hash"
-                className="p-1 rounded hover:bg-white/[0.08] text-[#8E8E93] hover:text-[#EDEDED] transition-colors cursor-pointer"
+                onClick={handleAcousticResolve}
+                disabled={isResolvingAcoustId}
+                className="px-2.5 py-1 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-[11px] font-medium text-cyan-300 hover:text-cyan-200 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
+                title="Verify acoustic origin via MusicBrainz & AcoustID"
               >
-                {copiedField === 'acoustid' ? (
-                  <Check className="w-3 h-3 text-[#10B981]" />
+                {isResolvingAcoustId ? (
+                  <>
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    <span>Verifying...</span>
+                  </>
                 ) : (
-                  <Copy className="w-3 h-3" />
+                  <span>{effectiveOrigin ? 'Re-verify' : 'Verify'}</span>
                 )}
               </button>
             </div>
+
+            {/* Full Readable Match Details */}
+            {effectiveOrigin ? (
+              <div className="flex flex-col gap-1.5 pt-1.5 border-t border-white/[0.04]">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-xs font-semibold text-cyan-200 break-words leading-snug">
+                    {effectiveOrigin.title}
+                  </span>
+                  {effectiveOrigin.year && (
+                    <span className="text-[10px] font-mono text-cyan-400/90 px-1.5 py-0.5 rounded bg-cyan-500/10 shrink-0 border border-cyan-500/20 font-medium">
+                      {effectiveOrigin.year}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-[#8E8E93] leading-normal font-sans">
+                  {effectiveOrigin.isMaster
+                    ? 'Confirmed primary master recording for this release.'
+                    : 'Acoustically resolved to canonical movie soundtrack release.'}
+                </p>
+              </div>
+            ) : acoustIdResult === 'No match' ? (
+              <div className="pt-1.5 border-t border-white/[0.04]">
+                <p className="text-[10px] text-amber-400/90 leading-normal">
+                  No matching master recording found in MusicBrainz or AcoustID.
+                </p>
+              </div>
+            ) : acoustIdResult === 'Failed' ? (
+              <div className="pt-1.5 border-t border-white/[0.04]">
+                <p className="text-[10px] text-rose-400/90 leading-normal">
+                  Verification request failed. Check network connection.
+                </p>
+              </div>
+            ) : (
+              <p className="text-[10px] text-[#8E8E93]/80 leading-normal">
+                Click Verify to match acoustic origin against MusicBrainz & AcoustID master catalog.
+              </p>
+            )}
           </div>
 
-          {/* External Authority */}
-          <div className="flex items-center justify-between text-[#8E8E93]">
-            <span>External Authority</span>
+          {/* 3. AcoustID Hash (Inspectable & Copyable) */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between text-[#8E8E93]">
+              <span className="text-[11px]">AcoustID Hash</span>
+              {acoustIdHash && (
+                <button
+                  onClick={() => handleCopy('acoustid', acoustIdHash)}
+                  title="Copy AcoustID Chromaprint Hash"
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-white/[0.08] text-[10px] text-[#8E8E93] hover:text-[#EDEDED] transition-colors cursor-pointer"
+                >
+                  {copiedField === 'acoustid' ? (
+                    <>
+                      <Check className="w-3 h-3 text-[#10B981]" />
+                      <span className="text-[#10B981]">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+            <div className="p-2 rounded-lg bg-black/40 border border-white/[0.05] text-[10px] font-mono text-[#A1A1AA] break-all select-all max-h-16 overflow-y-auto leading-relaxed">
+              {acoustIdHash || 'Pending calculation (quiet background thread)'}
+            </div>
+          </div>
+
+          {/* 4. External Authority (MusicBrainz) */}
+          <div className="flex items-center justify-between pt-1 border-t border-white/[0.04] text-[#8E8E93]">
+            <span className="text-[11px]">External Authority</span>
             <a
               href={getMusicBrainzUrl()}
               target="_blank"
@@ -336,7 +568,7 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
               className="text-[#D4AF37] hover:underline flex items-center gap-1 text-[11px] cursor-pointer transition-colors group"
               title={`Open MusicBrainz recording for "${track.title}"`}
             >
-              <span>MusicBrainz Linked</span>
+              <span>{(resolvedMbid || track.recordingId) ? 'MusicBrainz Record' : 'MusicBrainz Linked'}</span>
               <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
             </a>
           </div>

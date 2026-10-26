@@ -47,6 +47,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             front_cover_url TEXT,
             backdrop_url TEXT,
             target_folder_path TEXT,
+            is_compilation INTEGER NOT NULL DEFAULT 0,
+            physical_combo_title TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -80,6 +82,12 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             work_title TEXT,
             movement_number TEXT,
             movement_title TEXT,
+            is_compilation INTEGER NOT NULL DEFAULT 0,
+            album_artist TEXT,
+            original_album TEXT,
+            original_year INTEGER,
+            acoustid_fingerprint TEXT,
+            musicbrainz_recording_id TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(release_id) REFERENCES releases(id) ON DELETE CASCADE,
             FOREIGN KEY(mount_id) REFERENCES storage_mounts(id) ON DELETE CASCADE
@@ -174,6 +182,16 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             added_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS acoustid_cache (
+            fingerprint TEXT PRIMARY KEY,
+            duration INTEGER NOT NULL,
+            mbid TEXT,
+            canonical_title TEXT,
+            canonical_year INTEGER,
+            score REAL,
+            resolved_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path);
         CREATE INDEX IF NOT EXISTS idx_tracks_mount_id ON tracks(mount_id);
         CREATE INDEX IF NOT EXISTS idx_tracks_release_id ON tracks(release_id);
@@ -196,6 +214,18 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE canonical_artists ADD COLUMN portrait_status TEXT NOT NULL DEFAULT 'pending'", []);
     let _ = conn.execute("ALTER TABLE canonical_artists ADD COLUMN portrait_checked_at INTEGER", []);
     let _ = conn.execute("ALTER TABLE skipped_files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE releases ADD COLUMN is_compilation INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE releases ADD COLUMN physical_combo_title TEXT", []);
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN is_compilation INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN album_artist TEXT", []);
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN original_album TEXT", []);
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN original_year INTEGER", []);
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN acoustid_fingerprint TEXT", []);
+    let _ = conn.execute("ALTER TABLE tracks ADD COLUMN musicbrainz_recording_id TEXT", []);
+
+    // Create indices on migrated columns safely
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_acoustid ON tracks(acoustid_fingerprint)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_mbid ON tracks(musicbrainz_recording_id)", []);
 
     Ok(())
 }

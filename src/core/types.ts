@@ -203,6 +203,8 @@ export interface Release {
   genreTags: string[]
   storageMountId: string
   language?: string
+  isCompilation?: boolean
+  physicalComboTitle?: string
   // Curation fields (DB-only, non-destructive)
   rating?: number // 1 to 5 stars
   isFavorite?: boolean
@@ -284,6 +286,14 @@ export interface Track {
   canonicalReleaseId?: string
   canonicalReleaseYear?: number
   isCanonicalAlbumTrack?: boolean
+  isCompilation?: boolean
+  albumArtist?: string
+  originalAlbum?: string
+  originalYear?: number
+  acoustidFingerprint?: string
+  musicbrainzRecordingId?: string
+  releaseTitle?: string
+  albumTitle?: string
   // Curation fields (DB-only)
   rating?: number
   isFavorite?: boolean

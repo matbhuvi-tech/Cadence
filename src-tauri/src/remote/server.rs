@@ -273,7 +273,7 @@ async fn get_tracks(
     let conn = state.db.conn.lock();
     let tracks = if let Some(ref rel_id) = q.release_id {
         let mut stmt = conn
-            .prepare("SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name, file_size, mtime, title, artist_credit, album_title, release_year, track_number, genre, composer, duration_secs, format, sample_rate, bit_depth, channels, dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online, work_title, movement_number, movement_title, created_at FROM tracks WHERE release_id = ?1 ORDER BY track_number ASC")
+            .prepare("SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name, file_size, mtime, title, artist_credit, album_title, release_year, track_number, genre, composer, duration_secs, format, sample_rate, bit_depth, channels, dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online, work_title, movement_number, movement_title, is_compilation, album_artist, original_album, original_year, acoustid_fingerprint, musicbrainz_recording_id, created_at FROM tracks WHERE release_id = ?1 ORDER BY track_number ASC")
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let rows = stmt
             .query_map(rusqlite::params![rel_id], |row| {
@@ -307,7 +307,13 @@ async fn get_tracks(
                     work_title: row.get(26)?,
                     movement_number: row.get(27)?,
                     movement_title: row.get(28)?,
-                    created_at: row.get(29)?,
+                    is_compilation: row.get::<_, i32>(29).unwrap_or(0) == 1,
+                    album_artist: row.get(30)?,
+                    original_album: row.get(31)?,
+                    original_year: row.get(32)?,
+                    acoustid_fingerprint: row.get(33)?,
+                    musicbrainz_recording_id: row.get(34)?,
+                    created_at: row.get(35)?,
                 })
             })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

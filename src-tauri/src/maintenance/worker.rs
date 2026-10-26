@@ -416,13 +416,18 @@ impl MaintenanceWorker {
                 // Low-noise cooldown between items (100ms) to ensure zero thermal/fan disruption
                 thread::sleep(Duration::from_millis(100));
             } else {
-                self.set_status("Idle: All artist portraits and album covers up-to-date".to_string());
-                // No pending items to process: sleep longer before checking for new files
-                for _ in 0..20 {
-                    if !self.is_running.load(Ordering::Relaxed) || !self.is_audio_idle() || self.user_paused.load(Ordering::Relaxed) {
-                        break;
+                let processed_fingerprint = self.process_next_fingerprint_item();
+                if processed_fingerprint {
+                    thread::sleep(Duration::from_millis(100));
+                } else {
+                    self.set_status("Idle: All artist portraits, album covers, and audio fingerprints up-to-date".to_string());
+                    // No pending items to process: sleep longer before checking for new files
+                    for _ in 0..20 {
+                        if !self.is_running.load(Ordering::Relaxed) || !self.is_audio_idle() || self.user_paused.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1000));
                     }
-                    thread::sleep(Duration::from_millis(1000));
                 }
             }
         }
@@ -463,6 +468,52 @@ impl MaintenanceWorker {
 
         if let Some((track_id, _release_id, file_path, mtime)) = pending_track {
             self.process_track_artwork(&track_id, &file_path, mtime);
+            return true;
+        }
+
+        false
+    }
+
+    fn process_next_fingerprint_item(&self) -> bool {
+        if !self.is_audio_idle() {
+            return false;
+        }
+
+        let pending_track = {
+            let conn = self.db.conn.lock();
+            DbOperations::get_unfingerprinted_tracks(&conn, 1)
+                .ok()
+                .and_then(|mut v| v.pop())
+        };
+
+        if let Some((track_id, file_path)) = pending_track {
+            if !self.is_audio_idle() {
+                return false;
+            }
+            let file_name = Path::new(&file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&file_path);
+            self.set_status(format!("Active: Generating acoustic fingerprint for {}", file_name));
+
+            match crate::maintenance::fingerprint::generate_fingerprint_for_file(&file_path, 120) {
+                Ok((fingerprint, actual_dur)) => {
+                    let conn = self.db.conn.lock();
+                    let _ = DbOperations::update_track_fingerprint(&conn, &track_id, &fingerprint);
+                    if let Some(app) = self.app_handle.lock().as_ref() {
+                        let _ = app.emit("track-fingerprinted", &serde_json::json!({
+                            "trackId": track_id,
+                            "fingerprint": fingerprint,
+                            "duration": actual_dur
+                        }));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[Cadence Maintenance] Fingerprint generation failed for {}: {}", file_path, e);
+                    let conn = self.db.conn.lock();
+                    let _ = DbOperations::update_track_fingerprint(&conn, &track_id, "ERROR_UNREADABLE");
+                }
+            }
             return true;
         }
 

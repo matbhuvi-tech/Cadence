@@ -49,6 +49,9 @@ pub struct DbRelease {
     pub front_cover_url: Option<String>,
     pub backdrop_url: Option<String>,
     pub target_folder_path: Option<String>,
+    #[serde(default)]
+    pub is_compilation: bool,
+    pub physical_combo_title: Option<String>,
     pub created_at: String,
 }
 
@@ -84,6 +87,13 @@ pub struct DbTrack {
     pub work_title: Option<String>,
     pub movement_number: Option<String>,
     pub movement_title: Option<String>,
+    #[serde(default)]
+    pub is_compilation: bool,
+    pub album_artist: Option<String>,
+    pub original_album: Option<String>,
+    pub original_year: Option<i32>,
+    pub acoustid_fingerprint: Option<String>,
+    pub musicbrainz_recording_id: Option<String>,
     pub created_at: String,
 }
 
@@ -587,13 +597,15 @@ impl DbOperations {
     pub fn get_releases(conn: &Connection, only_online: Option<bool>) -> Result<Vec<DbRelease>> {
         let sql = if only_online.unwrap_or(false) {
             "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
-                    r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path, r.created_at
+                    r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path,
+                    r.is_compilation, r.physical_combo_title, r.created_at
              FROM releases r
              WHERE r.id IN (SELECT DISTINCT release_id FROM tracks WHERE is_online = 1)
              ORDER BY r.title ASC"
         } else {
             "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
-                    release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path, created_at
+                    release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
+                    is_compilation, physical_combo_title, created_at
              FROM releases ORDER BY title ASC"
         };
 
@@ -612,7 +624,9 @@ impl DbOperations {
                 front_cover_url: row.get(8)?,
                 backdrop_url: row.get(9)?,
                 target_folder_path: row.get(10)?,
-                created_at: row.get(11)?,
+                is_compilation: row.get::<_, i32>(11).unwrap_or(0) != 0,
+                physical_combo_title: row.get(12)?,
+                created_at: row.get(13)?,
             })
         })?;
 
@@ -629,8 +643,9 @@ impl DbOperations {
             let mut stmt = tx.prepare(
                 "INSERT INTO releases (
                     id, title, folder_path, folder_name, artist_credit, composer_name,
-                    release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path, created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
+                    is_compilation, physical_combo_title, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     folder_path=excluded.folder_path,
@@ -641,7 +656,9 @@ impl DbOperations {
                     genre_tags=COALESCE(excluded.genre_tags, releases.genre_tags),
                     front_cover_url=COALESCE(excluded.front_cover_url, releases.front_cover_url),
                     backdrop_url=COALESCE(excluded.backdrop_url, releases.backdrop_url),
-                    target_folder_path=COALESCE(excluded.target_folder_path, releases.target_folder_path)",
+                    target_folder_path=COALESCE(excluded.target_folder_path, releases.target_folder_path),
+                    is_compilation=excluded.is_compilation,
+                    physical_combo_title=COALESCE(excluded.physical_combo_title, releases.physical_combo_title)",
             )?;
 
             for rel in releases {
@@ -657,6 +674,8 @@ impl DbOperations {
                     rel.front_cover_url,
                     rel.backdrop_url,
                     rel.target_folder_path,
+                    if rel.is_compilation { 1 } else { 0 },
+                    rel.physical_combo_title,
                     rel.created_at,
                 ])?;
             }
@@ -689,7 +708,9 @@ impl DbOperations {
                     file_size, mtime, title, artist_credit, album_title, release_year, track_number,
                     genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
                     dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
-                    work_title, movement_number, movement_title, created_at
+                    work_title, movement_number, movement_title,
+                    is_compilation, album_artist, original_album, original_year,
+                    acoustid_fingerprint, musicbrainz_recording_id, created_at
              FROM tracks {} ORDER BY album_title ASC, track_number ASC {}",
             where_clause, pagination_clause
         );
@@ -726,7 +747,13 @@ impl DbOperations {
                 work_title: row.get(26)?,
                 movement_number: row.get(27)?,
                 movement_title: row.get(28)?,
-                created_at: row.get(29)?,
+                is_compilation: row.get::<_, i32>(29).unwrap_or(0) != 0,
+                album_artist: row.get(30)?,
+                original_album: row.get(31)?,
+                original_year: row.get(32)?,
+                acoustid_fingerprint: row.get(33)?,
+                musicbrainz_recording_id: row.get(34)?,
+                created_at: row.get(35)?,
             })
         })?;
 
@@ -768,9 +795,12 @@ impl DbOperations {
                     file_size, mtime, title, artist_credit, album_title, release_year, track_number,
                     genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
                     dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
-                    work_title, movement_number, movement_title, created_at
+                    work_title, movement_number, movement_title,
+                    is_compilation, album_artist, original_album, original_year,
+                    acoustid_fingerprint, musicbrainz_recording_id, created_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                          ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)
+                          ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                          ?31, ?32, ?33, ?34, ?35, ?36)
                 ON CONFLICT(file_path) DO UPDATE SET
                     release_id=excluded.release_id,
                     mount_id=excluded.mount_id,
@@ -797,7 +827,13 @@ impl DbOperations {
                     is_online=excluded.is_online,
                     work_title=excluded.work_title,
                     movement_number=excluded.movement_number,
-                    movement_title=excluded.movement_title",
+                    movement_title=excluded.movement_title,
+                    is_compilation=excluded.is_compilation,
+                    album_artist=COALESCE(excluded.album_artist, tracks.album_artist),
+                    original_album=COALESCE(excluded.original_album, tracks.original_album),
+                    original_year=COALESCE(excluded.original_year, tracks.original_year),
+                    acoustid_fingerprint=COALESCE(excluded.acoustid_fingerprint, tracks.acoustid_fingerprint),
+                    musicbrainz_recording_id=COALESCE(excluded.musicbrainz_recording_id, tracks.musicbrainz_recording_id)",
             )?;
 
             for t in tracks {
@@ -832,11 +868,95 @@ impl DbOperations {
                     t.work_title,
                     t.movement_number,
                     t.movement_title,
+                    if t.is_compilation { 1 } else { 0 },
+                    t.album_artist,
+                    t.original_album,
+                    t.original_year,
+                    t.acoustid_fingerprint,
+                    t.musicbrainz_recording_id,
                     t.created_at,
                 ])?;
             }
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_unfingerprinted_tracks(conn: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, file_path FROM tracks 
+             WHERE (acoustid_fingerprint IS NULL OR acoustid_fingerprint = '')
+               AND is_online = 1
+             LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        let mut res = Vec::new();
+        for r in rows {
+            if let Ok(item) = r {
+                res.push(item);
+            }
+        }
+        Ok(res)
+    }
+
+    pub fn update_track_fingerprint(conn: &Connection, track_id: &str, fingerprint: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE tracks SET acoustid_fingerprint = ?1 WHERE id = ?2",
+            params![fingerprint, track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_track_provenance(
+        conn: &Connection,
+        track_id: &str,
+        mbid: Option<&str>,
+        original_album: Option<&str>,
+        original_year: Option<i32>,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE tracks SET 
+                musicbrainz_recording_id = COALESCE(?1, musicbrainz_recording_id),
+                original_album = COALESCE(?2, original_album),
+                original_year = COALESCE(?3, original_year)
+             WHERE id = ?4",
+            params![mbid, original_album, original_year, track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_cached_acoustid(
+        conn: &Connection,
+        fingerprint: &str,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<i32>, Option<f64>)>> {
+        let mut stmt = conn.prepare(
+            "SELECT mbid, canonical_title, canonical_year, score FROM acoustid_cache WHERE fingerprint = ?1"
+        )?;
+        let mut rows = stmt.query(params![fingerprint])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn cache_acoustid_result(
+        conn: &Connection,
+        fingerprint: &str,
+        duration: i32,
+        mbid: Option<&str>,
+        canonical_title: Option<&str>,
+        canonical_year: Option<i32>,
+        score: Option<f64>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR REPLACE INTO acoustid_cache (fingerprint, duration, mbid, canonical_title, canonical_year, score, resolved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![fingerprint, duration, mbid, canonical_title, canonical_year, score, now],
+        )?;
         Ok(())
     }
 
@@ -1228,7 +1348,7 @@ impl DbOperations {
                 if Self::is_compound_exception(comp_trimmed) {
                     if !credits.iter().any(|(name, role, _, _)| name.eq_ignore_ascii_case(comp_trimmed) && role == "Composer") {
                         credits.push((comp_trimmed.to_string(), "Composer".to_string(), String::new(), order));
-                        order += 1;
+                        let _ = order;
                     }
                 } else {
                     let comp_cleaned = comp_trimmed.replace(';', ",")
@@ -1396,7 +1516,8 @@ impl DbOperations {
         // Discography releases where this artist contributed
         let mut rel_stmt = conn.prepare(
             "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
-                             r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path, r.created_at
+                             r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path,
+                             r.is_compilation, r.physical_combo_title, r.created_at
              FROM releases r
              JOIN tracks t ON t.release_id = r.id
              JOIN track_artist_credits tac ON tac.track_id = t.id
@@ -1417,7 +1538,9 @@ impl DbOperations {
                 front_cover_url: row.get(8)?,
                 backdrop_url: row.get(9)?,
                 target_folder_path: row.get(10)?,
-                created_at: row.get(11)?,
+                is_compilation: row.get::<_, i32>(11).unwrap_or(0) != 0,
+                physical_combo_title: row.get(12)?,
+                created_at: row.get(13)?,
             })
         })?;
 
@@ -1623,7 +1746,8 @@ impl DbOperations {
         {
             let mut stmt = conn.prepare(
                 "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
-                        release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path, created_at
+                        release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
+                        is_compilation, physical_combo_title, created_at
                  FROM releases
                  WHERE title LIKE ?1 OR artist_credit LIKE ?1 OR composer_name LIKE ?1 OR folder_name LIKE ?1
                  LIMIT ?2"
@@ -1641,7 +1765,9 @@ impl DbOperations {
                     front_cover_url: row.get(8)?,
                     backdrop_url: row.get(9)?,
                     target_folder_path: row.get(10)?,
-                    created_at: row.get(11)?,
+                    is_compilation: row.get::<_, i32>(11).unwrap_or(0) != 0,
+                    physical_combo_title: row.get(12)?,
+                    created_at: row.get(13)?,
                 })
             })?;
             for r in rows.flatten() {
@@ -1657,7 +1783,9 @@ impl DbOperations {
                         file_size, mtime, title, artist_credit, album_title, release_year, track_number,
                         genre, composer, duration_secs, format, sample_rate, bit_depth, channels,
                         dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
-                        work_title, movement_number, movement_title, created_at
+                        work_title, movement_number, movement_title,
+                        is_compilation, album_artist, original_album, original_year,
+                        acoustid_fingerprint, musicbrainz_recording_id, created_at
                  FROM tracks
                  WHERE title LIKE ?1 OR artist_credit LIKE ?1 OR composer LIKE ?1 OR work_title LIKE ?1 OR movement_title LIKE ?1
                  LIMIT ?2"
@@ -1693,7 +1821,13 @@ impl DbOperations {
                     work_title: row.get(26)?,
                     movement_number: row.get(27)?,
                     movement_title: row.get(28)?,
-                    created_at: row.get(29)?,
+                    is_compilation: row.get::<_, i32>(29).unwrap_or(0) != 0,
+                    album_artist: row.get(30)?,
+                    original_album: row.get(31)?,
+                    original_year: row.get(32)?,
+                    acoustid_fingerprint: row.get(33)?,
+                    musicbrainz_recording_id: row.get(34)?,
+                    created_at: row.get(35)?,
                 })
             })?;
             for t in rows.flatten() {
@@ -1828,7 +1962,9 @@ impl DbOperations {
                     t.genre, t.composer, t.duration_secs, t.format, t.sample_rate,
                     t.bit_depth, t.channels, t.dr_score, t.has_embedded_art,
                     t.sidecar_status, t.sidecar_edits_json, t.is_online,
-                    t.work_title, t.movement_number, t.movement_title, t.created_at
+                    t.work_title, t.movement_number, t.movement_title,
+                    t.is_compilation, t.album_artist, t.original_album, t.original_year,
+                    t.acoustid_fingerprint, t.musicbrainz_recording_id, t.created_at
              FROM playlist_tracks pt
              JOIN tracks t ON t.id = pt.track_id
              WHERE pt.playlist_id = ?1
@@ -1866,7 +2002,13 @@ impl DbOperations {
                 work_title: row.get(26)?,
                 movement_number: row.get(27)?,
                 movement_title: row.get(28)?,
-                created_at: row.get(29)?,
+                is_compilation: row.get::<_, i32>(29).unwrap_or(0) != 0,
+                album_artist: row.get(30)?,
+                original_album: row.get(31)?,
+                original_year: row.get(32)?,
+                acoustid_fingerprint: row.get(33)?,
+                musicbrainz_recording_id: row.get(34)?,
+                created_at: row.get(35)?,
             })
         })?;
 
