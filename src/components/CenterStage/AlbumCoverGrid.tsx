@@ -1126,27 +1126,38 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                         )}
                         {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
                           <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                if (track.canonicalReleaseId) {
-                                  setSelectedAlbumId(track.canonicalReleaseId)
-                                }
-                              }}
-                              className="group/orig flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-cyan-300 hover:text-cyan-200 transition-all text-[10px] font-mono cursor-pointer"
-                              title={`Click to jump to original soundtrack: ${track.canonicalAlbumTitle}`}
-                            >
-                              <Film className="w-2.5 h-2.5 text-cyan-400 group-hover/orig:scale-110 transition-transform" />
-                              <span className="text-cyan-400 font-semibold">From</span>
-                              <span className="font-semibold underline decoration-cyan-500/40 underline-offset-2 truncate max-w-[200px]">
-                                {track.canonicalAlbumTitle}
-                              </span>
-                              {track.canonicalReleaseYear && (
-                                <span className="text-cyan-400/60 font-normal">({track.canonicalReleaseYear})</span>
-                              )}
-                              <ChevronRight className="w-2.5 h-2.5 text-cyan-400/60 group-hover/orig:translate-x-0.5 transition-transform" />
-                            </button>
+                            {track.canonicalReleaseId ? (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setSelectedAlbumId(track.canonicalReleaseId!)
+                                }}
+                                className="group/orig flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-cyan-300 hover:text-cyan-200 transition-all text-[10px] font-mono cursor-pointer"
+                                title={`Click to jump to original soundtrack: ${track.canonicalAlbumTitle}`}
+                              >
+                                <Film className="w-2.5 h-2.5 text-cyan-400 group-hover/orig:scale-110 transition-transform" />
+                                <span className="text-cyan-400 font-semibold">From</span>
+                                <span className="font-semibold underline decoration-cyan-500/40 underline-offset-2 truncate max-w-[200px]">
+                                  {track.canonicalAlbumTitle}
+                                </span>
+                                {track.canonicalReleaseYear && (
+                                  <span className="text-cyan-400/60 font-normal">({track.canonicalReleaseYear})</span>
+                                )}
+                                <ChevronRight className="w-2.5 h-2.5 text-cyan-400/60 group-hover/orig:translate-x-0.5 transition-transform" />
+                              </button>
+                            ) : (
+                              <div
+                                className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-cyan-500/5 border border-cyan-500/15 text-cyan-300/80 text-[10px] font-mono select-none"
+                                title={`Original Soundtrack: ${track.canonicalAlbumTitle} (Not in local library)`}
+                              >
+                                <Film className="w-2.5 h-2.5 text-cyan-400/70" />
+                                <span className="text-cyan-400/80 font-semibold">From</span>
+                                <span className="font-medium truncate max-w-[200px]">
+                                  {track.canonicalAlbumTitle}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>

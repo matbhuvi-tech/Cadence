@@ -172,14 +172,20 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
             <span className="text-xs font-semibold text-cyan-100 truncate" title={`Canonical Source: ${track.canonicalAlbumTitle}`}>
               {track.canonicalAlbumTitle}
             </span>
-            {track.canonicalReleaseYear && (
+            {track.canonicalReleaseYear ? (
               <span className="text-[10px] font-mono text-cyan-300/80 shrink-0">
                 ({track.canonicalReleaseYear})
+              </span>
+            ) : (
+              <span className="text-[9px] font-mono text-cyan-400/60 shrink-0 px-1.5 py-0.2 rounded bg-cyan-500/10 border border-cyan-500/20">
+                External Master
               </span>
             )}
           </div>
           <p className="text-[10px] text-cyan-300/70 leading-relaxed font-sans">
-            Linked from compilation recording to canonical movie soundtrack.
+            {track.canonicalReleaseId
+              ? 'Linked from compilation recording to canonical movie soundtrack in your library.'
+              : 'Identified canonical movie soundtrack source (not yet in local library).'}
           </p>
         </div>
       )}

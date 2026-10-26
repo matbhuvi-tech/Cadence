@@ -895,14 +895,20 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                               )}
                               {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
                                 <span
-                                  className="text-[10px] text-cyan-400 font-mono truncate flex items-center gap-1 cursor-pointer hover:underline"
+                                  className={`text-[10px] text-cyan-400 font-mono truncate flex items-center gap-1 ${
+                                    track.canonicalReleaseId && onInspectRelease ? 'cursor-pointer hover:underline' : 'opacity-85'
+                                  }`}
                                   onClick={(e) => {
-                                    e.stopPropagation()
                                     if (track.canonicalReleaseId && onInspectRelease) {
+                                      e.stopPropagation()
                                       onInspectRelease(track.canonicalReleaseId)
                                     }
                                   }}
-                                  title={`Originally released in ${track.canonicalAlbumTitle}. Click to inspect.`}
+                                  title={
+                                    track.canonicalReleaseId
+                                      ? `Originally released in ${track.canonicalAlbumTitle}. Click to inspect.`
+                                      : `Original Soundtrack: ${track.canonicalAlbumTitle} (Not in local library)`
+                                  }
                                 >
                                   <Film className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
                                   <span>From {track.canonicalAlbumTitle}</span>

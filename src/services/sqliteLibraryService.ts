@@ -621,7 +621,7 @@ export class SqliteLibraryService {
 
       const isCompilation = (title: string, folderName?: string) => {
         const combined = `${title || ''} ${folderName || ''}`.toLowerCase()
-        return /\b(hits|collection|best of|anthology|platinum|duets|melodies|greatest hits|golden hits|favorites|vol\s*\d+|volume\s*\d+|top\s*\d+|super\s*hits|megahits)\b/i.test(combined)
+        return /\b(hits|collection|best of|anthology|platinum|duets|melodies|greatest hits|golden hits|favorites|vol\s*\d+|volume\s*\d+|top\s*\d+|super\s*hits|megahits|world of|classics|revisited|essential|tribute|celebration|unforgettable|cd\s*\d+|disc\s*\d+)\b|mania/i.test(combined)
       }
 
       const soundtrackMap = new Map<string, OriginalSoundtrackInfo>() // songKey -> OriginalSoundtrackInfo
@@ -643,12 +643,13 @@ export class SqliteLibraryService {
         }
       })
 
-      // Index non-compilation tracks
+      // Index non-compilation tracks with EARLIEST release year priority
       tracks.forEach((t) => {
         const parentRel = releases.find((r) => r.id === t.releaseId)
         if (parentRel && !isCompilation(parentRel.title, parentRel.folderName) && parentRel.title) {
           const cleanTitle = stripRipNoiseAndTags(t.title).toLowerCase().trim()
           const artComp = (t.composerName || t.artistCredit || '').toLowerCase().trim()
+          const year = parentRel.releaseYear || parentRel.originalYear || 9999
           const info: OriginalSoundtrackInfo = {
             albumTitle: parentRel.title,
             releaseId: parentRel.id,
@@ -657,10 +658,30 @@ export class SqliteLibraryService {
           }
 
           if (cleanTitle.length > 2) {
-            soundtrackMap.set(`${cleanTitle}::${artComp}`, info)
-            if (!soundtrackTitleMap.has(cleanTitle)) {
+            const key = `${cleanTitle}::${artComp}`
+            const existing = soundtrackMap.get(key)
+            if (!existing || (existing.releaseYear || 9999) > year) {
+              soundtrackMap.set(key, info)
+            }
+            const existingTitle = soundtrackTitleMap.get(cleanTitle)
+            if (!existingTitle || (existingTitle.releaseYear || 9999) > year) {
               soundtrackTitleMap.set(cleanTitle, info)
             }
+          }
+        }
+      })
+
+      // Detect repeated movie titles in hyphenated tracks across library (e.g. "Rockstar", "Blue", "Highway")
+      const hyphenMovieCounts = new Map<string, number>()
+      tracks.forEach((t) => {
+        if (t.title && t.title.includes('-')) {
+          const parts = t.title.split('-').map((p) => p.trim())
+          if (parts.length === 2) {
+            const p0 = stripRipNoiseAndTags(parts[0]).trim()
+            const p1 = stripRipNoiseAndTags(parts[1]).trim()
+            const isDescriptor = (s: string) => /^(female version|male version|remix|version|instrumental|part\s*\d+|sad version)$/i.test(s)
+            if (p0.length >= 3 && !isDescriptor(p0)) hyphenMovieCounts.set(p0, (hyphenMovieCounts.get(p0) || 0) + 1)
+            if (p1.length >= 3 && !isDescriptor(p1)) hyphenMovieCounts.set(p1, (hyphenMovieCounts.get(p1) || 0) + 1)
           }
         }
       })
@@ -679,54 +700,88 @@ export class SqliteLibraryService {
         }
 
         const isParentComp = parentRel ? isCompilation(parentRel.title, parentRel.folderName) : false
+        const parentYear = parentRel?.releaseYear || parentRel?.originalYear || 9999
+        const rawTitle = t.title.trim()
+        const cleanTitle = stripRipNoiseAndTags(t.title).toLowerCase().trim()
+        const artComp = (t.composerName || t.artistCredit || '').toLowerCase().trim()
+
         let orig: OriginalSoundtrackInfo | undefined
 
-        if (isParentComp) {
-          const rawTitle = t.title.trim()
-          const cleanTitle = stripRipNoiseAndTags(t.title).toLowerCase().trim()
-          const artComp = (t.composerName || t.artistCredit || '').toLowerCase().trim()
-
-          // 1. Hyphen pattern (Movie - Song or Song - Movie)
-          if (rawTitle.includes('-')) {
-            const parts = rawTitle.split('-').map((p) => p.trim())
-            if (parts.length === 2) {
-              const p0 = stripRipNoiseAndTags(parts[0]).toLowerCase()
-              const p1 = stripRipNoiseAndTags(parts[1]).toLowerCase()
-              if (releaseTitleMap.has(p0)) {
-                orig = releaseTitleMap.get(p0)
-              } else if (releaseTitleMap.has(p1)) {
-                orig = releaseTitleMap.get(p1)
-              }
-            }
-          }
-
-          // 2. Exact key match
-          if (!orig) {
-            orig = soundtrackMap.get(`${cleanTitle}::${artComp}`)
-          }
-
-          // 3. Clean title match
-          if (!orig && cleanTitle.length > 3) {
-            orig = soundtrackTitleMap.get(cleanTitle)
-          }
-
-          // 4. Normalized prefix match (min 8 chars)
-          if (!orig && cleanTitle.length >= 8) {
-            for (const [stTitle, stInfo] of Array.from(soundtrackTitleMap.entries())) {
-              if (stTitle.length >= 8 && (cleanTitle.startsWith(stTitle) || stTitle.startsWith(cleanTitle))) {
-                orig = stInfo
-                break
-              }
+        // 1. Hyphen pattern (Movie - Song or Song - Movie) against local library releases
+        if (rawTitle.includes('-')) {
+          const parts = rawTitle.split('-').map((p) => p.trim())
+          if (parts.length === 2) {
+            const p0 = stripRipNoiseAndTags(parts[0]).toLowerCase()
+            const p1 = stripRipNoiseAndTags(parts[1]).toLowerCase()
+            if (releaseTitleMap.has(p0)) {
+              orig = releaseTitleMap.get(p0)
+            } else if (releaseTitleMap.has(p1)) {
+              orig = releaseTitleMap.get(p1)
             }
           }
         }
 
+        // 2. Exact key match
+        if (!orig) {
+          orig = soundtrackMap.get(`${cleanTitle}::${artComp}`)
+        }
+
+        // 3. Clean title match
+        if (!orig && cleanTitle.length > 3) {
+          orig = soundtrackTitleMap.get(cleanTitle)
+        }
+
+        // 4. Normalized prefix match (min 8 chars)
+        if (!orig && cleanTitle.length >= 8) {
+          for (const [stTitle, stInfo] of Array.from(soundtrackTitleMap.entries())) {
+            if (stTitle.length >= 8 && (cleanTitle.startsWith(stTitle) || stTitle.startsWith(cleanTitle))) {
+              orig = stInfo
+              break
+            }
+          }
+        }
+
+        let isProvenanceTrack = false
+
+        // Check if orig belongs to a different album and parent is a compilation or soundtrack was released earlier
         if (orig && orig.albumTitle !== parentRel?.title) {
-          t.canonicalAlbumTitle = orig.albumTitle
-          t.canonicalReleaseId = orig.masterReleaseId || orig.releaseId
-          t.canonicalReleaseYear = orig.releaseYear
-          t.isCanonicalAlbumTrack = false
-        } else {
+          const origYear = orig.releaseYear || 9999
+          if (isParentComp || origYear <= parentYear) {
+            t.canonicalAlbumTitle = orig.albumTitle
+            t.canonicalReleaseId = orig.masterReleaseId || orig.releaseId
+            t.canonicalReleaseYear = orig.releaseYear
+            t.isCanonicalAlbumTrack = false
+            isProvenanceTrack = true
+          }
+        }
+
+        // 5. Fallback for Hyphen pattern when Movie is NOT in local library (e.g. "Katiya Karun - Rockstar")
+        if (!isProvenanceTrack && rawTitle.includes('-')) {
+          const parts = rawTitle.split('-').map((p) => p.trim())
+          if (parts.length === 2) {
+            const p0 = stripRipNoiseAndTags(parts[0]).trim()
+            const p1 = stripRipNoiseAndTags(parts[1]).trim()
+            const count0 = hyphenMovieCounts.get(p0) || 0
+            const count1 = hyphenMovieCounts.get(p1) || 0
+            const isDesc = (s: string) => /^(female version|male version|remix|version|instrumental|part\s*\d+)$/i.test(s)
+
+            let movieCandidate: string | undefined
+            if (count1 >= 2) movieCandidate = p1
+            else if (count0 >= 2) movieCandidate = p0
+            else if (p1.length >= 3 && !isDesc(p1)) movieCandidate = p1
+            else if (p0.length >= 3 && !isDesc(p0)) movieCandidate = p0
+
+            if (movieCandidate && movieCandidate.toLowerCase() !== parentRel?.title.toLowerCase()) {
+              t.canonicalAlbumTitle = movieCandidate
+              t.canonicalReleaseId = undefined
+              t.canonicalReleaseYear = undefined
+              t.isCanonicalAlbumTrack = false
+              isProvenanceTrack = true
+            }
+          }
+        }
+
+        if (!isProvenanceTrack) {
           t.isCanonicalAlbumTrack = true
         }
 
