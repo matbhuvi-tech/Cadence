@@ -671,10 +671,11 @@ export class SqliteLibraryService {
         }
       })
 
-      // Detect repeated movie titles in hyphenated tracks across library (e.g. "Rockstar", "Blue", "Highway")
+      // Detect repeated movie titles in hyphenated tracks across compilation releases (e.g. "Rockstar", "Blue", "Highway")
       const hyphenMovieCounts = new Map<string, number>()
       tracks.forEach((t) => {
-        if (t.title && t.title.includes('-')) {
+        const parentRel = releases.find((r) => r.id === t.releaseId)
+        if (parentRel && isCompilation(parentRel.title, parentRel.folderName) && t.title && t.title.includes('-')) {
           const parts = t.title.split('-').map((p) => p.trim())
           if (parts.length === 2) {
             const p0 = stripRipNoiseAndTags(parts[0]).trim()
@@ -700,7 +701,24 @@ export class SqliteLibraryService {
         }
 
         const isParentComp = parentRel ? isCompilation(parentRel.title, parentRel.folderName) : false
-        const parentYear = parentRel?.releaseYear || parentRel?.originalYear || 9999
+
+        // Original soundtrack albums (non-compilations) are ground-truth native masters
+        if (!isParentComp) {
+          t.isCanonicalAlbumTrack = true
+          t.canonicalAlbumTitle = undefined
+          t.canonicalReleaseId = undefined
+          t.canonicalReleaseYear = undefined
+
+          // Link to stable recording ID for identical song compositions
+          const songKey = `${t.title.toLowerCase().trim()}::${(t.composerName || t.artistCredit || '').toLowerCase().trim()}`
+          let hash = 0
+          for (let i = 0; i < songKey.length; i++) {
+            hash = ((hash << 5) - hash + songKey.charCodeAt(i)) | 0
+          }
+          t.recordingId = `rec-${Math.abs(hash).toString(16)}`
+          return
+        }
+
         const rawTitle = t.title.trim()
         const cleanTitle = stripRipNoiseAndTags(t.title).toLowerCase().trim()
         const artComp = (t.composerName || t.artistCredit || '').toLowerCase().trim()
@@ -743,19 +761,16 @@ export class SqliteLibraryService {
 
         let isProvenanceTrack = false
 
-        // Check if orig belongs to a different album and parent is a compilation or soundtrack was released earlier
+        // Check if orig belongs to a different album
         if (orig && orig.albumTitle !== parentRel?.title) {
-          const origYear = orig.releaseYear || 9999
-          if (isParentComp || origYear <= parentYear) {
-            t.canonicalAlbumTitle = orig.albumTitle
-            t.canonicalReleaseId = orig.masterReleaseId || orig.releaseId
-            t.canonicalReleaseYear = orig.releaseYear
-            t.isCanonicalAlbumTrack = false
-            isProvenanceTrack = true
-          }
+          t.canonicalAlbumTitle = orig.albumTitle
+          t.canonicalReleaseId = orig.masterReleaseId || orig.releaseId
+          t.canonicalReleaseYear = orig.releaseYear
+          t.isCanonicalAlbumTrack = false
+          isProvenanceTrack = true
         }
 
-        // 5. Fallback for Hyphen pattern when Movie is NOT in local library (e.g. "Katiya Karun - Rockstar")
+        // 5. Fallback for Hyphen pattern on compilation when Movie is NOT in local library (e.g. "Katiya Karun - Rockstar")
         if (!isProvenanceTrack && rawTitle.includes('-')) {
           const parts = rawTitle.split('-').map((p) => p.trim())
           if (parts.length === 2) {
@@ -763,13 +778,11 @@ export class SqliteLibraryService {
             const p1 = stripRipNoiseAndTags(parts[1]).trim()
             const count0 = hyphenMovieCounts.get(p0) || 0
             const count1 = hyphenMovieCounts.get(p1) || 0
-            const isDesc = (s: string) => /^(female version|male version|remix|version|instrumental|part\s*\d+)$/i.test(s)
 
+            // Must be a verified repeated movie name across compilations (e.g. Rockstar appearing 7 times)
             let movieCandidate: string | undefined
             if (count1 >= 2) movieCandidate = p1
             else if (count0 >= 2) movieCandidate = p0
-            else if (p1.length >= 3 && !isDesc(p1)) movieCandidate = p1
-            else if (p0.length >= 3 && !isDesc(p0)) movieCandidate = p0
 
             if (movieCandidate && movieCandidate.toLowerCase() !== parentRel?.title.toLowerCase()) {
               t.canonicalAlbumTitle = movieCandidate
