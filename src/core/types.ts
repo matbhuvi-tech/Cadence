@@ -277,6 +277,8 @@ export interface Track {
   credits: Credit[]
   masterReleaseId: string
   isOnline?: boolean
+  canonicalAlbumTitle?: string
+  isCanonicalAlbumTrack?: boolean
   // Curation fields (DB-only)
   rating?: number
   isFavorite?: boolean

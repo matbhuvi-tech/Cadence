@@ -187,6 +187,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
       const key =
         track.releaseId ||
         track.pendingSidecarEdits?.album ||
+        track.folderPath ||
         track.folderName ||
         'unknown'
       const existing = groupMap.get(key) || []
@@ -197,12 +198,26 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
     const groups: ReleaseGroup[] = []
 
     groupMap.forEach((groupTracks, key) => {
-      const rel = releases?.find(
-        (r) =>
-          r.id === key ||
-          (r.folderName && groupTracks.some((t) => t.folderName === r.folderName)) ||
-          (r.title && groupTracks.some((t) => t.pendingSidecarEdits?.album === r.title))
-      )
+      // 1. Exact match by release ID
+      let rel = releases?.find((r) => r.id === key)
+      // 2. Exact match by folder path
+      if (!rel) {
+        rel = releases?.find((r) => r.folderPath && groupTracks.some((t) => t.folderPath && t.folderPath === r.folderPath))
+      }
+      // 3. Match by pending edited album title
+      if (!rel) {
+        rel = releases?.find((r) => r.title && groupTracks.some((t) => t.pendingSidecarEdits?.album === r.title))
+      }
+      // 4. Scoped fallback: folderName ONLY if artist or album title also matches
+      if (!rel) {
+        rel = releases?.find(
+          (r) =>
+            r.folderName &&
+            groupTracks.some(
+              (t) => t.folderName === r.folderName && (t.artistCredit === r.artistCredit || (t as any).albumTitle === r.title)
+            )
+        )
+      }
 
       const title =
         rel?.title ||

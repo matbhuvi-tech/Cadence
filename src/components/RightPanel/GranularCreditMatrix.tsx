@@ -265,6 +265,16 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
             </span>
           </div>
 
+          {/* Original Soundtrack / Master Provenance */}
+          {track.canonicalAlbumTitle && (
+            <div className="flex items-center justify-between text-[#8E8E93]">
+              <span>Original Album</span>
+              <span className="text-[#D4AF37] font-medium truncate max-w-[170px]" title={`Primary Master Release: ${track.canonicalAlbumTitle}`}>
+                {track.canonicalAlbumTitle}
+              </span>
+            </div>
+          )}
+
           {/* AcoustID Hash with Copy Feedback (Guardrail 2) */}
           <div className="flex items-center justify-between text-[#8E8E93]">
             <span>AcoustID Hash</span>

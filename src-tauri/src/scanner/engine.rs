@@ -523,7 +523,28 @@ impl ScannerController {
                 let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 let parent_dir = path.parent().unwrap_or(&dir);
                 let folder_path_str = parent_dir.to_string_lossy().to_string();
-                let folder_name = parent_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Unknown Album".to_string());
+                let mut folder_name = parent_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Unknown Album".to_string());
+
+                // Detect if parent folder is an inner artist or disc subfolder (e.g. "December Pookal CD RIP\Illayaraja" or "Album\CD 1")
+                if let Some(grandparent) = parent_dir.parent() {
+                    let parent_lower = folder_name.to_lowercase();
+                    let gp_name = grandparent.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let gp_lower = gp_name.to_lowercase();
+                    let is_disc = parent_lower.starts_with("cd") || parent_lower.starts_with("disc") || parent_lower.starts_with("disk");
+                    let is_rip_wrapper = gp_lower.contains("cd rip") || gp_lower.contains("cdrip") || gp_lower.contains("rip");
+
+                    if (is_disc || is_rip_wrapper) && !gp_name.is_empty() {
+                        let mut clean_gp = gp_name.clone();
+                        for marker in &[" [CD RIP]", " CD RIP", " (CD RIP)", " [FLAC]", " [DSD]", " [MP3]"] {
+                            if let Some(pos) = clean_gp.to_lowercase().find(&marker.to_lowercase()) {
+                                clean_gp = clean_gp[..pos].to_string();
+                            }
+                        }
+                        if !clean_gp.trim().is_empty() {
+                            folder_name = clean_gp.trim().to_string();
+                        }
+                    }
+                }
 
                 let file_meta = fs::metadata(path).ok();
                 let file_size = file_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);

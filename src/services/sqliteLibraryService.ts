@@ -15,7 +15,7 @@ import {
   AudioFormat,
   Playlist,
 } from '../core/types'
-import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar } from '../core/taxonomyUtils'
+import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags } from '../core/taxonomyUtils'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 export interface MigrationResult {
@@ -373,12 +373,115 @@ export class SqliteLibraryService {
         trackCount: f.trackCount ?? f.track_count ?? 0,
       }))
 
+      // 1. Process tracks first so format and technical audio specs are resolved
+      const tracks: Track[] = rawTracks.map((t) => {
+        const specs = formatAudioSpecs(t.format, t.sampleRate, t.bitDepth, t.filePath)
+        return {
+          id: t.id,
+          releaseId: t.releaseId,
+          recordingId: t.id,
+          trackNumber: t.trackNumber || 1,
+          discNumber: 1,
+          title: t.title,
+          workTitle: t.workTitle,
+          movementNumber: t.movementNumber,
+          movementTitle: t.movementTitle,
+          composerName: t.composer,
+          artistCredit: t.artistCredit,
+          durationSeconds: t.durationSecs || 0,
+          filePath: t.filePath,
+          fileSize: t.fileSize,
+          storageMountId: t.mountId,
+          folderName: t.folderName,
+          folderPath: t.folderPath,
+          sidecarStatus: t.sidecarStatus as any,
+          pendingSidecarEdits: t.sidecarEditsJson ? JSON.parse(t.sidecarEditsJson) : undefined,
+          modifiedTimestamp: new Date(t.mtime * 1000).toISOString(),
+          checksumValid: true,
+          accurateRipConfidence: 100,
+          drScore: t.drScore || 0,
+          drSource: t.drScore ? 'estimated' : undefined,
+          sampleRateStr: specs.sampleRateStr,
+          format: specs.format,
+          isHighRes: specs.isHighRes,
+          sampleRate: t.sampleRate || undefined,
+          bitDepth: t.bitDepth || undefined,
+          isOnline: t.isOnline,
+          credits: [],
+          masterReleaseId: t.releaseId,
+        }
+      })
+
+      // 2. Index tracks by releaseId to calculate format roll-ups
+      const releaseTracksMap = new Map<string, Track[]>()
+      tracks.forEach((t) => {
+        const list = releaseTracksMap.get(t.releaseId) || []
+        list.push(t)
+        releaseTracksMap.set(t.releaseId, list)
+      })
+
+      // 3. Cluster releases into Canonical Master Albums (Release Groups)
+      // Group by normalized title + primary composer/artist
+      const masterGroupMap = new Map<string, typeof rawReleases>()
+      rawReleases.forEach((r) => {
+        const cleanTitle = stripRipNoiseAndTags(r.title).toLowerCase().trim()
+        const cleanArtist = (r.composerName || r.artistCredit || '').toLowerCase().trim()
+        const groupKey = `${cleanTitle}::${cleanArtist}`
+        const existing = masterGroupMap.get(groupKey) || []
+        existing.push(r)
+        masterGroupMap.set(groupKey, existing)
+      })
+
+      // Map each raw release to its masterReleaseId and variant stack
+      const releaseMasterMap = new Map<string, { masterId: string; variants: PressingVariant[] }>()
+      masterGroupMap.forEach((groupRels) => {
+        const primaryRel = groupRels[0]
+        const masterId = groupRels.length > 1 ? `master-${primaryRel.id}` : primaryRel.id
+
+        // Build pressing variants for all releases in this master album
+        const variants: PressingVariant[] = groupRels.map((gr, idx) => {
+          const rTracks = releaseTracksMap.get(gr.id) || []
+          const formats = Array.from(new Set(rTracks.map((t) => t.format)))
+          const dominantFormat = formats[0] || 'FLAC'
+          const dominantRate = rTracks[0]?.sampleRateStr || '16-bit / 44.1kHz'
+          const avgDr = rTracks.length > 0 ? Math.round(rTracks.reduce((acc, t) => acc + (t.drScore || 0), 0) / rTracks.length) : 12
+
+          let variantName = gr.title.includes('(') ? gr.title : `${gr.releaseYear || ''} ${dominantFormat} Edition`.trim()
+          if (!variantName) variantName = `${dominantFormat} Master`
+
+          return {
+            id: `var-${gr.id}`,
+            masterReleaseId: masterId,
+            releaseName: gr.title,
+            variantName,
+            releaseYear: gr.releaseYear || 0,
+            drScore: avgDr,
+            sampleRateStr: dominantRate,
+            formatStr: dominantFormat,
+            matrixRunout: gr.id.slice(0, 8).toUpperCase(),
+            catalogNumber: 'CAD-001',
+            label: dominantFormat.includes('DSD') ? 'Direct DSD Transfer' : 'Lossless Master',
+            isCurrentMaster: idx === 0,
+            country: 'Global',
+          }
+        })
+
+        groupRels.forEach((gr) => {
+          releaseMasterMap.set(gr.id, { masterId, variants })
+        })
+      })
+
+      // 4. Construct final Release objects with masterReleaseId and populated variants
       const releases: Release[] = rawReleases.map((r) => {
         const rawCover = r.frontCoverUrl || ''
         const coverArtUrl = rawCover || getCuratedAlbumArtwork(r.title, r.composerName || r.artistCredit)
+        const groupInfo = releaseMasterMap.get(r.id)
+        const rTracks = releaseTracksMap.get(r.id) || []
+        const formats = Array.from(new Set(rTracks.map((t) => t.format)))
+
         return {
           id: r.id,
-          masterReleaseId: r.id,
+          masterReleaseId: groupInfo?.masterId || r.id,
           title: r.title,
           folderName: r.folderName,
           folderPath: r.folderPath,
@@ -387,9 +490,9 @@ export class SqliteLibraryService {
           composerName: r.composerName,
           releaseYear: r.releaseYear || 0,
           originalYear: r.releaseYear || 0,
-          label: 'Lossless Master',
+          label: formats.some((f) => f.includes('DSD')) ? 'Direct DSD Transfer' : 'Lossless Master',
           catalogNumber: 'CAD-001',
-          mediaFormat: 'Lossless Audio',
+          mediaFormat: formats[0] || 'Lossless Audio',
           country: 'Global',
           matrixRunout: '',
           artwork: {
@@ -403,53 +506,49 @@ export class SqliteLibraryService {
             isLowRes: !coverArtUrl,
             hasBookletPdf: false,
           },
-          variants: [],
+          variants: groupInfo?.variants || [],
           discsCount: 1,
-          tracksCount: 0,
+          tracksCount: rTracks.length,
           genreTags: r.genreTags ? JSON.parse(r.genreTags) : [],
           storageMountId: storageMounts[0]?.id || '',
         }
       })
 
-      const tracks: Track[] = rawTracks.map((t) => ({
-        id: t.id,
-        releaseId: t.releaseId,
-        recordingId: t.id,
-        trackNumber: t.trackNumber || 1,
-        discNumber: 1,
-        title: t.title,
-        workTitle: t.workTitle,
-        movementNumber: t.movementNumber,
-        movementTitle: t.movementTitle,
-        composerName: t.composer,
-        artistCredit: t.artistCredit,
-        durationSeconds: t.durationSecs || 0,
-        filePath: t.filePath,
-        fileSize: t.fileSize,
-        storageMountId: t.mountId,
-        folderName: t.folderName,
-        folderPath: t.folderPath,
-        sidecarStatus: t.sidecarStatus as any,
-        pendingSidecarEdits: t.sidecarEditsJson ? JSON.parse(t.sidecarEditsJson) : undefined,
-        modifiedTimestamp: new Date(t.mtime * 1000).toISOString(),
-        checksumValid: true,
-        accurateRipConfidence: 100,
-        drScore: t.drScore || 0,
-        drSource: t.drScore ? 'estimated' : undefined,
-        ...(() => {
-          const specs = formatAudioSpecs(t.format, t.sampleRate, t.bitDepth, t.filePath)
-          return {
-            sampleRateStr: specs.sampleRateStr,
-            format: specs.format,
-            isHighRes: specs.isHighRes,
-            sampleRate: t.sampleRate || undefined,
-            bitDepth: t.bitDepth || undefined,
+      // 5. Cross-Album Song Graph: Link Compilation Songs to Original Soundtrack Releases
+      const soundtrackMap = new Map<string, string>() // songKey -> originalAlbumTitle
+      tracks.forEach((t) => {
+        const parentRel = releases.find((r) => r.id === t.releaseId)
+        const relTitle = parentRel?.title || ''
+        const isCompilation = /hits|collection|best of|anthology|platinum|duets|melodies/i.test(relTitle)
+        if (!isCompilation && relTitle) {
+          const songKey = `${t.title.toLowerCase().trim()}::${(t.composerName || t.artistCredit || '').toLowerCase().trim()}`
+          if (!soundtrackMap.has(songKey)) {
+            soundtrackMap.set(songKey, relTitle)
           }
-        })(),
-        isOnline: t.isOnline,
-        credits: [],
-        masterReleaseId: t.releaseId,
-      }))
+        }
+      })
+
+      // Update tracks with canonical master IDs and original album provenance
+      tracks.forEach((t) => {
+        const parentRel = releases.find((r) => r.id === t.releaseId)
+        if (parentRel) {
+          t.masterReleaseId = parentRel.masterReleaseId
+        }
+        const songKey = `${t.title.toLowerCase().trim()}::${(t.composerName || t.artistCredit || '').toLowerCase().trim()}`
+        const origAlbum = soundtrackMap.get(songKey)
+        if (origAlbum && origAlbum !== parentRel?.title) {
+          t.canonicalAlbumTitle = origAlbum
+          t.isCanonicalAlbumTrack = false
+        } else {
+          t.isCanonicalAlbumTrack = true
+        }
+        // Link to stable recording ID for identical song compositions
+        let hash = 0
+        for (let i = 0; i < songKey.length; i++) {
+          hash = ((hash << 5) - hash + songKey.charCodeAt(i)) | 0
+        }
+        t.recordingId = `rec-${Math.abs(hash).toString(16)}`
+      })
 
       const skippedFiles: SkippedFile[] = rawSkipped.map((s) => ({
         id: s.id,
