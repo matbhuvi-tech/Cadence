@@ -19,6 +19,7 @@ import {
   Folder,
   FolderOpen,
   Film,
+  Sparkles,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
 import { getCuratedAlbumArtwork, generateMonogramAvatar } from '../../core/taxonomyUtils'
@@ -917,6 +918,22 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               >
                 <SlidersHorizontal className="w-4 h-4 text-slate-400" />
                 <span>Edit Metadata</span>
+              </button>
+
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  window.dispatchEvent(
+                    new CustomEvent('cadence:open-compilation-provenance', {
+                      detail: { releaseId: activeReleaseId || album.id },
+                    })
+                  )
+                }}
+                className="px-4 py-2.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-cyan-200 hover:text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer shadow-sm"
+                title="Identify original movie soundtracks and release years with Gemini AI"
+              >
+                <Sparkles className="w-4 h-4 text-cyan-400" />
+                <span>Identify Soundtracks (AI)</span>
               </button>
 
               {/* Rating Stars */}

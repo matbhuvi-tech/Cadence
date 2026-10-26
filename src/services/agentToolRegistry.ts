@@ -259,6 +259,17 @@ export const AGENT_TOOL_DEFINITIONS: AgentToolDefinition[] = [
       required: ['filter'],
     },
   },
+  {
+    name: 'canonicalize_compilation_soundtracks',
+    description: 'Analyzes a compilation or multi-movie soundtrack album using Gemini AI to identify the original motion picture soundtracks and release years for all tracks.',
+    parameters: {
+      type: 'object',
+      properties: {
+        releaseId: { type: 'string', description: 'Unique release ID of the album in the catalog' },
+        albumTitle: { type: 'string', description: 'Album title to resolve' },
+      },
+    },
+  },
 ]
 
 export function generateGeminiSystemInstruction(catalogSummary: string): string {

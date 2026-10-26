@@ -24,6 +24,7 @@ export type AgentToolName =
   | 'preview_path_restructure'
   | 'curate_sonic_session'
   | 'query_graph'
+  | 'canonicalize_compilation_soundtracks'
 
 export type RemediationActionType =
   | 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER'
@@ -137,6 +138,10 @@ export interface ToolArgumentMap {
   query_graph: {
     filter: Record<string, any>
     limit?: number
+  }
+  canonicalize_compilation_soundtracks: {
+    releaseId?: string
+    albumTitle?: string
   }
 }
 

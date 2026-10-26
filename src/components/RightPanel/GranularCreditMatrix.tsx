@@ -323,12 +323,28 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
       {/* Original Soundtrack Provenance Banner (Compilation Tracks) */}
       {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
         <div className="p-3 rounded-xl bg-gradient-to-r from-cyan-950/40 via-cyan-900/20 to-indigo-950/30 border border-cyan-500/25 flex flex-col gap-1.5 shadow-sm">
-          <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider text-cyan-400 font-semibold">
-            <Film className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Original Soundtrack Provenance</span>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider text-cyan-400 font-semibold">
+              <Film className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Original Soundtrack Provenance</span>
+            </div>
+            <button
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent('cadence:open-compilation-provenance', {
+                    detail: { releaseId: track.releaseId },
+                  })
+                )
+              }}
+              className="text-[10px] text-cyan-300 hover:text-white flex items-center gap-1 cursor-pointer font-medium hover:underline"
+              title="Resolve all tracks on this album with Gemini AI"
+            >
+              <Sparkles className="w-3 h-3 text-cyan-400" />
+              <span>Batch AI</span>
+            </button>
           </div>
           <div className="flex items-baseline justify-between gap-2">
-            <span className="text-xs font-semibold text-cyan-100 truncate" title={`Canonical Source: ${track.canonicalAlbumTitle}`}>
+            <span className="text-xs font-semibold text-cyan-100 break-words leading-tight" title={`Canonical Source: ${track.canonicalAlbumTitle}`}>
               {track.canonicalAlbumTitle}
             </span>
             {track.canonicalReleaseYear ? (
@@ -526,6 +542,24 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
               <p className="text-[10px] text-[#8E8E93]/80 leading-normal">
                 Click Verify to match acoustic origin against MusicBrainz & AcoustID master catalog.
               </p>
+            )}
+
+            {/* If unverified or compilation, offer AI compilation resolver */}
+            {(!effectiveOrigin || Boolean(track.isCompilation)) && (
+              <button
+                onClick={() => {
+                  window.dispatchEvent(
+                    new CustomEvent('cadence:open-compilation-provenance', {
+                      detail: { releaseId: track.releaseId },
+                    })
+                  )
+                }}
+                className="mt-1.5 flex items-center justify-center gap-1.5 py-1 px-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-[10px] font-medium text-cyan-300 hover:text-cyan-200 transition-colors cursor-pointer w-full"
+                title="Identify original movie soundtracks for all tracks in this album with Gemini AI"
+              >
+                <Sparkles className="w-3 h-3 text-cyan-400" />
+                <span>Identify Soundtracks with AI</span>
+              </button>
             )}
           </div>
 

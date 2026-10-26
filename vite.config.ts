@@ -1913,6 +1913,154 @@ No markdown, just JSON.`
         })
       })
 
+      // 6.6. Gemini AI Compilation Soundtrack & Provenance Resolver with Safe Pacing
+      server.middlewares.use('/api/ai-compilation-resolver', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.end('Method Not Allowed')
+          return
+        }
+
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Access-Control-Allow-Origin', '*')
+
+        let body = ''
+        req.on('data', (chunk) => {
+          body += chunk
+        })
+
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body || '{}')
+            const albumTitle = data.albumTitle || ''
+            const artistCredit = data.artistCredit || ''
+            const releaseYear = data.releaseYear
+            const tracks: any[] = Array.isArray(data.tracks) ? data.tracks.slice(0, 100) : []
+
+            if (!albumTitle || tracks.length === 0) {
+              res.statusCode = 400
+              res.end(JSON.stringify({ error: 'Missing albumTitle or tracks array in payload' }))
+              return
+            }
+
+            const apiKey = getGeminiApiKey()
+            if (!apiKey) {
+              res.statusCode = 500
+              res.end(
+                JSON.stringify({
+                  error: 'GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY to your .env file.',
+                })
+              )
+              return
+            }
+
+            const promptText = `You are an authoritative archival musicologist and expert discographer specializing in film soundtracks, compilations, boxsets, and multi-movie audio releases (including Indian cinema: Tamil, Hindi/Bollywood, Telugu, Malayalam, Kannada, as well as Western cinema, classical and world anthologies).
+
+Analyze the compilation or multi-film soundtrack album:
+Album Title: "${albumTitle}"
+Album Artist / Attributed: "${artistCredit || 'Various Artists'}"
+Compilation Release Year: ${releaseYear || 'Unknown'}
+
+Here is the tracklist of ${tracks.length} track(s):
+${JSON.stringify(
+  tracks.map((t) => ({
+    id: t.id,
+    trackNumber: t.trackNumber,
+    title: t.title,
+    artist: t.artist || '',
+    composer: t.composer || '',
+    durationSecs: t.duration ? Math.round(t.duration) : undefined,
+  })),
+  null,
+  2
+)}
+
+TASK:
+For each track in this album, determine its canonical ORIGINAL soundtrack or debut motion picture release:
+1. "originalAlbum": The official canonical title of the original motion picture soundtrack or debut studio album where this song first originated (e.g., if the compilation is "World of Rahmania" and track is "Khalbali", the original soundtrack is "Rang De Basanti"; if track is "Chinna Chinna Aasai", the original soundtrack is "Roja"; if track is "Kallukulle Vandha Eeram", the original movie is "Manithanin Marupakkam"). If the album itself is already the original soundtrack (not a compilation), set "originalAlbum" to the native album title.
+2. "originalYear": The 4-digit original release year of that soundtrack/film (e.g., 2006 for Rang De Basanti, 1992 for Roja, 1986 for Manithanin Marupakkam).
+3. "canonicalComposer": The original composer of the composition (e.g. "A. R. Rahman", "Ilaiyaraaja", "M. S. Viswanathan").
+4. "primaryVocalists": The primary singers/vocalists credited on the original master recording.
+5. "isCompilationTrack": true if the song originated from a different film/album than "${albumTitle}", false if it originated with this album.
+6. "confidence": A score between 0.0 and 1.0 representing historical discographical certainty.
+7. "notes": A brief 1-line discographical origin note (e.g. "Original motion picture soundtrack Rang De Basanti (2006)").
+
+Return ONLY a valid JSON array of ${tracks.length} objects matching this exact structure:
+[
+  {
+    "id": "<matching track id>",
+    "trackNumber": 1,
+    "title": "<clean song title>",
+    "originalAlbum": "<canonical original soundtrack/film title>",
+    "originalYear": 2006,
+    "canonicalComposer": "<composer name>",
+    "primaryVocalists": "<vocalists>",
+    "isCompilationTrack": true,
+    "confidence": 0.98,
+    "notes": "<discographical note>"
+  }
+]
+Do not include any surrounding markdown or explanation, just the raw JSON array.`
+
+            const callResult = await executePacedGeminiCall(apiKey, {
+              bodyPayload: {
+                contents: [{ parts: [{ text: promptText }] }],
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                },
+              },
+              timeoutMs: 35000,
+            })
+
+            res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
+            res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
+            res.setHeader('x-gemini-retries', String(callResult.retriesAttempted || 0))
+
+            if (!callResult.ok) {
+              res.statusCode = callResult.status
+              const errMessage = callResult.error || 'Gemini AI compilation resolver unavailable'
+              console.error('[Gemini AI] Compilation resolver failed:', errMessage)
+              res.end(
+                JSON.stringify({
+                  error: errMessage,
+                  code: callResult.status === 429 ? 'RATE_LIMIT_429' : 'AI_ERROR',
+                  pacingDelayMs: callResult.pacingDelayMs,
+                })
+              )
+              return
+            }
+
+            const geminiResult = callResult.data as any
+            const textResponse = geminiResult.candidates?.[0]?.content?.parts?.[0]?.text || '[]'
+            let parsedEntities = []
+            try {
+              parsedEntities = JSON.parse(textResponse)
+            } catch {
+              const cleaned = textResponse.replace(/^```json\s*|```\s*$/g, '').trim()
+              parsedEntities = JSON.parse(cleaned)
+            }
+
+            res.statusCode = 200
+            res.end(
+              JSON.stringify({
+                success: true,
+                albumTitle,
+                count: parsedEntities.length,
+                results: parsedEntities,
+                telemetry: {
+                  modelUsed: callResult.modelUsed,
+                  pacingDelayMs: callResult.pacingDelayMs,
+                  retriesAttempted: callResult.retriesAttempted,
+                },
+              })
+            )
+          } catch (e: any) {
+            res.statusCode = 500
+            res.end(JSON.stringify({ error: e.message || 'AI Compilation resolver failed' }))
+          }
+        })
+      })
+
       // 7. Embedded Conversational AI Agent with Live Database Snapshot & Paced Calling
       server.middlewares.use('/api/agent-chat', async (req, res) => {
         if (req.method !== 'POST') {

@@ -449,6 +449,43 @@ export class AgentActionDispatcher {
           }
         }
 
+        case 'canonicalize_compilation_soundtracks': {
+          const { releaseId, albumTitle } = command.args as any
+          let targetRel = releaseId ? graphEngine.getReleaseById(releaseId) : undefined
+          if (!targetRel && albumTitle) {
+            targetRel = graphEngine.getAllReleases().find((r) =>
+              r.title.toLowerCase().includes(albumTitle.toLowerCase())
+            )
+          }
+          if (!targetRel && ctx.currentRelease) {
+            targetRel = ctx.currentRelease
+          }
+          if (!targetRel && ctx.currentTrack) {
+            targetRel = graphEngine.getReleaseById(ctx.currentTrack.releaseId)
+          }
+
+          if (!targetRel) {
+            return {
+              success: false,
+              message: 'Please select a compilation album to identify soundtracks for.',
+            }
+          }
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('cadence:open-compilation-provenance', {
+                detail: { releaseId: targetRel.id },
+              })
+            )
+          }
+
+          return {
+            success: true,
+            message: `Opened Canonical Soundtrack Resolver for "${targetRel.title}".`,
+            data: { releaseId: targetRel.id, title: targetRel.title },
+          }
+        }
+
         default:
           return { success: false, message: `Unknown tool directive: "${command.tool}".` }
       }

@@ -39,6 +39,7 @@ import { SidecarExportModal } from './components/Modals/SidecarExportModal'
 import { ImportLibraryModal } from './components/Modals/ImportLibraryModal'
 import { CustomizeAlbumModal } from './components/Modals/CustomizeAlbumModal'
 import { BatchDiffTracksModal } from './components/Modals/BatchDiffTracksModal'
+import { CompilationProvenanceModal } from './components/Modals/CompilationProvenanceModal'
 import { GuidedTutorialModal } from './components/Tutorial/GuidedTutorialModal'
 import { TutorialActions } from './tutorial/tutorialSteps'
 import { EmbeddedAgentDrawer } from './components/Agent/EmbeddedAgentDrawer'
@@ -138,6 +139,7 @@ function AppContent() {
   const [isPathRuleModalOpen, setIsPathRuleModalOpen] = useState(false)
   const [isImportModalOpen, setIsImportModalOpen] = useState(false)
   const [isBatchDiffModalOpen, setIsBatchDiffModalOpen] = useState(false)
+  const [compilationModalRelease, setCompilationModalRelease] = useState<Release | null>(null)
   const [customizingRelease, setCustomizingRelease] = useState<Release | null>(null)
   const [sidecarTrackId, setSidecarTrackId] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
@@ -913,6 +915,32 @@ function AppContent() {
   const currentTrack = tracks.find((t) => t.id === selectedTrackId) || tracks[0]
   const currentRelease = currentTrack ? releases.find((r) => r.id === currentTrack.releaseId) : releases[0]
 
+  useEffect(() => {
+    const handleOpenProvenance = (e: any) => {
+      const relId = e.detail?.releaseId
+      const target =
+        releases.find((r) => r.id === relId) ||
+        (currentTrack ? releases.find((r) => r.id === currentTrack.releaseId) : null) ||
+        releases[0]
+      if (target) {
+        setCompilationModalRelease(target)
+      }
+    }
+
+    const handleProvenanceUpdated = async () => {
+      refreshFromEngine()
+      persistCurrentLibrary()
+    }
+
+    window.addEventListener('cadence:open-compilation-provenance', handleOpenProvenance)
+    window.addEventListener('cadence:provenance-updated', handleProvenanceUpdated)
+
+    return () => {
+      window.removeEventListener('cadence:open-compilation-provenance', handleOpenProvenance)
+      window.removeEventListener('cadence:provenance-updated', handleProvenanceUpdated)
+    }
+  }, [releases, currentTrack])
+
   // Scoped Curate Trigger Handler
   const handleOpenCurate = () => {
     const trk = resolveCurateTargetTrack({
@@ -1306,6 +1334,19 @@ function AppContent() {
       shortcut: '⌘B',
       icon: <Sparkles className="w-4 h-4 text-[#ADFF2F]" />,
       action: () => setIsBatchDiffModalOpen(true),
+    },
+    {
+      id: 'cmd-resolve-compilation-soundtracks',
+      title: 'Canonical Soundtrack Resolver (Gemini AI for Compilation Albums)',
+      category: 'ACTION',
+      shortcut: '⌘R',
+      icon: <Sparkles className="w-4 h-4 text-[#00F5FF]" />,
+      action: () => {
+        const targetRel = currentRelease || (currentTrack ? releases.find((r) => r.id === currentTrack.releaseId) : null) || releases[0]
+        if (targetRel) {
+          setCompilationModalRelease(targetRel)
+        }
+      },
     },
     {
       id: 'cmd-pathrule',
@@ -2146,6 +2187,32 @@ function AppContent() {
         onApplyBatchEdits={handleApplyBatchEdits}
         currentRelease={currentRelease}
         onOpenCommitModal={() => setIsCommitModalOpen(true)}
+      />
+
+      {/* Compilation Canonical Soundtrack Resolver Modal (Apple HIG) */}
+      <CompilationProvenanceModal
+        isOpen={Boolean(compilationModalRelease)}
+        onClose={() => setCompilationModalRelease(null)}
+        release={compilationModalRelease}
+        allTracks={tracks}
+        allReleases={releases}
+        onSuccess={async () => {
+          const refreshed = await sqliteLibraryService.loadLibraryFromDb()
+          if (refreshed && refreshed.tracks.length > 0) {
+            graphEngine.loadCustomLibrary({
+              tracks: refreshed.tracks,
+              releases: refreshed.releases,
+              works: [],
+              auditIssues: [],
+              storageMounts: refreshed.storageMounts,
+            })
+            refreshFromEngine()
+          } else {
+            refreshFromEngine()
+            persistCurrentLibrary()
+          }
+        }}
+        showToast={showToast}
       />
 
       {/* Cadence Core Embedded AI Agent Copilot Drawer */}
