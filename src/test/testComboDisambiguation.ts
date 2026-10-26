@@ -65,6 +65,25 @@ const testCases = [
     expectedTitle: 'Chinna Thambi / Dharma Dorai',
     expectedCombo: false,
   },
+  // Hyphen-separated 3-in-1 combo CD
+  {
+    tag: 'Needhana Andak Kuyil - Moondraam Pirai - Pakal Nilavu',
+    folder: 'Moondraam Pirai CD RIP',
+    expectedTitle: 'Moondraam Pirai',
+    expectedCombo: true,
+  },
+  {
+    tag: 'Needhana Andak Kuyil - Moondraam Pirai - Pakal Nilavu',
+    folder: 'Needhana Andak Kuyil CD RIP',
+    expectedTitle: 'Needhana Andak Kuyil',
+    expectedCombo: true,
+  },
+  {
+    tag: 'Needhana Andak Kuyil - Moondraam Pirai - Pakal Nilavu',
+    folder: 'Pakal Nilavu CD RIP',
+    expectedTitle: 'Pakal Nilavu',
+    expectedCombo: true,
+  },
 ]
 
 let passed = 0

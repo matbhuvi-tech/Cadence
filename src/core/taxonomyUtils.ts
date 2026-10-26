@@ -1034,7 +1034,7 @@ function stripRepeatedLetters(str: string): string {
 export function disambiguateComboTitle(rawTitle: string, folderNameOrPath: string): ComboDisambiguationResult {
   if (!rawTitle) return { resolvedTitle: rawTitle, isCombo: false }
 
-  const delims = ['/', ';']
+  const delims = ['/', ';', ' - ']
   const matchedDelim = delims.find((d) => rawTitle.includes(d))
   if (!matchedDelim) {
     return { resolvedTitle: rawTitle, isCombo: false }
@@ -1043,7 +1043,7 @@ export function disambiguateComboTitle(rawTitle: string, folderNameOrPath: strin
   const rawSegments = rawTitle
     .split(matchedDelim)
     .map((s) => s.trim())
-    .filter((s) => s.length > 2)
+    .filter((s) => s.length > 2 && !/^(cd|disc)\s*\d+$/i.test(s))
   if (rawSegments.length <= 1) {
     return { resolvedTitle: rawTitle, isCombo: false }
   }
