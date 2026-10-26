@@ -15,7 +15,7 @@ import {
   AudioFormat,
   Playlist,
 } from '../core/types'
-import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags } from '../core/taxonomyUtils'
+import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags, disambiguateComboTitle } from '../core/taxonomyUtils'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 export interface MigrationResult {
@@ -420,6 +420,15 @@ export class SqliteLibraryService {
         releaseTracksMap.set(t.releaseId, list)
       })
 
+      // 2.5 Disambiguate multi-soundtrack combo releases (e.g. "Chinna Thambi/Dharma Dorai/Captain Prabhakaran" against folder name)
+      rawReleases.forEach((r) => {
+        const disambig = disambiguateComboTitle(r.title, r.folderName || r.folderPath)
+        if (disambig.isCombo) {
+          ;(r as any).physicalComboTitle = disambig.physicalComboTitle
+          r.title = disambig.resolvedTitle
+        }
+      })
+
       // 3. Cluster releases into Canonical Master Albums (Release Groups)
       // Group by normalized title + primary composer/artist
       const masterGroupMap = new Map<string, typeof rawReleases>()
@@ -447,7 +456,11 @@ export class SqliteLibraryService {
           const avgDr = rTracks.length > 0 ? Math.round(rTracks.reduce((acc, t) => acc + (t.drScore || 0), 0) / rTracks.length) : 12
 
           let variantName = gr.title.includes('(') ? gr.title : `${gr.releaseYear || ''} ${dominantFormat} Edition`.trim()
-          if (!variantName) variantName = `${dominantFormat} Master`
+          if ((gr as any).physicalComboTitle) {
+            variantName = `Combo CD: ${(gr as any).physicalComboTitle}`
+          } else if (!variantName) {
+            variantName = `${dominantFormat} Master`
+          }
 
           return {
             id: `var-${gr.id}`,

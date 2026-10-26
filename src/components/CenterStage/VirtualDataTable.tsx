@@ -185,6 +185,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
 
     sortedTracks.forEach((track) => {
       const key =
+        track.masterReleaseId ||
         track.releaseId ||
         track.pendingSidecarEdits?.album ||
         track.folderPath ||
@@ -198,8 +199,14 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
     const groups: ReleaseGroup[] = []
 
     groupMap.forEach((groupTracks, key) => {
-      // 1. Exact match by release ID
-      let rel = releases?.find((r) => r.id === key)
+      // 1. Exact match by master release ID (current master variant preferred) or release ID
+      let rel = releases?.find((r) => r.masterReleaseId === key && r.variants?.some((v) => v.isCurrentMaster))
+      if (!rel) {
+        rel = releases?.find((r) => r.masterReleaseId === key)
+      }
+      if (!rel) {
+        rel = releases?.find((r) => r.id === key)
+      }
       // 2. Exact match by folder path
       if (!rel) {
         rel = releases?.find((r) => r.folderPath && groupTracks.some((t) => t.folderPath && t.folderPath === r.folderPath))

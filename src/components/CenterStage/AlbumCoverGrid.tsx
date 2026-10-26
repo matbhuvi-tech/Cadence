@@ -165,6 +165,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
     tracks.forEach((track) => {
       const key =
+        track.masterReleaseId ||
         track.releaseId ||
         track.pendingSidecarEdits?.album ||
         track.folderPath ||
@@ -178,8 +179,14 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     const cards: AlbumCardData[] = []
 
     groupMap.forEach((groupTracks, key) => {
-      // 1. Exact match by release ID
-      let rel = releases.find((r) => r.id === key)
+      // 1. Exact match by master release ID (current master variant preferred) or release ID
+      let rel = releases.find((r) => r.masterReleaseId === key && r.variants?.some((v) => v.isCurrentMaster))
+      if (!rel) {
+        rel = releases.find((r) => r.masterReleaseId === key)
+      }
+      if (!rel) {
+        rel = releases.find((r) => r.id === key)
+      }
       // 2. Exact match by folder path
       if (!rel) {
         rel = releases.find((r) => r.folderPath && groupTracks.some((t) => t.folderPath && t.folderPath === r.folderPath))
@@ -291,7 +298,12 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
   // Drilldown Selected Album
   const selectedAlbum = useMemo(() => {
     if (!selectedAlbumId) return null
-    return unfilteredCards.find((a) => a.id === selectedAlbumId) || null
+    return (
+      unfilteredCards.find((a) => a.id === selectedAlbumId) ||
+      unfilteredCards.find((a) => a.release?.id === selectedAlbumId) ||
+      unfilteredCards.find((a) => a.release?.masterReleaseId === selectedAlbumId) ||
+      null
+    )
   }, [unfilteredCards, selectedAlbumId])
 
   // Drilldown Filtered Albums for Selected Artist

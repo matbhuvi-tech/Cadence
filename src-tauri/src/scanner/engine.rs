@@ -621,6 +621,8 @@ impl ScannerController {
                             .and_then(|t| t.album().map(|s| s.to_string()))
                             .unwrap_or_else(|| folder_name.clone());
 
+                        album = disambiguate_combo_title(&album, &folder_name);
+
                         let mut year = tag.and_then(|t| t.year()).map(|y| y as i32);
                         let mut track_number = tag.and_then(|t| t.track()).map(|t| t as i32);
                         let mut genre = tag.and_then(|t| t.genre().map(|s| s.to_string()));
@@ -1075,6 +1077,139 @@ pub fn calculate_dr_score(
     } else {
         8 + (char_sum % 7) as i32 // DR8 - DR14
     }
+}
+
+/// Disambiguates multi-soundtrack combo CD titles (e.g. "Chinna Thambi/Dharma Dorai/Captain Prabhakaran")
+/// when the folder name or path corroborates one specific soundtrack (e.g. "Dharma Dorai CD RIP").
+pub fn disambiguate_combo_title(raw_title: &str, folder_name: &str) -> String {
+    let delims = ['/', ';'];
+    let has_delim = delims.iter().any(|&d| raw_title.contains(d));
+    if !has_delim {
+        return raw_title.to_string();
+    }
+
+    let segments: Vec<&str> = raw_title
+        .split(|c| c == '/' || c == ';')
+        .map(|s| s.trim())
+        .filter(|s| s.len() > 2)
+        .collect();
+
+    if segments.len() <= 1 {
+        return raw_title.to_string();
+    }
+
+    let clean_folder = strip_rip_noise(folder_name).to_lowercase();
+    if clean_folder.is_empty() {
+        return raw_title.to_string();
+    }
+
+    let folder_no_doubles = strip_repeated_chars(&clean_folder);
+
+    let mut matching_segs: Vec<&str> = Vec::new();
+    for seg in &segments {
+        let clean_seg = strip_rip_noise(seg).to_lowercase();
+        if clean_seg.is_empty() {
+            continue;
+        }
+
+        let seg_no_doubles = strip_repeated_chars(&clean_seg);
+        if clean_seg == clean_folder || seg_no_doubles == folder_no_doubles {
+            matching_segs.push(seg);
+            continue;
+        }
+
+        let st: Vec<String> = clean_seg
+            .split_whitespace()
+            .map(strip_repeated_chars)
+            .filter(|t| t.len() >= 2)
+            .collect();
+        let ft: Vec<String> = clean_folder
+            .split_whitespace()
+            .map(strip_repeated_chars)
+            .filter(|t| t.len() >= 2)
+            .collect();
+
+        if !st.is_empty() && !ft.is_empty() {
+            let matches = st
+                .iter()
+                .filter(|s| {
+                    ft.iter().any(|f| {
+                        f == *s
+                            || (s.len() >= 4 && f.starts_with(&s[..4]))
+                            || (f.len() >= 4 && s.starts_with(&f[..4]))
+                    })
+                })
+                .count();
+
+            if matches >= st.len().min(ft.len()) && matches >= 1 {
+                matching_segs.push(seg);
+            }
+        }
+    }
+
+    // Deduplicate matching segments
+    let mut unique_matches: Vec<String> = matching_segs.iter().map(|s| s.to_lowercase()).collect();
+    unique_matches.sort();
+    unique_matches.dedup();
+
+    // Guard: If the folder name contains tokens from multiple distinct segments (e.g. folder is "Face Off" or "Chinna Thambi & Dharma Dorai"),
+    // then the folder represents the unified multi-title release, NOT a single split segment!
+    let folder_tokens: Vec<String> = clean_folder
+        .split_whitespace()
+        .map(strip_repeated_chars)
+        .filter(|t| t.len() >= 2)
+        .collect();
+    let segments_in_folder = segments
+        .iter()
+        .filter(|seg| {
+            let clean_seg = strip_rip_noise(seg).to_lowercase();
+            let st: Vec<String> = clean_seg
+                .split_whitespace()
+                .map(strip_repeated_chars)
+                .filter(|t| t.len() >= 2)
+                .collect();
+            st.iter().any(|s| {
+                folder_tokens.iter().any(|f| {
+                    f == s || (s.len() >= 4 && f.starts_with(&s[..4]))
+                })
+            })
+        })
+        .count();
+
+    if segments_in_folder > 1 {
+        return raw_title.to_string();
+    }
+
+    if unique_matches.len() == 1 {
+        return matching_segs[0].to_string();
+    }
+
+    raw_title.to_string()
+}
+
+fn strip_rip_noise(s: &str) -> String {
+    let mut res = s.to_string();
+    for marker in &[
+        " [CD RIP]", " CD RIP", " (CD RIP)", " [FLAC]", " [DSD]", " [MP3]", " [WAV]",
+        " [ALAC]", " CD-RIP", " CDRIP", " v1.0", " v2.0", " v3.0",
+    ] {
+        if let Some(pos) = res.to_lowercase().find(&marker.to_lowercase()) {
+            res = res[..pos].to_string();
+        }
+    }
+    res.trim().to_string()
+}
+
+fn strip_repeated_chars(s: &str) -> String {
+    let mut res = String::new();
+    let mut last_char: Option<char> = None;
+    for c in s.chars() {
+        if Some(c) != last_char {
+            res.push(c);
+            last_char = Some(c);
+        }
+    }
+    res
 }
 
 

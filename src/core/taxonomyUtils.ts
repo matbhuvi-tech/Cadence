@@ -985,3 +985,100 @@ export function getCuratedAlbumArtwork(albumTitle?: string, artistOrComposer?: s
   }
   return ''
 }
+
+export interface ComboDisambiguationResult {
+  resolvedTitle: string
+  physicalComboTitle?: string
+  isCombo: boolean
+}
+
+function stripRepeatedLetters(str: string): string {
+  return str.replace(/([a-z])\1+/g, '$1')
+}
+
+/**
+ * Universal Combo CD & Multi-Album Disambiguation Engine.
+ * 
+ * When a CD contains multiple soundtracks (e.g., "Chinna Thambi/Dharma Dorai/Captian Prabhakaran")
+ * and the folder name or path positively corroborates one of the soundtrack segments
+ * (e.g., "Dharma Dorai CD RIP"), this resolves the individual soundtrack album title.
+ */
+export function disambiguateComboTitle(rawTitle: string, folderNameOrPath: string): ComboDisambiguationResult {
+  if (!rawTitle) return { resolvedTitle: rawTitle, isCombo: false }
+
+  const delims = ['/', ';']
+  const matchedDelim = delims.find((d) => rawTitle.includes(d))
+  if (!matchedDelim) {
+    return { resolvedTitle: rawTitle, isCombo: false }
+  }
+
+  const rawSegments = rawTitle
+    .split(matchedDelim)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 2)
+  if (rawSegments.length <= 1) {
+    return { resolvedTitle: rawTitle, isCombo: false }
+  }
+
+  // Extract base folder name from path if full path is provided
+  const baseFolder = folderNameOrPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || folderNameOrPath
+  const cleanFolder = stripRipNoiseAndTags(baseFolder).toLowerCase().trim()
+  if (!cleanFolder) {
+    return { resolvedTitle: rawTitle, isCombo: false }
+  }
+
+  // Check which segments match the folder name
+  const matchingSegs: string[] = []
+  for (const seg of rawSegments) {
+    const cleanSeg = stripRipNoiseAndTags(seg).toLowerCase().trim()
+    if (!cleanSeg) continue
+
+    // Exact or reduced-double match (e.g. 'anand' vs 'aanand')
+    if (cleanSeg === cleanFolder || stripRepeatedLetters(cleanSeg) === stripRepeatedLetters(cleanFolder)) {
+      matchingSegs.push(seg)
+      continue
+    }
+
+    // Token overlap check (handles "Captain Prabhakaran" vs "Captian Prabhakaran" or "Nanum Oru Thozillali" vs "Naanum Oru Thozhilaali")
+    const st = cleanSeg.split(/\s+/).map(stripRepeatedLetters).filter((t) => t.length >= 2)
+    const ft = cleanFolder.split(/\s+/).map(stripRepeatedLetters).filter((t) => t.length >= 2)
+    if (st.length > 0 && ft.length > 0) {
+      const matches = st.filter((s) =>
+        ft.some(
+          (f) =>
+            f === s ||
+            (s.length >= 4 && f.startsWith(s.slice(0, 4))) ||
+            (f.length >= 4 && s.startsWith(f.slice(0, 4)))
+        )
+      ).length
+      if (matches >= Math.min(st.length, ft.length) && matches >= 1) {
+        matchingSegs.push(seg)
+      }
+    }
+  }
+
+  // Deduplicate matching segments by normalized name
+  const uniqueMatches = Array.from(new Set(matchingSegs.map((m) => m.toLowerCase().trim())))
+
+  // Guard: If the folder name contains tokens from multiple distinct segments (e.g. folder is "Face Off" or "Chinna Thambi & Dharma Dorai"),
+  // then the folder represents the unified multi-title release, NOT a single split segment!
+  const folderTokens = cleanFolder.split(/\s+/).map(stripRepeatedLetters).filter((t) => t.length >= 2)
+  const segmentsInFolder = rawSegments.filter((seg) => {
+    const cleanSeg = stripRipNoiseAndTags(seg).toLowerCase().trim()
+    const st = cleanSeg.split(/\s+/).map(stripRepeatedLetters).filter((t) => t.length >= 2)
+    return st.some((s) => folderTokens.some((f) => f === s || (s.length >= 4 && f.startsWith(s.slice(0, 4)))))
+  })
+  if (segmentsInFolder.length > 1) {
+    return { resolvedTitle: rawTitle, isCombo: false }
+  }
+
+  // High confidence: exactly ONE distinct segment matched this folder
+  if (uniqueMatches.length === 1) {
+    const bestSeg = matchingSegs[0]
+    return { resolvedTitle: bestSeg, physicalComboTitle: rawTitle, isCombo: true }
+  }
+
+  // If multiple distinct segments matched (e.g. unified disc folder like "Face Off" or "Chinna Thambi & Dharma Dorai"),
+  // preserve the unified title.
+  return { resolvedTitle: rawTitle, isCombo: false }
+}
