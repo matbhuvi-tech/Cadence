@@ -25,6 +25,7 @@ import {
   RefreshCw,
   ZoomIn,
   Eye,
+  Maximize2,
 } from 'lucide-react'
 import { Release, Track } from '../../core/types'
 import {
@@ -344,61 +345,29 @@ const ArtworkZoomThumbnail: React.FC<ArtworkZoomThumbnailProps> = ({
   const [imageError, setImageError] = useState(false)
 
   return (
-    <div className="relative group/art">
-      <div
-        onClick={onClick}
-        className={`w-14 h-14 rounded-xl overflow-hidden flex items-center justify-center shrink-0 cursor-zoom-in transition-all duration-200 group-hover/art:scale-105 ${
-          isStaged
-            ? 'bg-black/70 border-2 border-emerald-400/80 shadow-md shadow-emerald-500/20'
-            : 'bg-black/70 border border-white/20 hover:border-white/40'
-        }`}
-        title="Hover for larger preview • Click for full inspection"
-      >
-        {url && !imageError ? (
-          <img
-            src={url}
-            alt={label}
-            className="w-full h-full object-cover"
-            onError={() => setImageError(true)}
-          />
-        ) : (
-          <Disc3 className="w-6 h-6 text-zinc-500" />
-        )}
-
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/art:opacity-100 transition-opacity flex items-center justify-center">
-          <ZoomIn className="w-4 h-4 text-white drop-shadow" />
-        </div>
-      </div>
-
-      {/* Floating Hover Zoom Popover */}
-      {url && !imageError && (
-        <div className="absolute bottom-full mb-3 left-0 z-50 pointer-events-none opacity-0 group-hover/art:opacity-100 scale-95 group-hover/art:scale-100 transition-all duration-200 origin-bottom-left flex flex-col gap-2 p-3 rounded-2xl bg-[#090b10]/95 backdrop-blur-2xl border border-white/20 shadow-2xl shadow-black/90 w-72">
-          <div className="w-full h-64 rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-white/10">
-            <img
-              src={url}
-              alt={label}
-              className="w-full h-full object-contain"
-            />
-          </div>
-          <div className="flex flex-col gap-0.5 px-0.5">
-            <div className="flex items-center justify-between">
-              <span
-                className={`text-[10px] font-mono uppercase tracking-wider font-bold ${
-                  isStaged ? 'text-emerald-400' : 'text-zinc-400'
-                }`}
-              >
-                {label}
-              </span>
-              <span className="text-[11px] font-mono font-medium text-zinc-200">
-                {resolution || (isStaged ? 'High-Resolution Scan' : 'Original Artwork')}
-              </span>
-            </div>
-            <span className="text-[9px] font-mono text-zinc-400 text-center mt-1 pt-1 border-t border-white/[0.08]">
-              Click thumbnail for side-by-side inspection
-            </span>
-          </div>
-        </div>
+    <div
+      onClick={onClick}
+      className={`w-14 h-14 rounded-xl overflow-hidden flex items-center justify-center shrink-0 cursor-pointer relative group/art transition-all duration-200 hover:scale-105 ${
+        isStaged
+          ? 'bg-black/70 border-2 border-emerald-400/80 shadow-md shadow-emerald-500/20'
+          : 'bg-black/70 border border-white/20 hover:border-white/40'
+      }`}
+      title={`${label} (${resolution || ''}) • Click to inspect in Archival Pane`}
+    >
+      {url && !imageError ? (
+        <img
+          src={url}
+          alt={label}
+          className="w-full h-full object-cover"
+          onError={() => setImageError(true)}
+        />
+      ) : (
+        <Disc3 className="w-6 h-6 text-zinc-500" />
       )}
+
+      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/art:opacity-100 transition-opacity flex items-center justify-center">
+        <ZoomIn className="w-4 h-4 text-white drop-shadow" />
+      </div>
     </div>
   )
 }
@@ -420,6 +389,8 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   const { isPlaying, togglePlayPause } = useAudioPlayer()
   const isPlaybackActive = isPlaying
   const [searchQuery, setSearchQuery] = useState('')
+  const [selectedReleaseId, setSelectedReleaseId] = useState<string | null>(null)
+  const [inspectorArtTab, setInspectorArtTab] = useState<'split' | 'staged' | 'current'>('split')
   const [inspectingArtwork, setInspectingArtwork] = useState<{
     currentUrl?: string
     stagedUrl?: string
@@ -515,6 +486,69 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     })
     return Array.from(map.entries())
   }, [filteredTracks, releases])
+
+  // Selected Release Synchronization for Inspector Pane
+  useEffect(() => {
+    if (groupedByRelease.length > 0) {
+      if (!selectedReleaseId || !groupedByRelease.some(([id]) => id === selectedReleaseId)) {
+        setSelectedReleaseId(groupedByRelease[0][0])
+      }
+    } else {
+      setSelectedReleaseId(null)
+    }
+  }, [groupedByRelease, selectedReleaseId])
+
+  const selectedGroup = useMemo(() => {
+    if (!selectedReleaseId) return groupedByRelease[0] || null
+    return groupedByRelease.find(([id]) => id === selectedReleaseId) || groupedByRelease[0] || null
+  }, [groupedByRelease, selectedReleaseId])
+
+  const selectedReleaseData = useMemo(() => {
+    if (!selectedGroup) return null
+    const [relId, { release, tracks: relTracks }] = selectedGroup
+    const albumTitle =
+      release?.title ||
+      relTracks[0]?.pendingSidecarEdits?.album ||
+      relTracks[0]?.folderName ||
+      'Album Release'
+    const folderName = release?.folderName || relTracks[0]?.folderName
+    const artistCredit = release?.artistCredit || relTracks[0]?.artistCredit || 'Various Artists'
+    const stagedCoverArt =
+      release?.artwork?.frontCoverUrl ||
+      relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)?.pendingSidecarEdits?.coverArtUrl
+    const currentCoverArt =
+      release?.artwork?.originalFrontCoverUrl ||
+      (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt
+        ? release.artwork.frontCoverUrl
+        : relTracks[0]?.filePath
+        ? `/api/track-art?file=${encodeURIComponent(relTracks[0].filePath)}`
+        : undefined)
+    const stagedRes =
+      relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)?.pendingSidecarEdits?.coverResolution ||
+      release?.artwork?.resolution ||
+      '3000×3000px (Apple Music Master Scan)'
+    const currentRes = release?.artwork?.originalFrontCoverUrl
+      ? 'Local Disk / Original'
+      : release?.artwork?.resolution || 'Disk file'
+
+    const realEdits = relTracks.flatMap((t) => getTrackRealEdits(t, release))
+    const allTracksExcluded = relTracks.every((t) => excludedTrackIds.has(t.id))
+
+    return {
+      relId,
+      release,
+      relTracks,
+      albumTitle,
+      folderName,
+      artistCredit,
+      stagedCoverArt,
+      currentCoverArt,
+      stagedRes,
+      currentRes,
+      realEdits,
+      allTracksExcluded,
+    }
+  }, [selectedGroup, excludedTrackIds])
 
   // Decoupled Metrics: All Staged Items
   const allMetrics: CommitUnitMetrics = useMemo(() => {
@@ -698,7 +732,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-start justify-center pt-[52px] animate-in fade-in duration-200">
       <div
         data-tutorial-id="modal-staged-commit-pipeline"
-        className="bg-[#121318] border-x border-b border-white/[0.08] rounded-t-none rounded-b-2xl w-full max-w-5xl max-h-[calc(92vh-52px)] shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-hidden flex flex-col animate-in slide-in-from-top-6 duration-240 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] will-change-transform"
+        className="bg-[#121318] border-x border-b border-white/[0.08] rounded-t-none rounded-b-2xl w-full max-w-[1400px] max-h-[calc(94vh-52px)] h-[calc(94vh-52px)] shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-hidden flex flex-col animate-in slide-in-from-top-6 duration-240 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] will-change-transform"
       >
         {/* 1. Modal Header with Trust Badges */}
         <div className="p-4 px-6 border-b border-white/[0.08] flex items-center justify-between bg-white/[0.02]">
@@ -797,11 +831,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
         </div>
 
         {/* 3. Main Body Viewport */}
-        <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 text-left">
+        <div className="flex-1 overflow-hidden p-6 flex flex-col gap-4 text-left min-h-0">
           {activeTab === 'preview' ? (
             <>
               {/* Category Filter Tabs & Search Bar */}
-              <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center justify-between gap-3 flex-wrap shrink-0">
                 <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/[0.06]">
                   <button
                     type="button"
@@ -855,7 +889,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 
               {/* Preflight Transport Warning if Playback Active */}
               {!preflight.playbackIdle && (
-                <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 flex items-center justify-between gap-3 animate-in fade-in">
+                <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 flex items-center justify-between gap-3 animate-in fade-in shrink-0">
                   <div className="flex items-center gap-2.5">
                     <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                     <span>
@@ -868,367 +902,704 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                 </div>
               )}
 
-              {/* Album Grouped Primary Review Diff */}
-              {uncommittedTracks.length === 0 ? (
-                <div className="p-12 rounded-2xl bg-white/[0.01] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center gap-2">
-                  <CheckCircle2 className="w-10 h-10 text-emerald-500/50" />
-                  <h3 className="text-sm font-bold text-white">No Pending Changes Staged</h3>
-                  <p className="text-xs text-zinc-400 max-w-sm">
-                    All audio headers and sidecars are currently synchronized and bit-perfect with your library.
-                  </p>
-                </div>
-              ) : filteredTracks.length === 0 ? (
-                <div className="p-12 rounded-2xl bg-white/[0.01] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center gap-2">
-                  <Search className="w-10 h-10 text-zinc-500/50" />
-                  <h3 className="text-sm font-bold text-white">No Matching Staged Changes</h3>
-                  <p className="text-xs text-zinc-400 max-w-sm">
-                    No staged tracks match the selected filter category or search query.
-                  </p>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-4">
-                  {groupedByRelease.map(([relId, { release, tracks: relTracks }]) => {
-                    const albumTitle =
-                      release?.title ||
-                      relTracks[0]?.pendingSidecarEdits?.album ||
-                      relTracks[0]?.folderName ||
-                      'Album Release'
-                    const folderName = release?.folderName || relTracks[0]?.folderName
-                    const stagedCoverArt = relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)
-                      ?.pendingSidecarEdits?.coverArtUrl
-                    const currentCoverArt =
-                      release?.artwork?.originalFrontCoverUrl ||
-                      (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt
-                        ? release.artwork.frontCoverUrl
-                        : relTracks[0]?.filePath
-                        ? `/api/track-art?file=${encodeURIComponent(relTracks[0].filePath)}`
-                        : undefined)
+              {/* Two-Column Master-Detail Layout */}
+              <div className="flex-1 min-h-0 flex gap-5 overflow-hidden">
+                {/* Left Pane (Master Album & Track Review List) */}
+                <div className="flex-1 min-w-0 overflow-y-auto pr-1.5 flex flex-col gap-4">
+                  {uncommittedTracks.length === 0 ? (
+                    <div className="p-12 rounded-2xl bg-white/[0.01] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center gap-2">
+                      <CheckCircle2 className="w-10 h-10 text-emerald-500/50" />
+                      <h3 className="text-sm font-bold text-white">No Pending Changes Staged</h3>
+                      <p className="text-xs text-zinc-400 max-w-sm">
+                        All audio headers and sidecars are currently synchronized and bit-perfect with your library.
+                      </p>
+                    </div>
+                  ) : filteredTracks.length === 0 ? (
+                    <div className="p-12 rounded-2xl bg-white/[0.01] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center gap-2">
+                      <Search className="w-10 h-10 text-zinc-500/50" />
+                      <h3 className="text-sm font-bold text-white">No Matching Staged Changes</h3>
+                      <p className="text-xs text-zinc-400 max-w-sm">
+                        No staged tracks match the selected filter category or search query.
+                      </p>
+                    </div>
+                  ) : (
+                    groupedByRelease.map(([relId, { release, tracks: relTracks }]) => {
+                      const albumTitle =
+                        release?.title ||
+                        relTracks[0]?.pendingSidecarEdits?.album ||
+                        relTracks[0]?.folderName ||
+                        'Album Release'
+                      const folderName = release?.folderName || relTracks[0]?.folderName
+                      const stagedCoverArt = relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)
+                        ?.pendingSidecarEdits?.coverArtUrl
+                      const currentCoverArt =
+                        release?.artwork?.originalFrontCoverUrl ||
+                        (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt
+                          ? release.artwork.frontCoverUrl
+                          : relTracks[0]?.filePath
+                          ? `/api/track-art?file=${encodeURIComponent(relTracks[0].filePath)}`
+                          : undefined)
 
-                    const isExpanded = expandedReleaseIds.has(relId)
-                    const allTracksExcluded = relTracks.every((t) => excludedTrackIds.has(t.id))
-                    const someTracksExcluded = relTracks.some((t) => excludedTrackIds.has(t.id))
+                      const isExpanded = expandedReleaseIds.has(relId)
+                      const isSelected = selectedReleaseId === relId
+                      const allTracksExcluded = relTracks.every((t) => excludedTrackIds.has(t.id))
+                      const someTracksExcluded = relTracks.some((t) => excludedTrackIds.has(t.id))
 
-                    return (
-                      <div
-                        key={relId}
-                        className={`rounded-2xl border transition-all ${
-                          allTracksExcluded
-                            ? 'border-white/[0.04] bg-[#0c0d11]/60 opacity-60'
-                            : 'border-white/[0.08] bg-[#0E1017]/90 shadow-lg'
-                        }`}
-                      >
-                        {/* Album Group Header */}
+                      return (
                         <div
-                          onClick={() => toggleReleaseExpanded(relId)}
-                          className="p-3.5 px-4 bg-white/[0.02] hover:bg-white/[0.04] border-b border-white/[0.06] flex items-center justify-between gap-3 cursor-pointer transition-colors"
+                          key={relId}
+                          onClick={() => setSelectedReleaseId(relId)}
+                          className={`rounded-2xl border transition-all ${
+                            allTracksExcluded
+                              ? 'border-white/[0.04] bg-[#0c0d11]/60 opacity-60'
+                              : isSelected
+                              ? 'border-cyan-500/50 bg-[#0E1017] shadow-xl shadow-cyan-950/20 ring-1 ring-cyan-500/40'
+                              : 'border-white/[0.08] bg-[#0E1017]/90 shadow-lg hover:border-white/20'
+                          }`}
                         >
-                          <div className="flex items-center gap-3 min-w-0">
-                            {/* Album Checkbox */}
-                            <div
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                toggleReleaseExclusion(relId, relTracks)
-                              }}
-                              className="w-5 h-5 flex items-center justify-center shrink-0 cursor-pointer"
-                              title={allTracksExcluded ? 'Include album in commit' : 'Exclude album from commit'}
-                            >
+                          {/* Sticky Album Group Header */}
+                          <div
+                            onClick={(e) => {
+                              setSelectedReleaseId(relId)
+                              toggleReleaseExpanded(relId)
+                            }}
+                            className={`sticky top-0 z-10 backdrop-blur-xl p-3.5 px-4 border-b border-white/[0.06] flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                              isSelected
+                                ? 'bg-[#101422]/95 border-b-cyan-500/30'
+                                : 'bg-[#0c0e17]/95 hover:bg-[#12141f]/95'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              {/* Album Checkbox */}
                               <div
-                                className={`w-4 h-4 rounded flex items-center justify-center transition-all ${
-                                  !allTracksExcluded && !someTracksExcluded
-                                    ? 'bg-emerald-500 border border-emerald-400 text-black'
-                                    : someTracksExcluded && !allTracksExcluded
-                                    ? 'bg-emerald-500/40 border border-emerald-400/60'
-                                    : 'bg-zinc-900 border border-zinc-700'
-                                }`}
-                              >
-                                {!allTracksExcluded && <Check className="w-3 h-3 stroke-[3]" />}
-                              </div>
-                            </div>
-
-                            {/* Album Artwork or Disc Icon */}
-                            <div className="w-10 h-10 rounded-lg bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
-                              {stagedCoverArt || currentCoverArt ? (
-                                <img
-                                  src={stagedCoverArt || currentCoverArt}
-                                  alt="Cover"
-                                  className="w-full h-full object-cover"
-                                  onError={(e) => {
-                                    ;(e.target as HTMLElement).style.display = 'none'
-                                  }}
-                                />
-                              ) : (
-                                <Disc3 className="w-5 h-5 text-cyan-400" />
-                              )}
-                            </div>
-
-                            {/* Album Meta */}
-                            <div className="flex flex-col min-w-0 text-left">
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-bold text-white truncate">
-                                  {albumTitle}
-                                </span>
-                                {folderName && (
-                                  <span
-                                    className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 flex items-center gap-1 shrink-0"
-                                    title={`Physical Folder: ${folderName}`}
-                                  >
-                                    <Folder className="w-3 h-3" />
-                                    <span className="truncate max-w-[200px]">{folderName}</span>
-                                  </span>
-                                )}
-                              </div>
-                              <span className="text-[11px] text-zinc-400 truncate mt-0.5 font-mono">
-                                {release?.artistCredit || relTracks[0]?.artistCredit || 'Various Artists'}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0">
-                            {stagedCoverArt ? (
-                              <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
-                                Cover Art Updated
-                              </span>
-                            ) : relTracks.some((t) => getTrackRealEdits(t, release).length > 0) ? (
-                              <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                                Tag Edits Staged
-                              </span>
-                            ) : (
-                              <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                                Sidecar Staged
-                              </span>
-                            )}
-                            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-zinc-300 border border-white/10">
-                              {relTracks.length} track{relTracks.length > 1 ? 's' : ''}
-                            </span>
-                            {onDiscardRelease && (
-                              <button
-                                type="button"
                                 onClick={(e) => {
                                   e.stopPropagation()
-                                  onDiscardRelease(relId)
+                                  toggleReleaseExclusion(relId, relTracks)
                                 }}
-                                title="Discard all staged changes for this album"
-                                className="p-1 rounded text-zinc-400 hover:text-rose-400 hover:bg-white/[0.06] transition-all cursor-pointer"
+                                className="w-5 h-5 flex items-center justify-center shrink-0 cursor-pointer"
+                                title={allTracksExcluded ? 'Include album in commit' : 'Exclude album from commit'}
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                            <div className="p-1 text-zinc-400">
-                              {isExpanded ? (
-                                <ChevronDown className="w-4 h-4 text-cyan-400" />
-                              ) : (
-                                <ChevronRight className="w-4 h-4 text-zinc-400" />
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Staged Album Artwork Comparison (if present) */}
-                        {isExpanded && stagedCoverArt && (
-                          <div className="p-3.5 px-4 bg-black/40 border-b border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                            <div className="flex items-center gap-4">
-                              <div className="flex items-center gap-3">
-                                <ArtworkZoomThumbnail
-                                  url={currentCoverArt}
-                                  label="Current Artwork"
-                                  resolution={release?.artwork?.resolution || 'Disk file'}
-                                  onClick={() =>
-                                    setInspectingArtwork({
-                                      currentUrl: currentCoverArt,
-                                      stagedUrl: stagedCoverArt,
-                                      albumTitle,
-                                      currentRes: release?.artwork?.resolution || 'Disk file',
-                                      stagedRes:
-                                        relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
-                                          ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan',
-                                    })
-                                  }
-                                />
-                                <div className="flex flex-col text-left">
-                                  <span className="text-[10px] text-zinc-400 font-mono uppercase tracking-wider">
-                                    Current Artwork
-                                  </span>
-                                  <span className="text-xs text-zinc-300 font-mono">
-                                    {release?.artwork?.resolution || 'Disk file'}
-                                  </span>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center text-cyan-400 shrink-0 px-1">
-                                <ArrowRight className="w-4 h-4" />
-                              </div>
-
-                              <div className="flex items-center gap-3">
-                                <ArtworkZoomThumbnail
-                                  url={stagedCoverArt}
-                                  label="Staged Archival Cover"
-                                  resolution={
-                                    relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
-                                      ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'
-                                  }
-                                  isStaged
-                                  onClick={() =>
-                                    setInspectingArtwork({
-                                      currentUrl: currentCoverArt,
-                                      stagedUrl: stagedCoverArt,
-                                      albumTitle,
-                                      currentRes: release?.artwork?.resolution || 'Disk file',
-                                      stagedRes:
-                                        relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
-                                          ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan',
-                                    })
-                                  }
-                                />
-                                <div className="flex flex-col text-left">
-                                  <span className="text-[10px] text-emerald-400 font-mono uppercase tracking-wider font-semibold">
-                                    Staged Archival Cover
-                                  </span>
-                                  <span className="text-xs text-emerald-300 font-mono">
-                                    {relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
-                                      ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-
-                            {onDiscardReleaseArtwork && (
-                              <button
-                                type="button"
-                                onClick={() => onDiscardReleaseArtwork(relId)}
-                                className="px-2.5 py-1 text-xs font-mono rounded-lg border border-white/10 hover:border-rose-400/50 hover:bg-rose-500/10 text-zinc-400 hover:text-rose-300 transition-all cursor-pointer"
-                              >
-                                Revert Artwork
-                              </button>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Track-Level Diff List */}
-                        {isExpanded && (
-                          <div className="divide-y divide-white/[0.04]">
-                            {relTracks.map((track) => {
-                              const realEdits = getTrackRealEdits(track, release)
-                              const isTrackExcluded = excludedTrackIds.has(track.id)
-                              const paddingInfo = paddingMap.get(track.id)
-
-                              return (
                                 <div
-                                  key={track.id}
-                                  className={`p-3 px-4 flex flex-col gap-2 transition-colors ${
-                                    isTrackExcluded
-                                      ? 'bg-black/20 opacity-50'
-                                      : 'hover:bg-white/[0.01]'
+                                  className={`w-4 h-4 rounded flex items-center justify-center transition-all ${
+                                    !allTracksExcluded && !someTracksExcluded
+                                      ? 'bg-emerald-500 border border-emerald-400 text-black'
+                                      : someTracksExcluded && !allTracksExcluded
+                                      ? 'bg-emerald-500/40 border border-emerald-400/60'
+                                      : 'bg-zinc-900 border border-zinc-700'
                                   }`}
                                 >
-                                  {/* Track Item Row Header */}
-                                  <div className="flex items-center justify-between gap-3">
-                                    <div className="flex items-center gap-2.5 min-w-0">
-                                      {/* Track Checkbox */}
-                                      <button
-                                        type="button"
-                                        role="checkbox"
-                                        aria-checked={!isTrackExcluded}
-                                        onClick={() => toggleTrackExclusion(track.id)}
-                                        className={`w-4 h-4 rounded flex items-center justify-center transition-all cursor-pointer shrink-0 ${
-                                          !isTrackExcluded
-                                            ? 'bg-emerald-500 border border-emerald-400 text-black'
-                                            : 'bg-zinc-900 border border-zinc-700'
-                                        }`}
-                                        title={isTrackExcluded ? 'Include track' : 'Exclude track'}
-                                      >
-                                        {!isTrackExcluded && <Check className="w-3 h-3 stroke-[3]" />}
-                                      </button>
+                                  {!allTracksExcluded && <Check className="w-3 h-3 stroke-[3]" />}
+                                </div>
+                              </div>
 
-                                      <div className="w-6 text-[11px] font-mono text-zinc-500 shrink-0">
-                                        {track.trackNumber ? `#${String(track.trackNumber).padStart(2, '0')}` : '—'}
-                                      </div>
+                              {/* Album Artwork Thumbnail */}
+                              <div className="w-10 h-10 rounded-lg bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                                {stagedCoverArt || currentCoverArt ? (
+                                  <img
+                                    src={stagedCoverArt || currentCoverArt}
+                                    alt="Cover"
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => {
+                                      ;(e.target as HTMLElement).style.display = 'none'
+                                    }}
+                                  />
+                                ) : (
+                                  <Disc3 className="w-5 h-5 text-cyan-400" />
+                                )}
+                              </div>
 
-                                      <span className="text-xs font-semibold text-zinc-100 truncate">
-                                        {track.title}
-                                      </span>
-                                    </div>
-
-                                    <div className="flex items-center gap-2 shrink-0">
-                                      {/* Header Write Strategy Badge (When Embed Headers is selected) */}
-                                      {commitTarget === 'embedded' && paddingInfo && (
-                                        <span
-                                          className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
-                                            paddingInfo.requiresFullRewrite
-                                              ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                                              : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-                                          }`}
-                                          title={paddingInfo.reason}
-                                        >
-                                          {paddingInfo.requiresFullRewrite ? 'Stream Rewrite' : 'In-Place Overwrite'}
-                                        </span>
-                                      )}
-
-                                      {onDiscardTrack && (
-                                        <button
-                                          type="button"
-                                          onClick={() => onDiscardTrack(track.id)}
-                                          title="Discard staged edits for this track"
-                                          className="p-1 rounded text-zinc-500 hover:text-rose-400 transition-colors cursor-pointer"
-                                        >
-                                          <Trash2 className="w-3.5 h-3.5" />
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  {/* Field Diffs Table */}
-                                  {realEdits.length > 0 ? (
-                                    <div className="ml-6 mt-1 rounded-xl bg-black/40 border border-white/[0.04] overflow-hidden text-xs">
-                                      <div className="grid grid-cols-12 gap-3 px-3 py-1.5 bg-white/[0.02] border-b border-white/[0.04] text-[10px] font-mono uppercase tracking-wider text-zinc-500">
-                                        <div className="col-span-3">TAG FIELD</div>
-                                        <div className="col-span-4">CURRENT ON-DISK</div>
-                                        <div className="col-span-5 text-emerald-400">PROPOSED VALUE</div>
-                                      </div>
-                                      <div className="divide-y divide-white/[0.03]">
-                                        {realEdits.map((diff) => (
-                                          <div
-                                            key={diff.key}
-                                            className="grid grid-cols-12 gap-3 px-3 py-2 items-center font-mono text-[11px]"
-                                          >
-                                            <div className="col-span-3 text-zinc-400 flex items-center gap-1.5 truncate">
-                                              <diff.icon className="w-3 h-3 text-zinc-500 shrink-0" />
-                                              <span className="truncate">{diff.label}</span>
-                                            </div>
-                                            <div className="col-span-4 text-zinc-500 truncate" title={diff.current}>
-                                              {diff.current}
-                                            </div>
-                                            <div className="col-span-5 text-zinc-100 font-semibold truncate flex items-center gap-1.5" title={diff.proposed}>
-                                              <span className="text-zinc-600 font-normal shrink-0">→</span>
-                                              <span className="text-emerald-300 truncate">{diff.proposed}</span>
-                                            </div>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <div className="ml-6 text-[11px] font-mono text-zinc-500 flex items-center gap-1.5">
-                                      <Check className="w-3 h-3 text-emerald-400" />
-                                      <span>
-                                        {track.pendingSidecarEdits?.coverArtUrl
-                                          ? 'Audio tags identical to current file • Album artwork updated'
-                                          : 'Staged for sidecar ledger creation (cadence-album.sidecar.json) • Bit-perfect audio tags intact'}
-                                      </span>
-                                    </div>
+                              {/* Album Meta */}
+                              <div className="flex flex-col min-w-0 text-left">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-bold text-white truncate">
+                                    {albumTitle}
+                                  </span>
+                                  {folderName && (
+                                    <span
+                                      className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 flex items-center gap-1 shrink-0"
+                                      title={`Physical Folder: ${folderName}`}
+                                    >
+                                      <Folder className="w-3 h-3" />
+                                      <span className="truncate max-w-[180px]">{folderName}</span>
+                                    </span>
                                   )}
                                 </div>
-                              )
-                            })}
+                                <span className="text-[11px] text-zinc-400 truncate mt-0.5 font-mono">
+                                  {release?.artistCredit || relTracks[0]?.artistCredit || 'Various Artists'}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0">
+                              {isSelected && (
+                                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hidden sm:inline-flex items-center gap-1">
+                                  <Eye className="w-3 h-3" />
+                                  <span>Inspecting</span>
+                                </span>
+                              )}
+                              {stagedCoverArt ? (
+                                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                                  Cover Art Updated
+                                </span>
+                              ) : relTracks.some((t) => getTrackRealEdits(t, release).length > 0) ? (
+                                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                                  Tag Edits Staged
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                                  Sidecar Staged
+                                </span>
+                              )}
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-zinc-300 border border-white/10">
+                                {relTracks.length} track{relTracks.length > 1 ? 's' : ''}
+                              </span>
+                              {onDiscardRelease && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    onDiscardRelease(relId)
+                                  }}
+                                  title="Discard all staged changes for this album"
+                                  className="p-1 rounded text-zinc-400 hover:text-rose-400 hover:bg-white/[0.06] transition-all cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              <div className="p-1 text-zinc-400">
+                                {isExpanded ? (
+                                  <ChevronDown className="w-4 h-4 text-cyan-400" />
+                                ) : (
+                                  <ChevronRight className="w-4 h-4 text-zinc-400" />
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Expandable Inline Artwork Comparison (if artwork staged) */}
+                          {isExpanded && stagedCoverArt && (
+                            <div className="p-3.5 px-4 bg-black/40 border-b border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="flex items-center gap-4">
+                                <div className="flex items-center gap-3">
+                                  <ArtworkZoomThumbnail
+                                    url={currentCoverArt}
+                                    label="Current Artwork"
+                                    resolution={release?.artwork?.resolution || 'Disk file'}
+                                    onClick={() => setSelectedReleaseId(relId)}
+                                  />
+                                  <div className="flex flex-col text-left">
+                                    <span className="text-[10px] text-zinc-400 font-mono uppercase tracking-wider">
+                                      Current Artwork
+                                    </span>
+                                    <span className="text-xs text-zinc-300 font-mono">
+                                      {release?.artwork?.resolution || 'Disk file'}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center text-cyan-400 shrink-0 px-1">
+                                  <ArrowRight className="w-4 h-4" />
+                                </div>
+
+                                <div className="flex items-center gap-3">
+                                  <ArtworkZoomThumbnail
+                                    url={stagedCoverArt}
+                                    label="Staged Archival Cover"
+                                    resolution={
+                                      relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
+                                        ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'
+                                    }
+                                    isStaged
+                                    onClick={() => setSelectedReleaseId(relId)}
+                                  />
+                                  <div className="flex flex-col text-left">
+                                    <span className="text-[10px] text-emerald-400 font-mono uppercase tracking-wider font-semibold">
+                                      Staged Archival Cover
+                                    </span>
+                                    <span className="text-xs text-emerald-300 font-mono">
+                                      {relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
+                                        ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedReleaseId(relId)}
+                                  className="px-2.5 py-1 text-xs font-mono rounded-lg border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 transition-all cursor-pointer flex items-center gap-1.5"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>Inspect Pane</span>
+                                </button>
+                                {onDiscardReleaseArtwork && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onDiscardReleaseArtwork(relId)}
+                                    className="px-2.5 py-1 text-xs font-mono rounded-lg border border-white/10 hover:border-rose-400/50 hover:bg-rose-500/10 text-zinc-400 hover:text-rose-300 transition-all cursor-pointer"
+                                  >
+                                    Revert Art
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Track-Level Diff List */}
+                          {isExpanded && (
+                            <div className="divide-y divide-white/[0.04]">
+                              {relTracks.map((track) => {
+                                const realEdits = getTrackRealEdits(track, release)
+                                const isTrackExcluded = excludedTrackIds.has(track.id)
+                                const paddingInfo = paddingMap.get(track.id)
+
+                                return (
+                                  <div
+                                    key={track.id}
+                                    className={`p-3 px-4 flex flex-col gap-2 transition-colors ${
+                                      isTrackExcluded
+                                        ? 'bg-black/20 opacity-50'
+                                        : 'hover:bg-white/[0.01]'
+                                    }`}
+                                  >
+                                    {/* Track Item Row Header */}
+                                    <div className="flex items-center justify-between gap-3">
+                                      <div className="flex items-center gap-2.5 min-w-0">
+                                        {/* Track Checkbox */}
+                                        <button
+                                          type="button"
+                                          role="checkbox"
+                                          aria-checked={!isTrackExcluded}
+                                          onClick={(e) => {
+                                            e.stopPropagation()
+                                            toggleTrackExclusion(track.id)
+                                          }}
+                                          className={`w-4 h-4 rounded flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                                            !isTrackExcluded
+                                              ? 'bg-emerald-500 border border-emerald-400 text-black'
+                                              : 'bg-zinc-900 border border-zinc-700'
+                                          }`}
+                                          title={isTrackExcluded ? 'Include track' : 'Exclude track'}
+                                        >
+                                          {!isTrackExcluded && <Check className="w-3 h-3 stroke-[3]" />}
+                                        </button>
+
+                                        <div className="w-6 text-[11px] font-mono text-zinc-500 shrink-0">
+                                          {track.trackNumber ? `#${String(track.trackNumber).padStart(2, '0')}` : '—'}
+                                        </div>
+
+                                        <span className="text-xs font-semibold text-zinc-100 truncate">
+                                          {track.title}
+                                        </span>
+                                      </div>
+
+                                      <div className="flex items-center gap-2 shrink-0">
+                                        {/* Header Write Strategy Badge (When Embed Headers is selected) */}
+                                        {commitTarget === 'embedded' && paddingInfo && (
+                                          <span
+                                            className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                                              paddingInfo.requiresFullRewrite
+                                                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                                                : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                            }`}
+                                            title={paddingInfo.reason}
+                                          >
+                                            {paddingInfo.requiresFullRewrite ? 'Stream Rewrite' : 'In-Place Overwrite'}
+                                          </span>
+                                        )}
+
+                                        {onDiscardTrack && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation()
+                                              onDiscardTrack(track.id)
+                                            }}
+                                            title="Discard staged edits for this track"
+                                            className="p-1 rounded text-zinc-500 hover:text-rose-400 transition-colors cursor-pointer"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {/* Field Diffs Table */}
+                                    {realEdits.length > 0 ? (
+                                      <div className="ml-6 mt-1 rounded-xl bg-black/40 border border-white/[0.04] overflow-hidden text-xs">
+                                        <div className="grid grid-cols-12 gap-3 px-3 py-1.5 bg-white/[0.02] border-b border-white/[0.04] text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                                          <div className="col-span-3">TAG FIELD</div>
+                                          <div className="col-span-4">CURRENT ON-DISK</div>
+                                          <div className="col-span-5 text-emerald-400">PROPOSED VALUE</div>
+                                        </div>
+                                        <div className="divide-y divide-white/[0.03]">
+                                          {realEdits.map((diff) => (
+                                            <div
+                                              key={diff.key}
+                                              className="grid grid-cols-12 gap-3 px-3 py-2 items-center font-mono text-[11px]"
+                                            >
+                                              <div className="col-span-3 text-zinc-400 flex items-center gap-1.5 truncate">
+                                                <diff.icon className="w-3 h-3 text-zinc-500 shrink-0" />
+                                                <span className="truncate">{diff.label}</span>
+                                              </div>
+                                              <div className="col-span-4 text-zinc-500 truncate" title={diff.current}>
+                                                {diff.current}
+                                              </div>
+                                              <div className="col-span-5 text-zinc-100 font-semibold truncate flex items-center gap-1.5" title={diff.proposed}>
+                                                <span className="text-zinc-600 font-normal shrink-0">→</span>
+                                                <span className="text-emerald-300 truncate">{diff.proposed}</span>
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="ml-6 text-[11px] font-mono text-zinc-500 flex items-center gap-1.5">
+                                        <Check className="w-3 h-3 text-emerald-400" />
+                                        <span>
+                                          {track.pendingSidecarEdits?.coverArtUrl
+                                            ? 'Audio tags identical to current file • Album artwork updated'
+                                            : 'Staged for sidecar ledger creation (cadence-album.sidecar.json) • Bit-perfect audio tags intact'}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+
+                {/* Right Pane (Sticky Archival Inspector) */}
+                <div className="w-[380px] xl:w-[420px] shrink-0 bg-[#0c0d14] rounded-2xl border border-white/[0.08] p-4 flex flex-col gap-4 shadow-2xl overflow-y-auto">
+                  {selectedReleaseData ? (
+                    <>
+                      {/* Header */}
+                      <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
+                        <div className="flex items-center gap-2">
+                          <div className="w-6 h-6 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
+                            <ImageIcon className="w-3.5 h-3.5" />
+                          </div>
+                          <span className="text-xs font-mono font-semibold tracking-wide uppercase text-zinc-300">
+                            Archival Inspector
+                          </span>
+                        </div>
+                        {selectedReleaseData.stagedCoverArt && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setInspectingArtwork({
+                                currentUrl: selectedReleaseData.currentCoverArt,
+                                stagedUrl: selectedReleaseData.stagedCoverArt,
+                                albumTitle: selectedReleaseData.albumTitle,
+                                currentRes: selectedReleaseData.currentRes,
+                                stagedRes: selectedReleaseData.stagedRes,
+                              })
+                            }
+                            className="px-2 py-1 rounded-lg bg-white/[0.05] hover:bg-white/10 text-zinc-300 hover:text-white transition-all text-[11px] font-mono flex items-center gap-1.5 cursor-pointer border border-white/10"
+                            title="Open Fullscreen Lightbox"
+                          >
+                            <Maximize2 className="w-3 h-3 text-cyan-400" />
+                            <span>Lightbox</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Album Identity */}
+                      <div className="flex flex-col text-left gap-0.5">
+                        <div className="text-sm font-bold text-white truncate" title={selectedReleaseData.albumTitle}>
+                          {selectedReleaseData.albumTitle}
+                        </div>
+                        <div className="text-xs text-zinc-400 font-mono truncate">
+                          {selectedReleaseData.artistCredit}
+                        </div>
+                        {selectedReleaseData.folderName && (
+                          <div className="text-[10px] text-cyan-400/80 font-mono truncate flex items-center gap-1 mt-0.5">
+                            <Folder className="w-3 h-3 shrink-0" />
+                            <span className="truncate">{selectedReleaseData.folderName}</span>
                           </div>
                         )}
                       </div>
-                    )
-                  })}
+
+                      {/* Artwork View Mode Toggle & Canvas */}
+                      <div className="flex flex-col gap-2.5">
+                        <div className="flex items-center justify-between bg-black/60 p-1 rounded-xl border border-white/[0.08]">
+                          <button
+                            type="button"
+                            onClick={() => setInspectorArtTab('split')}
+                            className={`flex-1 py-1 text-[11px] font-mono rounded-lg transition-all cursor-pointer ${
+                              inspectorArtTab === 'split'
+                                ? 'bg-white/[0.14] text-white font-semibold shadow-sm'
+                                : 'text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            Side-by-Side
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setInspectorArtTab('staged')}
+                            className={`flex-1 py-1 text-[11px] font-mono rounded-lg transition-all cursor-pointer ${
+                              inspectorArtTab === 'staged'
+                                ? 'bg-purple-500/25 text-purple-200 border border-purple-500/30 font-semibold'
+                                : 'text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            Staged HD
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setInspectorArtTab('current')}
+                            className={`flex-1 py-1 text-[11px] font-mono rounded-lg transition-all cursor-pointer ${
+                              inspectorArtTab === 'current'
+                                ? 'bg-white/[0.14] text-white font-semibold shadow-sm'
+                                : 'text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            Current
+                          </button>
+                        </div>
+
+                        {/* Artwork Preview Canvas */}
+                        {inspectorArtTab === 'split' ? (
+                          <div className="grid grid-cols-2 gap-2.5">
+                            {/* Current Artwork Card */}
+                            <div className="flex flex-col gap-1.5">
+                              <div className="aspect-square rounded-xl bg-black/70 border border-white/10 overflow-hidden relative">
+                                {selectedReleaseData.currentCoverArt ? (
+                                  <img
+                                    src={selectedReleaseData.currentCoverArt}
+                                    alt="Current"
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => {
+                                      ;(e.target as HTMLElement).style.display = 'none'
+                                    }}
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
+                                    <Disc3 className="w-6 h-6" />
+                                    <span className="text-[9px] font-mono">No Art</span>
+                                  </div>
+                                )}
+                                <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/80 backdrop-blur-sm text-[9px] font-mono text-zinc-400 border border-white/10">
+                                  Current
+                                </div>
+                              </div>
+                              <div className="text-[10px] font-mono text-zinc-400 truncate text-center">
+                                {selectedReleaseData.currentRes}
+                              </div>
+                            </div>
+
+                            {/* Staged Artwork Card */}
+                            <div className="flex flex-col gap-1.5">
+                              <div
+                                onClick={() =>
+                                  selectedReleaseData.stagedCoverArt &&
+                                  setInspectingArtwork({
+                                    currentUrl: selectedReleaseData.currentCoverArt,
+                                    stagedUrl: selectedReleaseData.stagedCoverArt,
+                                    albumTitle: selectedReleaseData.albumTitle,
+                                    currentRes: selectedReleaseData.currentRes,
+                                    stagedRes: selectedReleaseData.stagedRes,
+                                  })
+                                }
+                                className={`aspect-square rounded-xl bg-black/70 border overflow-hidden relative group cursor-pointer transition-all ${
+                                  selectedReleaseData.stagedCoverArt
+                                    ? 'border-purple-500/40 hover:border-purple-400 hover:shadow-[0_0_15px_rgba(168,85,247,0.2)]'
+                                    : 'border-white/10'
+                                }`}
+                              >
+                                {selectedReleaseData.stagedCoverArt ? (
+                                  <img
+                                    src={selectedReleaseData.stagedCoverArt}
+                                    alt="Staged"
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => {
+                                      ;(e.target as HTMLElement).style.display = 'none'
+                                    }}
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
+                                    <Disc3 className="w-6 h-6" />
+                                    <span className="text-[9px] font-mono">Unchanged</span>
+                                  </div>
+                                )}
+                                <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-purple-950/80 backdrop-blur-sm text-[9px] font-mono text-purple-300 border border-purple-500/30">
+                                  Staged HD
+                                </div>
+                                {selectedReleaseData.stagedCoverArt && (
+                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                    <Maximize2 className="w-5 h-5 text-white" />
+                                  </div>
+                                )}
+                              </div>
+                              <div className="text-[10px] font-mono text-purple-300 font-semibold truncate text-center">
+                                {selectedReleaseData.stagedRes}
+                              </div>
+                            </div>
+                          </div>
+                        ) : inspectorArtTab === 'staged' ? (
+                          <div className="flex flex-col gap-2">
+                            <div
+                              onClick={() =>
+                                selectedReleaseData.stagedCoverArt &&
+                                setInspectingArtwork({
+                                  currentUrl: selectedReleaseData.currentCoverArt,
+                                  stagedUrl: selectedReleaseData.stagedCoverArt,
+                                  albumTitle: selectedReleaseData.albumTitle,
+                                  currentRes: selectedReleaseData.currentRes,
+                                  stagedRes: selectedReleaseData.stagedRes,
+                                })
+                              }
+                              className="aspect-square w-full rounded-xl bg-black/80 border border-purple-500/30 overflow-hidden relative group cursor-pointer shadow-lg"
+                            >
+                              {selectedReleaseData.stagedCoverArt ? (
+                                <img
+                                  src={selectedReleaseData.stagedCoverArt}
+                                  alt="Staged"
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
+                                  <Disc3 className="w-8 h-8" />
+                                  <span className="text-xs font-mono">No Staged Art</span>
+                                </div>
+                              )}
+                              <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-purple-950/85 backdrop-blur-md text-[10px] font-mono text-purple-200 border border-purple-500/40">
+                                Staged Archival Cover
+                              </div>
+                              {selectedReleaseData.stagedCoverArt && (
+                                <div className="absolute bottom-2 right-2 px-2 py-1 rounded-lg bg-black/70 backdrop-blur-md text-[10px] font-mono text-zinc-300 flex items-center gap-1 border border-white/10 group-hover:bg-cyan-500 group-hover:text-black transition-colors">
+                                  <Maximize2 className="w-3 h-3" />
+                                  <span>Zoom 4K</span>
+                                </div>
+                              )}
+                            </div>
+                            <div className="px-3 py-1.5 rounded-lg bg-purple-500/10 border border-purple-500/20 text-[11px] font-mono text-purple-300 flex items-center justify-between">
+                              <span>Resolution:</span>
+                              <span className="font-semibold">{selectedReleaseData.stagedRes}</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-2">
+                            <div className="aspect-square w-full rounded-xl bg-black/80 border border-white/10 overflow-hidden relative group shadow-lg">
+                              {selectedReleaseData.currentCoverArt ? (
+                                <img
+                                  src={selectedReleaseData.currentCoverArt}
+                                  alt="Current"
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
+                                  <Disc3 className="w-8 h-8" />
+                                  <span className="text-xs font-mono">No Current Art</span>
+                                </div>
+                              )}
+                              <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-black/80 backdrop-blur-md text-[10px] font-mono text-zinc-400 border border-white/10">
+                                Current Disk Art
+                              </div>
+                            </div>
+                            <div className="px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/10 text-[11px] font-mono text-zinc-400 flex items-center justify-between">
+                              <span>Resolution:</span>
+                              <span>{selectedReleaseData.currentRes}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Quick Actions for Selected Album */}
+                      <div className="flex items-center gap-2 pt-1">
+                        {selectedReleaseData.stagedCoverArt && onDiscardReleaseArtwork && (
+                          <button
+                            type="button"
+                            onClick={() => onDiscardReleaseArtwork(selectedReleaseData.relId)}
+                            className="flex-1 py-1.5 px-2 rounded-xl text-xs font-mono text-rose-300 bg-rose-500/10 border border-rose-500/25 hover:bg-rose-500/20 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Revert Art</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            toggleReleaseExclusion(selectedReleaseData.relId, selectedReleaseData.relTracks)
+                          }
+                          className={`flex-1 py-1.5 px-2 rounded-xl text-xs font-mono border transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                            selectedReleaseData.allTracksExcluded
+                              ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25'
+                              : 'bg-white/[0.04] border-white/10 text-zinc-400 hover:text-white hover:bg-white/[0.08]'
+                          }`}
+                        >
+                          <Check className="w-3 h-3" />
+                          <span>{selectedReleaseData.allTracksExcluded ? 'Include Album' : 'Exclude Album'}</span>
+                        </button>
+                      </div>
+
+                      {/* Staged Operations & Tag Changes Summary */}
+                      <div className="flex flex-col gap-2 pt-2 border-t border-white/[0.06] text-left">
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                          Staged Mutations ({selectedReleaseData.relTracks.length} Tracks)
+                        </span>
+                        <div className="flex flex-col gap-1.5">
+                          {selectedReleaseData.stagedCoverArt && (
+                            <div className="p-2.5 rounded-xl bg-purple-500/[0.08] border border-purple-500/20 flex items-start gap-2 text-xs">
+                              <ImageIcon className="w-3.5 h-3.5 text-purple-400 shrink-0 mt-0.5" />
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-purple-200">Cover Artwork Write</span>
+                                <span className="text-[10px] text-purple-300/80 font-mono mt-0.5">
+                                  Writes high-resolution cover.jpg to folder & updates sidecar ledger.
+                                </span>
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedReleaseData.realEdits.length > 0 ? (
+                            <div className="p-2.5 rounded-xl bg-emerald-500/[0.08] border border-emerald-500/20 flex items-start gap-2 text-xs">
+                              <Music className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                              <div className="flex flex-col min-w-0">
+                                <span className="font-semibold text-emerald-200">
+                                  {selectedReleaseData.realEdits.length} Tag Field Modification{selectedReleaseData.realEdits.length > 1 ? 's' : ''}
+                                </span>
+                                <div className="flex flex-wrap gap-1 mt-1">
+                                  {Array.from(new Set(selectedReleaseData.realEdits.map((e) => e.label))).map((lbl) => (
+                                    <span
+                                      key={lbl}
+                                      className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[9px] font-mono text-emerald-300"
+                                    >
+                                      {lbl}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="p-2.5 rounded-xl bg-white/[0.02] border border-white/[0.06] flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
+                              <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+                              <span>Bit-perfect audio tags intact</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center gap-2 text-zinc-500 py-12">
+                      <ImageIcon className="w-8 h-8 text-zinc-600" />
+                      <span className="text-xs font-mono font-medium text-zinc-400">Archival Inspector</span>
+                      <span className="text-[11px] text-zinc-500 max-w-[240px]">
+                        Select an album on the left to inspect high-resolution cover art and tag diffs.
+                      </span>
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </>
           ) : (
             /* 4. Execution Pipeline & Drawer View */
-            <div className="flex flex-col gap-4">
+            <div className="flex-1 overflow-y-auto pr-1 flex flex-col gap-4 min-h-0">
               {isRunning ? (
                 /* Active Execution Progress Hero */
                 <div className="p-6 rounded-2xl bg-gradient-to-br from-[#0F172A]/90 via-[#0B0F19] to-black border border-white/[0.12] shadow-xl flex flex-col gap-4 relative overflow-hidden text-left">
