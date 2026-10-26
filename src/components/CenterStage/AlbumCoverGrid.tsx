@@ -139,6 +139,13 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
   const selectedComposer = propSelectedComposer !== undefined ? propSelectedComposer : internalSelectedComposer
   const setSelectedComposer = propOnSelectComposer ?? setInternalSelectedComposer
 
+  // Active Edition / Pressing Variant within the selected album detail view
+  const [activeVariantId, setActiveVariantId] = useState<string | null>(null)
+
+  useEffect(() => {
+    setActiveVariantId(null)
+  }, [selectedAlbumId])
+
   // Map of canonical artist/composer name (lowercase) -> portraitUrl
   const [composerPortraits, setComposerPortraits] = useState<Map<string, string>>(new Map())
 
@@ -397,37 +404,44 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
       )
   }, [albumCards])
 
-  const handleEditAlbum = (album: AlbumCardData, e?: React.MouseEvent) => {
+  const handleEditAlbum = (album: AlbumCardData, e?: React.MouseEvent, targetReleaseId?: string) => {
     e?.stopPropagation()
-    const relToEdit: Release = album.release || {
-      id: album.id,
-      masterReleaseId: album.id,
-      title: album.title,
-      folderName: album.folderName,
-      artistCredit: album.artistCredit,
-      composerName: album.composerName,
-      originalYear: album.releaseYear || new Date().getFullYear(),
-      releaseYear: album.releaseYear || new Date().getFullYear(),
-      label: 'Self-Released',
-      catalogNumber: '',
-      mediaFormat: album.formats[0] || 'Digital Audio',
-      country: '',
-      matrixRunout: '',
-      artwork: {
-        frontCoverUrl: album.coverArtUrl || '',
-        resolution: 'Custom Front Cover',
-        width: 2400,
-        height: 2400,
-        dpi: 300,
-        colorProfile: 'sRGB',
-        isLowRes: false,
-        hasBookletPdf: false,
-      },
-      variants: [],
-      discsCount: 1,
-      tracksCount: album.tracks.length,
-      genreTags: [],
-      storageMountId: album.tracks[0]?.storageMountId || '',
+    let relToEdit: Release | undefined = album.release
+    if (targetReleaseId && releases) {
+      const found = releases.find((r) => r.id === targetReleaseId)
+      if (found) relToEdit = found
+    }
+    if (!relToEdit) {
+      relToEdit = {
+        id: album.id,
+        masterReleaseId: album.id,
+        title: album.title,
+        folderName: album.folderName,
+        artistCredit: album.artistCredit,
+        composerName: album.composerName,
+        originalYear: album.releaseYear || new Date().getFullYear(),
+        releaseYear: album.releaseYear || new Date().getFullYear(),
+        label: 'Self-Released',
+        catalogNumber: '',
+        mediaFormat: album.formats[0] || 'Digital Audio',
+        country: '',
+        matrixRunout: '',
+        artwork: {
+          frontCoverUrl: album.coverArtUrl || '',
+          resolution: 'Custom Front Cover',
+          width: 2400,
+          height: 2400,
+          dpi: 300,
+          colorProfile: 'sRGB',
+          isLowRes: false,
+          hasBookletPdf: false,
+        },
+        variants: [],
+        discsCount: 1,
+        tracksCount: album.tracks.length,
+        genreTags: [],
+        storageMountId: album.tracks[0]?.storageMountId || '',
+      }
     }
 
     if (onCustomizeRelease) {
@@ -450,15 +464,17 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     }
   }
 
-  const handlePlayAlbum = (album: AlbumCardData) => {
-    if (album.tracks.length > 0) {
-      playTrack(album.tracks[0], album.tracks)
+  const handlePlayAlbum = (album: AlbumCardData, trackList?: Track[]) => {
+    const list = trackList || album.tracks
+    if (list.length > 0) {
+      playTrack(list[0], list)
     }
   }
 
-  const handleShuffleAlbum = (album: AlbumCardData) => {
-    if (album.tracks.length > 0) {
-      const shuffled = [...album.tracks].sort(() => Math.random() - 0.5)
+  const handleShuffleAlbum = (album: AlbumCardData, trackList?: Track[]) => {
+    const list = trackList || album.tracks
+    if (list.length > 0) {
+      const shuffled = [...list].sort(() => Math.random() - 0.5)
       playTrack(shuffled[0], shuffled)
     }
   }
@@ -658,13 +674,42 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
   // Render the Album Detail Drill-down View
   const renderAlbumDetail = (album: AlbumCardData) => {
-    const drClass = IntegrityScanner.getDrBadgeClass(album.avgDr)
+    const variants = album.release?.variants || []
+    const hasMultipleVariants = variants.length > 1
+
+    const activeVariant = hasMultipleVariants
+      ? variants.find((v) => v.id === activeVariantId) ||
+        variants.find((v) => v.releaseId === activeVariantId) ||
+        variants.find((v) => v.isCurrentMaster) ||
+        variants[0]
+      : null
+
+    const activeReleaseId =
+      activeVariant?.releaseId ||
+      activeVariant?.id?.replace(/^var-/, '') ||
+      album.release?.id
+
+    const variantTracks =
+      hasMultipleVariants && activeReleaseId
+        ? album.tracks.filter((t) => t.releaseId === activeReleaseId)
+        : album.tracks
+
+    const effectiveTracks = variantTracks.length > 0 ? variantTracks : album.tracks
+
+    const effectiveFormats = Array.from(new Set(effectiveTracks.map((t) => t.format))).filter(Boolean)
+    const effectiveSampleRates = Array.from(new Set(effectiveTracks.map((t) => t.sampleRateStr))).filter(Boolean)
+    const effectiveAvgDr =
+      effectiveTracks.length > 0
+        ? Math.round(effectiveTracks.reduce((acc, t) => acc + (t.drScore || 0), 0) / effectiveTracks.length)
+        : album.avgDr
+
+    const drClass = IntegrityScanner.getDrBadgeClass(effectiveAvgDr)
     const isPlayingThisAlbum =
-      album.tracks.some((t) => t.id === currentTrack?.id) && isPlaying
+      effectiveTracks.some((t) => t.id === currentTrack?.id) && isPlaying
 
     // Group tracks by disc number
     const discsMap = new Map<number, Track[]>()
-    album.tracks.forEach((t) => {
+    effectiveTracks.forEach((t) => {
       const disc = t.discNumber || 1
       const list = discsMap.get(disc) || []
       list.push(t)
@@ -759,7 +804,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
               {/* Badges Bar */}
               <div className="mt-3 flex items-center gap-2 flex-wrap text-xs">
-                {album.formats.map((fmt) => (
+                {(effectiveFormats.length > 0 ? effectiveFormats : album.formats).map((fmt) => (
                   <span
                     key={fmt}
                     className="px-2 py-0.5 rounded-md bg-white/[0.08] text-white font-mono font-semibold text-[11px] border border-white/[0.12]"
@@ -768,7 +813,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                   </span>
                 ))}
 
-                {album.sampleRates.map((sr) => (
+                {(effectiveSampleRates.length > 0 ? effectiveSampleRates : album.sampleRates).map((sr) => (
                   <span
                     key={sr}
                     className="px-2 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 font-mono text-[11px] border border-cyan-500/30"
@@ -777,19 +822,19 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                   </span>
                 ))}
 
-                {album.avgDr > 0 && (
+                {effectiveAvgDr > 0 && (
                   <span
                     className={`px-2 py-0.5 rounded-md font-mono font-bold text-[11px] border ${drClass.bg} ${drClass.text}`}
-                    title={`Average Dynamic Range: DR${album.avgDr}`}
+                    title={`Average Dynamic Range: DR${effectiveAvgDr}`}
                   >
-                    DR{album.avgDr}
+                    DR{effectiveAvgDr}
                   </span>
                 )}
 
                 {album.variantsCount > 1 && (
                   <span className="px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 font-mono text-[11px] border border-purple-500/30 flex items-center gap-1">
                     <Layers className="w-3 h-3" />
-                    <span>{album.variantsCount} Pressings</span>
+                    <span>{album.variantsCount} Editions</span>
                   </span>
                 )}
 
@@ -802,7 +847,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
                 <span className="text-white/20">&bull;</span>
                 <span className="text-slate-400 font-mono text-xs">
-                  {album.tracks.length} Tracks &bull; {formatAlbumDuration(album.tracks)}
+                  {effectiveTracks.length} Tracks &bull; {formatAlbumDuration(effectiveTracks)}
                 </span>
               </div>
             </div>
@@ -810,7 +855,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
             {/* Action Buttons Row */}
             <div className="mt-5 flex items-center gap-3 flex-wrap">
               <button
-                onClick={() => handlePlayAlbum(album)}
+                onClick={() => handlePlayAlbum(album, effectiveTracks)}
                 className="px-5 py-2.5 rounded-xl bg-[#00F5FF] hover:bg-[#00F5FF]/90 text-black font-bold text-xs flex items-center gap-2 shadow-lg shadow-cyan-500/20 hover:scale-105 active:scale-95 transition-all cursor-pointer"
               >
                 <Play className="w-4 h-4 fill-current" />
@@ -818,7 +863,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               </button>
 
               <button
-                onClick={() => handleShuffleAlbum(album)}
+                onClick={() => handleShuffleAlbum(album, effectiveTracks)}
                 className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer"
               >
                 <Shuffle className="w-4 h-4 text-cyan-400" />
@@ -827,9 +872,9 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
               <button
                 onClick={() => {
-                  addToQueue(album.tracks)
+                  addToQueue(effectiveTracks)
                   window.dispatchEvent(
-                    new CustomEvent('cadence:toast', { detail: `Added ${album.tracks.length} tracks to queue` })
+                    new CustomEvent('cadence:toast', { detail: `Added ${effectiveTracks.length} tracks to queue` })
                   )
                 }}
                 className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer"
@@ -842,7 +887,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               <button
                 onClick={() => {
                   window.dispatchEvent(
-                    new CustomEvent('cadence:add-tracks-playlist', { detail: album.tracks })
+                    new CustomEvent('cadence:add-tracks-playlist', { detail: effectiveTracks })
                   )
                 }}
                 className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer"
@@ -853,7 +898,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               </button>
 
               <button
-                onClick={(e) => handleEditAlbum(album, e)}
+                onClick={(e) => handleEditAlbum(album, e, activeReleaseId)}
                 className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer"
               >
                 <SlidersHorizontal className="w-4 h-4 text-slate-400" />
@@ -895,6 +940,51 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
           </div>
         </div>
 
+        {/* Edition / Pressing Switcher (When Multiple Pressings / Editions Exist) */}
+        {hasMultipleVariants && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 px-5 rounded-2xl bg-[#12151D]/90 border border-white/[0.08] shadow-lg backdrop-blur-md">
+            <div className="flex items-center gap-2 text-xs font-mono text-slate-400 shrink-0">
+              <Layers className="w-4 h-4 text-purple-400" />
+              <span className="font-semibold text-white">Editions & Pressings</span>
+              <span className="text-white/20">&bull;</span>
+              <span>{variants.length} available</span>
+            </div>
+
+            <div className="flex items-center gap-2 overflow-x-auto py-0.5 no-scrollbar flex-wrap sm:flex-nowrap">
+              {variants.map((v) => {
+                const isSelected =
+                  (activeVariant?.id === v.id) ||
+                  (activeVariant?.releaseId && activeVariant.releaseId === v.releaseId)
+                const vDrClass = IntegrityScanner.getDrBadgeClass(v.drScore)
+                return (
+                  <button
+                    key={v.id}
+                    onClick={() => setActiveVariantId(v.id)}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+                      isSelected
+                        ? 'bg-purple-500/25 border border-purple-500/60 text-white shadow-lg shadow-purple-500/10 font-bold'
+                        : 'bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-400 hover:text-white'
+                    }`}
+                    title={v.notes || v.variantName}
+                  >
+                    <span>{v.variantName}</span>
+                    {v.drScore > 0 && (
+                      <span className={`px-1.5 py-0.2 rounded font-mono font-bold text-[9px] border ${vDrClass.bg} ${vDrClass.text}`}>
+                        DR{v.drScore}
+                      </span>
+                    )}
+                    {v.isCurrentMaster && (
+                      <span className="px-1.5 py-0.2 rounded font-mono text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        Master
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         {/* 2. Tracklist Table */}
         <div className="rounded-2xl bg-[#12151D]/80 border border-white/[0.08] overflow-hidden shadow-xl">
           {discEntries.map(([discNum, dTracks]) => (
@@ -928,7 +1018,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                     <div
                       key={track.id}
                       onClick={() => onSelectTrack(track.id)}
-                      onDoubleClick={() => playTrack(track, album.tracks)}
+                      onDoubleClick={() => playTrack(track, effectiveTracks)}
                       className={`grid grid-cols-12 gap-3 px-5 py-2.5 items-center transition-colors cursor-pointer group/tr ${
                         isCurrentPlaying
                           ? 'bg-cyan-500/10 text-cyan-300'
@@ -942,7 +1032,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            playTrack(track, album.tracks)
+                            playTrack(track, effectiveTracks)
                           }}
                           className="w-6 h-6 rounded-full flex items-center justify-center hover:bg-cyan-400 hover:text-black transition-all cursor-pointer"
                           title="Play Track"

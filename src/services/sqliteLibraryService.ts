@@ -513,15 +513,37 @@ export class SqliteLibraryService {
           const dominantRate = rTracks[0]?.sampleRateStr || '16-bit / 44.1kHz'
           const avgDr = rTracks.length > 0 ? Math.round(rTracks.reduce((acc, t) => acc + (t.drScore || 0), 0) / rTracks.length) : 12
 
-          let variantName = gr.title.includes('(') ? gr.title : `${gr.releaseYear || ''} ${dominantFormat} Edition`.trim()
+          // Compute distinctive descriptor for variants
+          const fNameLower = (gr.folderName || '').toLowerCase()
+          const fPathLower = (gr.folderPath || '').toLowerCase()
+          let descriptor = ''
           if ((gr as any).physicalComboTitle) {
-            variantName = `Combo CD: ${(gr as any).physicalComboTitle}`
-          } else if (!variantName) {
-            variantName = `${dominantFormat} Master`
+            descriptor = `Combo CD: ${(gr as any).physicalComboTitle}`
+          } else if (fNameLower.includes('cd rip') || fPathLower.includes('cd rip') || fNameLower.includes('cdrip') || fPathLower.includes('cdrip')) {
+            descriptor = 'CD Rip'
+          } else if (fNameLower.includes('vinyl') || fPathLower.includes('vinyl') || fPathLower.includes('lp')) {
+            descriptor = 'Vinyl Master'
+          } else if (dominantFormat.includes('DSD') || fNameLower.includes('dsd') || fPathLower.includes('sacd')) {
+            descriptor = 'DSD Transfer'
+          } else if (dominantRate.includes('24-bit') || dominantRate.includes('192') || dominantRate.includes('96')) {
+            descriptor = 'Hi-Res Edition'
+          } else if (groupRels.length > 1) {
+            const cleanFolder = stripRipNoiseAndTags(gr.folderName || '')
+            if (cleanFolder && cleanFolder.toLowerCase() !== gr.title.toLowerCase()) {
+              descriptor = cleanFolder
+            } else {
+              descriptor = 'Standalone Master'
+            }
           }
+
+          let variantName = descriptor
+            ? `${descriptor} (${dominantFormat} · DR${avgDr})`
+            : `${gr.releaseYear || ''} ${dominantFormat} Edition (DR${avgDr})`.trim()
+          if (!variantName) variantName = `${dominantFormat} Master`
 
           return {
             id: `var-${gr.id}`,
+            releaseId: gr.id,
             masterReleaseId: masterId,
             releaseName: gr.title,
             variantName,

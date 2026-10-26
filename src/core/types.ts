@@ -156,6 +156,7 @@ export interface ArtworkMeta {
 
 export interface PressingVariant {
   id: string
+  releaseId?: string
   masterReleaseId: string
   releaseName: string
   variantName: string // e.g., "1959 US Columbia 6-Eye First Press Mono", "1986 Japan 32DP-513 CD Master"
