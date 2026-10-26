@@ -18,6 +18,7 @@ import {
   BookmarkPlus,
   Folder,
   FolderOpen,
+  Film,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
 import { getCuratedAlbumArtwork, generateMonogramAvatar } from '../../core/taxonomyUtils'
@@ -1121,6 +1122,31 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                         {track.artistCredit && track.artistCredit !== album.artistCredit && (
                           <div className="text-[10px] text-[#94A3B8] truncate mt-0.5">
                             {track.artistCredit}
+                          </div>
+                        )}
+                        {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
+                          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                if (track.canonicalReleaseId) {
+                                  setSelectedAlbumId(track.canonicalReleaseId)
+                                }
+                              }}
+                              className="group/orig flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-cyan-300 hover:text-cyan-200 transition-all text-[10px] font-mono cursor-pointer"
+                              title={`Click to jump to original soundtrack: ${track.canonicalAlbumTitle}`}
+                            >
+                              <Film className="w-2.5 h-2.5 text-cyan-400 group-hover/orig:scale-110 transition-transform" />
+                              <span className="text-cyan-400 font-semibold">From</span>
+                              <span className="font-semibold underline decoration-cyan-500/40 underline-offset-2 truncate max-w-[200px]">
+                                {track.canonicalAlbumTitle}
+                              </span>
+                              {track.canonicalReleaseYear && (
+                                <span className="text-cyan-400/60 font-normal">({track.canonicalReleaseYear})</span>
+                              )}
+                              <ChevronRight className="w-2.5 h-2.5 text-cyan-400/60 group-hover/orig:translate-x-0.5 transition-transform" />
+                            </button>
                           </div>
                         )}
                       </div>

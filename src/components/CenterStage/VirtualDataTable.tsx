@@ -28,6 +28,7 @@ import {
   ArrowUpToLine,
   ListPlus,
   BookmarkPlus,
+  Film,
 } from 'lucide-react'
 import { Track, Release, AlbumDisplayMode } from '../../core/types'
 import { IntegrityScanner } from '../../services/integrityScanner'
@@ -890,6 +891,22 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                               {track.movementTitle && (
                                 <span className="text-[10px] text-[#64748B] font-mono truncate">
                                   Mov {track.movementNumber}: {track.movementTitle}
+                                </span>
+                              )}
+                              {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
+                                <span
+                                  className="text-[10px] text-cyan-400 font-mono truncate flex items-center gap-1 cursor-pointer hover:underline"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    if (track.canonicalReleaseId && onInspectRelease) {
+                                      onInspectRelease(track.canonicalReleaseId)
+                                    }
+                                  }}
+                                  title={`Originally released in ${track.canonicalAlbumTitle}. Click to inspect.`}
+                                >
+                                  <Film className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
+                                  <span>From {track.canonicalAlbumTitle}</span>
+                                  {track.canonicalReleaseYear && <span className="text-cyan-400/60">({track.canonicalReleaseYear})</span>}
                                 </span>
                               )}
                             </div>

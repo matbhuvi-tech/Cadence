@@ -281,6 +281,8 @@ export interface Track {
   masterReleaseId: string
   isOnline?: boolean
   canonicalAlbumTitle?: string
+  canonicalReleaseId?: string
+  canonicalReleaseYear?: number
   isCanonicalAlbumTrack?: boolean
   // Curation fields (DB-only)
   rating?: number

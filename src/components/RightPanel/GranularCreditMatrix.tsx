@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Check,
   Copy,
+  Film,
 } from 'lucide-react'
 import { Track, Credit, CreditRole } from '../../core/types'
 import { splitMultiArtistCredits, canonicalizeComposer } from '../../core/taxonomyUtils'
@@ -160,6 +161,29 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
         </button>
       </div>
 
+      {/* Original Soundtrack Provenance Banner (Compilation Tracks) */}
+      {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
+        <div className="p-3 rounded-xl bg-gradient-to-r from-cyan-950/40 via-cyan-900/20 to-indigo-950/30 border border-cyan-500/25 flex flex-col gap-1.5 shadow-sm">
+          <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider text-cyan-400 font-semibold">
+            <Film className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Original Soundtrack Provenance</span>
+          </div>
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs font-semibold text-cyan-100 truncate" title={`Canonical Source: ${track.canonicalAlbumTitle}`}>
+              {track.canonicalAlbumTitle}
+            </span>
+            {track.canonicalReleaseYear && (
+              <span className="text-[10px] font-mono text-cyan-300/80 shrink-0">
+                ({track.canonicalReleaseYear})
+              </span>
+            )}
+          </div>
+          <p className="text-[10px] text-cyan-300/70 leading-relaxed font-sans">
+            Linked from compilation recording to canonical movie soundtrack.
+          </p>
+        </div>
+      )}
+
       {/* Add Credit Form */}
       {isAdding && (
         <div className="p-3 rounded-xl bg-[#16171B] border border-white/[0.08] flex flex-col gap-2.5 text-left text-xs shadow-md">
@@ -268,9 +292,9 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
           {/* Original Soundtrack / Master Provenance */}
           {track.canonicalAlbumTitle && (
             <div className="flex items-center justify-between text-[#8E8E93]">
-              <span>Original Album</span>
-              <span className="text-[#D4AF37] font-medium truncate max-w-[170px]" title={`Primary Master Release: ${track.canonicalAlbumTitle}`}>
-                {track.canonicalAlbumTitle}
+              <span>Original Soundtrack</span>
+              <span className="text-cyan-400 font-medium truncate max-w-[170px]" title={`Primary Master Release: ${track.canonicalAlbumTitle}`}>
+                {track.canonicalAlbumTitle} {track.canonicalReleaseYear ? `(${track.canonicalReleaseYear})` : ''}
               </span>
             </div>
           )}

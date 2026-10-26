@@ -612,15 +612,55 @@ export class SqliteLibraryService {
       })
 
       // 5. Cross-Album Song Graph: Link Compilation Songs to Original Soundtrack Releases
-      const soundtrackMap = new Map<string, string>() // songKey -> originalAlbumTitle
+      interface OriginalSoundtrackInfo {
+        albumTitle: string
+        releaseId: string
+        masterReleaseId: string
+        releaseYear?: number
+      }
+
+      const isCompilation = (title: string, folderName?: string) => {
+        const combined = `${title || ''} ${folderName || ''}`.toLowerCase()
+        return /\b(hits|collection|best of|anthology|platinum|duets|melodies|greatest hits|golden hits|favorites|vol\s*\d+|volume\s*\d+|top\s*\d+|super\s*hits|megahits)\b/i.test(combined)
+      }
+
+      const soundtrackMap = new Map<string, OriginalSoundtrackInfo>() // songKey -> OriginalSoundtrackInfo
+      const soundtrackTitleMap = new Map<string, OriginalSoundtrackInfo>() // cleanTitle -> OriginalSoundtrackInfo
+      const releaseTitleMap = new Map<string, OriginalSoundtrackInfo>() // cleanReleaseTitle -> OriginalSoundtrackInfo
+
+      // Index non-compilation release titles
+      releases.forEach((r) => {
+        if (!isCompilation(r.title, r.folderName) && r.title) {
+          const cleanRel = stripRipNoiseAndTags(r.title).toLowerCase().trim()
+          if (cleanRel.length > 2) {
+            releaseTitleMap.set(cleanRel, {
+              albumTitle: r.title,
+              releaseId: r.id,
+              masterReleaseId: r.masterReleaseId || r.id,
+              releaseYear: r.releaseYear || r.originalYear,
+            })
+          }
+        }
+      })
+
+      // Index non-compilation tracks
       tracks.forEach((t) => {
         const parentRel = releases.find((r) => r.id === t.releaseId)
-        const relTitle = parentRel?.title || ''
-        const isCompilation = /hits|collection|best of|anthology|platinum|duets|melodies/i.test(relTitle)
-        if (!isCompilation && relTitle) {
-          const songKey = `${t.title.toLowerCase().trim()}::${(t.composerName || t.artistCredit || '').toLowerCase().trim()}`
-          if (!soundtrackMap.has(songKey)) {
-            soundtrackMap.set(songKey, relTitle)
+        if (parentRel && !isCompilation(parentRel.title, parentRel.folderName) && parentRel.title) {
+          const cleanTitle = stripRipNoiseAndTags(t.title).toLowerCase().trim()
+          const artComp = (t.composerName || t.artistCredit || '').toLowerCase().trim()
+          const info: OriginalSoundtrackInfo = {
+            albumTitle: parentRel.title,
+            releaseId: parentRel.id,
+            masterReleaseId: parentRel.masterReleaseId || parentRel.id,
+            releaseYear: parentRel.releaseYear || parentRel.originalYear,
+          }
+
+          if (cleanTitle.length > 2) {
+            soundtrackMap.set(`${cleanTitle}::${artComp}`, info)
+            if (!soundtrackTitleMap.has(cleanTitle)) {
+              soundtrackTitleMap.set(cleanTitle, info)
+            }
           }
         }
       })
@@ -637,15 +677,61 @@ export class SqliteLibraryService {
             t.composerName = parentRel.composerName
           }
         }
-        const songKey = `${t.title.toLowerCase().trim()}::${(t.composerName || t.artistCredit || '').toLowerCase().trim()}`
-        const origAlbum = soundtrackMap.get(songKey)
-        if (origAlbum && origAlbum !== parentRel?.title) {
-          t.canonicalAlbumTitle = origAlbum
+
+        const isParentComp = parentRel ? isCompilation(parentRel.title, parentRel.folderName) : false
+        let orig: OriginalSoundtrackInfo | undefined
+
+        if (isParentComp) {
+          const rawTitle = t.title.trim()
+          const cleanTitle = stripRipNoiseAndTags(t.title).toLowerCase().trim()
+          const artComp = (t.composerName || t.artistCredit || '').toLowerCase().trim()
+
+          // 1. Hyphen pattern (Movie - Song or Song - Movie)
+          if (rawTitle.includes('-')) {
+            const parts = rawTitle.split('-').map((p) => p.trim())
+            if (parts.length === 2) {
+              const p0 = stripRipNoiseAndTags(parts[0]).toLowerCase()
+              const p1 = stripRipNoiseAndTags(parts[1]).toLowerCase()
+              if (releaseTitleMap.has(p0)) {
+                orig = releaseTitleMap.get(p0)
+              } else if (releaseTitleMap.has(p1)) {
+                orig = releaseTitleMap.get(p1)
+              }
+            }
+          }
+
+          // 2. Exact key match
+          if (!orig) {
+            orig = soundtrackMap.get(`${cleanTitle}::${artComp}`)
+          }
+
+          // 3. Clean title match
+          if (!orig && cleanTitle.length > 3) {
+            orig = soundtrackTitleMap.get(cleanTitle)
+          }
+
+          // 4. Normalized prefix match (min 8 chars)
+          if (!orig && cleanTitle.length >= 8) {
+            for (const [stTitle, stInfo] of Array.from(soundtrackTitleMap.entries())) {
+              if (stTitle.length >= 8 && (cleanTitle.startsWith(stTitle) || stTitle.startsWith(cleanTitle))) {
+                orig = stInfo
+                break
+              }
+            }
+          }
+        }
+
+        if (orig && orig.albumTitle !== parentRel?.title) {
+          t.canonicalAlbumTitle = orig.albumTitle
+          t.canonicalReleaseId = orig.masterReleaseId || orig.releaseId
+          t.canonicalReleaseYear = orig.releaseYear
           t.isCanonicalAlbumTrack = false
         } else {
           t.isCanonicalAlbumTrack = true
         }
+
         // Link to stable recording ID for identical song compositions
+        const songKey = `${t.title.toLowerCase().trim()}::${(t.composerName || t.artistCredit || '').toLowerCase().trim()}`
         let hash = 0
         for (let i = 0; i < songKey.length; i++) {
           hash = ((hash << 5) - hash + songKey.charCodeAt(i)) | 0
