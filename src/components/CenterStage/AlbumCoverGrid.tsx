@@ -218,6 +218,8 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
         groupTracks.find((t) => t.pendingSidecarEdits?.composerName)?.pendingSidecarEdits?.composerName ||
         ''
       const artistCredit =
+        (rel?.artistCredit && !/^(unknown artist|unknown)$/i.test(rel.artistCredit) ? rel.artistCredit : undefined) ||
+        groupTracks.find((t) => t.artistCredit && !/^(unknown artist|unknown)$/i.test(t.artistCredit))?.artistCredit ||
         rel?.artistCredit ||
         groupTracks[0]?.artistCredit ||
         'Various Artists'

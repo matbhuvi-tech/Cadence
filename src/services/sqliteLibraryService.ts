@@ -430,22 +430,80 @@ export class SqliteLibraryService {
       })
 
       // 3. Cluster releases into Canonical Master Albums (Release Groups)
-      // Group by normalized title + primary composer/artist
+      // Group by normalized title + primary composer/artist (with unknown artist coalescing)
+      const isGenericTitle = (title: string) =>
+        /^(greatest hits|best of|hits|collection|anthology|live|various|soundtrack|unknown)$/i.test(title.trim())
+
+      const isUnknownArtist = (artist: string) =>
+        !artist || /^(unknown artist|unknown|various artists|various)$/i.test(artist.trim())
+
       const masterGroupMap = new Map<string, typeof rawReleases>()
+
       rawReleases.forEach((r) => {
         const cleanTitle = stripRipNoiseAndTags(r.title).toLowerCase().trim()
-        const cleanArtist = (r.composerName || r.artistCredit || '').toLowerCase().trim()
-        const groupKey = `${cleanTitle}::${cleanArtist}`
-        const existing = masterGroupMap.get(groupKey) || []
-        existing.push(r)
-        masterGroupMap.set(groupKey, existing)
+        const rawArtist = (r.composerName || r.artistCredit || '').toLowerCase().trim()
+        const isUnknown = isUnknownArtist(rawArtist)
+
+        // Find existing group by title
+        let matchingKey: string | undefined
+        for (const existingKey of Array.from(masterGroupMap.keys())) {
+          const [groupTitle, groupArtist] = existingKey.split('::')
+          if (groupTitle === cleanTitle) {
+            if (!isGenericTitle(cleanTitle)) {
+              // Specific title: if artists match, or either is unknown, merge!
+              if (groupArtist === rawArtist || isUnknown || isUnknownArtist(groupArtist)) {
+                matchingKey = existingKey
+                break
+              }
+            } else if (groupArtist === rawArtist) {
+              matchingKey = existingKey
+              break
+            }
+          }
+        }
+
+        if (matchingKey) {
+          const groupRels = masterGroupMap.get(matchingKey)!
+          // If existing group had an unknown artist but current release has a known artist, upgrade group key
+          const [, groupArtist] = matchingKey.split('::')
+          if (isUnknownArtist(groupArtist) && !isUnknown) {
+            const upgradedKey = `${cleanTitle}::${rawArtist}`
+            masterGroupMap.delete(matchingKey)
+            groupRels.push(r)
+            masterGroupMap.set(upgradedKey, groupRels)
+          } else {
+            groupRels.push(r)
+          }
+        } else {
+          const groupKey = `${cleanTitle}::${rawArtist}`
+          masterGroupMap.set(groupKey, [r])
+        }
       })
 
       // Map each raw release to its masterReleaseId and variant stack
       const releaseMasterMap = new Map<string, { masterId: string; variants: PressingVariant[] }>()
       masterGroupMap.forEach((groupRels) => {
+        // Sort releases so that known artists and high-quality rips serve as primary release
+        groupRels.sort((a, b) => {
+          const aUnknown = isUnknownArtist(a.composerName || a.artistCredit || '')
+          const bUnknown = isUnknownArtist(b.composerName || b.artistCredit || '')
+          if (aUnknown && !bUnknown) return 1
+          if (!aUnknown && bUnknown) return -1
+          return 0
+        })
+
         const primaryRel = groupRels[0]
         const masterId = groupRels.length > 1 ? `master-${primaryRel.id}` : primaryRel.id
+
+        // Propagate known artist and composer from primary release to any unknown release in group
+        groupRels.forEach((gr) => {
+          if (isUnknownArtist(gr.artistCredit) && !isUnknownArtist(primaryRel.artistCredit)) {
+            gr.artistCredit = primaryRel.artistCredit
+          }
+          if (!gr.composerName && primaryRel.composerName) {
+            gr.composerName = primaryRel.composerName
+          }
+        })
 
         // Build pressing variants for all releases in this master album
         const variants: PressingVariant[] = groupRels.map((gr, idx) => {
@@ -546,6 +604,12 @@ export class SqliteLibraryService {
         const parentRel = releases.find((r) => r.id === t.releaseId)
         if (parentRel) {
           t.masterReleaseId = parentRel.masterReleaseId
+          if (isUnknownArtist(t.artistCredit) && !isUnknownArtist(parentRel.artistCredit)) {
+            t.artistCredit = parentRel.artistCredit
+          }
+          if (!t.composerName && parentRel.composerName) {
+            t.composerName = parentRel.composerName
+          }
         }
         const songKey = `${t.title.toLowerCase().trim()}::${(t.composerName || t.artistCredit || '').toLowerCase().trim()}`
         const origAlbum = soundtrackMap.get(songKey)
