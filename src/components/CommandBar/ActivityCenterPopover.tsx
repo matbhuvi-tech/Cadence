@@ -17,6 +17,7 @@ import {
 import { ScanProgressPayload } from '../../core/types'
 import { tauriBridge } from '../../services/tauriBridge'
 import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
+import { backgroundArtworkService, BackgroundArtworkState } from '../../services/backgroundArtworkService'
 
 interface ActivityCenterPopoverProps {
   isOpen: boolean
@@ -40,6 +41,13 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
     nextSlotRemainingMs: number
     isPacingActive: boolean
   } | null>(null)
+
+  const [bgArtState, setBgArtState] = useState<BackgroundArtworkState>(() => backgroundArtworkService.getState())
+
+  useEffect(() => {
+    if (!isOpen) return
+    return backgroundArtworkService.subscribe((s) => setBgArtState(s))
+  }, [isOpen])
 
   const [playbackPolicy, setPlaybackPolicy] = useState<'purist' | 'paced' | 'unthrottled'>(() => {
     return (localStorage.getItem('cadence_scan_playback_policy') as any) || 'purist'
@@ -369,6 +377,111 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
 
           <div className="text-[10px] text-white/40 font-mono truncate" title={maintenanceStats.statusMessage}>
             {maintenanceStats.statusMessage}
+          </div>
+        </div>
+      )}
+
+      {/* Background Archival Artwork Enrichment Bento */}
+      {bgArtState.status !== 'idle' && (
+        <div className="mb-4 p-3 rounded-xl bg-black/40 border border-amber-500/20 flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              <span>Archival Artwork Enrichment</span>
+            </div>
+            <span
+              className={`text-[9px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                bgArtState.status === 'suspended_playback'
+                  ? 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                  : bgArtState.status === 'cooldown'
+                  ? 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                  : bgArtState.status === 'user_paused'
+                  ? 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                  : bgArtState.status === 'complete'
+                  ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
+                  : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  bgArtState.status === 'suspended_playback'
+                    ? 'bg-amber-400'
+                    : bgArtState.status === 'cooldown'
+                    ? 'bg-amber-300 animate-pulse'
+                    : bgArtState.status === 'user_paused'
+                    ? 'bg-zinc-400'
+                    : bgArtState.status === 'complete'
+                    ? 'bg-emerald-400'
+                    : 'bg-amber-400 animate-pulse'
+                }`}
+              />
+              {bgArtState.status === 'suspended_playback'
+                ? 'Suspended — Audio Active'
+                : bgArtState.status === 'cooldown'
+                ? `Cooldown (${bgArtState.cooldownRemainingSecs}s)`
+                : bgArtState.status === 'user_paused'
+                ? 'Paused'
+                : bgArtState.status === 'complete'
+                ? 'Complete'
+                : 'Active'}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-[#94A3B8]">
+            <span className="flex items-center gap-1.5">
+              <ImageIcon className="w-3 h-3 text-amber-400/80" />
+              <span>Archival Covers Staged:</span>
+            </span>
+            <span className="font-mono text-white">
+              {bgArtState.completed} / {bgArtState.total} Albums
+            </span>
+          </div>
+
+          {/* Progress bar */}
+          {bgArtState.total > 0 && (
+            <div className="w-full bg-white/[0.06] rounded-full h-1 overflow-hidden">
+              <div
+                className="bg-amber-400 h-full transition-all duration-300"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.round((bgArtState.completed / bgArtState.total) * 100)
+                  )}%`,
+                }}
+              />
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-1">
+            <span className="text-[10px] text-white/50 font-mono truncate max-w-[200px]" title={bgArtState.currentAlbumTitle}>
+              {bgArtState.currentAlbumTitle ? `Resolving: ${bgArtState.currentAlbumTitle}` : 'Waiting for audio idle...'}
+            </span>
+            <div className="flex items-center gap-1.5">
+              {bgArtState.status === 'user_paused' ? (
+                <button
+                  type="button"
+                  onClick={() => backgroundArtworkService.resume()}
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 transition-colors cursor-pointer"
+                >
+                  Resume
+                </button>
+              ) : bgArtState.status === 'active' || bgArtState.status === 'cooldown' ? (
+                <button
+                  type="button"
+                  onClick={() => backgroundArtworkService.pause()}
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-white/10 hover:bg-white/20 text-zinc-300 border border-white/10 transition-colors cursor-pointer"
+                >
+                  Pause
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => backgroundArtworkService.cancel()}
+                className="px-2 py-0.5 rounded text-[10px] font-mono bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

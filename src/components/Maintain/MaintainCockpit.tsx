@@ -29,6 +29,9 @@ import {
   Music,
   Mic,
   EyeOff,
+  Pause,
+  Play,
+  StopCircle,
 } from 'lucide-react'
 import { Track, Release, AuditIssue, StorageMount, WatchedFolder, SkippedFile, ActiveEntityScope } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
@@ -37,6 +40,7 @@ import { auditService } from '../../services/auditService'
 import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
 import { tauriBridge, MaintenanceStats } from '../../services/tauriBridge'
 import { isIssueInEntityScope } from '../../core/scopeUtils'
+import { backgroundArtworkService, BackgroundArtworkState } from '../../services/backgroundArtworkService'
 
 export type MaintainSubTab = 'needs_attention' | 'organize_files' | 'metadata_matching' | 'storage_mounts' | 'pending_changes'
 
@@ -352,6 +356,24 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   const [remediationProgress, setRemediationProgress] = useState<{ current: number; total: number; title: string } | null>(null)
   const { maintenanceStats: mStats } = useMaintenanceWorker(true)
 
+  // Background Artwork Enrichment State & Reactive Subscription
+  const [bgArtState, setBgArtState] = useState<BackgroundArtworkState>(() => backgroundArtworkService.getState())
+
+  useEffect(() => {
+    return backgroundArtworkService.subscribe((s) => {
+      setBgArtState(s)
+      if (s.updatedCount > 0) {
+        onRefreshAudit()
+      }
+    })
+  }, [onRefreshAudit])
+
+  const isArtBgBusy =
+    bgArtState.status === 'active' ||
+    bgArtState.status === 'cooldown' ||
+    bgArtState.status === 'suspended_playback' ||
+    bgArtState.status === 'user_paused'
+
   // Grouping & Staging Workbench State
   const [groupByMode, setGroupByMode] = useState<'artist' | 'album' | 'category'>('artist')
   const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Set<string>>(new Set())
@@ -575,6 +597,23 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   }
 
   const handleRemediateSingle = async (issueId: string) => {
+    const issue = scopedIssues.find((i) => i.id === issueId)
+    if (issue?.category === 'low_res_art' || issue?.autoFixAction === 'FETCH_HIRES_ART') {
+      const targetReleaseIds = new Set<string>()
+      if (issue.sampleTrackIds && issue.sampleTrackIds.length > 0) {
+        issue.sampleTrackIds.forEach((tid) => {
+          const trk = tracks.find((t) => t.id === tid)
+          if (trk?.releaseId) targetReleaseIds.add(trk.releaseId)
+        })
+      }
+      backgroundArtworkService.start({
+        releaseIds: targetReleaseIds.size > 0 ? Array.from(targetReleaseIds) : undefined,
+        preferredProvider: 'apple',
+      })
+      showToast('Started background archival artwork fetch. Runs safely during audio-idle.')
+      return
+    }
+
     setRemediatingIssueId(issueId)
     setRemediationProgress(null)
     try {
@@ -594,6 +633,12 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   }
 
   const handleStageClusterFixes = async (cluster: IssueCluster) => {
+    if (cluster.title === 'Artwork & Media Integrity') {
+      backgroundArtworkService.start({ preferredProvider: 'apple' })
+      showToast('Started background archival artwork fetch for all albums.')
+      return
+    }
+
     const ids = cluster.issues.filter((i) => !i.isRoleConflict && i.isAutoFixable).map((i) => i.id)
     for (const id of ids) {
       setRemediatingIssueId(id)
@@ -870,6 +915,72 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                   <span>{mStats.statusMessage}</span>
                 )}
               </div>
+
+              {/* Archival Artwork Fetch Status Section */}
+              {bgArtState.status !== 'idle' && (
+                <div className="pt-2 border-t border-white/5 space-y-1.5 mt-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-[9px] uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                      <Sparkles className="w-2.5 h-2.5 text-amber-400" />
+                      Archival Art Fetch
+                    </span>
+                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                      {bgArtState.status === 'suspended_playback'
+                        ? 'Suspended (Playing)'
+                        : bgArtState.status === 'cooldown'
+                        ? `Cooldown (${bgArtState.cooldownRemainingSecs}s)`
+                        : bgArtState.status === 'user_paused'
+                        ? 'Paused'
+                        : bgArtState.status === 'complete'
+                        ? 'Complete'
+                        : `${bgArtState.completed}/${bgArtState.total}`}
+                    </span>
+                  </div>
+                  <div className="w-full bg-white/5 rounded-full h-1 overflow-hidden">
+                    <div
+                      className="h-1 rounded-full bg-amber-400 transition-all duration-300"
+                      style={{
+                        width: `${
+                          bgArtState.total > 0
+                            ? Math.min(100, Math.round((bgArtState.completed / bgArtState.total) * 100))
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                    <span className="truncate max-w-[130px]" title={bgArtState.currentAlbumTitle || 'Idle'}>
+                      {bgArtState.currentAlbumTitle || 'Idle'}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {bgArtState.status === 'user_paused' ? (
+                        <button
+                          type="button"
+                          onClick={() => backgroundArtworkService.resume()}
+                          className="text-[10px] text-amber-400 hover:text-amber-300 underline cursor-pointer"
+                        >
+                          Resume
+                        </button>
+                      ) : bgArtState.status === 'active' || bgArtState.status === 'cooldown' ? (
+                        <button
+                          type="button"
+                          onClick={() => backgroundArtworkService.pause()}
+                          className="text-[10px] text-slate-400 hover:text-white underline cursor-pointer"
+                        >
+                          Pause
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => backgroundArtworkService.cancel()}
+                        className="text-[10px] text-rose-400/80 hover:text-rose-300 underline cursor-pointer ml-1"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1213,7 +1324,71 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                         </div>
 
                         <div className="flex items-center gap-2.5 shrink-0">
-                          {cluster.safeFixesCount > 0 && (
+                          {cluster.title === 'Artwork & Media Integrity' && isArtBgBusy ? (
+                            <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg text-xs font-mono border border-amber-400/40 bg-amber-400/10 text-amber-300">
+                              <span className="flex items-center gap-1.5 font-medium">
+                                {bgArtState.status === 'suspended_playback' ? (
+                                  <>
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                                    <span>Suspended (Playing)</span>
+                                  </>
+                                ) : bgArtState.status === 'cooldown' ? (
+                                  <>
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
+                                    <span>Cooldown ({bgArtState.cooldownRemainingSecs}s)</span>
+                                  </>
+                                ) : bgArtState.status === 'user_paused' ? (
+                                  <>
+                                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
+                                    <span>Paused ({bgArtState.completed}/{bgArtState.total})</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
+                                    <span>Fetching {bgArtState.completed}/{bgArtState.total}</span>
+                                  </>
+                                )}
+                              </span>
+                              <div className="flex items-center gap-1 border-l border-amber-400/20 pl-2">
+                                {bgArtState.status === 'user_paused' ? (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      backgroundArtworkService.resume()
+                                    }}
+                                    className="p-0.5 hover:text-white transition-colors cursor-pointer"
+                                    title="Resume Artwork Fetch"
+                                  >
+                                    <Play className="w-3 h-3" />
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      backgroundArtworkService.pause()
+                                    }}
+                                    className="p-0.5 hover:text-white transition-colors cursor-pointer"
+                                    title="Pause Artwork Fetch"
+                                  >
+                                    <Pause className="w-3 h-3" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    backgroundArtworkService.cancel()
+                                  }}
+                                  className="p-0.5 hover:text-rose-400 transition-colors cursor-pointer"
+                                  title="Cancel Artwork Fetch"
+                                >
+                                  <StopCircle className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </div>
+                          ) : cluster.safeFixesCount > 0 ? (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -1226,7 +1401,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                 ? `Fetch All Artwork (${cluster.safeFixesCount})`
                                 : `Stage All Safe Fixes (${cluster.safeFixesCount})`}
                             </button>
-                          )}
+                          ) : null}
                           <span className="text-xs text-slate-500 font-mono hidden sm:inline">
                             {isCollapsed ? '[Expand]' : '[Collapse]'}
                           </span>
@@ -1360,6 +1535,59 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                     >
                                       Discard
                                     </button>
+                                  </div>
+                                ) : issue.category === 'low_res_art' && isArtBgBusy ? (
+                                  <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-mono font-medium rounded-lg border border-amber-500/40 bg-amber-500/15 text-amber-300 shrink-0">
+                                    {bgArtState.status === 'suspended_playback' ? (
+                                      <span className="flex items-center gap-1 text-[11px]">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                                        <span>Suspended (Audio)</span>
+                                      </span>
+                                    ) : bgArtState.status === 'cooldown' ? (
+                                      <span className="flex items-center gap-1 text-[11px]">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
+                                        <span>Cooldown ({bgArtState.cooldownRemainingSecs}s)</span>
+                                      </span>
+                                    ) : bgArtState.status === 'user_paused' ? (
+                                      <span className="flex items-center gap-1 text-[11px]">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
+                                        <span>Paused ({bgArtState.completed}/{bgArtState.total})</span>
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center gap-1 text-[11px]">
+                                        <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
+                                        <span>Fetching {bgArtState.completed}/{bgArtState.total}</span>
+                                      </span>
+                                    )}
+                                    <div className="flex items-center gap-1 border-l border-amber-400/20 pl-1.5">
+                                      {bgArtState.status === 'user_paused' ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => backgroundArtworkService.resume()}
+                                          className="p-0.5 hover:text-white transition-colors cursor-pointer"
+                                          title="Resume Artwork Fetch"
+                                        >
+                                          <Play className="w-3 h-3" />
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => backgroundArtworkService.pause()}
+                                          className="p-0.5 hover:text-white transition-colors cursor-pointer"
+                                          title="Pause Artwork Fetch"
+                                        >
+                                          <Pause className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => backgroundArtworkService.cancel()}
+                                        className="p-0.5 hover:text-rose-400 transition-colors cursor-pointer"
+                                        title="Cancel Artwork Fetch"
+                                      >
+                                        <StopCircle className="w-3 h-3" />
+                                      </button>
+                                    </div>
                                   </div>
                                 ) : remediatingIssueId === issue.id ? (
                                   <div className="flex items-center gap-2 px-3 py-1 text-xs font-mono font-medium rounded-lg border border-amber-500/40 bg-amber-500/15 text-amber-300 shrink-0">

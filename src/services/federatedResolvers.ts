@@ -701,12 +701,35 @@ export class FederatedResolversService {
     composerName?: string
     releaseYear?: number
     provider: 'apple' | 'musicbrainz' | 'ai'
+    signal?: AbortSignal
   }): Promise<CoverArtCandidate | null> {
     const cleanAlbum = this.cleanSearchTerm(query.albumTitle)
     const cleanArtist = this.cleanSearchTerm(query.artistCredit || '')
     const cleanComposer = this.cleanSearchTerm(query.composerName || '')
 
     if (!cleanAlbum) return null
+
+    const combineSignal = (timeoutMs: number): AbortSignal => {
+      if (typeof (AbortSignal as any).any === 'function') {
+        return (AbortSignal as any).any(
+          query.signal ? [query.signal, AbortSignal.timeout(timeoutMs)] : [AbortSignal.timeout(timeoutMs)]
+        )
+      }
+      if (!query.signal) {
+        return AbortSignal.timeout(timeoutMs)
+      }
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(new Error('Timeout')), timeoutMs)
+      query.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer)
+          controller.abort(query.signal?.reason)
+        },
+        { once: true }
+      )
+      return controller.signal
+    }
 
     if (query.provider === 'apple') {
       try {
@@ -716,7 +739,10 @@ export class FederatedResolversService {
         )}&artist=${encodeURIComponent(cleanArtist)}&composer=${encodeURIComponent(
           cleanComposer
         )}&entity=album`
-        const localRes = await fetch(localUrl).catch(() => null)
+        const localRes = await fetch(localUrl, { signal: combineSignal(6000) }).catch((err) => {
+          if (query.signal?.aborted) throw err
+          return null
+        })
         if (localRes && localRes.ok) {
           const data = await localRes.json()
           if (data.success && data.coverArtUrl) {
@@ -746,7 +772,7 @@ export class FederatedResolversService {
         for (const q of itunesQueries) {
           try {
             const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=album&limit=5`
-            const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+            const itunesRes = await fetch(itunesUrl, { signal: combineSignal(6000) })
             if (itunesRes.ok) {
               const itunesData = (await itunesRes.json()) as any
               if (itunesData.results && itunesData.results.length > 0) {
@@ -775,9 +801,12 @@ export class FederatedResolversService {
                 }
               }
             }
-          } catch {}
+          } catch (err: any) {
+            if (query.signal?.aborted) throw err
+          }
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (query.signal?.aborted) throw err
         console.warn('Failed to fetch Apple Music artwork candidate:', err)
       }
       return null
@@ -789,7 +818,10 @@ export class FederatedResolversService {
         const localUrl = `${this.getBaseUrl()}/api/musicbrainz-search?album=${encodeURIComponent(
           cleanAlbum
         )}&artist=${encodeURIComponent(cleanArtist)}&composer=${encodeURIComponent(cleanComposer)}`
-        const localRes = await fetch(localUrl).catch(() => null)
+        const localRes = await fetch(localUrl, { signal: combineSignal(7000) }).catch((err) => {
+          if (query.signal?.aborted) throw err
+          return null
+        })
         if (localRes && localRes.ok) {
           const data = await localRes.json()
           if (data.success && data.coverArtUrl) {
@@ -824,7 +856,7 @@ export class FederatedResolversService {
                 'User-Agent': 'CadenceMusicAgent/2.0 (contact@cadencemusic.io)',
                 Accept: 'application/json',
               },
-              signal: AbortSignal.timeout(7000),
+              signal: combineSignal(7000),
             })
 
             if (mbRes.ok) {
@@ -853,9 +885,12 @@ export class FederatedResolversService {
                 }
               }
             }
-          } catch {}
+          } catch (err: any) {
+            if (query.signal?.aborted) throw err
+          }
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (query.signal?.aborted) throw err
         console.warn('Failed to fetch MusicBrainz CAA artwork candidate:', err)
       }
       return null
@@ -892,7 +927,11 @@ export class FederatedResolversService {
             composerName: cleanComposer,
             releaseYear: query.releaseYear,
           }),
-        }).catch(() => null)
+          signal: combineSignal(8000),
+        }).catch((err) => {
+          if (query.signal?.aborted) throw err
+          return null
+        })
 
         if (localAiRes && localAiRes.ok) {
           const aiData = await localAiRes.json()
@@ -920,6 +959,7 @@ export class FederatedResolversService {
           composerName: cleanComposer,
           releaseYear: query.releaseYear,
           provider: 'apple',
+          signal: query.signal,
         })
 
         if (fallbackApple) {
@@ -932,7 +972,8 @@ export class FederatedResolversService {
             sourceInfo: 'AI Canonical Catalog Master Reference',
           }
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (query.signal?.aborted) throw err
         console.warn('Failed to fetch Gemini AI artwork candidate:', err)
       }
       return null

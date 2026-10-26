@@ -62,6 +62,7 @@ import { CreatePlaylistModal } from './components/Modals/CreatePlaylistModal'
 import { EditPlaylistModal } from './components/Modals/EditPlaylistModal'
 import { AddTracksToPlaylistModal } from './components/Modals/AddTracksToPlaylistModal'
 import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
+import { backgroundArtworkService } from './services/backgroundArtworkService'
 
 function AppContent() {
   // Primary Graph State
@@ -178,6 +179,8 @@ function AppContent() {
   const [initialPlaylistTracks, setInitialPlaylistTracks] = useState<Track[]>([])
 
   const {
+    isPlaying,
+    isPaused,
     togglePlayPause,
     nextTrack,
     prevTrack,
@@ -188,6 +191,20 @@ function AppContent() {
     setRightSidebarTab,
     toggleRightSidebar,
   } = useAudioPlayer()
+
+  // Audiophile Transport Synchronization: Immediately notify background artwork service
+  useEffect(() => {
+    backgroundArtworkService.notifyPlaybackState(isPlaying, isPaused)
+  }, [isPlaying, isPaused])
+
+  // Initialize background artwork service and hook debounced checkpoints
+  useEffect(() => {
+    backgroundArtworkService.init()
+    backgroundArtworkService.setCheckpointHandler(async () => {
+      await persistCurrentLibrary()
+      refreshFromEngine()
+    })
+  }, [])
 
   const refreshPlaylists = async () => {
     try {
@@ -1611,7 +1628,12 @@ function AppContent() {
             })
             handleApplyPathRestructure(previews)
           }}
-          onCommitTwoPhase={() => setIsCommitModalOpen(true)}
+          onCommitTwoPhase={() => {
+            if (isPlaying) {
+              showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
+            }
+            setIsCommitModalOpen(true)
+          }}
           onToggleMountLock={handleToggleMountLock}
           onToggleMountStatus={(mountId: string) => {
             const mount = storageMounts.find((m) => m.id === mountId)
