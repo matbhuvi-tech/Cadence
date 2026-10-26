@@ -16,6 +16,8 @@ import {
   ArrowUpToLine,
   ListPlus,
   BookmarkPlus,
+  Folder,
+  FolderOpen,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
 import { getCuratedAlbumArtwork, generateMonogramAvatar } from '../../core/taxonomyUtils'
@@ -838,6 +840,17 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                   </span>
                 )}
 
+                {/* Physical Folder Badge for Active Edition */}
+                {(activeVariant?.folderName || album.folderName) && (
+                  <span
+                    className="px-2 py-0.5 rounded-md bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30 font-mono text-[11px] flex items-center gap-1 shrink-0 max-w-[280px] truncate backdrop-blur-sm"
+                    title={`Physical Folder: ${activeVariant?.folderPath || activeVariant?.folderName || album.folderName}`}
+                  >
+                    <Folder className="w-3 h-3 shrink-0" />
+                    <span className="truncate">{activeVariant?.folderName || album.folderName}</span>
+                  </span>
+                )}
+
                 {album.stagedCount > 0 && (
                   <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 font-mono text-[11px] border border-amber-500/30 flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -942,46 +955,76 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
         {/* Edition / Pressing Switcher (When Multiple Pressings / Editions Exist) */}
         {hasMultipleVariants && (
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 px-5 rounded-2xl bg-[#12151D]/90 border border-white/[0.08] shadow-lg backdrop-blur-md">
-            <div className="flex items-center gap-2 text-xs font-mono text-slate-400 shrink-0">
-              <Layers className="w-4 h-4 text-purple-400" />
-              <span className="font-semibold text-white">Editions & Pressings</span>
-              <span className="text-white/20">&bull;</span>
-              <span>{variants.length} available</span>
+          <div className="flex flex-col gap-3 p-4 px-5 rounded-2xl bg-[#12151D]/90 border border-white/[0.08] shadow-lg backdrop-blur-md">
+            {/* Top Row: Section Title & Variant Selector Pills */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs font-mono text-slate-400 shrink-0">
+                <Layers className="w-4 h-4 text-purple-400" />
+                <span className="font-semibold text-white">Editions & Pressings</span>
+                <span className="text-white/20">&bull;</span>
+                <span>{variants.length} available</span>
+              </div>
+
+              <div className="flex items-center gap-2.5 overflow-x-auto py-0.5 no-scrollbar flex-wrap">
+                {variants.map((v) => {
+                  const isSelected =
+                    (activeVariant?.id === v.id) ||
+                    (activeVariant?.releaseId && activeVariant.releaseId === v.releaseId)
+                  const vDrClass = IntegrityScanner.getDrBadgeClass(v.drScore)
+                  const displayFolder = v.folderName || ''
+                  return (
+                    <button
+                      key={v.id}
+                      onClick={() => setActiveVariantId(v.id)}
+                      className={`group flex items-center gap-2.5 px-3.5 py-2 rounded-xl text-xs transition-all cursor-pointer whitespace-nowrap ${
+                        isSelected
+                          ? 'bg-purple-500/20 border border-purple-500/60 text-white shadow-lg shadow-purple-500/10 font-bold ring-1 ring-purple-500/30'
+                          : 'bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-300 hover:text-white'
+                      }`}
+                      title={v.folderPath || v.notes || v.variantName}
+                    >
+                      <Folder className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-[#38BDF8]' : 'text-slate-400 group-hover:text-[#38BDF8] transition-colors'}`} />
+                      <div className="flex flex-col text-left">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-semibold">{v.variantName}</span>
+                          {v.isCurrentMaster && (
+                            <span className="px-1.5 py-0.2 rounded font-mono text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                              Master
+                            </span>
+                          )}
+                        </div>
+                        {displayFolder && (
+                          <span className="text-[10px] font-mono text-slate-400 truncate max-w-[260px]">
+                            {displayFolder}
+                          </span>
+                        )}
+                      </div>
+                      {v.drScore > 0 && (
+                        <span className={`px-1.5 py-0.5 rounded font-mono font-bold text-[9px] border ${vDrClass.bg} ${vDrClass.text}`}>
+                          DR{v.drScore}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 overflow-x-auto py-0.5 no-scrollbar flex-wrap sm:flex-nowrap">
-              {variants.map((v) => {
-                const isSelected =
-                  (activeVariant?.id === v.id) ||
-                  (activeVariant?.releaseId && activeVariant.releaseId === v.releaseId)
-                const vDrClass = IntegrityScanner.getDrBadgeClass(v.drScore)
-                return (
-                  <button
-                    key={v.id}
-                    onClick={() => setActiveVariantId(v.id)}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
-                      isSelected
-                        ? 'bg-purple-500/25 border border-purple-500/60 text-white shadow-lg shadow-purple-500/10 font-bold'
-                        : 'bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-400 hover:text-white'
-                    }`}
-                    title={v.notes || v.variantName}
-                  >
-                    <span>{v.variantName}</span>
-                    {v.drScore > 0 && (
-                      <span className={`px-1.5 py-0.2 rounded font-mono font-bold text-[9px] border ${vDrClass.bg} ${vDrClass.text}`}>
-                        DR{v.drScore}
-                      </span>
-                    )}
-                    {v.isCurrentMaster && (
-                      <span className="px-1.5 py-0.2 rounded font-mono text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                        Master
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
+            {/* Bottom Row: Active Edition Physical Storage Path Banner */}
+            {(activeVariant?.folderPath || (activeVariant as any)?.folderName) && (
+              <div className="flex items-center gap-2 pt-2.5 border-t border-white/[0.06] text-xs font-mono text-slate-400 w-full overflow-hidden">
+                <div className="flex items-center gap-1.5 shrink-0 text-[#38BDF8]">
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Physical Location:</span>
+                </div>
+                <span
+                  className="text-slate-300 truncate font-mono text-[11px] select-all hover:text-white transition-colors cursor-text bg-black/40 px-2.5 py-1 rounded-lg border border-white/[0.06] flex-1"
+                  title={activeVariant.folderPath || activeVariant.folderName}
+                >
+                  {activeVariant.folderPath || activeVariant.folderName}
+                </span>
+              </div>
+            )}
           </div>
         )}
 

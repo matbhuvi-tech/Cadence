@@ -160,6 +160,8 @@ export interface PressingVariant {
   masterReleaseId: string
   releaseName: string
   variantName: string // e.g., "1959 US Columbia 6-Eye First Press Mono", "1986 Japan 32DP-513 CD Master"
+  folderName?: string
+  folderPath?: string
   releaseYear: number
   drScore: number
   sampleRateStr: string

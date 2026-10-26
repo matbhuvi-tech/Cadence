@@ -15,7 +15,7 @@ import {
   AudioFormat,
   Playlist,
 } from '../core/types'
-import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags, disambiguateComboTitle } from '../core/taxonomyUtils'
+import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags, disambiguateComboTitle, extractMeaningfulFolderName } from '../core/taxonomyUtils'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 export interface MigrationResult {
@@ -541,12 +541,16 @@ export class SqliteLibraryService {
             : `${gr.releaseYear || ''} ${dominantFormat} Edition (DR${avgDr})`.trim()
           if (!variantName) variantName = `${dominantFormat} Master`
 
+          const meaningfulFolder = extractMeaningfulFolderName(gr.folderName, gr.folderPath, gr.artistCredit)
+
           return {
             id: `var-${gr.id}`,
             releaseId: gr.id,
             masterReleaseId: masterId,
             releaseName: gr.title,
             variantName,
+            folderName: meaningfulFolder,
+            folderPath: gr.folderPath || '',
             releaseYear: gr.releaseYear || 0,
             drScore: avgDr,
             sampleRateStr: dominantRate,

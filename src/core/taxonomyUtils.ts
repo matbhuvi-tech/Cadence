@@ -74,6 +74,34 @@ export function stripRipNoiseAndTags(raw: string): string {
 }
 
 /**
+ * Extracts a meaningful folder descriptor from a physical folderPath and folderName,
+ * preserving parent context if the leaf folder is merely an artist or disc subfolder.
+ */
+export function extractMeaningfulFolderName(
+  folderName?: string,
+  folderPath?: string,
+  artistCredit?: string
+): string {
+  if (!folderPath) return folderName || ''
+  const norm = folderPath.replace(/\\/g, '/').replace(/\/+$/, '')
+  const parts = norm.split('/').filter(Boolean)
+  if (parts.length === 0) return folderName || ''
+
+  const last = parts[parts.length - 1]
+  const parent = parts.length >= 2 ? parts[parts.length - 2] : ''
+
+  const isGeneric =
+    (artistCredit && last.toLowerCase() === artistCredit.toLowerCase()) ||
+    /^(cd\s*\d+|disc\s*\d+|wav|flac|dsd|lossless|audio|unknown artist|unknown)$/i.test(last)
+
+  if (isGeneric && parent) {
+    return `${parent} / ${last}`
+  }
+
+  return last
+}
+
+/**
  * Normalizes and canonicalizes composer names across variant spellings and credits.
  */
 export interface ComposerAuthority {
