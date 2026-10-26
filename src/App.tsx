@@ -1694,6 +1694,7 @@ function AppContent() {
           releases={releases}
           viewMode={viewMode}
           onViewModeChange={setViewMode}
+          onOpenCommitModal={() => setIsCommitModalOpen(true)}
           playlists={playlists}
           selectedPlaylistId={selectedPlaylist?.id}
           onSelectPlaylist={(pl) => {

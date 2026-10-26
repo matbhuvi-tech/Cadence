@@ -23,6 +23,8 @@ import {
   ChevronUp,
   ChevronRight,
   RefreshCw,
+  ZoomIn,
+  Eye,
 } from 'lucide-react'
 import { Release, Track } from '../../core/types'
 import {
@@ -324,6 +326,83 @@ function formatElapsed(ms: number): string {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
 }
 
+interface ArtworkZoomThumbnailProps {
+  url?: string
+  label: string
+  resolution?: string
+  isStaged?: boolean
+  onClick?: () => void
+}
+
+const ArtworkZoomThumbnail: React.FC<ArtworkZoomThumbnailProps> = ({
+  url,
+  label,
+  resolution,
+  isStaged,
+  onClick,
+}) => {
+  const [imageError, setImageError] = useState(false)
+
+  return (
+    <div className="relative group/art">
+      <div
+        onClick={onClick}
+        className={`w-14 h-14 rounded-xl overflow-hidden flex items-center justify-center shrink-0 cursor-zoom-in transition-all duration-200 group-hover/art:scale-105 ${
+          isStaged
+            ? 'bg-black/70 border-2 border-emerald-400/80 shadow-md shadow-emerald-500/20'
+            : 'bg-black/70 border border-white/20 hover:border-white/40'
+        }`}
+        title="Hover for larger preview • Click for full inspection"
+      >
+        {url && !imageError ? (
+          <img
+            src={url}
+            alt={label}
+            className="w-full h-full object-cover"
+            onError={() => setImageError(true)}
+          />
+        ) : (
+          <Disc3 className="w-6 h-6 text-zinc-500" />
+        )}
+
+        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/art:opacity-100 transition-opacity flex items-center justify-center">
+          <ZoomIn className="w-4 h-4 text-white drop-shadow" />
+        </div>
+      </div>
+
+      {/* Floating Hover Zoom Popover */}
+      {url && !imageError && (
+        <div className="absolute bottom-full mb-3 left-0 z-50 pointer-events-none opacity-0 group-hover/art:opacity-100 scale-95 group-hover/art:scale-100 transition-all duration-200 origin-bottom-left flex flex-col gap-2 p-3 rounded-2xl bg-[#090b10]/95 backdrop-blur-2xl border border-white/20 shadow-2xl shadow-black/90 w-72">
+          <div className="w-full h-64 rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-white/10">
+            <img
+              src={url}
+              alt={label}
+              className="w-full h-full object-contain"
+            />
+          </div>
+          <div className="flex flex-col gap-0.5 px-0.5">
+            <div className="flex items-center justify-between">
+              <span
+                className={`text-[10px] font-mono uppercase tracking-wider font-bold ${
+                  isStaged ? 'text-emerald-400' : 'text-zinc-400'
+                }`}
+              >
+                {label}
+              </span>
+              <span className="text-[11px] font-mono font-medium text-zinc-200">
+                {resolution || (isStaged ? 'High-Resolution Scan' : 'Original Artwork')}
+              </span>
+            </div>
+            <span className="text-[9px] font-mono text-zinc-400 text-center mt-1 pt-1 border-t border-white/[0.08]">
+              Click thumbnail for side-by-side inspection
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   uncommittedTracks,
   releases = [],
@@ -338,9 +417,16 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   const [activeTab, setActiveTab] = useState<'preview' | 'pipeline'>('preview')
   const [filterCategory, setFilterCategory] = useState<'all' | 'metadata' | 'artwork'>('all')
   const [commitTarget, setCommitTarget] = useState<'sidecar' | 'embedded'>('sidecar')
-  const { isPlaying, isPaused } = useAudioPlayer()
-  const isPlaybackActive = isPlaying || isPaused
+  const { isPlaying, togglePlayPause } = useAudioPlayer()
+  const isPlaybackActive = isPlaying
   const [searchQuery, setSearchQuery] = useState('')
+  const [inspectingArtwork, setInspectingArtwork] = useState<{
+    currentUrl?: string
+    stagedUrl?: string
+    albumTitle: string
+    currentRes?: string
+    stagedRes?: string
+  } | null>(null)
 
   // Exclusion & Expansion Sets
   const [excludedTrackIds, setExcludedTrackIds] = useState<Set<string>>(new Set())
@@ -941,21 +1027,23 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                         {isExpanded && stagedCoverArt && (
                           <div className="p-3.5 px-4 bg-black/40 border-b border-white/[0.06] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div className="flex items-center gap-4">
-                              <div className="flex items-center gap-2.5">
-                                <div className="w-12 h-12 rounded-lg bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
-                                  {currentCoverArt ? (
-                                    <img
-                                      src={currentCoverArt}
-                                      alt="Current Cover"
-                                      className="w-full h-full object-cover"
-                                      onError={(e) => {
-                                        ;(e.target as HTMLElement).style.display = 'none'
-                                      }}
-                                    />
-                                  ) : (
-                                    <Disc3 className="w-6 h-6 text-zinc-500" />
-                                  )}
-                                </div>
+                              <div className="flex items-center gap-3">
+                                <ArtworkZoomThumbnail
+                                  url={currentCoverArt}
+                                  label="Current Artwork"
+                                  resolution={release?.artwork?.resolution || 'Disk file'}
+                                  onClick={() =>
+                                    setInspectingArtwork({
+                                      currentUrl: currentCoverArt,
+                                      stagedUrl: stagedCoverArt,
+                                      albumTitle,
+                                      currentRes: release?.artwork?.resolution || 'Disk file',
+                                      stagedRes:
+                                        relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
+                                          ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan',
+                                    })
+                                  }
+                                />
                                 <div className="flex flex-col text-left">
                                   <span className="text-[10px] text-zinc-400 font-mono uppercase tracking-wider">
                                     Current Artwork
@@ -970,20 +1058,34 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                 <ArrowRight className="w-4 h-4" />
                               </div>
 
-                              <div className="flex items-center gap-2.5">
-                                <div className="w-12 h-12 rounded-lg bg-black/60 border border-emerald-500/40 overflow-hidden flex items-center justify-center shrink-0 shadow-md shadow-emerald-500/10">
-                                  <img
-                                    src={stagedCoverArt}
-                                    alt="New Cover"
-                                    className="w-full h-full object-cover"
-                                  />
-                                </div>
+                              <div className="flex items-center gap-3">
+                                <ArtworkZoomThumbnail
+                                  url={stagedCoverArt}
+                                  label="Staged Archival Cover"
+                                  resolution={
+                                    relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
+                                      ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'
+                                  }
+                                  isStaged
+                                  onClick={() =>
+                                    setInspectingArtwork({
+                                      currentUrl: currentCoverArt,
+                                      stagedUrl: stagedCoverArt,
+                                      albumTitle,
+                                      currentRes: release?.artwork?.resolution || 'Disk file',
+                                      stagedRes:
+                                        relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
+                                          ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan',
+                                    })
+                                  }
+                                />
                                 <div className="flex flex-col text-left">
                                   <span className="text-[10px] text-emerald-400 font-mono uppercase tracking-wider font-semibold">
                                     Staged Archival Cover
                                   </span>
                                   <span className="text-xs text-emerald-300 font-mono">
-                                    {relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'}
+                                    {relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)
+                                      ?.pendingSidecarEdits?.coverResolution || 'High-Resolution Scan'}
                                   </span>
                                 </div>
                               </div>
@@ -1407,11 +1509,17 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
             {!isCompleted && uncommittedTracks.length > 0 && (
               <button
                 type="button"
-                onClick={() => handleStartCommit()}
-                disabled={isRunning || !preflight.canProceed || activeTracksToCommit.length === 0}
+                onClick={() => {
+                  if (!preflight.playbackIdle) {
+                    togglePlayPause()
+                    return
+                  }
+                  handleStartCommit()
+                }}
+                disabled={isRunning || !preflight.storageWritable || activeTracksToCommit.length === 0}
                 title={
                   !preflight.playbackIdle
-                    ? 'Transport active. Stop playback before committing changes.'
+                    ? 'Audio playback active. Click to pause playback and unlock saving.'
                     : !preflight.storageWritable
                     ? 'Storage mount is read-only locked.'
                     : activeTracksToCommit.length === 0
@@ -1419,10 +1527,12 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                     : undefined
                 }
                 className={`px-5 py-2 rounded-xl text-xs font-mono font-semibold transition-all flex items-center gap-2 shadow-lg cursor-pointer ${
-                  !preflight.canProceed || activeTracksToCommit.length === 0
-                    ? 'bg-zinc-800 text-zinc-500 border border-zinc-700 cursor-not-allowed'
-                    : isRunning
+                  isRunning
                     ? 'bg-amber-500/50 text-black cursor-wait'
+                    : !preflight.playbackIdle
+                    ? 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 animate-pulse'
+                    : !preflight.storageWritable || activeTracksToCommit.length === 0
+                    ? 'bg-zinc-800 text-zinc-500 border border-zinc-700 cursor-not-allowed'
                     : 'bg-amber-400 hover:bg-amber-300 text-black shadow-amber-400/20'
                 }`}
               >
@@ -1433,7 +1543,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                   </>
                 ) : !preflight.playbackIdle ? (
                   <>
-                    <span>🔒 Pause Playback to Save</span>
+                    <span>⏸ Pause Playback to Save</span>
                   </>
                 ) : !preflight.storageWritable ? (
                   <>
@@ -1454,6 +1564,97 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Side-by-Side Artwork Full Inspection Lightbox Modal */}
+      {inspectingArtwork && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in duration-150"
+          onClick={() => setInspectingArtwork(null)}
+        >
+          <div
+            className="bg-[#0e1017] border border-white/20 rounded-3xl p-6 max-w-4xl w-full flex flex-col gap-5 shadow-2xl relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>Artwork Inspection</span>
+                  <span className="text-zinc-400 font-normal text-sm font-mono">• {inspectingArtwork.albumTitle}</span>
+                </h3>
+                <p className="text-xs text-zinc-400 font-mono mt-0.5">Side-by-side comparison of local vs. staged archival cover art</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setInspectingArtwork(null)}
+                className="p-1.5 rounded-xl hover:bg-white/10 text-zinc-400 hover:text-white transition-all cursor-pointer"
+                title="Close inspection"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+              {/* Current Artwork */}
+              <div className="flex flex-col gap-2.5 p-4 rounded-2xl bg-black/50 border border-white/10">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">Current Artwork</span>
+                  <span className="text-xs font-mono text-zinc-300">{inspectingArtwork.currentRes || 'Disk File'}</span>
+                </div>
+                <div className="aspect-square w-full rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-white/10">
+                  {inspectingArtwork.currentUrl ? (
+                    <img
+                      src={inspectingArtwork.currentUrl}
+                      alt="Current Artwork"
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 text-zinc-500">
+                      <Disc3 className="w-16 h-16 stroke-[1.5]" />
+                      <span className="text-xs font-mono">No Local Cover Embedded</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Staged Archival Cover */}
+              <div className="flex flex-col gap-2.5 p-4 rounded-2xl bg-black/50 border border-emerald-500/40 shadow-xl shadow-emerald-500/10">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    Staged Archival Cover
+                  </span>
+                  <span className="text-xs font-mono text-emerald-300 font-semibold">{inspectingArtwork.stagedRes || '3000×3000px'}</span>
+                </div>
+                <div className="aspect-square w-full rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-emerald-500/20">
+                  {inspectingArtwork.stagedUrl ? (
+                    <img
+                      src={inspectingArtwork.stagedUrl}
+                      alt="Staged Archival Cover"
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 text-zinc-500">
+                      <Disc3 className="w-16 h-16 stroke-[1.5]" />
+                      <span className="text-xs font-mono">No Staged Art</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-white/[0.08] text-xs font-mono text-zinc-400">
+              <span>Press <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-zinc-300">Esc</kbd> or click outside to dismiss</span>
+              <button
+                type="button"
+                onClick={() => setInspectingArtwork(null)}
+                className="px-4 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-mono transition-all cursor-pointer"
+              >
+                Close Preview
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
