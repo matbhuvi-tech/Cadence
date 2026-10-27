@@ -430,7 +430,9 @@ class AcoustIdService {
         track.originalAlbum = canonicalTitle
         track.originalYear = canonicalYear
         track.musicbrainzRecordingId = mbid
-        track.recordingId = mbid
+        if (mbid) {
+          track.recordingId = mbid
+        }
         if (fingerprint && !fingerprint.startsWith('ERROR')) {
           track.acoustidFingerprint = fingerprint
         }

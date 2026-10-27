@@ -24,6 +24,7 @@ interface FolderTreeExplorerProps {
   selectedTrackId?: string
   onSelectTrack: (trackId: string) => void
   highlightedPath?: string
+  filterQuery?: string
 }
 
 interface TreeNode {
@@ -35,15 +36,36 @@ interface TreeNode {
   sampleRates: Set<string>
 }
 
+function getCompactedNode(node: TreeNode): { displayName: string; effectiveNode: TreeNode } {
+  let current = node
+  const names: string[] = [node.name]
+
+  while (current.tracks.length === 0 && current.subfolders.size === 1) {
+    const singleChild = Array.from(current.subfolders.values())[0]
+    names.push(singleChild.name)
+    current = singleChild
+  }
+
+  if (names.length > 1) {
+    return {
+      displayName: names.join(' / '),
+      effectiveNode: current,
+    }
+  }
+
+  return { displayName: node.name, effectiveNode: node }
+}
+
 export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
   tracks,
   releases,
   selectedTrackId,
   onSelectTrack,
   highlightedPath,
+  filterQuery = '',
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
-  const [searchQuery, setSearchQuery] = useState('')
+  const searchQuery = filterQuery
   const { currentTrack, isPlaying, playTrack, togglePlayPause } = useAudioPlayer()
 
   // Build hierarchical folder tree from track file paths
@@ -135,9 +157,10 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
 
   // Recursive folder node renderer
   const renderFolderNode = (node: TreeNode, depth: number = 0): React.ReactNode => {
-    const isExpanded = expandedFolders.has(node.path)
-    const hasChildren = node.subfolders.size > 0 || node.tracks.length > 0
-    const isHighlighted = highlightedPath && highlightedPath.replace(/\\/g, '/').includes(node.path)
+    const { displayName, effectiveNode } = getCompactedNode(node)
+    const isExpanded = expandedFolders.has(effectiveNode.path) || expandedFolders.has(node.path)
+    const hasChildren = effectiveNode.subfolders.size > 0 || effectiveNode.tracks.length > 0
+    const isHighlighted = highlightedPath && highlightedPath.replace(/\\/g, '/').includes(effectiveNode.path)
 
     // Calculate recursive track counts and collect all recursive tracks
     const totalRecursiveTracks = (n: TreeNode): number => {
@@ -156,21 +179,26 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
       return result
     }
 
-    const recCount = totalRecursiveTracks(node)
-    const allNodeTracks = getAllRecursiveTracks(node)
+    const recCount = totalRecursiveTracks(effectiveNode)
+    const allNodeTracks = getAllRecursiveTracks(effectiveNode)
     const isFolderPlaying =
       isPlaying && Boolean(currentTrack && allNodeTracks.some((t) => t.id === currentTrack.id))
 
-    if (searchQuery.trim() && !node.name.toLowerCase().includes(searchQuery.toLowerCase())) {
-      // Check if any children match
-      if (recCount === 0) return null
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase()
+      const matches =
+        displayName.toLowerCase().includes(q) ||
+        allNodeTracks.some(
+          (t) => t.title.toLowerCase().includes(q) || (t.artistCredit || '').toLowerCase().includes(q)
+        )
+      if (!matches) return null
     }
 
     return (
-      <div key={node.path} className="select-none text-xs">
+      <div key={effectiveNode.path || node.path} className="select-none text-xs">
         {/* Folder Header Row */}
         <div
-          onClick={() => toggleFolder(node.path)}
+          onClick={() => toggleFolder(effectiveNode.path)}
           style={{ paddingLeft: `${depth * 18 + 12}px` }}
           className={`h-9 flex items-center justify-between pr-4 hover:bg-white/[0.04] cursor-pointer transition-colors border-l-2 group ${
             isHighlighted
@@ -224,7 +252,7 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
               <Folder className="w-4 h-4 text-amber-400/80 shrink-0" />
             )}
 
-            <span className="truncate font-mono text-[11px] font-medium">{node.name}</span>
+            <span className="truncate font-mono text-[11px] font-medium">{displayName}</span>
 
             <span className="text-[10px] text-white/40 font-mono">
               ({recCount} {recCount === 1 ? 'track' : 'tracks'})
@@ -233,7 +261,7 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
 
           {/* Format Badges on Folder */}
           <div className="flex items-center gap-1.5 shrink-0">
-            {Array.from(node.formats).slice(0, 3).map((fmt) => (
+            {Array.from(effectiveNode.formats).slice(0, 3).map((fmt) => (
               <span
                 key={fmt}
                 className="px-1.5 py-0.2 rounded text-[9px] font-mono font-medium bg-white/[0.06] text-white/60 border border-white/[0.06]"
@@ -248,12 +276,12 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
         {isExpanded && (
           <div>
             {/* Render child subfolders */}
-            {Array.from(node.subfolders.values()).map((sub) =>
+            {Array.from(effectiveNode.subfolders.values()).map((sub) =>
               renderFolderNode(sub, depth + 1)
             )}
 
             {/* Render tracks in this folder */}
-            {node.tracks.map((track) => {
+            {effectiveNode.tracks.map((track) => {
               const isCurrent = currentTrack?.id === track.id
               const isPlayingCurrent = isCurrent && isPlaying
               const isSelected = selectedTrackId === track.id
@@ -353,28 +381,24 @@ export const FolderTreeExplorer: React.FC<FolderTreeExplorerProps> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0D0E12] overflow-hidden">
-      {/* Top Filter Bar */}
-      <div className="px-6 py-3 border-b border-white/[0.06] bg-[#12151D]/60 backdrop-blur-xl flex items-center justify-between gap-4 shrink-0">
+      {/* Top Bar */}
+      <div className="px-6 py-2.5 border-b border-white/[0.06] bg-[#12151D]/60 backdrop-blur-xl flex items-center justify-between gap-4 shrink-0">
         <div className="flex items-center gap-2">
-          <HardDrive className="w-4 h-4 text-[#00F5FF]" />
+          <HardDrive className="w-4 h-4 text-[#D4AF37]" />
           <span className="font-semibold text-xs text-white">Physical On-Disk Folder Tree</span>
-          <span className="text-white/40 text-xs">
-            ({tracks.length.toLocaleString()} total files indexed)
+          <span className="text-white/40 text-[11px] font-mono">
+            ({tracks.length.toLocaleString()} indexed files)
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="relative w-64">
-            <Search className="w-3.5 h-3.5 text-white/40 absolute left-2.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search folders or tracks..."
-              className="w-full pl-8 pr-3 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08] text-xs text-white placeholder-white/30 focus:outline-none focus:border-[#00F5FF]"
-            />
+        {filterQuery && (
+          <div className="flex items-center gap-1.5 text-xs text-[#8E8E93] font-mono">
+            <span>Filter:</span>
+            <span className="px-2 py-0.5 rounded bg-white/[0.08] text-white font-semibold">
+              "{filterQuery}"
+            </span>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Directory Hierarchy Tree View */}

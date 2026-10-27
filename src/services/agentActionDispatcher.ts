@@ -1,4 +1,4 @@
-import { CanvasViewMode, FacetSelections } from '../core/types'
+import { CanvasViewMode, FacetSelections, Track, Release } from '../core/types'
 import { auditService } from './auditService'
 import { graphEngine } from '../core/graphEngine'
 import { agentSnapshotService } from './agentSnapshotService'
@@ -38,6 +38,8 @@ export interface AgentDispatcherContext {
   openModal: (modalName: string, payload?: any) => void
   refreshFromEngine: () => void
   showToast: (msg: string) => void
+  currentTrack?: Track | null
+  currentRelease?: Release | null
 }
 
 export class AgentActionDispatcher {

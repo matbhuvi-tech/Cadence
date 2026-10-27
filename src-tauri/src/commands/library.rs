@@ -439,3 +439,29 @@ pub fn db_reorder_playlist_tracks(
     DbOperations::reorder_playlist_tracks(&mut conn, &playlist_id, &track_ids).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn db_set_release_split(
+    db: State<'_, AppDb>,
+    release_id: String,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    DbOperations::insert_split_release(&conn, &release_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_remove_release_split(
+    db: State<'_, AppDb>,
+    release_id: String,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    DbOperations::delete_split_release(&conn, &release_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_get_split_releases(
+    db: State<'_, AppDb>,
+) -> Result<Vec<String>, String> {
+    let conn = db.conn.lock();
+    DbOperations::get_all_split_releases(&conn).map_err(|e| e.to_string())
+}
+

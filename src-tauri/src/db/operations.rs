@@ -2195,4 +2195,31 @@ impl DbOperations {
         tx.commit()?;
         Ok(())
     }
+
+    pub fn insert_split_release(conn: &Connection, release_id: &str) -> Result<()> {
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "INSERT OR REPLACE INTO user_split_releases (release_id, created_at) VALUES (?1, ?2)",
+            params![release_id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_split_release(conn: &Connection, release_id: &str) -> Result<()> {
+        conn.execute(
+            "DELETE FROM user_split_releases WHERE release_id = ?1",
+            params![release_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_split_releases(conn: &Connection) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare("SELECT release_id FROM user_split_releases ORDER BY created_at ASC")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id?);
+        }
+        Ok(ids)
+    }
 }

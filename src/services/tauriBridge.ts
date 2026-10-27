@@ -47,6 +47,7 @@ export interface PlaybackStatePayload {
   positionSecs: number
   durationSecs: number
   volume: number
+  playbackState?: 'Playing' | 'Paused' | 'Stopped' | 'Loading' | string
   activeDevice?: string
   streamInfo?: AudioStreamTelemetry
   purityMode?: boolean
@@ -259,6 +260,7 @@ class TauriBridgeService {
         positionSecs: Number(raw.positionSecs ?? raw.position_secs ?? 0),
         durationSecs: Number(raw.durationSecs ?? raw.duration_secs ?? 0),
         volume: Number(raw.volume ?? 1),
+        playbackState: raw.playbackState ?? raw.playback_state,
         activeDevice: raw.activeDevice ?? raw.active_device,
         purityMode: Boolean(raw.purityMode ?? raw.purity_mode),
         isBitPerfect: Boolean(raw.isBitPerfect ?? raw.is_bit_perfect),
@@ -1112,6 +1114,25 @@ class TauriBridgeService {
     if (this.isTauri()) {
       await invoke('db_reorder_playlist_tracks', { playlistId, trackIds })
     }
+  }
+
+  public async dbSetReleaseSplit(releaseId: string): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_set_release_split', { releaseId })
+    }
+  }
+
+  public async dbRemoveReleaseSplit(releaseId: string): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_remove_release_split', { releaseId })
+    }
+  }
+
+  public async dbGetSplitReleases(): Promise<string[]> {
+    if (this.isTauri()) {
+      return await invoke<string[]>('db_get_split_releases')
+    }
+    return []
   }
 }
 

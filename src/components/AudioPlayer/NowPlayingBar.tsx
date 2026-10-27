@@ -98,8 +98,11 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
         <div className="glass-dropdown border border-white/[0.08] rounded-2xl h-[56px] px-4 flex items-center justify-between gap-4 shadow-2xl relative select-none">
           {/* Subtle Top Specular Scrubber Highlight */}
           <div
-            className="absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-all duration-150 group/scrub"
+            className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-all duration-150 group/scrub ${
+              !currentTrack ? 'opacity-30 pointer-events-none' : ''
+            }`}
             onClick={(e) => {
+              if (!currentTrack) return
               const rect = e.currentTarget.getBoundingClientRect()
               const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
               seek(pct * effectiveDuration)
@@ -154,7 +157,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
           </div>
 
           {/* CENTER SECTION: TACTILE TRANSPORT CONTROLS (SINGLE-AXIS 56PX) */}
-          <div className="flex items-center justify-center gap-2 sm:gap-3 flex-1">
+          <div className={`flex items-center justify-center gap-2 sm:gap-3 flex-1 transition-opacity ${!currentTrack ? 'opacity-40 pointer-events-none' : ''}`}>
             {/* Elapsed Time */}
             <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
               {formatTime(currentTime)}
@@ -282,22 +285,34 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             </div>
 
             {/* The Clickable Audiophile Signal Path Pill */}
+            {currentTrack && (
+              <button
+                onClick={() => setIsSignalPopoverOpen((prev) => !prev)}
+                title="Inspect Deterministic Bit-Perfect Signal Path & DAC Clock"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[11px] font-mono transition-all cursor-pointer shadow-sm group"
+              >
+                <span
+                  className="w-2 h-2 rounded-full animate-pulse shadow-sm"
+                  style={{ backgroundColor: ledColor }}
+                />
+                <span className="text-[#F5F5F7] font-semibold">
+                  {streamTelemetry?.format || currentTrack?.format || 'PCM'}
+                </span>
+                <span className="text-[#8E8E93]">→</span>
+                <span className="text-[#8E8E93] truncate max-w-[70px]">
+                  {deviceType === 'upnp_streamer' ? 'UPnP' : isPurityMode ? 'WASAPI Ex.' : 'WASAPI'}
+                </span>
+              </button>
+            )}
+
+            {/* Anchored Gapless Playback Toggle */}
             <button
-              onClick={() => setIsSignalPopoverOpen((prev) => !prev)}
-              title="Inspect Deterministic Bit-Perfect Signal Path & DAC Clock"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[11px] font-mono transition-all cursor-pointer shadow-sm group"
+              onClick={() => toggleGapless()}
+              title={`Gapless Playback: ${isGapless ? 'Enabled' : 'Disabled'} • Click to toggle`}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[10px] font-mono transition-all cursor-pointer shadow-sm select-none"
             >
-              <span
-                className="w-2 h-2 rounded-full animate-pulse shadow-sm"
-                style={{ backgroundColor: ledColor }}
-              />
-              <span className="text-[#F5F5F7] font-semibold">
-                {streamTelemetry?.format || currentTrack?.format || 'PCM'}
-              </span>
-              <span className="text-[#8E8E93]">→</span>
-              <span className="text-[#8E8E93] truncate max-w-[70px]">
-                {deviceType === 'upnp_streamer' ? 'UPnP' : isPurityMode ? 'WASAPI Ex.' : 'WASAPI'}
-              </span>
+              <Sparkles className={`w-3 h-3 ${isGapless ? 'text-emerald-400' : 'text-neutral-500'}`} />
+              <span className={isGapless ? 'text-emerald-300' : 'text-neutral-400'}>Gapless</span>
             </button>
 
             {/* Dedicated Now Playing Queue Toggle (Matching Mockup) */}
@@ -353,16 +368,6 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               </button>
             )}
           </div>
-        </div>
-
-        {/* Subtle Floating Gapless Playback Chip (as in Mockup) */}
-        <div
-          className="absolute -top-7 right-6 flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-black/75 backdrop-blur-md border border-white/10 text-[10px] font-mono text-neutral-300 shadow-lg select-none cursor-pointer hover:border-emerald-500/40 transition-all z-30 group"
-          onClick={() => toggleGapless()}
-          title={`Gapless Playback: ${isGapless ? 'Enabled' : 'Disabled'} • Click to toggle`}
-        >
-          <Sparkles className={`w-3 h-3 ${isGapless ? 'text-emerald-400' : 'text-neutral-500'}`} />
-          <span className={isGapless ? 'text-emerald-300' : 'text-neutral-400'}>Gapless playback</span>
         </div>
 
         {/* Apple-Style Translucent Popover: The Deterministic Signal Path & Audiophile DAC Controls */}

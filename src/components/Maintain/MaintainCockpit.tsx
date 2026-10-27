@@ -38,6 +38,7 @@ import { graphEngine } from '../../core/graphEngine'
 import { normalizationService, NormalizationRule } from '../../services/normalizationService'
 import { auditService } from '../../services/auditService'
 import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
+import { useCatalogHealth } from '../../hooks/useCatalogHealth'
 import { tauriBridge, MaintenanceStats } from '../../services/tauriBridge'
 import { isIssueInEntityScope } from '../../core/scopeUtils'
 import { backgroundArtworkService, BackgroundArtworkState } from '../../services/backgroundArtworkService'
@@ -196,20 +197,12 @@ export const getIssueProposedAction = (issue: AuditIssue, canonicalTarget: strin
     return 'Generate Atmospheric Backdrop'
   }
 
-  if (issue.category === 'low_res_art') {
-    return 'COVER = Archival Front Scan'
-  }
-
   if (issue.category === 'missing_track_num') {
     return 'TRACKNUMBER = Sequential (01..N)'
   }
 
   if (issue.category === 'checksum_mismatch') {
     return 'Restore from Bit-Perfect Backup'
-  }
-
-  if (issue.category === 'empty_composer') {
-    return 'ALBUMARTIST = Extract from Directory'
   }
 
   if (issue.proposedAction && !issue.proposedAction.startsWith('Standardize to')) {
@@ -341,13 +334,32 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   }
   const [isScopeFilterActive, setIsScopeFilterActive] = useState<boolean>(true)
 
-  // Edge Case 3: Reset isScopeFilterActive to true whenever the target entity changes
+  const [selectedIssueCategory, setSelectedIssueCategory] = useState<string>('triage')
+
+  // Edge Case 3: Reset isScopeFilterActive to true and auto-select first non-empty triage category whenever activeEntityScope changes
   useEffect(() => {
     if (activeEntityScope) {
       setIsScopeFilterActive(true)
+      const matchingIssues = auditIssues.filter((issue) =>
+        isIssueInEntityScope(issue, activeEntityScope, tracks, releases)
+      )
+      const hasTriage = matchingIssues.some((i) => !i.isRoleConflict)
+      const hasCritical = matchingIssues.some((i) => i.severity === 'critical')
+      const hasWarning = matchingIssues.some((i) => i.severity === 'warning')
+      const hasPerformers = matchingIssues.some((i) => i.isRoleConflict)
+
+      if (hasTriage) {
+        setSelectedIssueCategory('triage')
+      } else if (hasCritical) {
+        setSelectedIssueCategory('critical')
+      } else if (hasWarning) {
+        setSelectedIssueCategory('warning')
+      } else if (hasPerformers) {
+        setSelectedIssueCategory('performers')
+      }
     }
-  }, [activeEntityScope?.type, activeEntityScope?.name, activeEntityScope?.albumId])
-  const [selectedIssueCategory, setSelectedIssueCategory] = useState<string>('triage')
+  }, [activeEntityScope?.type, activeEntityScope?.name, activeEntityScope?.albumId, auditIssues, tracks, releases])
+
   const [pathPattern, setPathPattern] = useState<string>('{Artist}/{Year} - {Album}/{TrackNum} - {Title}')
   const [normalizationRules, setNormalizationRules] = useState<NormalizationRule[]>(() => normalizationService.getRules())
   const [newRulePattern, setNewRulePattern] = useState('')
@@ -417,9 +429,9 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
     showToast(`✓ Whitelisted ${count} playback singers under "${clusterTitle}". Track credits preserved.`)
   }
 
-  // Authoritative Unified Health Score computed by auditService
-  const computedAudit = auditService.computeCatalogAudit(tracks, releases)
-  const healthScore = computedAudit.healthScore
+  // Authoritative Unified Health Score computed by useCatalogHealth
+  const { globalHealthScore } = useCatalogHealth(tracks, releases)
+  const healthScore = globalHealthScore
 
   // Filter issues (scoped to active entity when isScopeFilterActive is true)
   const scopedIssues = React.useMemo(() => {
@@ -832,7 +844,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                   title="Runs only when audio playback is idle to preserve bit-perfect transport purity"
                 >
                   <Cpu className="w-3 h-3 text-cyan-400" />
-                  Audio-Idle Worker
+                  Background Tasks
                 </span>
                 <span
                   className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full flex items-center gap-1 ${
@@ -869,7 +881,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
               <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
                 <span className="flex items-center gap-1">
                   <ImageIcon className="w-2.5 h-2.5 text-slate-400" />
-                  Album Covers (300×300)
+                  Indexing Artwork
                 </span>
                 {mStats.pendingItems === 0 ? (
                   <span className="text-emerald-400 font-medium">

@@ -15,6 +15,7 @@
     "test:artists": "tsx src/test/testArtistTokenizer.ts",
     "test:audit": "tsx src/test/testAuditHygieneDataBinding.ts",
     "test:commit": "tsx src/test/testCommitArchitecture.ts",
+    "test:cyclic": "tsx src/test/testCyclicNormalizationFix.ts",
     "test:startup": "tsx src/test/testAppStartup.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

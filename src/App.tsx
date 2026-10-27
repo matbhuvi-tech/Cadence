@@ -64,6 +64,7 @@ import { EditPlaylistModal } from './components/Modals/EditPlaylistModal'
 import { AddTracksToPlaylistModal } from './components/Modals/AddTracksToPlaylistModal'
 import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
 import { backgroundArtworkService } from './services/backgroundArtworkService'
+import { useStagedChanges } from './hooks/useStagedChanges'
 
 function AppContent() {
   // Primary Graph State
@@ -77,9 +78,48 @@ function AppContent() {
   const [offlineStats, setOfflineStats] = useState<{ tracks: number; releases: number }>({ tracks: 0, releases: 0 })
   const [isCheckingConnectivity, setIsCheckingConnectivity] = useState<boolean>(false)
 
+  // Split releases persisted from SQLite
+  const [splitReleaseIds, setSplitReleaseIds] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    tauriBridge.dbGetSplitReleases().then((ids) => {
+      setSplitReleaseIds(new Set(ids))
+    }).catch((err) => {
+      console.warn('[App] Failed to load split release IDs:', err)
+    })
+  }, [])
+
+  const handleToggleReleaseSplit = async (releaseId: string) => {
+    try {
+      if (splitReleaseIds.has(releaseId)) {
+        await tauriBridge.dbRemoveReleaseSplit(releaseId)
+        setSplitReleaseIds((prev) => {
+          const next = new Set(prev)
+          next.delete(releaseId)
+          return next
+        })
+        showToast('Multi-disc release recombined.')
+      } else {
+        await tauriBridge.dbSetReleaseSplit(releaseId)
+        setSplitReleaseIds((prev) => {
+          const next = new Set(prev)
+          next.add(releaseId)
+          return next
+        })
+        showToast('Multi-disc release split into individual discs.')
+      }
+    } catch (err) {
+      console.error('[App] Failed to toggle release split:', err)
+      showToast('Failed to update release split setting.')
+    }
+  }
+
   // Selection State
   const [selectedTrackId, setSelectedTrackId] = useState<string>(tracks[0]?.id || '')
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set())
+
+  // Canonical staged mutations hook
+  const { stagedAlbumsCount, stagedTracksCount, hasPendingCommits } = useStagedChanges(tracks, releases)
 
   // View & Filter State
   const [viewMode, setViewMode] = useState<CanvasViewMode>('cover_grid')
@@ -1343,7 +1383,7 @@ function AppContent() {
     },
     {
       id: 'cmd-guided-tutorial',
-      title: 'Interactive Guided Tutorial & Headless Agent Protocol Tour',
+      title: 'Cadence Quick Tour',
       category: 'HELP',
       shortcut: '?',
       icon: <Compass className="w-4 h-4 text-[#00F5FF]" />,
@@ -1359,7 +1399,7 @@ function AppContent() {
     },
     {
       id: 'cmd-twophase',
-      title: 'Review Staged Metadata & Write to Disk (Two-Phase Commit)',
+      title: 'Review & Apply Staged Changes',
       category: 'SAFETY',
       shortcut: '⌘S',
       icon: <ShieldCheck className="w-4 h-4 text-[#10B981]" />,
@@ -1375,7 +1415,7 @@ function AppContent() {
     },
     {
       id: 'cmd-resolve-compilation-soundtracks',
-      title: 'Canonical Soundtrack Resolver (Gemini AI for Compilation Albums)',
+      title: 'Resolve Original Soundtracks',
       category: 'ACTION',
       shortcut: '⌘R',
       icon: <Sparkles className="w-4 h-4 text-[#00F5FF]" />,
@@ -1583,15 +1623,20 @@ function AppContent() {
 
         {/* Right Toolbar Actions */}
         <div className="flex items-center gap-2">
-          {/* Uncommitted changes staging badge */}
-          {uncommittedCount > 0 && (
+          {/* Canonical Staged Changes Badge */}
+          {hasPendingCommits && (
             <button
-              onClick={() => setIsCommitModalOpen(true)}
-              title="Review Staged Non-Destructive Changes"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-[7px] bg-[#D4AF37]/15 hover:bg-[#D4AF37]/25 text-[#D4AF37] border border-[#D4AF37]/30 text-[11px] font-medium transition-all cursor-pointer"
+              onClick={() => {
+                if (isPlaying) {
+                  showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
+                }
+                setIsCommitModalOpen(true)
+              }}
+              title="Review and commit staged metadata and artwork changes"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-[7px] bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 text-[11px] font-mono transition-all cursor-pointer shadow-sm"
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37] animate-pulse" />
-              <span>{uncommittedCount} Staged</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>{stagedAlbumsCount} Albums · {stagedTracksCount} Staged</span>
             </button>
           )}
 
@@ -1663,82 +1708,8 @@ function AppContent() {
       </header>
 
       {/* Main Workspace Stage */}
-      {topMode === 'maintain' && (
-        <MaintainCockpit
-          tracks={tracks}
-          releases={releases}
-          auditIssues={auditIssues}
-          storageMounts={storageMounts}
-          watchedFolders={watchedFolders}
-          skippedFiles={skippedFiles}
-          uncommittedCount={uncommittedCount}
-          activeSubTab={maintainSubTab}
-          onSubTabChange={setMaintainSubTab}
-          onAddWatchedFolder={handleAddWatchedFolder}
-          onRemoveWatchedFolder={handleRemoveWatchedFolder}
-          onRemediateAudit={handleRemediateAudit}
-          onIgnoreSkippedFile={handleIgnoreSkippedFile}
-          onIgnoreAllSkippedFiles={handleIgnoreAllSkippedFiles}
-          onRefreshAudit={() => {
-            auditService.runFullCatalogAudit()
-            refreshFromEngine()
-            showToast('Catalog hygiene diagnostic scan updated.')
-          }}
-          onDiscardTrackEdits={(trackIds: string[]) => {
-            trackIds.forEach((id) => graphEngine.discardTrackEdits(id))
-            refreshFromEngine()
-            persistCurrentLibrary()
-            auditService.runFullCatalogAudit()
-            showToast(`Discarded staged edits for ${trackIds.length} track(s).`)
-          }}
-          onApplyPathRestructure={(pattern: string) => {
-            const previews = tracks.map((t) => {
-              const rel = releases.find((r) => r.id === t.releaseId)
-              const proposed = pattern
-                .replace('{Artist}', t.artistCredit || 'Unknown Artist')
-                .replace('{Year}', String(rel?.releaseYear || 'Unknown Year'))
-                .replace('{Album}', rel?.title || 'Unknown Album')
-                .replace('{TrackNum}', String(t.trackNumber || 1).padStart(2, '0'))
-                .replace('{Title}', t.title)
-              return {
-                trackId: t.id,
-                proposedPath: proposed + '.' + (t.format || 'flac').toLowerCase(),
-              }
-            })
-            handleApplyPathRestructure(previews)
-          }}
-          onCommitTwoPhase={() => {
-            if (isPlaying) {
-              showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
-            }
-            setIsCommitModalOpen(true)
-          }}
-          onToggleMountLock={handleToggleMountLock}
-          onToggleMountStatus={(mountId: string) => {
-            const mount = storageMounts.find((m) => m.id === mountId)
-            handleToggleMountStatus(mountId, mount?.status || 'online')
-          }}
-          onTriggerScan={(folderPath?: string) => {
-            if (folderPath) {
-              handleTriggerScan(folderPath)
-            } else if (storageMounts.length > 0) {
-              handleTriggerScan(storageMounts[0].mountPath)
-            }
-          }}
-          onRefreshLibrary={handleRefreshLibrary}
-          showToast={showToast}
-          onSwitchToLibrary={() => setTopMode('library')}
-          activeEntityScope={activeEntityScope}
-          onClearEntityScope={() => {
-            setSelectedAlbumId(null)
-            setSelectedArtist(null)
-            setSelectedComposer(null)
-          }}
-        />
-      )}
-
-      <div className={`flex-1 flex overflow-hidden ${topMode === 'maintain' ? 'hidden' : ''}`}>
-        {/* 1. Left Rail: Normalized Navigation */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* 1. Left Rail: Normalized Navigation (Persistent Shell) */}
         <LeftRail
           auditIssues={scopedAuditIssues}
           activeTriageFilter={activeTriageFilter}
@@ -1773,6 +1744,8 @@ function AppContent() {
           releases={releases}
           viewMode={viewMode}
           onViewModeChange={setViewMode}
+          topMode={topMode}
+          onTopModeChange={setTopMode}
           onOpenCommitModal={() => setIsCommitModalOpen(true)}
           playlists={playlists}
           selectedPlaylistId={selectedPlaylist?.id}
@@ -1786,8 +1759,80 @@ function AppContent() {
           }}
         />
 
-        {/* 2. Center Stage: Data Canvas OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
-        {focusedWorkbenchTrack ? (
+        {/* 2. Center Stage: MaintainCockpit OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
+        {topMode === 'maintain' ? (
+          <MaintainCockpit
+            tracks={tracks}
+            releases={releases}
+            auditIssues={auditIssues}
+            storageMounts={storageMounts}
+            watchedFolders={watchedFolders}
+            skippedFiles={skippedFiles}
+            uncommittedCount={uncommittedCount}
+            activeSubTab={maintainSubTab}
+            onSubTabChange={setMaintainSubTab}
+            onAddWatchedFolder={handleAddWatchedFolder}
+            onRemoveWatchedFolder={handleRemoveWatchedFolder}
+            onRemediateAudit={handleRemediateAudit}
+            onIgnoreSkippedFile={handleIgnoreSkippedFile}
+            onIgnoreAllSkippedFiles={handleIgnoreAllSkippedFiles}
+            onRefreshAudit={() => {
+              auditService.runFullCatalogAudit()
+              refreshFromEngine()
+              showToast('Catalog hygiene diagnostic scan updated.')
+            }}
+            onDiscardTrackEdits={(trackIds: string[]) => {
+              trackIds.forEach((id) => graphEngine.discardTrackEdits(id))
+              refreshFromEngine()
+              persistCurrentLibrary()
+              auditService.runFullCatalogAudit()
+              showToast(`Discarded staged edits for ${trackIds.length} track(s).`)
+            }}
+            onApplyPathRestructure={(pattern: string) => {
+              const previews = tracks.map((t) => {
+                const rel = releases.find((r) => r.id === t.releaseId)
+                const proposed = pattern
+                  .replace('{Artist}', t.artistCredit || 'Unknown Artist')
+                  .replace('{Year}', String(rel?.releaseYear || 'Unknown Year'))
+                  .replace('{Album}', rel?.title || 'Unknown Album')
+                  .replace('{TrackNum}', String(t.trackNumber || 1).padStart(2, '0'))
+                  .replace('{Title}', t.title)
+                return {
+                  trackId: t.id,
+                  proposedPath: proposed + '.' + (t.format || 'flac').toLowerCase(),
+                }
+              })
+              handleApplyPathRestructure(previews)
+            }}
+            onCommitTwoPhase={() => {
+              if (isPlaying) {
+                showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
+              }
+              setIsCommitModalOpen(true)
+            }}
+            onToggleMountLock={handleToggleMountLock}
+            onToggleMountStatus={(mountId: string) => {
+              const mount = storageMounts.find((m) => m.id === mountId)
+              handleToggleMountStatus(mountId, mount?.status || 'online')
+            }}
+            onTriggerScan={(folderPath?: string) => {
+              if (folderPath) {
+                handleTriggerScan(folderPath)
+              } else if (storageMounts.length > 0) {
+                handleTriggerScan(storageMounts[0].mountPath)
+              }
+            }}
+            onRefreshLibrary={handleRefreshLibrary}
+            showToast={showToast}
+            onSwitchToLibrary={() => setTopMode('library')}
+            activeEntityScope={activeEntityScope}
+            onClearEntityScope={() => {
+              setSelectedAlbumId(null)
+              setSelectedArtist(null)
+              setSelectedComposer(null)
+            }}
+          />
+        ) : focusedWorkbenchTrack ? (
           <FocusedWorkbench
             track={focusedWorkbenchTrack}
             release={releases.find((r) => r.id === focusedWorkbenchTrack.releaseId)}
@@ -1972,7 +2017,9 @@ function AppContent() {
                 onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
                 onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
                 totalLibraryTracksCount={tracks.length}
-                stagedAlbumsCount={stagedReleaseIds.size}
+                stagedAlbumsCount={stagedAlbumsCount}
+                splitReleaseIds={splitReleaseIds}
+                onToggleReleaseSplit={handleToggleReleaseSplit}
                 onResetFilters={() => {
                   setFacets({})
                   setActiveTriageFilter(undefined)

@@ -340,9 +340,10 @@ function getTrackRealEdits(track: Track, release?: Release): FieldDiff[] {
 function formatDuration(seconds?: number): string {
   if (seconds === undefined || isNaN(seconds)) return 'Calculating...'
   if (seconds <= 0) return 'Almost done'
-  if (seconds < 60) return `~${seconds}s remaining`
-  const mins = Math.floor(seconds / 60)
-  const remSecs = seconds % 60
+  const secInt = Math.floor(seconds)
+  if (secInt < 60) return `~${secInt}s remaining`
+  const mins = Math.floor(secInt / 60)
+  const remSecs = secInt % 60
   return `~${mins}m ${remSecs.toString().padStart(2, '0')}s remaining`
 }
 
@@ -435,7 +436,7 @@ const ArtworkDisplayCard: React.FC<ArtworkDisplayCardProps> = ({
     <div className={`flex flex-col gap-1.5 flex-1 min-w-0 ${className}`}>
       <div
         onClick={onClick}
-        className={`aspect-square w-full rounded-xl bg-[#090a0f] border overflow-hidden relative group transition-all flex flex-col items-center justify-center ${
+        className={`aspect-square max-h-48 w-full rounded-xl bg-[#090a0f] border overflow-hidden relative group transition-all flex flex-col items-center justify-center ${
           isStaged
             ? 'border-purple-500/40 hover:border-purple-400 hover:shadow-[0_0_15px_rgba(168,85,247,0.2)]'
             : 'border-white/10 hover:border-white/20'
@@ -836,8 +837,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   }, [uncommittedTracks, releaseMap])
 
   const artworkTracksCount = useMemo(() => {
-    return uncommittedTracks.filter((t) => Boolean(t.pendingSidecarEdits?.coverArtUrl)).length
-  }, [uncommittedTracks])
+    return uncommittedTracks.filter((t) => {
+      const rel = releaseMap.get(t.releaseId)
+      return Boolean(t.pendingSidecarEdits?.coverArtUrl) || Boolean(rel?.artwork?.frontCoverUrl && rel.artwork.frontCoverUrl !== (rel as any)?.originalCoverArtUrl)
+    }).length
+  }, [uncommittedTracks, releaseMap])
 
   // Preflight Verification Check
   const preflight = useMemo(() => {
@@ -1341,7 +1345,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                   <span className="text-xs font-bold text-white truncate">
                                     {albumTitle}
                                   </span>
-                                  {folderName && (
+                                  {folderName && folderName.toLowerCase().trim() !== albumTitle.toLowerCase().trim() && (
                                     <span
                                       className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 flex items-center gap-1 shrink-0"
                                       title={`Physical Folder: ${folderName}`}
@@ -1370,7 +1374,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                 </span>
                               ) : relTracks.some((t) => getTrackRealEdits(t, release).length > 0) ? (
                                 <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                                  Tag Edits Staged
+                                  {commitTarget === 'embedded' ? 'Header Write Staged' : 'Sidecar Staged'}
                                 </span>
                               ) : (
                                 <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">

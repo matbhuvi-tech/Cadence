@@ -142,6 +142,10 @@ pub fn run() {
             db_add_tracks_to_playlist,
             db_remove_track_from_playlist,
             db_reorder_playlist_tracks,
+            // Split Multi-Disc Overrides
+            db_set_release_split,
+            db_remove_release_split,
+            db_get_split_releases,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cadence Core application");

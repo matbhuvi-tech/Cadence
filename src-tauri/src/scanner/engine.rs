@@ -127,6 +127,7 @@ pub fn find_local_cover_art(dir: &Path) -> Option<String> {
 pub struct TrackSidecar {
     pub title: Option<String>,
     pub artist: Option<String>,
+    pub album_artist: Option<String>,
     pub album: Option<String>,
     pub composer: Option<String>,
     pub year: Option<i32>,
@@ -147,6 +148,9 @@ pub fn read_track_sidecar(audio_path: &Path) -> TrackSidecar {
                     .map(|s| s.to_string());
                 let artist = meta.and_then(|m| m.get("artist")).and_then(|s| s.as_str())
                     .or_else(|| edits.and_then(|e| e.get("artistCredit")).and_then(|s| s.as_str()))
+                    .map(|s| s.to_string());
+                let album_artist = meta.and_then(|m| m.get("albumArtist")).and_then(|s| s.as_str())
+                    .or_else(|| edits.and_then(|e| e.get("albumArtist")).and_then(|s| s.as_str()))
                     .map(|s| s.to_string());
                 let album = meta.and_then(|m| m.get("album")).and_then(|s| s.as_str())
                     .or_else(|| edits.and_then(|e| e.get("album")).and_then(|s| s.as_str()))
@@ -169,6 +173,7 @@ pub fn read_track_sidecar(audio_path: &Path) -> TrackSidecar {
                 return TrackSidecar {
                     title,
                     artist,
+                    album_artist,
                     album,
                     composer,
                     year,
@@ -634,17 +639,10 @@ impl ScannerController {
                             .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
                             .unwrap_or(false);
 
-                        let album_artist = tag.and_then(|t| t.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string()));
+                        let mut album_artist = tag.and_then(|t| t.get_string(&ItemKey::AlbumArtist).map(|s| s.to_string()));
                         let original_album = tag.and_then(|t| t.get_string(&ItemKey::OriginalAlbumTitle).map(|s| s.to_string()));
                         let original_year = tag.and_then(|t| t.get_string(&ItemKey::OriginalReleaseDate))
                             .and_then(|s| s.chars().take(4).collect::<String>().parse::<i32>().ok());
-
-                        let is_various_artist = album_artist.as_ref().map(|a| {
-                            let lower = a.to_lowercase();
-                            lower == "various artists" || lower == "various" || lower == "v/a" || lower == "soundtrack"
-                        }).unwrap_or(false);
-
-                        let is_compilation = is_compilation_tag || is_various_artist;
 
                         // Read track-level sidecar if present
                         let trk_sidecar = read_track_sidecar(path);
@@ -655,6 +653,14 @@ impl ScannerController {
                         if let Some(tn) = trk_sidecar.track_number { track_number = Some(tn); }
                         if let Some(g) = trk_sidecar.genre { genre = Some(g); }
                         if let Some(c) = trk_sidecar.composer { composer = Some(c); }
+                        if let Some(aa) = trk_sidecar.album_artist { album_artist = Some(aa); }
+
+                        let is_various_artist = album_artist.as_ref().map(|a| {
+                            let lower = a.to_lowercase();
+                            lower == "various artists" || lower == "various" || lower == "v/a" || lower == "soundtrack"
+                        }).unwrap_or(false);
+
+                        let is_compilation = is_compilation_tag || is_various_artist;
 
                         // Read album-level sidecar if present
                         let alb_sidecar = read_album_sidecar(parent_dir);
@@ -804,6 +810,7 @@ impl ScannerController {
                             let track_number = trk_sidecar.track_number;
                             let genre = trk_sidecar.genre;
                             let composer = trk_sidecar.composer;
+                            let album_artist = trk_sidecar.album_artist;
                             let ext_str = path.extension().and_then(|e| e.to_str()).map(|s| s.to_uppercase()).unwrap_or_else(|| "FLAC".to_string());
 
                             let (duration_secs, sample_rate, bit_depth, channels) = if let Some(dsf) = dsf_opt {
@@ -902,7 +909,7 @@ impl ScannerController {
                                 movement_number: None,
                                 movement_title: None,
                                 is_compilation: false,
-                                album_artist: None,
+                                album_artist,
                                 original_album: None,
                                 original_year: None,
                                 acoustid_fingerprint: None,

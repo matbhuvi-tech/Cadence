@@ -1,8 +1,6 @@
 import React, { useState, useMemo } from 'react'
 import {
   Music4,
-  Disc3,
-  Layers,
   FolderTree,
   FolderPlus,
   Sparkles,
@@ -14,6 +12,7 @@ import {
   Database,
   Radio,
   ListMusic,
+  ShieldAlert,
 } from 'lucide-react'
 import { AuditIssue, StorageMount, Track, Release, WatchedFolder, CanvasViewMode, Playlist } from '../../core/types'
 import { FacetSelections } from './FacetedFilters'
@@ -50,6 +49,8 @@ interface LeftRailProps {
 
   viewMode?: CanvasViewMode
   onViewModeChange?: (mode: CanvasViewMode) => void
+  topMode?: 'library' | 'maintain'
+  onTopModeChange?: (mode: 'library' | 'maintain') => void
   onOpenCommitModal?: () => void
 
   playlists?: Playlist[]
@@ -66,6 +67,8 @@ export const LeftRail: React.FC<LeftRailProps> = ({
   releases,
   viewMode = 'cover_grid',
   onViewModeChange,
+  topMode = 'library',
+  onTopModeChange,
   storageMounts = [],
   watchedFolders = [],
   onOpenImportModal,
@@ -75,6 +78,7 @@ export const LeftRail: React.FC<LeftRailProps> = ({
   selectedPlaylistId,
   onSelectPlaylist,
   onOpenCreatePlaylist,
+  auditIssues = [],
 }) => {
   // Derive active smart tier directly from facets state
   const activeSmartTier = useMemo(() => {
@@ -105,41 +109,36 @@ export const LeftRail: React.FC<LeftRailProps> = ({
     }
   }
 
-  const uncommittedCount = tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
+  type LeftRailNavId = CanvasViewMode | 'audit'
 
-  const libraryNavItems = [
+  const libraryNavItems: Array<{
+    id: LeftRailNavId
+    label: string
+    icon: typeof LayoutGrid
+    count?: number
+  }> = [
     {
-      id: 'cover_grid' as CanvasViewMode,
-      label: 'Albums',
+      id: 'cover_grid',
+      label: 'Library Browse',
       icon: LayoutGrid,
       count: releases.length,
     },
     {
-      id: 'virtual_table' as CanvasViewMode,
-      label: 'All Tracks',
-      icon: Music4,
-      count: tracks.length,
-    },
-    {
-      id: 'playlist_detail' as CanvasViewMode,
+      id: 'playlist_detail',
       label: 'Playlists',
       icon: ListMusic,
       count: playlists.length,
     },
     {
-      id: 'work_movement' as CanvasViewMode,
-      label: 'Classical Works',
-      icon: Layers,
-    },
-    {
-      id: 'variant_stack' as CanvasViewMode,
-      label: 'Pressing Stacks',
-      icon: Disc3,
-    },
-    {
-      id: 'folder_tree' as CanvasViewMode,
+      id: 'folder_tree',
       label: 'Physical Folder Tree',
       icon: FolderTree,
+    },
+    {
+      id: 'audit',
+      label: 'Audit & Hygiene',
+      icon: ShieldAlert,
+      count: auditIssues.length,
     },
   ]
 
@@ -171,13 +170,19 @@ export const LeftRail: React.FC<LeftRailProps> = ({
 
           {libraryNavItems.map((item) => {
             const Icon = item.icon
-            const isActive = viewMode === item.id
+            const isActive =
+              item.id === 'audit'
+                ? topMode === 'maintain'
+                : topMode === 'library' && (viewMode === item.id || (item.id === 'cover_grid' && (viewMode === 'cover_grid' || viewMode === 'virtual_table')))
 
             return (
               <button
                 key={item.id}
                 onClick={() => {
-                  if (item.id === 'playlist_detail') {
+                  if (item.id === 'audit') {
+                    onTopModeChange?.('maintain')
+                  } else if (item.id === 'playlist_detail') {
+                    onTopModeChange?.('library')
                     if (playlists.length > 0) {
                       onSelectPlaylist?.(playlists[0])
                       onViewModeChange?.('playlist_detail')
@@ -185,6 +190,7 @@ export const LeftRail: React.FC<LeftRailProps> = ({
                       onOpenCreatePlaylist?.()
                     }
                   } else {
+                    onTopModeChange?.('library')
                     onViewModeChange?.(item.id)
                   }
                 }}
@@ -304,21 +310,6 @@ export const LeftRail: React.FC<LeftRailProps> = ({
               {watchedFolders.length}
             </span>
           </button>
-
-          {/* Persistent Non-Destructive Staging Capsule */}
-          {uncommittedCount > 0 && (
-            <button
-              onClick={onOpenCommitModal}
-              title={`${uncommittedCount} staged metadata edits preserved in sidecar. Click to review commit sheet.`}
-              className="w-full px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-left transition-all flex items-center justify-between cursor-pointer"
-            >
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                <span className="font-medium text-[11px]">{uncommittedCount} Staged Changes</span>
-              </div>
-              <span className="text-[10px] font-mono text-amber-400 underline">Review…</span>
-            </button>
-          )}
 
           {/* Ambient Hardware Telemetry: Background Artist Portrait Sync */}
           <AmbientCurationCapsule />

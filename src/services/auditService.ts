@@ -86,7 +86,7 @@ export class AuditService {
     // 2. Detect Inconsistent Artist & Composer Name Variants (Dynamic Phonetic/Punctuation Clustering)
     const nameClusters = new Map<string, Map<string, string[]>>() // normKey -> exactName -> trackIds[]
     tracks.forEach((t) => {
-      const candidates = [t.artistCredit, t.composerName].filter((n): n is string => Boolean(n && n.trim() && n !== 'Unknown Artist'))
+      const candidates = [t.artistCredit, t.composerName, t.albumArtist].filter((n): n is string => Boolean(n && n.trim() && n !== 'Unknown Artist'))
       candidates.forEach((name) => {
         // Multi-artist collaboration credits must NEVER be clustered as single-artist typo variants
         if (splitMultiArtistCredits(name).length > 1) return
@@ -686,6 +686,7 @@ export class AuditService {
           if (trk) {
             const isArtistPlausible = normalizationService.isPlausibleVariant(trk.artistCredit, canonical)
             const isComposerPlausible = trk.composerName && normalizationService.isPlausibleVariant(trk.composerName, canonical)
+            const isAlbumArtistPlausible = trk.albumArtist && normalizationService.isPlausibleVariant(trk.albumArtist, canonical)
 
             let isModified = false
             const pendingEdits: Record<string, any> = { ...(trk.pendingSidecarEdits || {}) }
@@ -710,9 +711,34 @@ export class AuditService {
               isModified = true
             }
 
+            // Update albumArtist if it is a variant
+            if (isAlbumArtistPlausible && trk.albumArtist !== canonical) {
+              recordedSources.add(trk.albumArtist!)
+              pendingEdits.originalAlbumArtist = trk.albumArtist
+              trk.albumArtist = canonical
+              pendingEdits.albumArtist = canonical
+              isModified = true
+            }
+
+            // Synchronize parent release authority if it holds variant spelling
+            const rel = graphEngine.getReleaseById(trk.releaseId)
+            if (rel) {
+              if (rel.artistCredit && normalizationService.isPlausibleVariant(rel.artistCredit, canonical) && rel.artistCredit !== canonical) {
+                recordedSources.add(rel.artistCredit)
+                rel.artistCredit = canonical
+                graphEngine.addOrUpdateRelease(rel)
+              }
+              if (rel.composerName && normalizationService.isPlausibleVariant(rel.composerName, canonical) && rel.composerName !== canonical) {
+                recordedSources.add(rel.composerName)
+                rel.composerName = canonical
+                graphEngine.addOrUpdateRelease(rel)
+              }
+            }
+
             if (isModified) {
               trk.sidecarStatus = 'uncommitted_sidecar'
               trk.pendingSidecarEdits = pendingEdits
+              graphEngine.addOrUpdateTrack(trk)
               count++
             }
           }

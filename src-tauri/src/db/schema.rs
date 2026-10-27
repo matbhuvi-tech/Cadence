@@ -207,6 +207,11 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_canonical_artists_portrait_status ON canonical_artists(portrait_status);
         CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist ON playlist_tracks(playlist_id);
         CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
+
+        CREATE TABLE IF NOT EXISTS user_split_releases (
+            release_id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL
+        );
         "
     )?;
 
@@ -226,6 +231,15 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     // Create indices on migrated columns safely
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_acoustid ON tracks(acoustid_fingerprint)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_mbid ON tracks(musicbrainz_recording_id)", []);
+
+    // Ensure user_split_releases exists on upgraded databases
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_split_releases (
+            release_id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    );
 
     Ok(())
 }

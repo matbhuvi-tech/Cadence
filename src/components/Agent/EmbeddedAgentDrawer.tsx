@@ -369,7 +369,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
               <span className="font-bold text-white text-sm tracking-wide">Cadence Copilot</span>
               {activeEngine === 'gemini' ? (
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#00F5FF]/15 text-[#00F5FF] border border-[#00F5FF]/30">
-                  Gemini 3.7 AI
+                  AI Assistant
                 </span>
               ) : (
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
@@ -483,7 +483,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
               }
               className="text-[10px] text-[#00F5FF] hover:underline cursor-pointer"
             >
-              Commit &rarr;
+              Commit →
             </button>
           </div>
         )}
@@ -683,7 +683,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
 
                 <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between">
                   <span className="text-[10px] font-mono text-[#64748B]">
-                    {rec.affectedCount ? `${rec.affectedCount} tracks affected` : 'Catalog-wide'}
+                    {rec.affectedCount ? `${rec.affectedCount} ${rec.affectedCount === 1 ? 'track' : 'tracks'} affected` : 'Catalog-wide'}
                   </span>
                   <button
                     onClick={() =>

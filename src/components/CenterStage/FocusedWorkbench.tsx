@@ -11,6 +11,8 @@ import {
   ZoomIn,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
+import { tauriBridge } from '../../services/tauriBridge'
+import { useInspectorPersistence } from '../../hooks/useInspectorPersistence'
 
 interface FocusedWorkbenchProps {
   track: Track
@@ -37,10 +39,47 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
     year: String(release?.releaseYear || '1998'),
   })
 
-  const [selectedArtwork, setSelectedArtwork] = useState<string>(
-    release?.coverArtUrl || release?.artwork?.frontCoverUrl || ''
-  )
+  const [selectedArtworkId, setSelectedArtworkId] = useState<string>('apple')
   const [isZoomingArt, setIsZoomingArt] = useState(false)
+  const [isSplitting, setIsSplitting] = useState(false)
+  const [isSplit, setIsSplit] = useState(false)
+
+  // Collapse inspector on entry for focused view if screen is constrained
+  const { setIsCollapsed } = useInspectorPersistence()
+  useEffect(() => {
+    if (window.innerWidth < 1600) {
+      setIsCollapsed(true)
+    }
+  }, [setIsCollapsed])
+
+  // Check split state for current release
+  useEffect(() => {
+    if (release?.id) {
+      tauriBridge.dbGetSplitReleases().then((splits) => {
+        setIsSplit(splits.includes(release.id))
+      }).catch(() => {})
+    }
+  }, [release?.id])
+
+  const handleToggleSplit = async () => {
+    if (!release?.id) return
+    setIsSplitting(true)
+    try {
+      if (isSplit) {
+        await tauriBridge.dbRemoveReleaseSplit(release.id)
+        setIsSplit(false)
+        showToast(`Re-merged multi-disc release "${release.title}".`)
+      } else {
+        await tauriBridge.dbSetReleaseSplit(release.id)
+        setIsSplit(true)
+        showToast(`Split multi-disc release "${release.title}" into individual discs.`)
+      }
+    } catch (err: any) {
+      showToast(`Failed to update release split: ${err?.message || err}`)
+    } finally {
+      setIsSplitting(false)
+    }
+  }
 
   // Listen for Escape key to close workbench
   useEffect(() => {
@@ -54,12 +93,14 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
   }, [onClose])
 
   const handleSave = () => {
+    const chosenArt = artworkCandidates.find((a) => a.id === selectedArtworkId)
     onApplyEdits({
       title: selectedFields.title,
       artistCredit: selectedFields.artist,
       composerName: selectedFields.composer,
       sidecarStatus: 'uncommitted_sidecar',
-    })
+      pendingSidecarEdits: chosenArt?.url ? { coverArtUrl: chosenArt.url } : undefined,
+    } as any)
     showToast(`Staged metadata match for "${track.title}". Preserved bit-perfectly in sidecar.`)
     onClose()
   }
@@ -148,6 +189,17 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {release && (
+            <button
+              onClick={handleToggleSplit}
+              disabled={isSplitting}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-xs font-mono text-[#E5E5EA] hover:text-white transition-all cursor-pointer border border-white/[0.06] disabled:opacity-50"
+              title={isSplit ? 'Re-merge into single master card' : 'Split multi-disc album into individual disc cards'}
+            >
+              <Disc3 className="w-3.5 h-3.5 text-[#D4AF37]" />
+              <span>{isSplit ? 'Re-merge Release' : 'Split Multi-Disc'}</span>
+            </button>
+          )}
           <button
             onClick={onClose}
             className="px-3.5 py-1.5 text-xs text-[#8E8E93] hover:text-white transition-colors cursor-pointer"
@@ -281,9 +333,9 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
             {artworkCandidates.map((art) => (
               <div
                 key={art.id}
-                onClick={() => setSelectedArtwork(art.url)}
+                onClick={() => setSelectedArtworkId(art.id)}
                 className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col items-center gap-3 relative ${
-                  selectedArtwork === art.url
+                  selectedArtworkId === art.id
                     ? 'border-[#D4AF37] bg-[#D4AF37]/5 shadow-sm'
                     : 'border-white/[0.06] bg-black/30 hover:border-white/20'
                 }`}
@@ -301,7 +353,7 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
                   <div className="text-[10px] font-mono text-[#8E8E93]">{art.resolution}</div>
                 </div>
 
-                {selectedArtwork === art.url && (
+                {selectedArtworkId === art.id && (
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#D4AF37] text-black font-semibold">
                     Selected
                   </span>

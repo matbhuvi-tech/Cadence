@@ -14,6 +14,7 @@ import {
 import { Track, Credit, CreditRole } from '../../core/types'
 import { splitMultiArtistCredits, canonicalizeComposer } from '../../core/taxonomyUtils'
 import { acoustIdService } from '../../services/acoustidService'
+import { tauriBridge } from '../../services/tauriBridge'
 
 interface GranularCreditMatrixProps {
   track: Track
@@ -89,7 +90,9 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
               track.originalAlbum = canonicalTitle
               track.originalYear = canonicalYear || undefined
               track.musicbrainzRecordingId = mbid || undefined
-              track.recordingId = mbid || undefined
+              if (mbid) {
+                track.recordingId = mbid
+              }
               setResolvedOrigin({
                 title: canonicalTitle,
                 year: canonicalYear || undefined,
@@ -563,33 +566,38 @@ export const GranularCreditMatrix: React.FC<GranularCreditMatrixProps> = ({
             )}
           </div>
 
-          {/* 3. AcoustID Hash (Inspectable & Copyable) */}
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between text-[#8E8E93]">
-              <span className="text-[11px]">AcoustID Hash</span>
-              {acoustIdHash && (
-                <button
-                  onClick={() => handleCopy('acoustid', acoustIdHash)}
-                  title="Copy AcoustID Chromaprint Hash"
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-white/[0.08] text-[10px] text-[#8E8E93] hover:text-[#EDEDED] transition-colors cursor-pointer"
-                >
-                  {copiedField === 'acoustid' ? (
-                    <>
-                      <Check className="w-3 h-3 text-[#10B981]" />
-                      <span className="text-[#10B981]">Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3 h-3" />
-                      <span>Copy</span>
-                    </>
-                  )}
-                </button>
-              )}
+          {/* 3. AcoustID Hash (Inspectable & Copyable Single-Line Pill) */}
+          <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-black/40 border border-white/[0.05]">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-[10px] text-[#8E8E93] shrink-0 font-medium">AcoustID:</span>
+              <span
+                className="text-[10px] font-mono text-[#A1A1AA] truncate"
+                title={acoustIdHash !== 'Uncalculated' ? acoustIdHash : undefined}
+              >
+                {acoustIdHash && acoustIdHash !== 'Uncalculated' && !acoustIdHash.startsWith('Pending')
+                  ? `${acoustIdHash.slice(0, 8)}...${acoustIdHash.slice(-4)}`
+                  : 'Pending background calculation'}
+              </span>
             </div>
-            <div className="p-2 rounded-lg bg-black/40 border border-white/[0.05] text-[10px] font-mono text-[#A1A1AA] break-all select-all max-h-16 overflow-y-auto leading-relaxed">
-              {acoustIdHash || 'Pending calculation (quiet background thread)'}
-            </div>
+            {acoustIdHash && acoustIdHash !== 'Uncalculated' && !acoustIdHash.startsWith('Pending') && (
+              <button
+                onClick={() => handleCopy('acoustid', acoustIdHash)}
+                title="Copy full AcoustID Chromaprint Hash"
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-white/[0.08] text-[10px] text-[#8E8E93] hover:text-[#EDEDED] transition-colors cursor-pointer shrink-0"
+              >
+                {copiedField === 'acoustid' ? (
+                  <>
+                    <Check className="w-3 h-3 text-[#10B981]" />
+                    <span className="text-[#10B981]">Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>Copy</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
 
           {/* 4. External Authority (MusicBrainz) */}

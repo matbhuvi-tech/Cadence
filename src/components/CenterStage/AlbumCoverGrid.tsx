@@ -27,6 +27,7 @@ import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { IntegrityScanner } from '../../services/integrityScanner'
 import { ArtistsView } from './ArtistsView'
+import { groupAlbumReleases, GroupedReleaseCard, extractDiscInfo } from '../../services/albumGroupingService'
 
 interface AlbumCoverGridProps {
   releases: Release[]
@@ -64,6 +65,8 @@ interface AlbumCoverGridProps {
   onSelectArtist?: (artist: string | null) => void
   selectedComposer?: string | null
   onSelectComposer?: (composer: string | null) => void
+  splitReleaseIds?: Set<string>
+  onToggleReleaseSplit?: (releaseId: string) => void
 }
 
 export type EntityTab = 'albums' | 'artists' | 'composers'
@@ -85,6 +88,7 @@ interface AlbumCardData {
   tracks: Track[]
   stagedCount: number
   variantsCount: number
+  discCount?: number
   rating: number
   isFavorite: boolean
   isMasterpiece: boolean
@@ -112,6 +116,8 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
   onSelectArtist: propOnSelectArtist,
   selectedComposer: propSelectedComposer,
   onSelectComposer: propOnSelectComposer,
+  splitReleaseIds = new Set(),
+  onToggleReleaseSplit,
 }) => {
   const { playTrack, currentTrack, isPlaying, playNext, addToQueue } = useAudioPlayer()
 
@@ -170,18 +176,42 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
       })
   }, [releases, tracks])
 
+  // 0. Group multi-disc releases
+  const groupedReleaseList = useMemo(() => {
+    return groupAlbumReleases(releases, splitReleaseIds)
+  }, [releases, splitReleaseIds])
+
+  const releaseToMasterMap = useMemo(() => {
+    const map = new Map<string, GroupedReleaseCard>()
+    groupedReleaseList.forEach((grc) => {
+      grc.constituentReleases.forEach((cr) => {
+        map.set(cr.id, grc)
+      })
+    })
+    return map
+  }, [groupedReleaseList])
+
   // Group tracks into robust AlbumCardData objects (both unfiltered and filtered)
   const { unfilteredCards, albumCards } = useMemo(() => {
     const groupMap = new Map<string, Track[]>()
 
     tracks.forEach((track) => {
-      const key =
-        track.masterReleaseId ||
-        track.releaseId ||
-        track.pendingSidecarEdits?.album ||
-        track.folderPath ||
-        track.folderName ||
-        'unknown'
+      let key = 'unknown'
+
+      if (track.releaseId && releaseToMasterMap.has(track.releaseId)) {
+        key = releaseToMasterMap.get(track.releaseId)!.masterRelease.id
+      } else if (track.masterReleaseId && releaseToMasterMap.has(track.masterReleaseId)) {
+        key = releaseToMasterMap.get(track.masterReleaseId)!.masterRelease.id
+      } else {
+        key =
+          track.masterReleaseId ||
+          track.releaseId ||
+          track.pendingSidecarEdits?.album ||
+          track.folderPath ||
+          track.folderName ||
+          'unknown'
+      }
+
       const existing = groupMap.get(key) || []
       existing.push(track)
       groupMap.set(key, existing)
@@ -217,7 +247,11 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
         )
       }
 
+      const grc = releaseToMasterMap.get(key) || (rel ? releaseToMasterMap.get(rel.id) : undefined)
+      const effectiveRelease = grc ? grc.masterRelease : rel
+
       const title =
+        (grc && grc.discCount > 1 ? grc.masterRelease.title : undefined) ||
         rel?.title ||
         groupTracks.find((t) => t.pendingSidecarEdits?.album)?.pendingSidecarEdits?.album ||
         groupTracks[0]?.folderName ||
@@ -240,6 +274,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
         groupTracks.find((t) => t.pendingSidecarEdits?.year)?.pendingSidecarEdits?.year
 
       const rawCover =
+        effectiveRelease?.artwork?.frontCoverUrl ||
         rel?.artwork?.frontCoverUrl ||
         groupTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)?.pendingSidecarEdits?.coverArtUrl ||
         ''
@@ -252,11 +287,22 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
           ? Math.round(groupTracks.reduce((acc, t) => acc + (t.drScore || 0), 0) / groupTracks.length)
           : 0
       const stagedCount = groupTracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
-      const variantsCount = rel?.variants?.length || 1
+      const discCount = grc?.discCount || rel?.discsCount || 1
+      const variantsCount = (rel as any)?.pressingVariants?.length || 0
+
+      // Sort groupTracks in sequential disc then track order
+      const sortedGroupTracks = [...groupTracks].sort((a, b) => {
+        const aRel = releases.find((r) => r.id === a.releaseId)
+        const bRel = releases.find((r) => r.id === b.releaseId)
+        const aDisc = a.discNumber || (aRel ? extractDiscInfo(aRel.title || '').discNumber : 1)
+        const bDisc = b.discNumber || (bRel ? extractDiscInfo(bRel.title || '').discNumber : 1)
+        if (aDisc !== bDisc) return aDisc - bDisc
+        return (a.trackNumber || 0) - (b.trackNumber || 0)
+      })
 
       cards.push({
         id: key,
-        release: rel,
+        release: effectiveRelease,
         title,
         folderName,
         composerName,
@@ -266,9 +312,10 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
         formats,
         sampleRates,
         avgDr,
-        tracks: groupTracks,
+        tracks: sortedGroupTracks,
         stagedCount,
         variantsCount,
+        discCount,
         rating: rel?.rating || 0,
         isFavorite: Boolean(rel?.isFavorite),
         isMasterpiece: Boolean(rel?.isMasterpiece),
@@ -306,7 +353,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     })
 
     return { unfilteredCards: cards, albumCards: filtered }
-  }, [tracks, releases, searchFilter, sortBy])
+  }, [tracks, releases, searchFilter, sortBy, releaseToMasterMap])
 
   // Drilldown Selected Album
   const selectedAlbum = useMemo(() => {
@@ -315,6 +362,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
       unfilteredCards.find((a) => a.id === selectedAlbumId) ||
       unfilteredCards.find((a) => a.release?.id === selectedAlbumId) ||
       unfilteredCards.find((a) => a.release?.masterReleaseId === selectedAlbumId) ||
+      unfilteredCards.find((a) => a.tracks.some((t) => t.releaseId === selectedAlbumId)) ||
       null
     )
   }, [unfilteredCards, selectedAlbumId])
@@ -537,10 +585,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
         >
           {/* Fallback Artwork Background */}
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-[#1C1D24] via-[#14151B] to-[#0C0D10] text-[#636366] p-3 text-center">
-            <Disc3 className="w-10 h-10 text-white/20 mb-1 group-hover/card:rotate-45 transition-transform duration-700" />
-            <span className="text-[10px] font-mono text-[#8E8E93] line-clamp-2 px-1">
-              {album.title}
-            </span>
+            <Disc3 className="w-10 h-10 text-white/20 group-hover/card:rotate-45 transition-transform duration-700" />
           </div>
 
           {album.coverArtUrl ? (
@@ -577,6 +622,16 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               >
                 <Layers className="w-2.5 h-2.5 text-[#D4AF37]" />
                 <span>{album.variantsCount} Editions</span>
+              </span>
+            )}
+
+            {Boolean(album.discCount && album.discCount > 1) && (
+              <span
+                className="px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[#E5E5EA] border border-white/15 font-mono text-[9px] shadow-sm flex items-center gap-1"
+                title={`${album.discCount} Discs in Box Set`}
+              >
+                <Disc3 className="w-2.5 h-2.5 text-[#38BDF8]" />
+                <span>{album.discCount} Discs</span>
               </span>
             )}
           </div>
@@ -999,7 +1054,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                           ? 'bg-purple-500/20 border border-purple-500/60 text-white shadow-lg shadow-purple-500/10 font-bold ring-1 ring-purple-500/30'
                           : 'bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-300 hover:text-white'
                       }`}
-                      title={v.folderPath || v.notes || v.variantName}
+                      title={v.folderPath || (v as any).notes || v.variantName}
                     >
                       <Folder className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-[#38BDF8]' : 'text-slate-400 group-hover:text-[#38BDF8] transition-colors'}`} />
                       <div className="flex flex-col text-left">
@@ -1037,9 +1092,9 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                 </div>
                 <span
                   className="text-slate-300 truncate font-mono text-[11px] select-all hover:text-white transition-colors cursor-text bg-black/40 px-2.5 py-1 rounded-lg border border-white/[0.06] flex-1"
-                  title={activeVariant.folderPath || activeVariant.folderName}
+                  title={activeVariant?.folderPath || (activeVariant as any)?.folderName || ''}
                 >
-                  {activeVariant.folderPath || activeVariant.folderName}
+                  {activeVariant?.folderPath || (activeVariant as any)?.folderName}
                 </span>
               </div>
             )}

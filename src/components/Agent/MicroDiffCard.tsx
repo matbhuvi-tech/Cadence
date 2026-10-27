@@ -137,7 +137,7 @@ export const MicroDiffCard: React.FC<MicroDiffCardProps> = ({
             className="px-2.5 py-1 rounded-lg bg-[#00F5FF]/15 hover:bg-[#00F5FF]/25 text-[#00F5FF] border border-[#00F5FF]/30 flex items-center gap-1.5 transition-all cursor-pointer font-semibold"
           >
             <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
-            <span>Review in Commit (⌘S) &rarr;</span>
+            <span>Review in Commit (⌘S) →</span>
           </button>
         </div>
       )}

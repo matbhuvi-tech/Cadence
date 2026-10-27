@@ -14,6 +14,7 @@ import {
   ArtistDetail,
   AudioFormat,
   Playlist,
+  PressingVariant,
 } from '../core/types'
 import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags, disambiguateComboTitle, extractMeaningfulFolderName } from '../core/taxonomyUtils'
 import type { UnlistenFn } from '@tauri-apps/api/event'
@@ -386,8 +387,8 @@ export class SqliteLibraryService {
           workTitle: t.workTitle,
           movementNumber: t.movementNumber,
           movementTitle: t.movementTitle,
-          composerName: t.composer,
-          artistCredit: t.artistCredit,
+          composerName: (t.sidecarEditsJson ? (JSON.parse(t.sidecarEditsJson).composerName ?? t.composer) : t.composer),
+          artistCredit: (t.sidecarEditsJson ? (JSON.parse(t.sidecarEditsJson).artistCredit ?? t.artistCredit) : t.artistCredit),
           durationSeconds: t.durationSecs || 0,
           filePath: t.filePath,
           fileSize: t.fileSize,
@@ -408,7 +409,7 @@ export class SqliteLibraryService {
           bitDepth: t.bitDepth || undefined,
           isOnline: t.isOnline,
           isCompilation: Boolean(t.isCompilation),
-          albumArtist: t.albumArtist || undefined,
+          albumArtist: (t.sidecarEditsJson ? (JSON.parse(t.sidecarEditsJson).albumArtist ?? t.albumArtist) : t.albumArtist) || undefined,
           originalAlbum: t.originalAlbum || undefined,
           originalYear: t.originalYear || undefined,
           acoustidFingerprint: t.acoustidFingerprint || undefined,
@@ -1107,6 +1108,12 @@ export class SqliteLibraryService {
           workTitle: t.workTitle || null,
           movementNumber: t.movementNumber || null,
           movementTitle: t.movementTitle || null,
+          isCompilation: Boolean(t.isCompilation),
+          albumArtist: t.albumArtist || t.pendingSidecarEdits?.albumArtist || null,
+          originalAlbum: t.originalAlbum || null,
+          originalYear: t.originalYear || null,
+          acoustidFingerprint: t.acoustidFingerprint || null,
+          musicbrainzRecordingId: t.musicbrainzRecordingId || null,
           createdAt: new Date().toISOString(),
         }
       })

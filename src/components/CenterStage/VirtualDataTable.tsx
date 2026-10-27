@@ -29,6 +29,7 @@ import {
   ListPlus,
   BookmarkPlus,
   Film,
+  MoreHorizontal,
 } from 'lucide-react'
 import { Track, Release, AlbumDisplayMode } from '../../core/types'
 import { IntegrityScanner } from '../../services/integrityScanner'
@@ -136,7 +137,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
   onInspectRelease,
   onUpdateReleaseDetails,
 }) => {
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>('hierarchy')
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>('flat')
   const [sortField, setSortField] = useState<SortField>('trackNumber')
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
   const [pinnedColumns, setPinnedColumns] = useState<Set<string>>(new Set(['select', 'trackNumber']))
@@ -376,7 +377,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
 
   const formatDuration = (secs: number) => {
     const m = Math.floor(secs / 60)
-    const s = secs % 60
+    const s = Math.floor(secs % 60)
     return `${m}:${s.toString().padStart(2, '0')}`
   }
 
@@ -711,6 +712,8 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
 
                   {/* Right: Album-Level Actions with frosted glass */}
                   <div className="flex items-center gap-2.5 shrink-0 z-10">
+
+                    {/* Primary actions */}
                     <button
                       onClick={() => {
                         if (group.tracks.length > 0) {
@@ -725,83 +728,87 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                     </button>
 
                     <button
-                      onClick={() => {
-                        addToQueue(group.tracks)
-                        window.dispatchEvent(
-                          new CustomEvent('cadence:toast', { detail: `Added ${group.tracks.length} tracks to queue` })
-                        )
-                      }}
-                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-medium shadow-md"
-                      title="Add all album tracks to playback queue"
-                    >
-                      <ListPlus className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Queue</span>
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        window.dispatchEvent(
-                          new CustomEvent('cadence:add-tracks-playlist', { detail: group.tracks })
-                        )
-                      }}
-                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-medium shadow-md"
-                      title="Add all album tracks to a playlist"
-                    >
-                      <BookmarkPlus className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Playlist</span>
-                    </button>
-
-                    <button
                       onClick={() => handleEditAlbum(group)}
                       className="px-3 py-1.5 rounded-xl bg-[#00F5FF]/15 hover:bg-[#00F5FF]/25 text-[#00F5FF] border border-[#00F5FF]/40 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-bold shadow-md hover:scale-[1.02] active:scale-[0.98]"
-                      title="Edit Album Title, Physical Folder Name, Composer, Year & Artwork for all tracks at once"
+                      title="Edit Album Title, Physical Folder Name, Composer, Year & Artwork"
                     >
                       <SlidersHorizontal className="w-3.5 h-3.5" />
                       <span>Edit Album</span>
                     </button>
 
-                    {onOpenBatchDiff && (
+                    {/* Secondary Overflow Actions */}
+                    <div className="relative group/menu">
                       <button
-                        onClick={() => {
-                          group.tracks.forEach((t) => {
-                            if (!selectedTrackIds.has(t.id)) onToggleTrackSelection(t.id, false)
-                          })
-                          onOpenBatchDiff()
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-[#ADFF2F]/15 hover:bg-[#ADFF2F]/25 text-[#ADFF2F] border border-[#ADFF2F]/40 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-bold shadow-md hover:scale-[1.02] active:scale-[0.98]"
-                        title="Batch Enrich all tracks in this album across Apple Music, MusicBrainz, and AI"
+                        className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/15 transition-all text-xs flex items-center justify-center cursor-pointer"
+                        title="More album actions"
                       >
-                        <Sparkles className="w-3.5 h-3.5 text-[#ADFF2F]" />
-                        <span>Enrich Album</span>
+                        <MoreHorizontal className="w-4 h-4" />
                       </button>
-                    )}
-
-                    {backdropAnalyzer.isBackdropUnformatted(group.release).isUnformatted && (
-                      <button
-                        onClick={async () => {
-                          if (group.release) {
-                            const res = await backdropAnalyzer.formatBackdropForRelease(group.release.id)
-                            if (res.success && res.backdropUrl) {
-                              onUpdateReleaseDetails?.(group.release.id, { backdropUrl: res.backdropUrl })
-                              window.dispatchEvent(
-                                new CustomEvent('cadence:toast', {
-                                  detail: `Generated 2400×320 panoramic backdrop for "${group.title}"`,
-                                })
-                              )
-                            } else {
-                              window.dispatchEvent(
-                                new CustomEvent('cadence:toast', { detail: res.message })
-                              )
-                            }
-                          }
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 hover:text-white border border-amber-500/40 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-bold shadow-md hover:scale-[1.02] active:scale-[0.98]"
-                        title="Background is not properly formatted. Click to automatically generate a high-fidelity 2400×320 panoramic backdrop."
-                      >
-                        <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Format Backdrop</span>
-                      </button>
-                    )}
+                      <div className="absolute right-0 top-full mt-1.5 w-48 rounded-xl bg-[#12151D] border border-white/10 shadow-2xl p-1.5 hidden group-hover/menu:flex flex-col gap-1 z-30">
+                        <button
+                          onClick={() => {
+                            addToQueue(group.tracks)
+                            window.dispatchEvent(
+                              new CustomEvent('cadence:toast', { detail: `Added ${group.tracks.length} tracks to queue` })
+                            )
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left"
+                        >
+                          <ListPlus className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Add to Queue</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            window.dispatchEvent(
+                              new CustomEvent('cadence:add-tracks-playlist', { detail: group.tracks })
+                            )
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left"
+                        >
+                          <BookmarkPlus className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Add to Playlist</span>
+                        </button>
+                        {onOpenBatchDiff && (
+                          <button
+                            onClick={() => {
+                              group.tracks.forEach((t) => {
+                                if (!selectedTrackIds.has(t.id)) onToggleTrackSelection(t.id, false)
+                              })
+                              onOpenBatchDiff()
+                            }}
+                            className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-[#ADFF2F]" />
+                            <span>Enrich Album</span>
+                          </button>
+                        )}
+                        {backdropAnalyzer.isBackdropUnformatted(group.release).isUnformatted && (
+                          <button
+                            onClick={async () => {
+                              if (group.release) {
+                                const res = await backdropAnalyzer.formatBackdropForRelease(group.release.id)
+                                if (res.success && res.backdropUrl) {
+                                  onUpdateReleaseDetails?.(group.release.id, { backdropUrl: res.backdropUrl })
+                                  window.dispatchEvent(
+                                    new CustomEvent('cadence:toast', {
+                                      detail: `Generated 2400×320 panoramic backdrop for "${group.title}"`,
+                                    })
+                                  )
+                                } else {
+                                  window.dispatchEvent(
+                                    new CustomEvent('cadence:toast', { detail: res.message })
+                                  )
+                                }
+                              }
+                            }}
+                            className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-amber-300 text-xs flex items-center gap-2 text-left"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Format Backdrop</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -895,8 +902,8 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                               )}
                               {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
                                 <span
-                                  className={`text-[10px] text-cyan-400 font-mono truncate flex items-center gap-1 ${
-                                    track.canonicalReleaseId && onInspectRelease ? 'cursor-pointer hover:underline' : 'opacity-85'
+                                  className={`text-[10px] bg-white/[0.05] text-zinc-400 border border-white/[0.08] px-1.5 py-0.5 rounded font-mono truncate flex items-center gap-1 w-fit mt-0.5 ${
+                                    track.canonicalReleaseId && onInspectRelease ? 'cursor-pointer hover:text-white hover:border-white/20' : 'opacity-85'
                                   }`}
                                   onClick={(e) => {
                                     if (track.canonicalReleaseId && onInspectRelease) {
@@ -910,9 +917,9 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                                       : `Original Soundtrack: ${track.canonicalAlbumTitle} (Not in local library)`
                                   }
                                 >
-                                  <Film className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
+                                  <Film className="w-2.5 h-2.5 text-zinc-400 shrink-0" />
                                   <span>From {track.canonicalAlbumTitle}</span>
-                                  {track.canonicalReleaseYear && <span className="text-cyan-400/60">({track.canonicalReleaseYear})</span>}
+                                  {track.canonicalReleaseYear && <span className="text-zinc-500">({track.canonicalReleaseYear})</span>}
                                 </span>
                               )}
                             </div>
