@@ -26,6 +26,7 @@ import {
   ZoomIn,
   Eye,
   Maximize2,
+  Lock,
 } from 'lucide-react'
 import { Release, Track } from '../../core/types'
 import {
@@ -172,6 +173,29 @@ function getTrackRealEdits(track: Track, release?: Release): FieldDiff[] {
         label: 'Artist Credit',
         current: track.artistCredit || '<empty>',
         proposed: pending.artistCredit,
+        icon: User,
+      })
+    }
+  }
+
+  // Album Artist
+  const curAlbumArtist = track.albumArtist || release?.artistCredit || ''
+  if (pending.albumArtist) {
+    const orig = (pending as any).originalAlbumArtist
+    if (orig && orig !== pending.albumArtist) {
+      diffs.push({
+        key: 'albumArtist',
+        label: 'Album Artist',
+        current: orig,
+        proposed: pending.albumArtist,
+        icon: User,
+      })
+    } else if (pending.albumArtist !== curAlbumArtist) {
+      diffs.push({
+        key: 'albumArtist',
+        label: 'Album Artist',
+        current: curAlbumArtist || '<empty>',
+        proposed: pending.albumArtist,
         icon: User,
       })
     }
@@ -372,6 +396,183 @@ const ArtworkZoomThumbnail: React.FC<ArtworkZoomThumbnailProps> = ({
   )
 }
 
+interface ArtworkDisplayCardProps {
+  url?: string
+  label: string
+  badgeText: string
+  badgeColor?: 'zinc' | 'purple' | 'emerald'
+  resolution?: string
+  isStaged?: boolean
+  emptyTitle?: string
+  emptySubtitle?: string
+  onClick?: () => void
+  className?: string
+}
+
+const ArtworkDisplayCard: React.FC<ArtworkDisplayCardProps> = ({
+  url,
+  label,
+  badgeText,
+  badgeColor = 'zinc',
+  resolution,
+  isStaged = false,
+  emptyTitle = 'No Embedded Artwork',
+  emptySubtitle = 'Audio container has no embedded APIC / picture chunk',
+  onClick,
+  className = '',
+}) => {
+  const [hasError, setHasError] = useState(false)
+
+  useEffect(() => {
+    setHasError(false)
+  }, [url])
+
+  const showImage = Boolean(url) && !hasError
+
+  return (
+    <div className={`flex flex-col gap-1.5 flex-1 min-w-0 ${className}`}>
+      <div
+        onClick={onClick}
+        className={`aspect-square w-full rounded-xl bg-[#090a0f] border overflow-hidden relative group transition-all flex flex-col items-center justify-center ${
+          isStaged
+            ? 'border-purple-500/40 hover:border-purple-400 hover:shadow-[0_0_15px_rgba(168,85,247,0.2)]'
+            : 'border-white/10 hover:border-white/20'
+        } ${onClick ? 'cursor-pointer' : ''}`}
+      >
+        {showImage ? (
+          <img
+            src={url}
+            alt={label}
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            onError={() => setHasError(true)}
+          />
+        ) : (
+          <div className="p-3 w-full h-full flex flex-col items-center justify-center text-center gap-1.5 bg-[#0a0c13]/90 select-none">
+            <Disc3 className="w-8 h-8 text-zinc-600 stroke-[1.5]" />
+            <span className="text-[11px] font-mono font-medium text-zinc-300">{emptyTitle}</span>
+            <span className="text-[9px] font-mono text-zinc-500 max-w-[150px] leading-tight">
+              {emptySubtitle}
+            </span>
+          </div>
+        )}
+
+        {/* Badge in top-left */}
+        <div
+          className={`absolute top-2 left-2 px-2 py-0.5 rounded-md text-[9px] font-mono backdrop-blur-md border ${
+            badgeColor === 'purple'
+              ? 'bg-purple-950/85 text-purple-200 border-purple-500/40'
+              : badgeColor === 'emerald'
+              ? 'bg-emerald-950/85 text-emerald-200 border-emerald-500/40'
+              : 'bg-black/80 text-zinc-300 border-white/10'
+          }`}
+        >
+          {badgeText}
+        </div>
+
+        {showImage && onClick && (
+          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+            <Maximize2 className="w-5 h-5 text-white drop-shadow" />
+          </div>
+        )}
+      </div>
+
+      <div
+        className={`text-[10px] font-mono truncate text-center ${
+          isStaged ? 'text-purple-300 font-semibold' : 'text-zinc-400'
+        }`}
+      >
+        {showImage ? resolution || 'Disk File' : 'None detected'}
+      </div>
+    </div>
+  )
+}
+
+interface LightboxArtworkCardProps {
+  url?: string
+  label: string
+  badgeText: string
+  res?: string
+  isStaged?: boolean
+}
+
+const LightboxArtworkCard: React.FC<LightboxArtworkCardProps> = ({
+  url,
+  label,
+  badgeText,
+  res,
+  isStaged = false,
+}) => {
+  const [loadError, setLoadError] = useState(false)
+
+  useEffect(() => {
+    setLoadError(false)
+  }, [url])
+
+  return (
+    <div
+      className={`flex flex-col gap-2.5 p-4 rounded-2xl bg-black/50 border ${
+        isStaged
+          ? 'border-emerald-500/40 shadow-xl shadow-emerald-500/10'
+          : 'border-white/10'
+      }`}
+    >
+      <div className="flex items-center justify-between">
+        <span
+          className={`text-xs font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 ${
+            isStaged ? 'text-emerald-400' : 'text-zinc-400'
+          }`}
+        >
+          {isStaged && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />}
+          {badgeText}
+        </span>
+        <span className={`text-xs font-mono ${isStaged ? 'text-emerald-300 font-semibold' : 'text-zinc-300'}`}>
+          {res || (isStaged ? '3000×3000px' : 'Disk File')}
+        </span>
+      </div>
+      <div
+        className={`aspect-square w-full rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border ${
+          isStaged ? 'border-emerald-500/20' : 'border-white/10'
+        }`}
+      >
+        {url && !loadError ? (
+          <img
+            src={url}
+            alt={label}
+            className="w-full h-full object-contain"
+            onError={() => setLoadError(true)}
+          />
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-2 text-zinc-500 p-6 text-center select-none">
+            <Disc3 className="w-16 h-16 stroke-[1.5] text-zinc-600" />
+            <span className="text-xs font-mono text-zinc-400">
+              {url
+                ? 'Artwork could not be loaded from storage'
+                : isStaged
+                ? 'No Staged Artwork'
+                : 'No Local Cover Embedded'}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function getAlbumWideEdits(relTracks: Track[], release?: Release): FieldDiff[] {
+  if (relTracks.length <= 1) return []
+  const firstTrackEdits = getTrackRealEdits(relTracks[0], release)
+  if (firstTrackEdits.length === 0) return []
+
+  return firstTrackEdits.filter((firstDiff) => {
+    return relTracks.slice(1).every((track) => {
+      const trackEdits = getTrackRealEdits(track, release)
+      return trackEdits.some(
+        (d) => d.key === firstDiff.key && d.current === firstDiff.current && d.proposed === firstDiff.proposed
+      )
+    })
+  })
+}
+
 export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   uncommittedTracks,
   releases = [],
@@ -385,6 +586,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'preview' | 'pipeline'>('preview')
   const [filterCategory, setFilterCategory] = useState<'all' | 'metadata' | 'artwork'>('all')
+  const [compactDiffs, setCompactDiffs] = useState(false)
   const [commitTarget, setCommitTarget] = useState<'sidecar' | 'embedded'>('sidecar')
   const { isPlaying, togglePlayPause } = useAudioPlayer()
   const isPlaybackActive = isPlaying
@@ -659,10 +861,8 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     setDetailedProgress(null)
     setFailedTracks([])
 
-    // If writing embedded headers, immediately show pipeline progress
-    if (commitTarget === 'embedded') {
-      setActiveTab('pipeline')
-    }
+    // Immediately switch to execution pipeline so user has clear verification & progress proof
+    setActiveTab('pipeline')
 
     const startTime = Date.now()
     const description = `Batch Commit ${tracksToRun.length} tracks to ${
@@ -729,7 +929,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-start justify-center pt-[52px] animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[70] bg-black/85 backdrop-blur-md flex items-start justify-center pt-[52px] animate-in fade-in duration-200">
       <div
         data-tutorial-id="modal-staged-commit-pipeline"
         className="bg-[#121318] border-x border-b border-white/[0.08] rounded-t-none rounded-b-2xl w-full max-w-[1400px] max-h-[calc(94vh-52px)] h-[calc(94vh-52px)] shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-hidden flex flex-col animate-in slide-in-from-top-6 duration-240 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] will-change-transform"
@@ -737,23 +937,57 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
         {/* 1. Modal Header with Trust Badges */}
         <div className="p-4 px-6 border-b border-white/[0.08] flex items-center justify-between bg-white/[0.02]">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <ShieldCheck className="w-5 h-5" />
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center transition-colors ${
+              isRunning
+                ? 'bg-cyan-500/15 border border-cyan-500/30 text-cyan-400'
+                : isCompleted
+                ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                : 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+            }`}>
+              {isRunning ? <Loader2 className="w-5 h-5 animate-spin text-cyan-400" /> : <ShieldCheck className="w-5 h-5" />}
             </div>
             <div className="flex flex-col text-left">
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2.5 flex-wrap">
                 <h2 className="text-base font-bold text-slate-100">Review & Commit Changes</h2>
-                <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Staged Locally (Untouched)</span>
-                </span>
-                <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5">
-                  <Timer className="w-3.5 h-3.5" />
-                  <span>Rollback Journal Enabled</span>
+                
+                {/* Dynamic Transaction State Badge */}
+                {isRunning ? (
+                  <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-200 border border-cyan-500/40 flex items-center gap-1.5 animate-pulse">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                    <span>Commit In Progress (Writing to Disk)</span>
+                  </span>
+                ) : isCompleted ? (
+                  <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Transaction Verified (Committed)</span>
+                  </span>
+                ) : failedTracks.length > 0 ? (
+                  <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Commit Completed with Errors</span>
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>Staged Locally (Draft / Untouched)</span>
+                  </span>
+                )}
+
+                {/* Pre-Commit State Snapshot Badge */}
+                <span
+                  className="text-[11px] font-mono font-medium px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5"
+                  title="A pre-commit snapshot is recorded before any write begins. Sidecar JSON edits are non-destructively reversible; embedded header tags can be restored from the pre-commit snapshot."
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Pre-Commit State Snapshot</span>
                 </span>
               </div>
               <span className="text-xs text-slate-400 mt-0.5">
-                Inspect pending field diffs grouped by album authority before saving to storage.
+                {isRunning
+                  ? 'Writing metadata and artwork to library storage. Controls locked to guarantee transaction integrity.'
+                  : isCompleted
+                  ? 'All staged modifications have been verified and saved to storage.'
+                  : 'Inspect pending field diffs grouped by album authority before saving to storage.'}
               </span>
             </div>
           </div>
@@ -770,9 +1004,9 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 
         {/* 2. Decoupled Summary Metrics Strip (Distinct from Filter Tabs) */}
         <div className="px-6 py-2.5 bg-[#0f1015] border-b border-white/[0.06] flex items-center justify-between gap-4 flex-wrap shrink-0">
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex items-center gap-2 text-xs flex-wrap">
             <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mr-1">
-              Staged Batch:
+              Total Staged Batch:
             </span>
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.03] border border-white/[0.06] text-zinc-300">
               <Disc3 className="w-3.5 h-3.5 text-cyan-400" />
@@ -800,6 +1034,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                 </span>
               </div>
             )}
+            {activeTracksToCommit.length !== uncommittedTracks.length && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] font-mono">
+                <span>Selected: <strong>{activeTracksToCommit.length}</strong> of {uncommittedTracks.length} files</span>
+              </div>
+            )}
           </div>
 
           {/* View Switcher: Diff Review vs Execution Drawer */}
@@ -807,13 +1046,18 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('preview')}
-              className={`px-3 py-1 rounded-md text-xs font-mono font-medium transition-all cursor-pointer ${
+              className={`px-3 py-1 rounded-md text-xs font-mono font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
                 activeTab === 'preview'
                   ? 'bg-white/[0.12] text-white shadow-sm border border-white/10'
                   : 'text-zinc-400 hover:text-white'
               }`}
             >
-              Diff Review
+              <span>Diff Review</span>
+              {isRunning && (
+                <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                  Snapshot
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -834,7 +1078,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
         <div className="flex-1 overflow-hidden p-6 flex flex-col gap-4 text-left min-h-0">
           {activeTab === 'preview' ? (
             <>
-              {/* Category Filter Tabs & Search Bar */}
+              {/* Category Filter Tabs, Compact Toggle & Search Bar */}
               <div className="flex items-center justify-between gap-3 flex-wrap shrink-0">
                 <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/[0.06]">
                   <button
@@ -874,18 +1118,66 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                   </button>
                 </div>
 
-                {/* Search Bar */}
-                <div className="relative flex-1 min-w-[220px]">
-                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Filter by title, artist, album, path..."
-                    className="w-full pl-9 pr-3 py-1.5 bg-black/40 border border-white/[0.08] rounded-xl text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 font-mono"
-                  />
+                <div className="flex items-center gap-2 flex-1 min-w-[280px]">
+                  {/* Compact Diff Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => setCompactDiffs(!compactDiffs)}
+                    className={`px-3 py-1.5 rounded-xl border text-xs font-mono transition-all cursor-pointer shrink-0 flex items-center gap-1.5 ${
+                      compactDiffs
+                        ? 'bg-cyan-500/15 border-cyan-500/30 text-cyan-300 font-semibold'
+                        : 'bg-black/40 border-white/[0.08] text-zinc-400 hover:text-white'
+                    }`}
+                    title={compactDiffs ? 'Showing only track-specific differences' : 'Showing all field diffs'}
+                  >
+                    <Layers className="w-3.5 h-3.5" />
+                    <span>{compactDiffs ? 'Compact Diffs: ON' : 'Compact Diffs'}</span>
+                  </button>
+
+                  {/* Search Bar */}
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Filter by title, artist, album, path..."
+                      className="w-full pl-9 pr-3 py-1.5 bg-black/40 border border-white/[0.08] rounded-xl text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 font-mono"
+                    />
+                  </div>
                 </div>
               </div>
+
+              {/* Persistent Live Commit Banner if user is viewing diffs while isRunning */}
+              {isRunning && (
+                <div className="p-3 px-4 rounded-xl bg-gradient-to-r from-cyan-950/60 via-[#0C1220] to-[#0A0D14] border border-cyan-500/40 text-cyan-200 flex items-center justify-between gap-4 animate-in fade-in shrink-0 shadow-lg">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Loader2 className="w-4 h-4 text-cyan-400 animate-spin shrink-0" />
+                    <div className="flex flex-col min-w-0 text-left">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-white">
+                          Commit Transaction In Progress — Snapshot Frozen
+                        </span>
+                        <span className="text-[10px] font-mono px-2 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                          Read-Only
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-zinc-300 font-mono truncate mt-0.5">
+                        {detailedProgress
+                          ? `Writing track ${detailedProgress.processedTracks} of ${detailedProgress.totalTracks} (${detailedProgress.percent}%) • Current: ${detailedProgress.currentTrack?.title || 'Processing...'}`
+                          : `Committing ${activeTracksToCommit.length} tracks to storage...`}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('pipeline')}
+                    className="px-3 py-1 text-xs font-mono font-semibold rounded-lg bg-cyan-500 text-black hover:bg-cyan-400 transition-all cursor-pointer shrink-0 shadow-md"
+                  >
+                    View Live Execution Log →
+                  </button>
+                </div>
+              )}
 
               {/* Preflight Transport Warning if Playback Active */}
               {!preflight.playbackIdle && (
@@ -974,10 +1266,13 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                               <div
                                 onClick={(e) => {
                                   e.stopPropagation()
+                                  if (isRunning) return
                                   toggleReleaseExclusion(relId, relTracks)
                                 }}
-                                className="w-5 h-5 flex items-center justify-center shrink-0 cursor-pointer"
-                                title={allTracksExcluded ? 'Include album in commit' : 'Exclude album from commit'}
+                                className={`w-5 h-5 flex items-center justify-center shrink-0 ${
+                                  isRunning ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+                                }`}
+                                title={isRunning ? 'Locked during execution' : allTracksExcluded ? 'Include album in commit' : 'Exclude album from commit'}
                               >
                                 <div
                                   className={`w-4 h-4 rounded flex items-center justify-center transition-all ${
@@ -1053,7 +1348,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                               <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-zinc-300 border border-white/10">
                                 {relTracks.length} track{relTracks.length > 1 ? 's' : ''}
                               </span>
-                              {onDiscardRelease && (
+                              {onDiscardRelease && !isRunning && (
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -1075,6 +1370,42 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                               </div>
                             </div>
                           </div>
+
+                          {/* Uniform Album Edits Banner */}
+                          {isExpanded && (() => {
+                            const albumWideEdits = getAlbumWideEdits(relTracks, release)
+                            if (albumWideEdits.length === 0) return null
+                            return (
+                              <div className="mx-4 my-2.5 p-3 rounded-xl bg-cyan-500/[0.07] border border-cyan-500/25 flex flex-col gap-2 text-xs text-left animate-in fade-in duration-150">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] font-mono uppercase tracking-wider font-semibold text-cyan-300 flex items-center gap-1.5">
+                                    <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                                    <span>Uniform Album Modifications Applied to All {relTracks.length} Tracks:</span>
+                                  </span>
+                                  <span className="text-[10px] font-mono text-zinc-400">
+                                    {albumWideEdits.length} uniform field{albumWideEdits.length > 1 ? 's' : ''}
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {albumWideEdits.map((ed) => (
+                                    <div
+                                      key={ed.key}
+                                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/60 border border-cyan-500/30 text-[11px] font-mono shadow-sm"
+                                    >
+                                      <span className="text-zinc-400">{ed.label}:</span>
+                                      <span className="text-zinc-500 line-through truncate max-w-[140px]" title={ed.current}>
+                                        {ed.current}
+                                      </span>
+                                      <span className="text-cyan-400 font-bold">→</span>
+                                      <span className="text-emerald-300 font-semibold truncate max-w-[180px]" title={ed.proposed}>
+                                        {ed.proposed}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )
+                          })()}
 
                           {/* Expandable Inline Artwork Comparison (if artwork staged) */}
                           {isExpanded && stagedCoverArt && (
@@ -1133,7 +1464,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                   <Eye className="w-3.5 h-3.5" />
                                   <span>Inspect Pane</span>
                                 </button>
-                                {onDiscardReleaseArtwork && (
+                                {onDiscardReleaseArtwork && !isRunning && (
                                   <button
                                     type="button"
                                     onClick={() => onDiscardReleaseArtwork(relId)}
@@ -1154,6 +1485,25 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                 const isTrackExcluded = excludedTrackIds.has(track.id)
                                 const paddingInfo = paddingMap.get(track.id)
 
+                                const albumWideEdits = getAlbumWideEdits(relTracks, release)
+                                const albumWideKeys = new Set(albumWideEdits.map((e) => e.key))
+                                const displayedEdits = compactDiffs
+                                  ? realEdits.filter((e) => !albumWideKeys.has(e.key))
+                                  : realEdits
+
+                                // Multi-disc numbering & proposed track number formatting
+                                const discNum = track.discNumber || (track as any).discIndex || 1
+                                const hasMultipleDiscs = relTracks.some(
+                                  (t) => (t.discNumber || (t as any).discIndex || 1) > 1
+                                )
+                                const trackNumRaw = track.trackNumber
+                                  ? String(track.trackNumber).padStart(2, '0')
+                                  : '—'
+                                const proposedTrackNum = track.pendingSidecarEdits?.trackNumber
+                                const trackNumberDisplay = hasMultipleDiscs
+                                  ? `D${discNum} #${trackNumRaw}`
+                                  : `#${trackNumRaw}`
+
                                 return (
                                   <div
                                     key={track.id}
@@ -1171,22 +1521,38 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                           type="button"
                                           role="checkbox"
                                           aria-checked={!isTrackExcluded}
+                                          disabled={isRunning}
                                           onClick={(e) => {
                                             e.stopPropagation()
+                                            if (isRunning) return
                                             toggleTrackExclusion(track.id)
                                           }}
-                                          className={`w-4 h-4 rounded flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                                          className={`w-4 h-4 rounded flex items-center justify-center transition-all shrink-0 ${
+                                            isRunning ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+                                          } ${
                                             !isTrackExcluded
                                               ? 'bg-emerald-500 border border-emerald-400 text-black'
                                               : 'bg-zinc-900 border border-zinc-700'
                                           }`}
-                                          title={isTrackExcluded ? 'Include track' : 'Exclude track'}
+                                          title={isRunning ? 'Locked during execution' : isTrackExcluded ? 'Include track' : 'Exclude track'}
                                         >
                                           {!isTrackExcluded && <Check className="w-3 h-3 stroke-[3]" />}
                                         </button>
 
-                                        <div className="w-6 text-[11px] font-mono text-zinc-500 shrink-0">
-                                          {track.trackNumber ? `#${String(track.trackNumber).padStart(2, '0')}` : '—'}
+                                        <div className="w-14 text-[11px] font-mono text-zinc-400 shrink-0 font-medium">
+                                          {proposedTrackNum !== undefined && proposedTrackNum !== track.trackNumber ? (
+                                            <span
+                                              className="text-emerald-300 flex items-center gap-0.5"
+                                              title={`Track number updated from #${trackNumRaw} to #${String(proposedTrackNum).padStart(2, '0')}`}
+                                            >
+                                              {hasMultipleDiscs ? `D${discNum} ` : ''}
+                                              <span className="line-through text-zinc-500">#{trackNumRaw}</span>
+                                              <span>→</span>
+                                              <span>#{String(proposedTrackNum).padStart(2, '0')}</span>
+                                            </span>
+                                          ) : (
+                                            <span>{trackNumberDisplay}</span>
+                                          )}
                                         </div>
 
                                         <span className="text-xs font-semibold text-zinc-100 truncate">
@@ -1209,7 +1575,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                           </span>
                                         )}
 
-                                        {onDiscardTrack && (
+                                        {onDiscardTrack && !isRunning && (
                                           <button
                                             type="button"
                                             onClick={(e) => {
@@ -1226,7 +1592,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                     </div>
 
                                     {/* Field Diffs Table */}
-                                    {realEdits.length > 0 ? (
+                                    {displayedEdits.length > 0 ? (
                                       <div className="ml-6 mt-1 rounded-xl bg-black/40 border border-white/[0.04] overflow-hidden text-xs">
                                         <div className="grid grid-cols-12 gap-3 px-3 py-1.5 bg-white/[0.02] border-b border-white/[0.04] text-[10px] font-mono uppercase tracking-wider text-zinc-500">
                                           <div className="col-span-3">TAG FIELD</div>
@@ -1234,7 +1600,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                           <div className="col-span-5 text-emerald-400">PROPOSED VALUE</div>
                                         </div>
                                         <div className="divide-y divide-white/[0.03]">
-                                          {realEdits.map((diff) => (
+                                          {displayedEdits.map((diff) => (
                                             <div
                                               key={diff.key}
                                               className="grid grid-cols-12 gap-3 px-3 py-2 items-center font-mono text-[11px]"
@@ -1253,6 +1619,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                             </div>
                                           ))}
                                         </div>
+                                      </div>
+                                    ) : realEdits.length > 0 && compactDiffs ? (
+                                      <div className="ml-6 text-[11px] font-mono text-zinc-400 flex items-center gap-1.5 py-0.5">
+                                        <Check className="w-3 h-3 text-cyan-400" />
+                                        <span>All modifications applied via uniform album edits above</span>
                                       </div>
                                     ) : (
                                       <div className="ml-6 text-[11px] font-mono text-zinc-500 flex items-center gap-1.5">
@@ -1281,12 +1652,23 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                     <>
                       {/* Header */}
                       <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-                            <ImageIcon className="w-3.5 h-3.5" />
+                        <div className="flex flex-col text-left">
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
+                              <ImageIcon className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="text-xs font-mono font-semibold tracking-wide uppercase text-zinc-300">
+                              Archival Inspector
+                            </span>
+                            {isRunning && (
+                              <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center gap-1">
+                                <Lock className="w-2.5 h-2.5" />
+                                <span>Snapshot</span>
+                              </span>
+                            )}
                           </div>
-                          <span className="text-xs font-mono font-semibold tracking-wide uppercase text-zinc-300">
-                            Archival Inspector
+                          <span className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                            Selected Album Scope: {selectedReleaseData.relTracks.length} of {allMetrics.audioTrackCount} batch tracks
                           </span>
                         </div>
                         {selectedReleaseData.stagedCoverArt && (
@@ -1368,145 +1750,76 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                         {inspectorArtTab === 'split' ? (
                           <div className="grid grid-cols-2 gap-2.5">
                             {/* Current Artwork Card */}
-                            <div className="flex flex-col gap-1.5">
-                              <div className="aspect-square rounded-xl bg-black/70 border border-white/10 overflow-hidden relative">
-                                {selectedReleaseData.currentCoverArt ? (
-                                  <img
-                                    src={selectedReleaseData.currentCoverArt}
-                                    alt="Current"
-                                    className="w-full h-full object-cover"
-                                    onError={(e) => {
-                                      ;(e.target as HTMLElement).style.display = 'none'
-                                    }}
-                                  />
-                                ) : (
-                                  <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
-                                    <Disc3 className="w-6 h-6" />
-                                    <span className="text-[9px] font-mono">No Art</span>
-                                  </div>
-                                )}
-                                <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/80 backdrop-blur-sm text-[9px] font-mono text-zinc-400 border border-white/10">
-                                  Current
-                                </div>
-                              </div>
-                              <div className="text-[10px] font-mono text-zinc-400 truncate text-center">
-                                {selectedReleaseData.currentRes}
-                              </div>
-                            </div>
+                            <ArtworkDisplayCard
+                              url={selectedReleaseData.currentCoverArt}
+                              label="Current Artwork"
+                              badgeText="Current"
+                              badgeColor="zinc"
+                              resolution={selectedReleaseData.currentRes}
+                              emptyTitle="No Embedded Artwork"
+                              emptySubtitle="File contains no embedded cover"
+                            />
 
                             {/* Staged Artwork Card */}
-                            <div className="flex flex-col gap-1.5">
-                              <div
-                                onClick={() =>
-                                  selectedReleaseData.stagedCoverArt &&
-                                  setInspectingArtwork({
-                                    currentUrl: selectedReleaseData.currentCoverArt,
-                                    stagedUrl: selectedReleaseData.stagedCoverArt,
-                                    albumTitle: selectedReleaseData.albumTitle,
-                                    currentRes: selectedReleaseData.currentRes,
-                                    stagedRes: selectedReleaseData.stagedRes,
-                                  })
-                                }
-                                className={`aspect-square rounded-xl bg-black/70 border overflow-hidden relative group cursor-pointer transition-all ${
-                                  selectedReleaseData.stagedCoverArt
-                                    ? 'border-purple-500/40 hover:border-purple-400 hover:shadow-[0_0_15px_rgba(168,85,247,0.2)]'
-                                    : 'border-white/10'
-                                }`}
-                              >
-                                {selectedReleaseData.stagedCoverArt ? (
-                                  <img
-                                    src={selectedReleaseData.stagedCoverArt}
-                                    alt="Staged"
-                                    className="w-full h-full object-cover"
-                                    onError={(e) => {
-                                      ;(e.target as HTMLElement).style.display = 'none'
-                                    }}
-                                  />
-                                ) : (
-                                  <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
-                                    <Disc3 className="w-6 h-6" />
-                                    <span className="text-[9px] font-mono">Unchanged</span>
-                                  </div>
-                                )}
-                                <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-purple-950/80 backdrop-blur-sm text-[9px] font-mono text-purple-300 border border-purple-500/30">
-                                  Staged HD
-                                </div>
-                                {selectedReleaseData.stagedCoverArt && (
-                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                                    <Maximize2 className="w-5 h-5 text-white" />
-                                  </div>
-                                )}
-                              </div>
-                              <div className="text-[10px] font-mono text-purple-300 font-semibold truncate text-center">
-                                {selectedReleaseData.stagedRes}
-                              </div>
-                            </div>
+                            <ArtworkDisplayCard
+                              url={selectedReleaseData.stagedCoverArt}
+                              label="Staged HD Artwork"
+                              badgeText="Staged HD"
+                              badgeColor="purple"
+                              isStaged
+                              resolution={selectedReleaseData.stagedRes}
+                              emptyTitle="Unchanged"
+                              emptySubtitle="No new artwork staged for release"
+                              onClick={
+                                selectedReleaseData.stagedCoverArt
+                                  ? () =>
+                                      setInspectingArtwork({
+                                        currentUrl: selectedReleaseData.currentCoverArt,
+                                        stagedUrl: selectedReleaseData.stagedCoverArt,
+                                        albumTitle: selectedReleaseData.albumTitle,
+                                        currentRes: selectedReleaseData.currentRes,
+                                        stagedRes: selectedReleaseData.stagedRes,
+                                      })
+                                  : undefined
+                              }
+                            />
                           </div>
                         ) : inspectorArtTab === 'staged' ? (
                           <div className="flex flex-col gap-2">
-                            <div
-                              onClick={() =>
-                                selectedReleaseData.stagedCoverArt &&
-                                setInspectingArtwork({
-                                  currentUrl: selectedReleaseData.currentCoverArt,
-                                  stagedUrl: selectedReleaseData.stagedCoverArt,
-                                  albumTitle: selectedReleaseData.albumTitle,
-                                  currentRes: selectedReleaseData.currentRes,
-                                  stagedRes: selectedReleaseData.stagedRes,
-                                })
+                            <ArtworkDisplayCard
+                              url={selectedReleaseData.stagedCoverArt}
+                              label="Staged Archival Cover"
+                              badgeText="Staged Archival Cover"
+                              badgeColor="purple"
+                              isStaged
+                              resolution={selectedReleaseData.stagedRes}
+                              emptyTitle="No Staged Art"
+                              emptySubtitle="No artwork replacement queued"
+                              onClick={
+                                selectedReleaseData.stagedCoverArt
+                                  ? () =>
+                                      setInspectingArtwork({
+                                        currentUrl: selectedReleaseData.currentCoverArt,
+                                        stagedUrl: selectedReleaseData.stagedCoverArt,
+                                        albumTitle: selectedReleaseData.albumTitle,
+                                        currentRes: selectedReleaseData.currentRes,
+                                        stagedRes: selectedReleaseData.stagedRes,
+                                      })
+                                  : undefined
                               }
-                              className="aspect-square w-full rounded-xl bg-black/80 border border-purple-500/30 overflow-hidden relative group cursor-pointer shadow-lg"
-                            >
-                              {selectedReleaseData.stagedCoverArt ? (
-                                <img
-                                  src={selectedReleaseData.stagedCoverArt}
-                                  alt="Staged"
-                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                                />
-                              ) : (
-                                <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
-                                  <Disc3 className="w-8 h-8" />
-                                  <span className="text-xs font-mono">No Staged Art</span>
-                                </div>
-                              )}
-                              <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-purple-950/85 backdrop-blur-md text-[10px] font-mono text-purple-200 border border-purple-500/40">
-                                Staged Archival Cover
-                              </div>
-                              {selectedReleaseData.stagedCoverArt && (
-                                <div className="absolute bottom-2 right-2 px-2 py-1 rounded-lg bg-black/70 backdrop-blur-md text-[10px] font-mono text-zinc-300 flex items-center gap-1 border border-white/10 group-hover:bg-cyan-500 group-hover:text-black transition-colors">
-                                  <Maximize2 className="w-3 h-3" />
-                                  <span>Zoom 4K</span>
-                                </div>
-                              )}
-                            </div>
-                            <div className="px-3 py-1.5 rounded-lg bg-purple-500/10 border border-purple-500/20 text-[11px] font-mono text-purple-300 flex items-center justify-between">
-                              <span>Resolution:</span>
-                              <span className="font-semibold">{selectedReleaseData.stagedRes}</span>
-                            </div>
+                            />
                           </div>
                         ) : (
                           <div className="flex flex-col gap-2">
-                            <div className="aspect-square w-full rounded-xl bg-black/80 border border-white/10 overflow-hidden relative group shadow-lg">
-                              {selectedReleaseData.currentCoverArt ? (
-                                <img
-                                  src={selectedReleaseData.currentCoverArt}
-                                  alt="Current"
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                <div className="w-full h-full flex flex-col items-center justify-center text-zinc-600 gap-1">
-                                  <Disc3 className="w-8 h-8" />
-                                  <span className="text-xs font-mono">No Current Art</span>
-                                </div>
-                              )}
-                              <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-black/80 backdrop-blur-md text-[10px] font-mono text-zinc-400 border border-white/10">
-                                Current Disk Art
-                              </div>
-                            </div>
-                            <div className="px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/10 text-[11px] font-mono text-zinc-400 flex items-center justify-between">
-                              <span>Resolution:</span>
-                              <span>{selectedReleaseData.currentRes}</span>
-                            </div>
+                            <ArtworkDisplayCard
+                              url={selectedReleaseData.currentCoverArt}
+                              label="Current Disk Art"
+                              badgeText="Current Disk Art"
+                              badgeColor="zinc"
+                              resolution={selectedReleaseData.currentRes}
+                              emptyTitle="No Current Art"
+                              emptySubtitle="Audio files have no local cover art"
+                            />
                           </div>
                         )}
                       </div>
@@ -1516,8 +1829,14 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                         {selectedReleaseData.stagedCoverArt && onDiscardReleaseArtwork && (
                           <button
                             type="button"
+                            disabled={isRunning}
                             onClick={() => onDiscardReleaseArtwork(selectedReleaseData.relId)}
-                            className="flex-1 py-1.5 px-2 rounded-xl text-xs font-mono text-rose-300 bg-rose-500/10 border border-rose-500/25 hover:bg-rose-500/20 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                            title={isRunning ? 'Unavailable while commit is in progress' : 'Revert staged cover art for this album'}
+                            className={`flex-1 py-1.5 px-2 rounded-xl text-xs font-mono border transition-all flex items-center justify-center gap-1.5 ${
+                              isRunning
+                                ? 'opacity-40 cursor-not-allowed text-zinc-600 bg-white/[0.02] border-white/5'
+                                : 'text-rose-300 bg-rose-500/10 border-rose-500/25 hover:bg-rose-500/20 cursor-pointer'
+                            }`}
                           >
                             <RotateCcw className="w-3 h-3" />
                             <span>Revert Art</span>
@@ -1525,13 +1844,17 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                         )}
                         <button
                           type="button"
+                          disabled={isRunning}
                           onClick={() =>
                             toggleReleaseExclusion(selectedReleaseData.relId, selectedReleaseData.relTracks)
                           }
-                          className={`flex-1 py-1.5 px-2 rounded-xl text-xs font-mono border transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                            selectedReleaseData.allTracksExcluded
-                              ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25'
-                              : 'bg-white/[0.04] border-white/10 text-zinc-400 hover:text-white hover:bg-white/[0.08]'
+                          title={isRunning ? 'Unavailable while commit is in progress' : undefined}
+                          className={`flex-1 py-1.5 px-2 rounded-xl text-xs font-mono border transition-all flex items-center justify-center gap-1.5 ${
+                            isRunning
+                              ? 'opacity-40 cursor-not-allowed text-zinc-600 bg-white/[0.02] border-white/5'
+                              : selectedReleaseData.allTracksExcluded
+                              ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25 cursor-pointer'
+                              : 'bg-white/[0.04] border-white/10 text-zinc-400 hover:text-white hover:bg-white/[0.08] cursor-pointer'
                           }`}
                         >
                           <Check className="w-3 h-3" />
@@ -1803,8 +2126,12 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
             {/* Sidecar Option */}
             <button
               type="button"
+              disabled={isRunning}
               onClick={() => setCommitTarget('sidecar')}
-              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-0.5 ${
+              title={isRunning ? 'Write strategy is locked during commit execution' : undefined}
+              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all flex flex-col gap-0.5 ${
+                isRunning ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'
+              } ${
                 commitTarget === 'sidecar'
                   ? 'bg-amber-500/[0.08] border-amber-500/40 text-zinc-100 shadow-sm'
                   : 'bg-white/[0.02] border-white/[0.05] text-zinc-400 hover:bg-white/[0.04]'
@@ -1820,6 +2147,12 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                 <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300">
                   Recommended
                 </span>
+                {isRunning && commitTarget === 'sidecar' && (
+                  <span className="flex items-center gap-1 text-[9px] font-mono text-zinc-400 ml-1">
+                    <Lock className="w-2.5 h-2.5 text-amber-400" />
+                    <span>Locked</span>
+                  </span>
+                )}
               </div>
               <span className="text-[10px] text-zinc-400 font-sans pl-4">
                 Zero audio file checksum mutation • Preserves bitstream hashes • Non-portable to external UPnP
@@ -1829,8 +2162,12 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
             {/* Embedded Header Option */}
             <button
               type="button"
+              disabled={isRunning}
               onClick={() => setCommitTarget('embedded')}
-              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-0.5 ${
+              title={isRunning ? 'Write strategy is locked during commit execution' : undefined}
+              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all flex flex-col gap-0.5 ${
+                isRunning ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'
+              } ${
                 commitTarget === 'embedded'
                   ? 'bg-purple-500/[0.08] border-purple-500/40 text-zinc-100 shadow-sm'
                   : 'bg-white/[0.02] border-white/[0.05] text-zinc-400 hover:bg-white/[0.04]'
@@ -1846,6 +2183,12 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                 <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-white/[0.06] text-zinc-400">
                   Mutates File
                 </span>
+                {isRunning && commitTarget === 'embedded' && (
+                  <span className="flex items-center gap-1 text-[9px] font-mono text-zinc-400 ml-1">
+                    <Lock className="w-2.5 h-2.5 text-purple-400" />
+                    <span>Locked</span>
+                  </span>
+                )}
               </div>
               <span className="text-[10px] text-zinc-400 font-sans pl-4">
                 Portable tags for standalone UPnP streamers • Mutates container file hashes • Audio bit-identical
@@ -1855,12 +2198,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 
           {/* Action Buttons with Real-Time Dynamic Count */}
           <div className="flex items-center gap-3 shrink-0">
-            {onDiscardAll && !isCompleted && uncommittedTracks.length > 0 && (
+            {onDiscardAll && !isCompleted && uncommittedTracks.length > 0 && !isRunning && (
               <button
                 type="button"
                 onClick={onDiscardAll}
-                disabled={isRunning}
-                className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 font-mono text-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 font-mono text-xs transition-all flex items-center gap-1.5 cursor-pointer"
                 title="Discard all pending staged edits"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -1868,14 +2210,23 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={isRunning}
-              className="px-4 py-2 rounded-xl text-xs font-mono text-zinc-400 hover:text-white cursor-pointer transition-colors"
-            >
-              {isCompleted ? 'Close' : 'Cancel'}
-            </button>
+            {isRunning ? (
+              <div
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.04] border border-white/10 text-xs font-mono text-zinc-400 select-none cursor-not-allowed"
+                title="Disk write transaction in progress. Navigation is available via tabs, but the commit cannot be interrupted safely midway."
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-400" />
+                <span>Writing Locked</span>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 rounded-xl text-xs font-mono text-zinc-400 hover:text-white cursor-pointer transition-colors"
+              >
+                {isCompleted ? 'Close' : 'Cancel'}
+              </button>
+            )}
 
             {!isCompleted && uncommittedTracks.length > 0 && (
               <button
@@ -1966,51 +2317,21 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
               {/* Current Artwork */}
-              <div className="flex flex-col gap-2.5 p-4 rounded-2xl bg-black/50 border border-white/10">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">Current Artwork</span>
-                  <span className="text-xs font-mono text-zinc-300">{inspectingArtwork.currentRes || 'Disk File'}</span>
-                </div>
-                <div className="aspect-square w-full rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-white/10">
-                  {inspectingArtwork.currentUrl ? (
-                    <img
-                      src={inspectingArtwork.currentUrl}
-                      alt="Current Artwork"
-                      className="w-full h-full object-contain"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center gap-2 text-zinc-500">
-                      <Disc3 className="w-16 h-16 stroke-[1.5]" />
-                      <span className="text-xs font-mono">No Local Cover Embedded</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <LightboxArtworkCard
+                url={inspectingArtwork.currentUrl}
+                label="Current Artwork"
+                badgeText="Current Artwork"
+                res={inspectingArtwork.currentRes}
+              />
 
               {/* Staged Archival Cover */}
-              <div className="flex flex-col gap-2.5 p-4 rounded-2xl bg-black/50 border border-emerald-500/40 shadow-xl shadow-emerald-500/10">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    Staged Archival Cover
-                  </span>
-                  <span className="text-xs font-mono text-emerald-300 font-semibold">{inspectingArtwork.stagedRes || '3000×3000px'}</span>
-                </div>
-                <div className="aspect-square w-full rounded-xl overflow-hidden bg-black/80 flex items-center justify-center border border-emerald-500/20">
-                  {inspectingArtwork.stagedUrl ? (
-                    <img
-                      src={inspectingArtwork.stagedUrl}
-                      alt="Staged Archival Cover"
-                      className="w-full h-full object-contain"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center gap-2 text-zinc-500">
-                      <Disc3 className="w-16 h-16 stroke-[1.5]" />
-                      <span className="text-xs font-mono">No Staged Art</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <LightboxArtworkCard
+                url={inspectingArtwork.stagedUrl}
+                label="Staged Archival Cover"
+                badgeText="Staged Archival Cover"
+                res={inspectingArtwork.stagedRes}
+                isStaged
+              />
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-white/[0.08] text-xs font-mono text-zinc-400">

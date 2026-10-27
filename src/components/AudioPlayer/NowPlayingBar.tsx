@@ -357,7 +357,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
 
         {/* Subtle Floating Gapless Playback Chip (as in Mockup) */}
         <div
-          className="absolute -top-7 right-6 flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-black/75 backdrop-blur-md border border-white/10 text-[10px] font-mono text-neutral-300 shadow-lg select-none cursor-pointer hover:border-emerald-500/40 transition-all z-50 group"
+          className="absolute -top-7 right-6 flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-black/75 backdrop-blur-md border border-white/10 text-[10px] font-mono text-neutral-300 shadow-lg select-none cursor-pointer hover:border-emerald-500/40 transition-all z-30 group"
           onClick={() => toggleGapless()}
           title={`Gapless Playback: ${isGapless ? 'Enabled' : 'Disabled'} • Click to toggle`}
         >
