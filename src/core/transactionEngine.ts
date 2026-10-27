@@ -122,13 +122,21 @@ export class TransactionEngine {
     inPlaceHeaderCount?: number
     error?: string
   }> {
+    const destination: 'sidecar' | 'embedded' = options?.destination || 'embedded'
     const txId = `tx-${Date.now()}`
     const steps: CommitStepProgress[] = [
       { step: 'PREPARE', label: 'Phase 1: Validating file locks and storage mounts', completed: false },
       { step: 'VERIFY_STREAM_CHECKSUM', label: 'Phase 1: Stream MD5 and Vorbis comment validation', completed: false },
       { step: 'CREATE_BACKUP_SNAPSHOT', label: 'Phase 1: Generating atomic rollback snapshot', completed: false },
-      { step: 'WRITE_EMBEDDED_TAGS', label: 'Phase 2: Atomic write to ID3v2.4 / Vorbis Atoms', completed: false },
-      { step: 'FINALIZE', label: 'Phase 2: Updating sidecar ledger and journal', completed: false },
+      {
+        step: 'WRITE_EMBEDDED_TAGS',
+        label:
+          destination === 'sidecar'
+            ? 'Phase 2: Updating sidecar ledger (cadence-album.sidecar.json)'
+            : 'Phase 2: Atomic write to ID3v2.4 / Vorbis Atoms',
+        completed: false,
+      },
+      { step: 'FINALIZE', label: 'Phase 2: Finalizing journal and sync status', completed: false },
     ]
 
     const totalTracks = tracks.length
@@ -242,7 +250,13 @@ export class TransactionEngine {
     updateStep(2, true, `Snapshot created with hash sha256-${txId.slice(-8)}`)
 
     // Step 3: Phase 2 Commit with chunked batching & real-time ETA
-    updateStep(3, false, 'Writing embedded audio metadata atoms and sidecars to disk...')
+    updateStep(
+      3,
+      false,
+      destination === 'sidecar'
+        ? 'Writing album sidecars and track ledgers to disk...'
+        : 'Writing embedded audio metadata atoms and sidecars to disk...'
+    )
 
     let committedCount = 0
     let embeddedHeadersCount = 0
@@ -272,7 +286,9 @@ export class TransactionEngine {
       // Notify progress before batch starts
       notifyDetailed(
         'WRITE_EMBEDDED_TAGS',
-        `Writing ID3v2.4 / Vorbis tags & sidecar JSON (${committedCount}/${totalTracks})`,
+        destination === 'sidecar'
+          ? `Writing sidecar JSON (${committedCount}/${totalTracks})`
+          : `Writing ID3v2.4 / Vorbis tags & sidecar JSON (${committedCount}/${totalTracks})`,
         committedCount,
         currentTrack
           ? {
@@ -299,6 +315,7 @@ export class TransactionEngine {
               filePath: t.filePath,
               title: p.title || t.title,
               artistCredit: p.artistCredit || t.artistCredit,
+              albumArtist: p.albumArtist || t.albumArtist || rel?.artistCredit,
               composerName: p.composerName || t.composerName,
               album: p.album || p.releaseTitle || rel?.title,
               year: p.year || rel?.releaseYear,
@@ -317,7 +334,7 @@ export class TransactionEngine {
           const res = await fetch('/api/commit-tags', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tracks: commitPayload }),
+            body: JSON.stringify({ tracks: commitPayload, destination }),
           })
 
           if (res.ok) {
@@ -340,7 +357,9 @@ export class TransactionEngine {
         // Mock / non-browser test environment
         await new Promise((r) => setTimeout(r, Math.min(80, 20 + batchTracks.length * 5)))
         committedCount += batchTracks.length
-        embeddedHeadersCount += batchTracks.length
+        if (destination === 'embedded') {
+          embeddedHeadersCount += batchTracks.length
+        }
         sidecarsCount += batchTracks.length
       }
 
@@ -365,7 +384,9 @@ export class TransactionEngine {
     }
 
     let step3Detail = `${committedCount} audio headers & sidecars updated atomically`
-    if (embeddedHeadersCount > 0 && sidecarsCount > 0) {
+    if (destination === 'sidecar') {
+      step3Detail = `${sidecarsCount} sidecar ledgers updated on disk (bitstream unmutated)`
+    } else if (embeddedHeadersCount > 0 && sidecarsCount > 0) {
       step3Detail = `${embeddedHeadersCount} audio file headers embedded & ${sidecarsCount} sidecars updated atomically`
     } else if (embeddedHeadersCount > 0) {
       step3Detail = `${embeddedHeadersCount} audio file headers embedded atomically`

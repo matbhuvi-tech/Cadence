@@ -590,7 +590,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   const [activeTab, setActiveTab] = useState<'preview' | 'pipeline'>('preview')
   const [filterCategory, setFilterCategory] = useState<'all' | 'metadata' | 'artwork'>('all')
   const [compactDiffs, setCompactDiffs] = useState(false)
-  const [commitTarget, setCommitTarget] = useState<'sidecar' | 'embedded'>('sidecar')
+  const [commitTarget, setCommitTarget] = useState<'sidecar' | 'embedded'>('embedded')
   const { isPlaying, togglePlayPause } = useAudioPlayer()
   const isPlaybackActive = isPlaying
   const [searchQuery, setSearchQuery] = useState('')
@@ -2255,6 +2255,42 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
         <div className="p-4 px-6 border-t border-white/[0.08] bg-[#121318]/95 backdrop-blur-md flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
           {/* Destination Selector with Explicit Audiophile Trade-Off Copy */}
           <div className="flex items-center gap-3">
+            {/* Embedded Header Option (Default) */}
+            <button
+              type="button"
+              disabled={isRunning}
+              onClick={() => setCommitTarget('embedded')}
+              title={isRunning ? 'Write strategy is locked during commit execution' : undefined}
+              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all flex flex-col gap-0.5 ${
+                isRunning ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'
+              } ${
+                commitTarget === 'embedded'
+                  ? 'bg-purple-500/[0.08] border-purple-500/40 text-zinc-100 shadow-sm'
+                  : 'bg-white/[0.02] border-white/[0.05] text-zinc-400 hover:bg-white/[0.04]'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    commitTarget === 'embedded' ? 'bg-purple-400' : 'border border-zinc-600'
+                  }`}
+                />
+                <span className="text-xs font-mono font-semibold">Embed Headers (FLAC Vorbis / ID3v2.4 / ALAC / DSF)</span>
+                <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300">
+                  Default • Mutates File
+                </span>
+                {isRunning && commitTarget === 'embedded' && (
+                  <span className="flex items-center gap-1 text-[9px] font-mono text-zinc-400 ml-1">
+                    <Lock className="w-2.5 h-2.5 text-purple-400" />
+                    <span>Locked</span>
+                  </span>
+                )}
+              </div>
+              <span className="text-[10px] text-zinc-400 font-sans pl-4">
+                Portable tags for standalone UPnP streamers • Mutates container file hashes • Audio bit-identical
+              </span>
+            </button>
+
             {/* Sidecar Option */}
             <button
               type="button"
@@ -2276,8 +2312,8 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                   }`}
                 />
                 <span className="text-xs font-mono font-semibold">Sidecar JSON (cadence-album.sidecar.json)</span>
-                <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300">
-                  Recommended
+                <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300/80">
+                  Non-Destructive
                 </span>
                 {isRunning && commitTarget === 'sidecar' && (
                   <span className="flex items-center gap-1 text-[9px] font-mono text-zinc-400 ml-1">
@@ -2288,42 +2324,6 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
               </div>
               <span className="text-[10px] text-zinc-400 font-sans pl-4">
                 Zero audio file checksum mutation • Preserves bitstream hashes • Non-portable to external UPnP
-              </span>
-            </button>
-
-            {/* Embedded Header Option */}
-            <button
-              type="button"
-              disabled={isRunning}
-              onClick={() => setCommitTarget('embedded')}
-              title={isRunning ? 'Write strategy is locked during commit execution' : undefined}
-              className={`p-2.5 px-3.5 rounded-xl border text-left transition-all flex flex-col gap-0.5 ${
-                isRunning ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'
-              } ${
-                commitTarget === 'embedded'
-                  ? 'bg-purple-500/[0.08] border-purple-500/40 text-zinc-100 shadow-sm'
-                  : 'bg-white/[0.02] border-white/[0.05] text-zinc-400 hover:bg-white/[0.04]'
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    commitTarget === 'embedded' ? 'bg-purple-400' : 'border border-zinc-600'
-                  }`}
-                />
-                <span className="text-xs font-mono font-semibold">Embed Headers (FLAC Vorbis / ID3v2.4 / ALAC / DSF)</span>
-                <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded bg-white/[0.06] text-zinc-400">
-                  Mutates File
-                </span>
-                {isRunning && commitTarget === 'embedded' && (
-                  <span className="flex items-center gap-1 text-[9px] font-mono text-zinc-400 ml-1">
-                    <Lock className="w-2.5 h-2.5 text-purple-400" />
-                    <span>Locked</span>
-                  </span>
-                )}
-              </div>
-              <span className="text-[10px] text-zinc-400 font-sans pl-4">
-                Portable tags for standalone UPnP streamers • Mutates container file hashes • Audio bit-identical
               </span>
             </button>
           </div>

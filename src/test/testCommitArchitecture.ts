@@ -298,8 +298,50 @@ assert.strictEqual(filteredStagedTracks.length, 2)
 assert.strictEqual(filteredStagedTracks.some((t) => t.id === 'trk-clean'), false)
 console.log('  ✓ Staged review filter correctly isolates only albums with staged items (2 of 3 albums)')
 
-testExecutionAbort().then(() => {
+// [Test 7] Sidecar vs Embedded Commit Destination Isolation & Labels
+console.log('\n[Test 7] Testing Sidecar vs Embedded Commit Destination Isolation...')
+
+async function testCommitDestinations() {
+  let sidecarSteps: any[] = []
+  const sidecarResult = await transactionEngine.executeTwoPhaseCommit(
+    [tagChangeTrack],
+    'Test Sidecar Commit',
+    (steps) => { sidecarSteps = steps },
+    undefined,
+    { destination: 'sidecar' }
+  )
+  assert.strictEqual(sidecarResult.success, true)
+  assert.strictEqual(sidecarResult.embeddedHeadersCount, 0, 'Sidecar target must NOT write embedded headers')
+  assert.strictEqual(sidecarResult.sidecarsCount, 1, 'Sidecar target must write sidecar ledger')
+  assert.strictEqual(
+    sidecarSteps[3].label,
+    'Phase 2: Updating sidecar ledger (cadence-album.sidecar.json)',
+    'Sidecar target must display sidecar-specific step label, not atomic write to audio headers'
+  )
+  console.log('  ✓ Destination "sidecar" updates sidecar ledgers with 0 embedded audio file writes and clean step label')
+
+  let embeddedSteps: any[] = []
+  const embeddedResult = await transactionEngine.executeTwoPhaseCommit(
+    [tagChangeTrack],
+    'Test Embedded Commit',
+    (steps) => { embeddedSteps = steps },
+    undefined,
+    { destination: 'embedded' }
+  )
+  assert.strictEqual(embeddedResult.success, true)
+  assert.strictEqual(embeddedResult.embeddedHeadersCount, 1, 'Embedded target must write embedded headers')
+  assert.strictEqual(embeddedResult.sidecarsCount, 1, 'Embedded target also maintains sidecar ledger')
+  assert.strictEqual(
+    embeddedSteps[3].label,
+    'Phase 2: Atomic write to ID3v2.4 / Vorbis Atoms',
+    'Embedded target must display atomic header write step label'
+  )
+  console.log('  ✓ Destination "embedded" (default) updates embedded audio file headers and step label')
+}
+
+Promise.all([testExecutionAbort(), testCommitDestinations()]).then(() => {
   console.log('\n========================================================')
   console.log('🎉 ALL BATCH METADATA COMMIT SCREEN ARCHITECTURE TESTS PASSED!')
   console.log('========================================================\n')
 })
+

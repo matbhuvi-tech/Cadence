@@ -2244,6 +2244,7 @@ Instructions:
           try {
             const data = JSON.parse(body || '{}')
             const tracks: any[] = Array.isArray(data.tracks) ? data.tracks : []
+            const destination: 'sidecar' | 'embedded' = data.destination || 'embedded'
 
             const NodeID3Module = await import('node-id3')
             const NodeID3 = (NodeID3Module as any).default || NodeID3Module
@@ -2262,29 +2263,33 @@ Instructions:
               const ext = path.extname(t.filePath).toLowerCase()
               const artistVal = t.artistCredit || t.artist || ''
               const composerVal = t.composerName || t.composer || ''
+              const albumArtistVal = t.albumArtist || (t.pendingSidecarEdits ? t.pendingSidecarEdits.albumArtist : '') || ''
               const genreList = normalizeGenreTags(t.genre)
 
               const id3Tags: any = {}
               if (t.title) id3Tags.title = t.title
               if (artistVal) id3Tags.artist = artistVal
+              if (albumArtistVal) id3Tags.performerInfo = albumArtistVal
               if (composerVal) id3Tags.composer = composerVal
               if (t.album) id3Tags.album = t.album
               if (t.year) id3Tags.year = String(t.year)
               if (t.trackNumber) id3Tags.trackNumber = String(t.trackNumber)
               if (genreList.length > 0) id3Tags.genre = genreList[0]
 
-              // 1. Embed metadata into audio file header
-              try {
-                if (fs.existsSync(t.filePath)) {
-                  if (ext === '.wav') {
-                    embeddedSuccess = writeWavId3Tags(t.filePath, id3Tags, NodeID3)
-                  } else if (ext === '.mp3') {
-                    const res = NodeID3.write(id3Tags, t.filePath)
-                    embeddedSuccess = res !== false
+              // 1. Embed metadata into audio file header (Only when destination is 'embedded')
+              if (destination === 'embedded') {
+                try {
+                  if (fs.existsSync(t.filePath)) {
+                    if (ext === '.wav') {
+                      embeddedSuccess = writeWavId3Tags(t.filePath, id3Tags, NodeID3)
+                    } else if (ext === '.mp3') {
+                      const res = NodeID3.write(id3Tags, t.filePath)
+                      embeddedSuccess = res !== false
+                    }
                   }
+                } catch (err: any) {
+                  console.warn(`[commit-tags] Header embedding failed for ${t.filePath}:`, err)
                 }
-              } catch (err: any) {
-                console.warn(`[commit-tags] Header embedding failed for ${t.filePath}:`, err)
               }
 
               // 2. Write audiophile sidecar JSON
@@ -2299,6 +2304,7 @@ Instructions:
                   metadata: {
                     title: t.title,
                     artist: artistVal,
+                    albumArtist: albumArtistVal,
                     composer: composerVal,
                     album: t.album,
                     year: t.year,
