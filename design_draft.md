@@ -1,312 +1,306 @@
-# Cadence UX & UI Architecture Refactor
+# Cadence Curation, Auto-Suggestion & Review Lifecycle
 
 *   **Author:** Mathan
-*   **Status:** Proposed
+*   **Status:** Draft
 *   **Date:** 2026-10-27
 
 --------------------------------------------------------------------------------
 
 ## Overview
 
-Cadence is a bit-perfect music player and curation engine for Windows Desktop. Over successive feature additions, the user interface has accumulated navigation redundancy, competing search interfaces, contradictory library health telemetry, internal engineering jargon leaks, and layout density friction across high-density workflows.
+Cadence is a bit-perfect audiophile music player and catalog curation engine for Windows Desktop. The application currently fragments the curation workflow across disjointed, contradictory surfaces: clicking "Curate 126" in the top navigation locks onto an arbitrary track (`tracks[0]`, "Dil Se") with zero queue context; the 4-way provider reconciliation table displays simulated template strings rather than real metadata; Copilot recommendations blindly trigger in-memory mutations across hundreds of tracks without preview barriers; and reviewing staged changes suffers from conflicting counters, inconsistent artwork detection, and misaligned batch write modes.
 
-This project refactors the application shell and key operational screens into an orderly, predictable interface. The refactor establishes a container-based navigation rail with contextual sub-header lenses, decouples global spotlight search (`⌘K`) from in-memory folder tree filtering (`⌘F`), enforces deterministic multi-disc album grouping with SQLite-backed split overrides, introduces mode-aware inspector persistence, anchors a single canonical staged changes counter in the top utility header, and resolves several high-priority formatting and state bugs.
+This project unifies auto-suggesting, manual editing, and batch review into an end-to-end 3-stage lifecycle:
+1. **Discover & Triage (Audit & Hygiene ⌘3 + Copilot):** Surfaces categorized queues of catalog defects; clicking an issue routes to Curate scoped strictly to affected items with zero silent mutations.
+2. **Inspect & Reconcile (Curate ⌘2):** A dedicated Master-Detail Workbench with an Album-Hierarchical queue on the left (280px) and a real metadata reconciliation table + artwork inspector on the right, backed by a `Stage & Next → (⌘↵)` stepper.
+3. **Verify & Commit (Review & Commit Modal):** A strict, read-only pre-flight diff inspector with synchronized counters, consistent artwork detection, global target selection (`Embed Headers` vs `Sidecar JSON`), and unified execution logging.
 
 ## The Problem
 
-1. **Competing Navigation Pathways**: Navigation is fragmented between the left sidebar and the top canvas sub-header. `Albums` appears as both a sidebar item and a sub-header tab alongside `Artists` and `Composers`. When viewing an Album Detail page, the parent grid toolbar remains visible above breadcrumbs, presenting irrelevant sorting and filtering controls.
-2. **Search Ambiguity & SMB Network Risks**: Three search inputs operate concurrently (`⌘K` Spotlight, `⌘F` canvas filter, and Physical Folder Tree search). Attempting to drive deep folder expansion over SMB network shares via global search creates interface latency and risks violating transport bus quietness.
-3. **Multi-Disc Sprawl**: Multi-disc box sets (e.g., `Rahmania CD1–CD4`) render as discrete, scattered album cards across the Listen Grid, multiplying visual clutter.
-4. **Telemetry Drift & False-Negative Strings**: The `Audit` view reports `80% Library Health` while displaying text stating all metadata conforms to bit-perfect standards (because scoped album counts collapse to zero), while `Copilot` simultaneously displays `93% Catalog Health` with `1286 anomalies detected`.
-5. **Staged Changes Fragmentation & Tab Count Zero**: Pending mutations appear in four separate locations with conflicting units. In the `Review & Commit Changes` modal, the `Tag Edits` and `With Artwork Updates` tabs display count `(0)` when staged artwork exists solely on release entities, while row badges show `Sidecar Staged` even when the user selects `Embed Headers`.
-6. **Leaked Engineering Terminology & State Bugs**: Internal protocol names ("Two-Phase Commit"), worker thread IDs (`AUDIO-IDLE WORKER: Album Covers (300x300)`), and AI model badges (`Gemini 3.7 AI`) pollute user-facing views. In the Curate view, all three artwork candidates evaluate to active yellow `Selected` buttons simultaneously. In `All Tracks`, durations display unrounded floating-point decimals (e.g., `4:21.21333333333333`).
+1. **The "Mystery Selection" and Zero Queue Visibility**: The top navigation button displays `Curate 126` (implying a queue of 126 items waiting for curation). Clicking Curate triggers `resolveCurateTargetTrack()` which, in the absence of an active track selection or playback, arbitrarily defaults to `tracks[0]` ("Dil Se (Dil Se)"). Inside the view, there is no queue list, no item counter (e.g., `1 of 126`), no triage reason indicator, and no `Next` button—only `← Return (Esc)`.
+2. **Simulated Metadata and Broken State Binding in Curate**: In `FocusedWorkbench.tsx`, the `APPLE MUSIC`, `MUSICBRAINZ`, and `GEMINI AI` columns do not query real APIs; they append hardcoded template strings onto the local compilation name (e.g., `A World Of Music (Original Motion Picture Soundtrack)`), while simultaneously displaying the *Dil Se..* movie poster in the artwork inspector. Furthermore, `handleSave` mutates `track.title` and `track.artistCredit` directly in memory without writing them to `track.pendingSidecarEdits`, causing the green `STAGED OUTPUT` column to disagree with the proposed diffs in the `Review & Commit Changes` modal.
+3. **Contradictory Artwork State Between Surfaces**: For the exact same track, `FocusedWorkbench` detects and renders an embedded 500x500 JPEG, while `TwoPhaseCommitModal` evaluates `release.artwork.frontCoverUrl`, reports `No Embedded Artwork · None detected`, and proposes overwriting the entire compilation's artwork with a single track's soundtrack cover.
+4. **Misplaced Structural Actions on Single-Track Screens**: A yellow `Split Multi-Disc` button is mounted in the header of `FocusedWorkbench` next to `Cancel` and `Stage to Sidecar`. Disc splitting is an album-level structural operation that does not belong inside a track-level tag reconciliation view.
+5. **Blind "One-Click" Batch Mutations in Copilot**: In `EmbeddedAgentDrawer.tsx`, recommendation action buttons (e.g., `Sync Album from Folder`, `Normalize Genres`, `Fetch Online Art`) execute catalog-wide operations that silently stage mutations across hundreds of tracks without a pre-flight staging preview.
+6. **Telemetric Discrepancies and Row Badge Desynchronization in Commit Modal**: In `TwoPhaseCommitModal.tsx`, top summary badges (`2 Tag Edits, 4 Cover Art Updates`) disagree with the filter tabs immediately below (`Tag Edits (1), With Artwork Updates (648)`). Toggling between `Embed Headers` and `Sidecar JSON` updates the row badge for the first expanded album (`Header Write Staged`), while sibling rows remain stuck on `Sidecar Staged`.
 
 ## Goals
 
-*   **G1: Container Rail & Contextual Lens Routing**: Reserve the left sidebar exclusively for operational containers (`Library Browse`, `Playlists`, `Physical Folder Tree`, `Audit & Hygiene`, and a staged changes shortcut). Restrict metadata dimensions (`Albums | Artists | Composers | Tracks`) to the canvas sub-header within `Library Browse`.
-*   **G2: Contextual Toolbar Suppression**: Hide the parent grid filter/sort/density toolbar automatically when any Album Detail route is active.
-*   **G3: Bounded Dual-Layer Search**: Restrict `⌘F` to in-memory view filtering (and virtual branch pruning in `Physical Folder Tree` without remote filesystem I/O), and configure `⌘K` spotlight to navigate directly to matching album or track entities.
-*   **G4: Deterministic Multi-Disc Grouping with Split Overrides**: Automatically group multi-disc releases based strictly on MusicBrainz `MBID` or identical `album` title with sequential `disc_number`/`total_discs`. Provide an explicit `Split Multi-Disc Release` action in Album Detail that writes an override flag to local SQLite (`cadence.db`).
-*   **G5: Unified Telemetry Service**: Extract catalog health and staged mutation calculations into shared reactive hooks (`useCatalogHealth`, `useStagedChanges`), ensuring synchronized scores and accurate subtext across `MaintainCockpit` and `CatalogPulseCard`.
-*   **G6: Canonical Top Header Staged Entry**: Position a single persistent counter (`● 125 Albums · 811 Staged`) in the top utility header that opens the `Review & Commit Changes` modal directly.
-*   **G7: Commit Modal & Formatting Integrity**: Ensure commit modal filter tabs compute counts across both track and release edits, dynamically update row badges to reflect the active target (`Sidecar Staged` vs. `Header Write`), fix float duration rounding via `Math.floor`, and bind artwork candidate radios to candidate IDs (`art.id`).
-*   **G8: Microcopy Purge**: Replace all internal protocol terminology, thread IDs, and model badges with user-facing plain English descriptions.
+*   **G1: Master-Detail Curation Workbench**: Transform `Curate (⌘2)` into a dedicated Master-Detail Workbench featuring a 280px Album-Hierarchical queue on the left and a 4-way metadata reconciliation table + artwork inspector on the right.
+*   **G2: Elimination of Arbitrary Fallbacks**: Remove `tracks[0]` fallback in `resolveCurateTargetTrack()`. When Curate is opened without active context, default to the first album in the Curation Queue; if the queue is empty, display an explicit "All catalog items conform to hygiene standards" empty state.
+*   **G3: Album-Hierarchical Queue with Stepper**: Group curation items by Album with defect reason tags (e.g., `A World Of Music · 1 Compilation Conflict`). Provide an active stepper (`Item 1 of 15 Albums · Reason: Soundtrack Provenance`) and a primary `Stage & Next → (⌘↵)` action.
+*   **G4: Contextual Approval Branching**:
+    *   *Uniform Album Defects* (e.g. missing year or low-res artwork across all tracks): Apply approved metadata album-wide by default, with per-track checkbox opt-out.
+    *   *Multi-Film Compilation Box Sets* (e.g. *A World Of Music* containing tracks from both *Dil Se..* and *Guru*): Cluster tracks inside the album accordion by resolved canonical soundtrack. Accepting a match for *Dil Se..* applies strictly to its matching tracks without overwriting sibling tracks belonging to *Guru*.
+*   **G5: Real Metadata Provenance & Lazy Lookups**: Replace simulated template strings with real provenance queries (integrating `geminiCompilationSoundtrackService` for soundtrack resolution and MusicBrainz for release data), executed strictly on-demand for the active item to prevent network PHY noise during playback.
+*   **G6: Strict Pending Sidecar State Binding**: Ensure all staged edits write exclusively to `track.pendingSidecarEdits` and `track.sidecarStatus = 'uncommitted_sidecar'`, leaving in-memory track objects pristine until disk commit. Guarantee identical diff representations between Curate's `STAGED OUTPUT` and `TwoPhaseCommitModal`.
+*   **G7: UI Cleanliness & Scope Isolation**: Remove the `Split Multi-Disc` action from `FocusedWorkbench`. Collapse the global left navigation rail to icon-only mode (64px) in Curate to secure 1576px+ of workbench canvas. Scope Copilot recommendations to the active screen context, and introduce a Dry-Run Proposal Sheet for bulk actions before mutations enter the staged pool.
+*   **G8: Synchronized Commit Telemetry & Unified Units**: Bind all surface counters to unified units: the Curate navigation button displays queued **Albums** (`Curate 15 ⌘2`), while the Top Header Staged pill displays both dimensions (`● 15 Albums · 82 Staged`). Unify summary counters and filter tabs in `TwoPhaseCommitModal` to read from the centralized `useStagedChanges` hook. Ensure embedded file artwork is accurately reflected in the `Current` artwork box, and synchronize row badges with the active write target (`Embed Headers` vs `Sidecar JSON`).
 
 ## Non-Goals
 
-*   **NG1: Audio Transport Modification**: No modifications to the native WASAPI Exclusive audio core, memory pinning via Win32 `VirtualLock`, MMCSS `Pro Audio` thread prioritization, or packet pacing.
-*   **NG2: Physical Tag Mutation Engine Overhaul**: No changes to the underlying atomic tag writing engine or audio container parsers beyond correcting UI state bindings and SQLite override persistence.
-*   **NG3: Speculative Route Implementation**: No backend feature implementation for placeholder routes (`Classical Works`, `Pressing Stacks`); these will be removed from active sidebar navigation until supported.
-*   **NG4: Heuristic Regex Album Merging**: No automatic title-stripping regex heuristics for multi-disc merging that could accidentally conflate separate volume releases.
+*   **NG1: Modifying Native WASAPI Core**: No modifications to native audio transport, memory pinning (`VirtualLock`), MMCSS thread pacing, or ASIO streaming.
+*   **NG2: Overhauling TagLib / Lofty Native File Writers**: No modifications to the underlying C++/Rust file-writing binaries; the refactor targets UI staging, state binding, and review coordination.
+*   **NG3: Automatic Mass Web Scraping**: No automated background web-scraping across the entire library at once; all external metadata lookups remain demand-driven and on-demand for the active item.
 
-## Open Questions
+## Key Architectural Decisions
 
-*   **Question 1**: Should multi-disc releases split by the user display an indicator badge (e.g., `Disc 1 of 4 (Split)`) on the individual album cards in the Listen Grid, or render as standard independent albums?
-*   **Question 2**: In `Physical Folder Tree`, should `⌘F` search matches automatically expand collapsed ancestor nodes down to the matching leaf, or highlight parent nodes while leaving expansion manual?
+*   **Decision 1 (Curate Navigation Rail Mode)**: The global left rail collapses to icon-only mode (64px) rather than hiding completely. This preserves spatial orientation and instant access to other containers while freeing up 176px of horizontal space (leaving 1576px for the Master-Detail workbench on a 1920x1080 display).
+*   **Decision 2 (Approval Granularity Branching)**:
+    *   *Case A (Single-Release Defect)*: Stage album-wide changes to all tracks with individual track opt-out checkboxes.
+    *   *Case B (Disaggregated Compilations)*: Group tracks by resolved target soundtrack inside the album card; staging one soundtrack match (e.g. *Dil Se..*) mutates only its constituent tracks, leaving distinct sibling tracks (e.g. *Guru*) intact.
+*   **Decision 3 (Telemetry Unit Alignment)**:
+    *   Mode Switcher badge: Displays queued **Album count** (`Curate 15`).
+    *   Top Header Staged pill: Displays **Albums and Tracks** (`● 15 Albums · 82 Staged`).
+    *   Review & Commit Modal tabs: Display synchronized track and artwork counts derived from `useStagedChanges`.
 
 ## Critical User Journeys (CUJs)
 
-### CUJ 1: Navigating and Slicing the Library Catalog
-*   **Given**: The user launches Cadence on Windows with their local music library loaded.
-*   **When**: The user clicks `Library Browse` in the left sidebar and selects `Artists` or `Composers` in the canvas sub-header.
-*   **Then**: The view switches cleanly to the selected dimension without altering left-rail container selection; selecting an album opens Album Detail, suppressing the parent grid sort/filter toolbar.
+### CUJ 1: Navigating to Curate from the Top Bar
+*   **Given**: The user has 15 albums flagged with compilation conflicts or missing artwork in their library. The top bar displays `Curate 15 (⌘2)`.
+*   **When**: The user clicks `Curate` with no track or album selected.
+*   **Then**: The view opens to the Master-Detail Curation Workbench. The left queue lists all 15 albums with their defect badges, the first album is selected, the center-right canvas displays its multi-provider reconciliation table and artwork inspector, and the global left rail collapses to icon-only mode (64px).
 
-### CUJ 2: Inspecting and Committing Staged Metadata Changes
-*   **Given**: 811 track tag edits and 12 high-resolution Apple Music cover art replacements are staged in memory.
-*   **When**: The user clicks the staged counter in the top utility header (`● 125 Albums · 811 Staged`) and toggles between `Sidecar Files` and `Embed Headers`.
-*   **Then**: The commit modal opens immediately, tab counts show accurate numbers for both metadata and artwork updates, and row badges dynamically update between `Sidecar Staged` and `Header Write`.
+### CUJ 2: Stepping Through the Curation Queue
+*   **Given**: Album `A World Of Music` is selected in Curate. Its tracks are grouped under resolved soundtrack clusters: *Dil Se..* (1998) and *Guru* (2007).
+*   **When**: The user accepts the *Dil Se..* soundtrack metadata and presses `Stage & Next → (⌘↵)`.
+*   **Then**: Only the tracks matching *Dil Se..* are staged into `pendingSidecarEdits`; sibling tracks belonging to *Guru* remain untouched. The queue advances to the next un-staged item.
 
-### CUJ 3: Resolving Multi-Disc Box Sets with Manual Override
-*   **Given**: A 4-disc box set (`Rahmania CD1–CD4`) with matching MusicBrainz MBIDs or sequential disc numbers is loaded in the library.
-*   **When**: The user views the Listen Grid, the discs appear consolidated into a single master album card with a `4 Discs` badge. The user opens Album Detail and selects `Split Multi-Disc Release` from the overflow menu.
-*   **Then**: The album unpacks into four discrete album cards in the Listen Grid, and this split preference persists in SQLite across application restarts.
+### CUJ 3: Inspecting Bulk Copilot Suggestions Before Staging
+*   **Given**: The user opens Cadence Copilot and clicks `Disentangle 1 Compilation Boxset Conflicts`.
+*   **When**: The action is triggered.
+*   **Then**: Rather than immediately mutating tracks in memory, a Dry-Run Proposal Sheet opens showing the proposed before/after diffs with two actions: `Stage All Changes` or `Inspect in Curate`. Clicking `Inspect in Curate` routes directly to the Curate workbench pre-filtered to those affected tracks.
+
+### CUJ 4: Verifying and Committing Staged Changes
+*   **Given**: 15 albums and 82 tracks have staged edits.
+*   **When**: The user clicks the top header staged pill (`● 15 Albums · 82 Staged`) and toggles the footer commit mode between `Sidecar JSON` and `Embed Headers`.
+*   **Then**: The modal displays unified counts (`82 Tag Edits`, `15 Cover Art Updates`), the `Current` artwork box displays the real embedded cover art, all album row badges dynamically update to `Header Write Staged`, and clicking `Update 82 Audio Files` safely executes the two-phase commit.
 
 --------------------------------------------------------------------------------
 
 ## Technical Plan (Architecture)
 
-### 1. System Architecture & Component Mapping
+### 1. End-to-End System Architecture
 
 ```mermaid
 graph TD
-    subgraph UI_Shell [Cadence Application Shell]
-        TopHeader[Top Utility Header\nPurity Pill · Unified Staged Counter · Search Trigger]
-        LeftRail[Left Rail: Containers\nLibrary Browse · Playlists · Folders · Audit]
-        SubHeader[Canvas Sub-Header: Lenses\nAlbums · Artists · Composers · Tracks]
-        CenterStage[Center Stage Viewport\nAlbumGrid / Detail / Curate / Maintain]
-        RightInspector[Collapsible Right Inspector\nTrack Details / Provenance / Staged Diff]
-        FloatingTransport[Floating Audio Transport Bar\nWASAPI Exclusive Signal / Playback Engine]
+    subgraph UI_Shell [Application Navigation Shell]
+        TopSwitcher[Top Mode Switcher\nListen · Curate [15 Albums] · Audit]
+        TopHeader[Top Header Pill\n● 15 Albums · 82 Staged]
+        LeftRail[Left Container Rail\nCollapses to 64px Icon-Only in Curate]
+        CopilotDrawer[Cadence Copilot Drawer\nContextual Scope + Smart Hygiene]
     end
 
-    subgraph Domain_Hooks [Authoritative Domain State Hooks]
-        useNav[useNavigationState\nActive Container + Lens + Route Stack]
-        useHealth[useCatalogHealth\nUnified Global & Scoped Health Metrics]
-        useStaged[useStagedChanges\nDecoupled Track & Release Mutation Counters]
-        useInspect[useInspectorPersistence\nPer-Mode localStorage Collapse State]
+    subgraph Curate_Stage [Curate ⌘2: Master-Detail Workbench]
+        QueueRail[CurationQueueRail 280px\nAlbum Cards · Triage Badges · Stepper]
+        ReconcileStage[CurationReconciliationStage\n4-Way Metadata Table · Archival Artwork]
+        SoundtrackClusters[Soundtrack Provenance Clusters\ne.g., Dil Se.. [1998] vs Guru [2007]]
     end
 
-    subgraph Native_Storage [Native Tauri & SQLite Backend]
-        SqliteDB[(%APPDATA%/cadence.db\nTracks · Releases · user_split_releases)]
-        SidecarStore[Lossless .sidecar.json Cache]
-        WasapiCore[WASAPI Audio Engine\nZero-Allocation Locked Stream]
+    subgraph Proposal_System [Batch Safety Layer]
+        ProposalSheet[BatchProposalSheet\nDry-Run Diff Preview · Stage All vs Inspect]
     end
 
-    LeftRail --> useNav
-    SubHeader --> useNav
-    useNav --> CenterStage
-    TopHeader --> useStaged
-    TopHeader --> useHealth
-    CenterStage --> useHealth
-    CenterStage --> useStaged
-    RightInspector --> useInspect
-    CenterStage --> SqliteDB
-    useStaged --> SidecarStore
-    FloatingTransport -.->|Audio Thread Guard| WasapiCore
+    subgraph State_Domain [Authoritative Domain State Engine]
+        QueueService[curationQueueService\nDefect Aggregation & Prioritization]
+        FederationService[metadataFederationService\nDemand-Driven On-Demand Lookups]
+        StagedHook[useStagedChanges\nUnified Staged Mutators & Counters]
+        SidecarStore[(In-Memory Staged Sidecars\ntrack.pendingSidecarEdits)]
+    end
+
+    subgraph Commit_Modal [Two-Phase Commit Verification]
+        CommitModal[TwoPhaseCommitModal\nRead-Only Diff Table · Global Mode Switcher]
+    end
+
+    TopSwitcher -->|⌘2 Open Curate| QueueService
+    QueueService --> QueueRail
+    QueueRail -->|Select Item| ReconcileStage
+    ReconcileStage --> FederationService
+    ReconcileStage --> SoundtrackClusters
+    ReconcileStage -->|Stage & Next ⌘↵| SidecarStore
+    CopilotDrawer -->|Trigger Action| ProposalSheet
+    ProposalSheet -->|Stage All| SidecarStore
+    ProposalSheet -->|Inspect in Curate| QueueRail
+    SidecarStore --> StagedHook
+    StagedHook --> TopHeader
+    StagedHook --> CommitModal
+    TopHeader -->|Click Pill| CommitModal
 ```
 
-### 2. Global Shell & Navigation Topology
-
-#### A. Left Rail: Functional Containers
-The left navigation bar (`LeftRail.tsx`) is restructured to represent top-level functional containers rather than metadata slices:
-*   `Library Browse` (`library_browse`): Primary entry point for browsing the audio catalog.
-*   `Playlists` (`playlists`): User and smart playlists.
-*   `Physical Folder Tree` (`folders`): Direct filesystem hierarchy traversal.
-*   `Audit & Hygiene` (`audit`): Metadata compliance, normalization, and health triage cockpit.
-*   Unimplemented routes (`Classical Works`, `Pressing Stacks`) are removed from navigation to eliminate non-functional dead ends.
-*   The redundant `• Staged` count in the Left Rail is removed in favor of the canonical Top Header counter.
-
-#### B. Canvas Sub-Header: Contextual Metadata Lenses
-When `Library Browse` is active, `DataCanvas.tsx` displays the dimensional lens switcher:
-*   Lenses: `Albums` | `Artists` | `Composers` | `Tracks`.
-*   Grid Controls: Density toggle (`compact` / `standard` / `large`), sort menu (`Year`, `Artist`, `Title`, `Date Added`), and local `⌘F` filter bar.
-*   **Contextual Toolbar Suppression**: When navigating into an individual Album Detail view (`selectedAlbumId !== null`), the parent grid filter/sort/density toolbar is unmounted or hidden (`display: none`), preserving clean vertical space above the `← Back to Albums` breadcrumb.
-
-#### C. Viewport Spacing & Transport Clearance
-*   All scrolling view containers (`main`, virtual tables, grids) enforce `pb-28` (112px bottom padding) to guarantee that content is never clipped or occluded by the floating transport bar.
-*   The stray `gapless_playback` tooltip overlapping the bottom-right corner is anchored to the transport bar's internal signal cluster.
-*   When no track is loaded (`currentTrack === null`), transport playback controls and the `PCM · WASAPI` signal pill render in a muted, disabled state (`opacity-40 pointer-events-none`).
-
 ---
 
-### 3. Decoupled Dual-Layer Search Subsystem
+### 2. Curation Queue & Master-Detail Topology (`Curate ⌘2`)
 
-#### A. Global Spotlight (`⌘K`)
-*   Operates via `CommandBar`: indexes tracks, albums, artists, composers, and storage mount directories.
-*   Selecting an album result navigates directly to that Album Detail view.
-*   Selecting a track loads and queues the track.
-*   Selecting a directory navigates to `Library Browse` filtered to that directory path, rather than executing imperative DOM tree expansion across remote filesystem mounts.
+#### A. Spatial Layout & Responsive Grid
+*   **Viewport Dimensions**: When `topMode === 'curate'`, `LeftRail` compresses from standard 240px to icon-only mode (`w-16` / 64px). The right details inspector remains collapsed by default.
+*   **Canvas Allocation**: On a standard 1920x1080 display:
+    *   Left Container Rail: 64px (icon-only).
+    *   Curation Queue Rail: 280px (fixed-width, vertically scrollable).
+    *   Center-Right Reconciliation Canvas: 1576px (dedicated to the 4-way alignment table and artwork inspector).
 
-#### B. In-Place Folder Tree Filtering (`⌘F`)
-*   Operates exclusively within `FolderTreeExplorer.tsx`.
-*   The dedicated duplicate search input (`Search folders or tracks...`) is eliminated.
-*   Pressing `⌘F` while in the `Physical Folder Tree` container activates an in-place filter input.
-*   Filtering operates strictly against the in-memory array of loaded tree nodes: matching child branches are retained and expanded, while non-matching siblings are dimmed. No network queries or recursive filesystem disk traversals are performed over SMB shares.
-
----
-
-### 4. Deterministic Multi-Disc Grouping Engine
-
-#### A. Grouping Logic & Hierarchy
-In `AlbumCoverGrid.tsx` and library preparation pipelines, individual album releases are grouped into unified master releases using a strict two-tier confidence chain:
-1.  **Tier 1 (Deterministic MBID)**: Matching, non-empty MusicBrainz Release Group ID (`musicbrainzReleaseGroupId`).
-2.  **Tier 2 (Structural Disc Index)**: Identical normalized `album` title, matching `artistCredit`, and valid, sequential `discNumber` (`1..totalDiscs`) where `totalDiscs > 1` or multiple disc numbers exist for the release.
-3.  **Heuristic Regex Stripping Dropped**: Title stripping heuristics (e.g. removing `CD1`, `Disc 2`, `[Vol. 1]`) are explicitly excluded to prevent conflation of distinct volume releases.
-
-#### B. User Split Overrides via SQLite
-*   **Database Schema**: A lightweight user override table in `%APPDATA%/cadence.db`:
-    ```sql
-    CREATE TABLE IF NOT EXISTS user_split_releases (
-        release_id TEXT PRIMARY KEY,
-        created_at INTEGER NOT NULL
-    );
-    ```
-*   **Album Detail Action**: The Album Detail header overflow menu (`•••`) exposes `Split Multi-Disc Release`.
-*   **Execution**: Triggering `Split Multi-Disc Release` inserts the `release_id` into `user_split_releases`. The grouping engine skips releases present in this table, immediately unpacking the master card into individual disc cards in the grid.
-*   **Re-merging**: For split releases, the overflow menu displays `Re-merge Multi-Disc Release`, which removes the entry from `user_split_releases`.
-
----
-
-### 5. Unified Telemetry & State Hooks
-
-#### A. Shared Catalog Health Hook (`useCatalogHealth`)
-Centralizes catalog compliance calculations to eliminate contradictory scores:
-*   Computes authoritative health score from `auditService.computeCatalogAudit(tracks, releases)`.
-*   Exposes:
-    *   `globalHealthScore: number`: Catalog-wide health percentage (0–100).
-    *   `scopedHealthScore: number`: Health percentage within active scope (if scoped).
-    *   `impactedAlbumsCount: number`: Total unique albums with actionable defects.
-    *   `totalActionableTracks: number`: Total tracks requiring remediation.
-    *   `isCatalogPristine: boolean`: True only when global actionable defects == 0.
-*   **Copy Logic**:
-    *   If `isCatalogPristine`: `"All albums and tracks conform to bit-perfect metadata standards."`
-    *   If `!isCatalogPristine`: `"${totalActionableTracks} tracks across ${impactedAlbumsCount} albums require metadata or artwork triage."`
-*   `MaintainCockpit.tsx` and `CatalogPulseCard.tsx` consume `useCatalogHealth` directly, guaranteeing identical telemetry numbers and aligned descriptive text.
-
-#### B. Shared Staged Changes Hook (`useStagedChanges`)
-*   Aggregates uncommitted modifications across:
-    *   Track-level audio tag sidecars (`t.pendingSidecarEdits`).
-    *   Release-level artwork updates (`release.artwork.frontCoverUrl`).
-*   Exposes:
-    *   `stagedAlbumsCount: number`: Unique albums affected by pending edits.
-    *   `stagedTracksCount: number`: Total audio track files affected.
-    *   `stagedTagEditsCount: number`: Total discrete field modifications.
-    *   `stagedArtworkCount: number`: Total artwork replacements.
-    *   `hasPendingCommits: boolean`: True if any mutation is staged.
-*   **Top Utility Header Mount**: Renders a persistent indicator:
-    ```tsx
-    <button onClick={openCommitModal} className="...">
-      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-      <span>{stagedAlbumsCount} Albums · {stagedTracksCount} Staged</span>
-    </button>
-    ```
-*   Redundant indicators (`• Staged` in Left Rail, sub-header badges) are removed.
-
----
-
-### 6. Mode-Aware Panel State & Layout Polish
-
-#### A. Curate Mode Inspector Auto-Collapse (`useInspectorPersistence`)
-*   When navigating into `Curate (⌘2)`, Cadence evaluates viewport width (`window.innerWidth < 1600px`).
-*   On initial entry, the right-hand `Details` inspector is automatically collapsed to allocate full horizontal width to the 5-column reconciliation table.
-*   The collapse state is persisted in `localStorage` under `cadence_curate_inspector_collapsed`. If the user manually toggles the inspector open or closed while in `Curate`, their explicit choice is preserved across subsequent view transitions.
-
-#### B. All Tracks Flat Table & Action Bar Cleanup
-*   `VirtualDataTable.tsx` defaults to `Flat Table` view layout (`isFlatTable = true`) to provide clear functional differentiation from `Physical Folder Tree`.
-*   Album group headers in `VirtualDataTable.tsx` collapse secondary operations (`Enrich Album`, `Format Backdrop`) into a `•••` overflow menu, preserving only `Playlist` and `Edit Album` as primary buttons.
-
----
-
-### 7. State, Badge & Formatting Remediation
-
-#### A. Duration Formatting (`VirtualDataTable.tsx`)
-*   Replace `formatDuration` logic:
+#### B. `CurationQueueRail.tsx` (Left Pane)
+*   **Queue Discovery Engine** (`curationQueueService.ts`):
+    *   Scans catalog for actionable defects: compilation conflicts, missing artist/composer tags, missing/low-res artwork (<1000px), fragmented genre tags, and uncommitted staged edits.
+    *   Groups defects into **Album Curation Cards**.
+*   **Queue Item Schema**:
     ```typescript
-    const formatDuration = (secs: number) => {
-      const totalSecs = Math.floor(secs || 0)
-      const m = Math.floor(totalSecs / 60)
-      const s = totalSecs % 60
-      return `${m}:${s.toString().padStart(2, '0')}`
+    export interface AlbumCurationQueueItem {
+      albumId: string
+      albumTitle: string
+      artistCredit: string
+      coverArtUrl?: string
+      primaryIssueType: 'compilation_conflict' | 'missing_artwork' | 'untagged' | 'genre_fragment' | 'staged_uncommitted'
+      issueBadgeLabel: string
+      defectSeverity: 'critical' | 'high' | 'medium' | 'info'
+      affectedTrackCount: number
+      totalTracks: number
+      isStaged: boolean
+      soundtrackClusters?: {
+        canonicalTitle: string
+        releaseYear: string
+        trackIds: string[]
+      }[]
     }
     ```
-*   Eliminates raw floating-point decimals (`4:21.21333333333333`).
+*   **Header Stepper & Filters**:
+    *   Top stepper: `Item 1 of 15 Albums · Reason: Soundtrack Provenance`.
+    *   Filter pills: `All (15)` | `Soundtracks (1)` | `Artwork (12)` | `Staged (2)`.
+    *   Keyboard navigation: `⌘[` for previous album, `⌘]` for next album.
 
-#### B. Artwork Candidate Selection (`FocusedWorkbench.tsx`)
-*   Refactor `artworkCandidates` to supply distinct preview URLs and resolutions per source (`Local Embedded`, `Apple Music Master`, `Cover Art Archive`).
-*   Bind selection state to candidate ID: `selectedArtworkId === art.id` instead of `selectedArtwork === art.url`. Only the active candidate displays the filled yellow `Selected` badge; alternatives display a ghost `Use Cover` action.
+#### C. `CurationReconciliationStage.tsx` (Center-Right Pane)
+*   **Action Header**:
+    *   Breadcrumb: `Curate & 3-Way Reconciliation: <Album Title>`.
+    *   Actions: `← Prev (⌘[)`, `Next (⌘])`, and primary `✓ Stage & Next (⌘↵)`.
+    *   *Removal*: The yellow `Split Multi-Disc` button is permanently removed from this header.
+*   **Case A: Uniform Album Defect Workflow**:
+    *   For albums with uniform defects (e.g. low-resolution artwork or missing year):
+    *   Reconciliation table displays album-level candidates for Title, Artist, Composer, Release Year, and Artwork.
+    *   Tracks are listed below with individual toggle checkboxes (all checked by default). Clicking `✓ Stage & Next` applies the selected values to all checked tracks in `pendingSidecarEdits`.
+*   **Case B: Multi-Film Compilation Box Set Workflow**:
+    *   When an album is identified as a compilation box set (e.g., *A World Of Music*):
+    *   Tracks are grouped into visual accordion clusters based on their resolved canonical movie soundtrack:
+        *   Cluster 1: *Dil Se..* (1998) → Track 1: "Dil Se (Dil Se)".
+        *   Cluster 2: *Guru* (2007) → Track 2: "Barso Re".
+    *   Selecting or accepting the metadata for Cluster 1 snaps canonical fields (*Dil Se..*, 1998, A. R. Rahman) strictly to Track 1, preserving Track 2's distinct metadata.
 
-#### C. Commit Modal Synchronization (`TwoPhaseCommitModal.tsx`)
-*   **Tab Counts**: Compute `artworkTracksCount` to include both `t.pendingSidecarEdits?.coverArtUrl` and `release.artwork?.frontCoverUrl` updates so staged artwork does not display `(0)`.
-*   **Row Badges**: Bind row badges to `commitTarget`:
-    *   If `commitTarget === 'embedded'`: display `Header Write Staged`.
-    *   If `commitTarget === 'sidecar'`: display `Sidecar Staged`.
-*   **Folder Name Suppression**: Conditionally render the cyan folder badge only when:
+---
+
+### 3. Data Integrity & Lazy Demand-Driven Federation Engine
+
+#### A. Demand-Driven Metadata Federation (`metadataFederationService.ts`)
+*   Replaces the hardcoded template strings in `FocusedWorkbench.tsx`.
+*   **Operational SLA**: External network requests are **NEVER** executed in batch across the 15 queue albums. Lookups occur strictly on-demand for the single actively selected album/track.
+*   **Candidate Provider Sources**:
+    1.  *Local Tag*: Ground-truth metadata read from audio file container headers.
+    2.  *Apple Music Master*: Query Apple Music API / iTunes Search API for master high-resolution artwork (up to 3000x3000px uncompressed) and canonical release dates.
+    3.  *MusicBrainz Archive*: Query MusicBrainz by AcoustID or release/track title for standardized discography credits and Cover Art Archive scans.
+    4.  *Gemini AI Provenance*: Leverages `geminiCompilationSoundtrackService.ts` for disaggregating Indian / world soundtrack compilations into their original canonical motion pictures.
+*   **Playback Quietness Guard**: In accordance with Audiophile Invariant 4, if `audioEngine.isPlaying()` is true, background remote fetching delays until playback enters idle or until the user explicitly clicks `Fetch Online Candidates`.
+
+#### B. Strict `pendingSidecarEdits` Immutability
+*   `handleSave` in the reconciliation stage writes exclusively to:
     ```typescript
-    Boolean(folderName && folderName.trim().toLowerCase() !== albumTitle.trim().toLowerCase())
+    track.sidecarStatus = 'uncommitted_sidecar'
+    track.pendingSidecarEdits = {
+      ...(track.pendingSidecarEdits || {}),
+      title: selectedFields.title,
+      artistCredit: selectedFields.artist,
+      composerName: selectedFields.composer,
+      albumTitle: selectedFields.album,
+      releaseYear: selectedFields.year ? parseInt(selectedFields.year, 10) : undefined,
+      coverArtUrl: selectedArtworkUrl,
+    }
     ```
-*   **Archival Inspector Preview Height**: Reduce preview card aspect ratio from fixed square to max height `h-48` (or 25% reduction) so the `STAGED MUTATIONS` field diff list renders above the fold without scrolling.
+*   `track.title`, `track.artistCredit`, and `track.composerName` are **NEVER** directly mutated on the base track object in memory prior to disk commit.
+*   The green `STAGED OUTPUT` column binds directly to `track.pendingSidecarEdits`, guaranteeing 100% diff symmetry with `TwoPhaseCommitModal`.
 
-#### D. Microcopy Sanitization
-*   Command Bar:
-    *   `"Interactive Guided Tutorial & Headless Agent Protocol Tour"` → `"Cadence Quick Tour"`
-    *   `"Review Staged Metadata & Write to Disk (Two-Phase Commit)"` → `"Review & Apply Staged Changes"`
-    *   `"Canonical Soundtrack Resolver (Gemini AI for Compilation Albums)"` → `"Resolve Original Soundtracks"`
-*   Maintenance Cockpit:
-    *   `"AUDIO-IDLE WORKER: Album Covers (300x300)"` → `"Background Tasks: Indexing Artwork"`
-*   Copilot Drawer:
-    *   Remove `"Gemini 3.7 AI"` engine badge from header.
-    *   Card copy: `"Open the Two-Phase Commit modal..."` → `"Review and apply your staged changes to disk."`
-    *   Replace raw `&rarr;` strings in `MicroDiffCard.tsx` and `EmbeddedAgentDrawer.tsx` with Unicode `→`.
-    *   Add pluralization helper in `EmbeddedAgentDrawer.tsx` line 686:
-        ```typescript
-        rec.affectedCount === 1 ? '1 track affected' : `${rec.affectedCount} tracks affected`
-        ```
-*   Provenance Pills:
-    *   Convert cyan `From <Movie> (Year) >` pills in tracklists to muted slate/zinc pills (`bg-white/[0.05] text-zinc-400 border border-white/[0.08] hover:text-white hover:bg-white/[0.1]`).
-*   AcoustID Hash:
-    *   Truncate raw hash in `GranularCreditMatrix.tsx` into a single-line pill (`${hash.slice(0, 8)}...${hash.slice(-4)}`) with a dedicated `Copy` button.
+---
+
+### 4. Copilot Batch Proposal System (`BatchProposalSheet.tsx`)
+
+#### A. Safety Barrier against Blind In-Memory Mutations
+*   Clicking recommendation action pills in `EmbeddedAgentDrawer.tsx` (e.g. `Sync Album from Folder`, `Normalize Genres`, `Fetch Online Art`) will no longer execute silent mutations across hundreds of tracks.
+*   Instead, the dispatcher invokes `openBatchProposal(proposalData)`.
+
+#### B. Proposal Sheet Schema & Interface
+*   **Header**: Action title (e.g. `"Normalize Fragmented Genres: 32 Albums Affected"`).
+*   **Scope Badge**: Displays whether the action applies catalog-wide or is restricted to the active album scope.
+*   **Diff Preview Grid**:
+    *   Displays a clean before-and-after table (`Album / Track`, `Field`, `Current Tag`, `Proposed Tag`).
+*   **Action Dual-Path**:
+    *   `[Stage All as Draft]`: Commits the diffs into `pendingSidecarEdits` in bulk, updating the Top Header Staged pill and marking items as staged in Curate.
+    *   `[Inspect in Curate (⌘2)]`: Dismisses the sheet and routes the user into `Curate (⌘2)` with the Curation Queue pre-filtered strictly to the affected items.
+
+---
+
+### 5. Unified Telemetry & Commit State Synchronization
+
+#### A. Centralized Reactive State (`useStagedChanges.ts`)
+*   Extracts all staging calculations into an authoritative singleton hook:
+    *   `stagedAlbumsCount`: Unique releases with at least one track edit or artwork update.
+    *   `stagedTracksCount`: Total track files with `pendingSidecarEdits`.
+    *   `stagedTagEditsCount`: Total field-level modifications across all tracks.
+    *   `stagedArtworkCount`: Total artwork replacements.
+*   **Surface Bindings**:
+    *   Top Segmented Control: `Curate {triageAlbumsCount} (⌘2)`.
+    *   Top Header Utility Bar: `● {stagedAlbumsCount} Albums · {stagedTracksCount} Staged`.
+    *   `TwoPhaseCommitModal` Summary Badges: Displays `stagedTagEditsCount` and `stagedArtworkCount`.
+    *   `TwoPhaseCommitModal` Filter Tabs: `All Changes ({stagedTracksCount})`, `Tag Edits ({stagedTagEditsCount})`, `With Artwork Updates ({stagedArtworkCount})`.
+
+#### B. `TwoPhaseCommitModal.tsx` Fixes
+*   **Global Target Synchronization**: When toggling between `Embed Headers` and `Sidecar JSON` in the modal footer:
+    *   Iterate over all rendered album rows and update their badges dynamically (`Header Write Staged` vs `Sidecar Staged`), eliminating the defect where only the first expanded row updated.
+*   **Accurate Embedded Artwork Detection**:
+    *   The `Current` artwork inspector resolves embedded cover artwork directly from the audio file binary via `tauriBridge.getEmbeddedArtwork(trackPath)` or `track.artworkUrl`.
+    *   If embedded artwork exists (e.g. 500x500 JPEG), it renders in the `Current` preview box with its true resolution, rather than displaying `No Embedded Artwork · None detected`.
 
 --------------------------------------------------------------------------------
 
 ## Alternatives Considered
 
-### Alternative A: Promoting Artists and Composers into the Left Rail
-*   **Description**: Move `Artists` and `Composers` into the left sidebar directly below `Albums` as permanent primary navigation destinations, eliminating the canvas sub-header.
-*   **Pros**: Flattens navigation into a single vertical list without requiring a sub-header lens switcher.
-*   **Cons**: Elongates the sidebar and produces an uneven mental model where entity categories (`Albums`, `Artists`, `Composers`) compete as siblings alongside functional operational containers (`Physical Folder Tree`, `Playlists`, `Audit & Hygiene`).
-*   **Reason for Rejection**: Retaining high-level operational containers in the left rail while exposing dimensional lenses in the canvas sub-header preserves Apple HIG progressive disclosure and keeps the primary sidebar focused on task containers.
+### Alternative A: Complete Elimination of the Curate Top-Level Mode
+*   **Description**: Remove `Curate` from the top navigation switcher (`Listen | Audit`) and relegate all metadata editing to an in-place inspector modal triggered exclusively from Album Detail or Audit & Hygiene issues.
+*   **Pros**: Simplifies top navigation to two core modes (Playback vs Maintenance); eliminates ambiguity over what Curate does from a cold start.
+*   **Cons**: Destroys high-throughput curation workflows. Users with 15–20 albums needing metadata review would have to repeatedly drill in and out of Album Detail pages without an active queue or stepper, adding significant interaction friction.
+*   **Reason for Rejection**: Dedicated curation requires a focused Master-Detail workbench with queue stepping. Retaining `Curate (⌘2)` as an explicit triage queue aligns with audiophile catalog grooming needs.
 
-### Alternative B: Speculative Regex Title Stripping for Multi-Disc Grouping
-*   **Description**: Apply regex heuristics (`(Disc \d+)`, `CD\d+`, `[Vol. \d+]`) across albums sharing a common root folder and release year to automatically merge multi-disc releases lacking standard tags.
-*   **Pros**: Consolidates untagged or non-standard local albums without requiring MusicBrainz metadata or sequential disc numbers.
-*   **Cons**: High risk of false-positive grouping across distinct multi-volume releases (e.g., *Soundtrack Volume 1* and *Volume 2* issued in the same year), causing data corruption and unintended metadata merging.
-*   **Reason for Rejection**: Bit-perfect audiophile curation demands deterministic data integrity. Automatic grouping is strictly limited to deterministic signals (`MBID` or matching title + sequential disc numbering), paired with an explicit user override in the UI.
+### Alternative B: Flat 126-Track Curation Queue
+*   **Description**: Display all 126 individual defect tracks as a flat list in the left curation queue rail.
+*   **Pros**: 1-to-1 parity with raw defect counts and track-level metadata rows.
+*   **Cons**: Triggers severe cognitive fatigue. Users would have to click `Stage & Next` 126 times across 15 albums, redundantly approving identical album-level fields (Album Title, Year, Cover Art, Primary Artist) for each track of an album.
+*   **Reason for Rejection**: Music catalog curation is fundamentally album-hierarchical. Grouping items by album reduces queue length from 126 to 15, while our two-case branching (Case A uniform vs Case B compilation clusters) handles multi-soundtrack nuances without repetitive manual stepping.
 
-### Alternative C: Imperative Deep-Tree Auto-Expansion via Global Spotlight (`⌘K`)
-*   **Description**: When selecting a folder path from `⌘K`, imperatively expand the entire directory tree chain in `Physical Folder Tree` and scroll the DOM to focus that folder node.
-*   **Pros**: Visually displays the folder's location within the overall nested directory structure.
-*   **Cons**: Executing deep tree node traversal and expansion over SMB/NAS network shares introduces UI thread blocking, layout reflow thrashing, and risks waking storage disks during active playback.
-*   **Reason for Rejection**: `⌘K` spotlight is kept strictly as a direct-navigation tool (jumping straight to the album or track view), while `⌘F` handles in-memory virtual tree branch pruning without remote filesystem roundtrips.
+### Alternative C: Unthrottled Pre-Fetching of External Metadata Across the Entire Queue
+*   **Description**: Asynchronously fetch MusicBrainz, Apple Music, and Gemini AI metadata for all 15 queue albums in parallel immediately upon entering Curate mode.
+*   **Pros**: Pre-populates all candidate pills with zero loading spinners as the user steps through items.
+*   **Cons**: Flouts rate limits (MusicBrainz 1 request/sec limit) and directly violates Audiophile Invariant 4 (NIC PHY packet bursts and electrical EMI/RFI noise during audio playback).
+*   **Reason for Rejection**: Bit-perfect audiophile transport mandates transport quietness. Remote API lookups must be strictly lazy, demand-driven, and evaluated only for the active album upon selection.
 
-### Alternative D: Ephemeral Session-Only State for Inspector Panels
-*   **Description**: Maintain the collapsed/expanded state of the right inspector solely in transient React component state without persistence.
-*   **Pros**: Zero interaction with local browser storage.
-*   **Cons**: Forces the user to repeatedly re-collapse the inspector every time they navigate away and return to Curate mode.
-*   **Reason for Rejection**: Storing the preference in `localStorage` under `cadence_curate_inspector_collapsed` (matching `cadence_album_grid_density`) provides a predictable, persistent layout experience.
+### Alternative D: Mandatory 1-by-1 Curate Routing for All Copilot Actions
+*   **Description**: Strip bulk execution from Copilot entirely; clicking any recommendation in Copilot always redirects the user to Curate to approve items one by one.
+*   **Pros**: Guarantees that every single tag modification is visually inspected by the user.
+*   **Cons**: Makes trivial catalog-wide operations (e.g. normalizing 40 genre strings from "Tamil Film" to "Tamil Film Soundtrack") excruciatingly tedious and frustrating.
+*   **Reason for Rejection**: The Dry-Run `BatchProposalSheet` provides the ideal compromise: users review the aggregate before/after diff summary and can choose `[Stage All as Draft]` for bulk operations or `[Inspect in Curate]` for granular item-by-item stepping.
 
 --------------------------------------------------------------------------------
 
 ## Non-Functional Requirements
 
-### 1. Storage Bus Silence & Playback Integrity
-*   Zero disk I/O may occur on music library storage drives while audio playback is active or within the 30-second cooldown window.
-*   All UI actions (filter pruning, staged mutation counting, and multi-disc grouping) operate strictly against in-memory React state and cached SQLite rows without triggering filesystem stat calls or directory walking.
+### 1. Storage Bus Silence & Playback Integrity (Audiophile Invariant 1)
+*   Zero disk reads/writes may occur on music library storage drives while audio playback is active or within the 30-second cooldown window.
+*   All Curation Queue discovery, filtering, and state staging operate strictly against in-memory React state and cached SQLite rows without triggering filesystem stat calls or metadata re-reading.
 
-### 2. UI Thread Performance & Tree Virtualization
-*   Folder tree filtering (`⌘F`) in `FolderTreeExplorer.tsx` must execute in `< 16ms` against in-memory node caches, avoiding DOM thrashing or UI freeze across deep directory trees (5,000+ folders).
+### 2. Network PHY Quietness & Lazy Federation (Audiophile Invariant 4)
+*   Metadata candidate lookups to external providers (Apple Music, MusicBrainz, Gemini AI) are strictly demand-driven: lookups execute solely for the single actively selected queue item.
+*   If `AudioEngine` is currently in `Playing`, `Paused`, or `Loading` states, remote network lookups are queued or gated behind an explicit `Fetch Online Candidates` user button to prevent NIC packet bursts during audio streaming.
 
-### 3. Data Durability & Two-Phase Commit Safety
-*   Multi-disc split preferences are persisted durably in SQLite (`%APPDATA%/cadence.db`) and survive application updates.
-*   All metadata and artwork mutations remain non-destructive drafts in memory or `.sidecar.json` files until explicitly committed by the user.
+### 3. UI Thread Performance & Queue Virtualization
+*   The 280px `CurationQueueRail` must support virtualized scrolling (`@tanstack/react-virtual` or CSS virtualization) to render hundreds of queue items at 60fps without DOM reflow lag.
+*   Queue filter toggles (`All`, `Soundtracks`, `Artwork`, `Staged`) must compute in `< 8ms` in-memory.
+
+### 4. Two-Phase Commit Safety & State Immutability
+*   Staging metadata changes must never mutate raw track objects in memory.
+*   All staged mutations reside strictly inside `track.pendingSidecarEdits` and can be reverted cleanly with zero side effects. Physical disk mutations remain deferred to explicit confirmation in `TwoPhaseCommitModal`.
 
 --------------------------------------------------------------------------------
 
@@ -314,182 +308,142 @@ Centralizes catalog compliance calculations to eliminate contradictory scores:
 
 ### Target Files to Create/Modify
 
-#### 1. `src/hooks/useCatalogHealth.ts` ([Create])
-*   **Type / Scope**: TypeScript React Hook
+#### 1. `src/services/curationQueueService.ts` ([Create])
+*   **Type / Scope**: TypeScript Domain Curation Service
 *   **Proposed Changes**:
-    *   Centralizes catalog audit calculation logic using `auditService.computeCatalogAudit(tracks, releases)`.
-    *   Exposes `globalHealthScore`, `scopedHealthScore`, `impactedAlbumsCount`, `totalActionableTracks`, and dynamic status copy strings.
-    *   Provides unified reactive updates for both `MaintainCockpit.tsx` and `CatalogPulseCard.tsx`.
-*   **Rationale**: Eliminates the contradiction where `Audit` displays 80% health while claiming 100% compliance, and synchronizes scores with `Copilot`'s 93% calculation.
+    *   Exposes `computeCurationQueue(tracks: Track[], releases: Release[]): AlbumCurationQueueItem[]`.
+    *   Scans `AuditIssue` items, compilation conflicts, missing cover art, and uncommitted sidecar status to formulate discrete album queue cards.
+    *   Extracts resolved soundtrack clusters for multi-soundtrack compilations.
+    *   Exposes `resolveCurateInitialAlbum(queue: AlbumCurationQueueItem[], activeAlbumId?: string): AlbumCurationQueueItem | null`.
+*   **Rationale**: Eliminates the arbitrary `tracks[0]` fallback and provides authoritative defect grouping for the Curation Queue rail.
 
-#### 2. `src/hooks/useStagedChanges.ts` ([Create])
-*   **Type / Scope**: TypeScript React Hook
+#### 2. `src/services/metadataFederationService.ts` ([Create])
+*   **Type / Scope**: TypeScript Metadata Federation Engine
 *   **Proposed Changes**:
-    *   Aggregates pending mutations across both track-level sidecars (`t.pendingSidecarEdits`) and release-level artwork replacements (`release.artwork.frontCoverUrl`).
-    *   Exposes `stagedAlbumsCount`, `stagedTracksCount`, `stagedTagEditsCount`, `stagedArtworkCount`, and `hasPendingCommits`.
-*   **Rationale**: Resolves unitless, contradictory staged counts across four surfaces (`Curate 125`, `• Staged 249`, `811 Staged Changes`, `• 811 Staged`) and provides an accurate input to the Top Utility Header counter.
+    *   Exposes `fetchCandidateMetadata(albumId: string, trackId?: string): Promise<CandidateMetadataPayload>`.
+    *   Integrates `geminiCompilationSoundtrackService.ts` for disaggregating Indian / world soundtrack compilations into their original film entities.
+    *   Queries MusicBrainz and Apple Music APIs on-demand with rate-limiting.
+    *   Includes an active playback guard (`isPlaybackActive()`) to defer remote network lookups during audio streaming.
+*   **Rationale**: Replaces hardcoded template strings with real provenance data while respecting Audiophile Invariants 1 and 4.
 
-#### 3. `src/hooks/useInspectorPersistence.ts` ([Create])
-*   **Type / Scope**: TypeScript React Hook
+#### 3. `src/components/Curate/CurationQueueRail.tsx` ([Create])
+*   **Type / Scope**: React Component (Left Pane of Curate Workbench)
 *   **Proposed Changes**:
-    *   Reads and writes inspector collapse state to `localStorage` under `cadence_curate_inspector_collapsed`.
-    *   Applies a default collapsed state upon initial entry into Curate mode if `window.innerWidth < 1600px`, while respecting subsequent manual user toggles.
-*   **Rationale**: Prevents inspector panel sprawl from compressing the 5-column reconciliation table while honoring explicit user preferences across navigation transitions.
+    *   Fixed-width 280px container hosting a virtualized list of `AlbumCurationQueueItem` cards.
+    *   Renders album thumbnail, title, artist, defect category badge, affected track count, and staged status checkmark.
+    *   Header bar with filter pills (`All`, `Soundtracks`, `Artwork`, `Staged`) and active item indicator (`Item 1 of 15`).
+    *   Handles keyboard shortcuts (`⌘[`, `⌘]`) for queue navigation.
+*   **Rationale**: Solves zero-queue visibility in Curate, giving users clear orientation of what needs attention.
 
-#### 4. `src/services/albumGroupingService.ts` ([Create])
-*   **Type / Scope**: TypeScript Domain Service
+#### 4. `src/components/Curate/CurationReconciliationStage.tsx` ([Create])
+*   **Type / Scope**: React Component (Center-Right Canvas of Curate Workbench)
 *   **Proposed Changes**:
-    *   Implements the two-tier grouping algorithm: Tier 1 (`MBID`) and Tier 2 (normalized title + sequential disc numbering).
-    *   Queries `tauriBridge.dbGetSplitReleases()` to exclude manually split releases from automated aggregation.
-    *   Returns grouped master release entities with aggregated track lists and multi-disc badge metadata.
-*   **Rationale**: Eliminates multi-disc release fragmentation across rows in the Listen Grid while guaranteeing deterministic data integrity without speculative regex guessing.
+    *   Top action header with breadcrumbs, previous/next buttons, and `✓ Stage & Next → (⌘↵)`.
+    *   Renders Case A (Uniform Album Defect with track checklist) or Case B (Multi-Soundtrack Compilation with film accordions).
+    *   Hosts the 4-way provider reconciliation table (Local Tag, MusicBrainz, Apple Music, Gemini AI).
+    *   Hosts the High-Resolution Artwork Inspector with real embedded image byte decoding.
+*   **Rationale**: Provides a dedicated, high-throughput reconciliation canvas tailored to both single-film and compilation releases.
 
-#### 5. `src-tauri/src/db.rs` ([Modify])
-*   **Type / Scope**: Rust SQLite Storage Core
+#### 5. `src/components/Curate/CurationWorkbench.tsx` ([Create])
+*   **Type / Scope**: React Container Component
 *   **Proposed Changes**:
-    *   Executes migration DDL creating table `user_split_releases (release_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL)`.
-    *   Adds queries: `insert_split_release`, `delete_split_release`, and `get_split_releases`.
-*   **Rationale**: Provides durable persistence for manual multi-disc split overrides across application sessions.
+    *   Mounts in center stage when `topMode === 'curate'`, combining `CurationQueueRail` and `CurationReconciliationStage`.
+    *   Manages active queue index, active soundtrack cluster, and keyboard shortcuts (`⌘↵`, `Esc`, `⌘[`, `⌘]`).
+    *   Renders an explicit empty state ("All catalog items conform to bit-perfect standards") when the queue is clear.
+*   **Rationale**: Replaces the isolated single-track `FocusedWorkbench` as the primary workspace for `Curate (⌘2)`.
 
-#### 6. `src-tauri/src/lib.rs` ([Modify])
-*   **Type / Scope**: Rust Tauri Command Registration
+#### 6. `src/components/Agent/BatchProposalSheet.tsx` ([Create])
+*   **Type / Scope**: React Modal / Drawer Component
 *   **Proposed Changes**:
-    *   Registers Tauri commands: `db_set_release_split`, `db_remove_release_split`, and `db_get_split_releases`.
-*   **Rationale**: Exposes split release persistence to the frontend IPC bridge.
+    *   Renders dry-run before-and-after diff tables when a recommendation is clicked in Cadence Copilot.
+    *   Displays affected album and track counts, scope badges, and field-level diff rows.
+    *   Exposes `[Stage All as Draft]` (bulk write to `pendingSidecarEdits`) and `[Inspect in Curate (⌘2)]` (navigates to Curate pre-filtered to the affected items).
+*   **Rationale**: Eliminates blind, silent in-memory mutations across hundreds of tracks.
 
-#### 7. `src/services/tauriBridge.ts` ([Modify])
-*   **Type / Scope**: TypeScript IPC Service
+#### 7. `src/core/scopeUtils.ts` ([Modify])
+*   **Type / Scope**: TypeScript Scope Resolution Utility
 *   **Proposed Changes**:
-    *   Exports asynchronous bridge wrappers: `dbSetReleaseSplit(releaseId: string): Promise<void>`, `dbRemoveReleaseSplit(releaseId: string): Promise<void>`, and `dbGetSplitReleases(): Promise<string[]>`.
-*   **Rationale**: Type-safe IPC invocation for release split persistence.
+    *   Refactors `resolveCurateTargetTrack()`: removes line 148 (`return tracks[0] || null`).
+    *   Returns `null` if no active track/album is in scope, allowing `App.tsx` to initialize Curate via `curationQueueService.resolveCurateInitialAlbum()`.
+*   **Rationale**: Eliminates the "Dil Se" arbitrary track lock bug.
 
-#### 8. `src/App.tsx` ([Modify])
-*   **Type / Scope**: Root React Shell Component
+#### 8. `src/hooks/useStagedChanges.ts` ([Modify])
+*   **Type / Scope**: TypeScript Reactive Hook
 *   **Proposed Changes**:
-    *   Mounts the canonical `useStagedChanges` counter button in the Top Utility Header next to the Purity pill (`● 125 Albums · 811 Staged`).
-    *   Suppresses parent grid sorting and filtering toolbars when viewing Album Detail views.
-    *   Purges internal engineering terminology from Spotlight commands ("Cadence Quick Tour", "Review & Apply Staged Changes", "Resolve Original Soundtracks").
-    *   Dims transport bar controls and hides the `PCM · WASAPI` signal pill when `currentTrack === null`.
-*   **Rationale**: Establishes a single entry point for staged commits, cleans up global microcopy, and fixes spatial hierarchy on detail routes.
+    *   Exposes `triageAlbumsCount`: number of albums currently requiring curation.
+    *   Ensures `stagedAlbumsCount`, `stagedTracksCount`, `stagedTagEditsCount`, and `stagedArtworkCount` use synchronized domain calculation logic.
+*   **Rationale**: Unifies telemetry across top navigation badges, top utility header pills, and commit modal tabs.
 
-#### 9. `src/components/LeftRail/LeftRail.tsx` ([Modify])
-*   **Type / Scope**: Primary Navigation Component
+#### 9. `src/App.tsx` ([Modify])
+*   **Type / Scope**: Root Application Component
 *   **Proposed Changes**:
-    *   Restructures navigation links into top-level containers: `Library Browse`, `Playlists`, `Physical Folder Tree`, and `Audit & Hygiene`.
-    *   Removes unimplemented routes (`Classical Works`, `Pressing Stacks`).
-    *   Removes the duplicate `• Staged` badge from the left rail.
-*   **Rationale**: Enforces container rail architecture and eliminates navigation dead ends.
+    *   Updates `handleOpenCurate`: mounts `CurationWorkbench` when `topMode === 'curate'`.
+    *   Passes `isIconOnly={topMode === 'curate'}` to `LeftRail`, collapsing the rail to 64px.
+    *   Updates Curate mode button badge to render `{triageAlbumsCount}` (`Curate 15 ⌘2`).
+    *   Mounts `BatchProposalSheet` wired to `agentActionDispatcher`.
+*   **Rationale**: Implements the Master-Detail workbench route, rail compression, and batch proposal sheet integration.
 
-#### 10. `src/components/CenterStage/DataCanvas.tsx` ([Modify])
-*   **Type / Scope**: Primary Content Canvas
+#### 10. `src/components/LeftRail/LeftRail.tsx` ([Modify])
+*   **Type / Scope**: Navigation Sidebar Component
 *   **Proposed Changes**:
-    *   Renders the dimensional sub-header lens switcher (`Albums | Artists | Composers | Tracks`) only when `Library Browse` is active.
-    *   Conditionally suppresses the grid sorting, filtering, and view density toolbar whenever an Album Detail route is active.
-    *   Enforces bottom padding `pb-28` on all canvas viewports to prevent transport clipping.
-*   **Rationale**: Provides predictable sub-header lens slicing and eliminates toolbar spillover on detail routes.
+    *   Supports `isIconOnly?: boolean` prop.
+    *   When `isIconOnly` is true, sets width to `w-16` (64px), collapses labels, and displays native tooltips for container icons (`Library Browse`, `Playlists`, `Physical Folder Tree`, `Audit & Hygiene`).
+*   **Rationale**: Frees up 176px of horizontal space for the curation workbench while preserving spatial orientation.
 
-#### 11. `src/components/CenterStage/AlbumCoverGrid.tsx` ([Modify])
-*   **Type / Scope**: Album Grid Component
+#### 11. `src/components/CenterStage/FocusedWorkbench.tsx` ([Modify])
+*   **Type / Scope**: Focused Track Reconciliation Component
 *   **Proposed Changes**:
-    *   Integrates `albumGroupingService` to render multi-disc sets as single master album cards with a `4 Discs` badge.
-    *   Removes duplicate album titles inside missing-artwork placeholder squares.
-    *   Anchors the `gapless_playback` tooltip inside the transport signal cluster to eliminate corner overlap.
-*   **Rationale**: Eliminates Listen Grid visual clutter from multi-disc sets and placeholder redundancy.
+    *   Removes the yellow `Split Multi-Disc` button from the header.
+    *   Updates `handleSave` to write strictly to `track.pendingSidecarEdits` and `track.sidecarStatus = 'uncommitted_sidecar'` without mutating base track fields in memory.
+    *   Binds `STAGED OUTPUT` column directly to `track.pendingSidecarEdits`.
+*   **Rationale**: Restores data integrity and removes misplaced album actions from track-level editors.
 
-#### 12. `src/components/CenterStage/FolderTreeExplorer.tsx` ([Modify])
-*   **Type / Scope**: Filesystem Tree Component
-*   **Proposed Changes**:
-    *   Removes the duplicate `Search folders or tracks...` text input.
-    *   Wires `⌘F` to an in-memory branch pruning algorithm that filters virtual nodes without filesystem disk reads.
-    *   Collapses linear single-child directory chains into a consolidated path label (e.g., `NAS: Master`).
-*   **Rationale**: Eliminates search redundancy, prevents network thread stalls over SMB mounts, and saves 4 levels of horizontal indentation.
-
-#### 13. `src/components/CenterStage/FocusedWorkbench.tsx` ([Modify])
-*   **Type / Scope**: Album Detail & Curate Component
-*   **Proposed Changes**:
-    *   Refactors `artworkCandidates` to supply distinct preview URLs and resolutions per source.
-    *   Binds candidate selection to `selectedArtworkId === art.id` instead of comparing identical URLs.
-    *   Integrates `useInspectorPersistence` to auto-collapse the right inspector on initial entry.
-    *   Softens track provenance pills (`From <Movie> (Year) >`) to muted slate badges.
-    *   Adds `Split Multi-Disc Release` / `Re-merge Multi-Disc Release` to the header overflow menu.
-*   **Rationale**: Resolves simultaneous `Selected` radio button activation, gives the reconciliation table full width, and supports release split overrides.
-
-#### 14. `src/components/RightPanel/GranularCreditMatrix.tsx` ([Modify])
-*   **Type / Scope**: Inspector Credit Component
-*   **Proposed Changes**:
-    *   Truncates the 5-line raw AcoustID hash into a compact single-line pill (`${hash.slice(0, 8)}...${hash.slice(-4)}`) with a dedicated `Copy` button.
-*   **Rationale**: Enhances typographic hierarchy and saves vertical inspector space.
-
-#### 15. `src/components/CenterStage/VirtualDataTable.tsx` ([Modify])
-*   **Type / Scope**: All Tracks Table Component
-*   **Proposed Changes**:
-    *   Updates `formatDuration` with `Math.floor(secs % 60)` to eliminate floating-point duration strings (`4:21.21333333333333`).
-    *   Defaults view mode to `Flat Table` (`isFlatTable = true`).
-    *   Collapses secondary group actions (`Enrich Album`, `Format Backdrop`) into an overflow `•••` dropdown menu.
-*   **Rationale**: Resolves duration float bugs, establishes distinct identity from Folder Tree, and cleans up banner clutter.
-
-#### 16. `src/components/Maintain/MaintainCockpit.tsx` ([Modify])
-*   **Type / Scope**: Maintenance Cockpit Component
-*   **Proposed Changes**:
-    *   Replaces inline health calculations with `useCatalogHealth`.
-    *   Updates status copy to dynamically report accurate anomaly counts when health is under 100%.
-    *   Auto-selects the first non-empty issue tab on scope change (or defaults to `All Issues`).
-    *   Renames `AUDIO-IDLE WORKER: Album Covers` to `Background Tasks: Indexing Artwork`.
-*   **Rationale**: Eliminates contradictory health copy, prevents false-negative zero-issue screens, and purges worker thread jargon.
-
-#### 17. `src/components/Modals/TwoPhaseCommitModal.tsx` ([Modify])
-*   **Type / Scope**: Commit Verification Modal Component
-*   **Proposed Changes**:
-    *   Updates tab count calculations to include release-level artwork updates alongside track edits.
-    *   Binds row badges dynamically to `commitTarget` (`Sidecar Staged` vs. `Header Write Staged`).
-    *   Suppresses the cyan folder badge when folder name matches the album title.
-    *   Reduces artwork preview card height by 25% so staged track mutations appear above the fold.
-*   **Rationale**: Fixes tab count zero bugs, aligns preview badges with execution mode, and optimizes modal screen space.
-
-#### 18. `src/components/Agent/EmbeddedAgentDrawer.tsx` ([Modify])
+#### 12. `src/components/Agent/EmbeddedAgentDrawer.tsx` ([Modify])
 *   **Type / Scope**: Copilot Drawer Component
 *   **Proposed Changes**:
-    *   Removes `Gemini 3.7 AI` header pill.
-    *   Replaces raw `&rarr;` entities with Unicode `→`.
-    *   Fixes pluralization in track recommendation copy (`1 track affected`).
-    *   Simplifies commit card microcopy to `"Review and apply your staged changes to disk."`
-*   **Rationale**: Purges AI version badges, resolves entity rendering bugs, and standardizes plain English microcopy.
+    *   Wires recommendation action buttons to invoke `dispatcherContext.openBatchProposal` with structured diff data.
+    *   Displays scoped badges when recommendations apply to an active album vs catalog-wide.
+*   **Rationale**: Connects Copilot to the dry-run proposal safety barrier.
 
-#### 19. `src/components/Agent/MicroDiffCard.tsx` ([Modify])
-*   **Type / Scope**: Agent Diff Card Component
+#### 13. `src/services/agentActionDispatcher.ts` ([Modify])
+*   **Type / Scope**: Agent Action Dispatcher Service
 *   **Proposed Changes**:
-    *   Replaces raw `&rarr;` entities with Unicode `→`.
-*   **Rationale**: Resolves HTML entity rendering glitches.
+    *   Extends `AgentDispatcherContext` with `openBatchProposal: (data: BatchProposalData) => void`.
+    *   Refactors `remediate_issue` and bulk handlers to compute dry-run preview diffs before executing staging.
+*   **Rationale**: Decouples recommendation evaluation from immediate state mutation.
 
-#### 20. `src/test/testUxArchitectureRefactor.ts` ([Create])
-*   **Type / Scope**: TypeScript Automated Test Suite
+#### 14. `src/components/CenterStage/TwoPhaseCommitModal.tsx` ([Modify])
+*   **Type / Scope**: Two-Phase Commit Modal Component
 *   **Proposed Changes**:
-    *   Unit tests for `formatDuration` float rounding.
-    *   Unit tests for `useCatalogHealth` global and scoped calculations.
-    *   Unit tests for `albumGroupingService` two-tier grouping and split exclusion.
-    *   Unit tests for `useStagedChanges` track and release count aggregation.
-*   **Rationale**: Guarantees automated regression coverage for all resolved UX and telemetry issues.
+    *   Binds summary counters and filter tabs directly to `useStagedChanges`.
+    *   Fixes row-level badge toggle loop so switching write modes in the footer updates badges across all album rows (`Header Write Staged` vs `Sidecar Staged`).
+    *   Updates `Current` artwork box to decode and display embedded image binaries from audio files rather than falsely reporting "No Embedded Artwork".
+*   **Rationale**: Eliminates telemetric drift and resolves contradictory artwork states.
+
+#### 15. `src/test/testCurationLifecycle.ts` ([Create])
+*   **Type / Scope**: TypeScript Automated Test Driver
+*   **Proposed Changes**:
+    *   Unit test: Curation queue discovery and album grouping.
+    *   Unit test: Case A uniform staging vs Case B compilation soundtrack clustering.
+    *   Unit test: Strict immutability of base track objects during staging.
+    *   Unit test: Zero arbitrary fallback in `resolveCurateTargetTrack`.
+    *   Unit test: Telemetry alignment across `useStagedChanges` outputs.
+*   **Rationale**: Guarantees automated regression testing for the entire 3-stage curation lifecycle.
 
 ---
 
 ### Verification Plan
 
-*   **Compilation & Build Validation**:
-    *   `npm run build`: Validate that all TypeScript compilation (`tsc -b`) and Vite production bundle packaging complete without errors.
-    *   `cargo check --manifest-path src-tauri/Cargo.toml`: Validate that native Rust backend compiles cleanly with the new SQLite migration and IPC commands.
-*   **Automated Unit & Regression Tests**:
-    *   `npx tsx src/test/testUxArchitectureRefactor.ts`: Verify duration formatting, telemetry formulas, multi-disc grouping, and staged count calculations.
-    *   `cargo test --manifest-path src-tauri/Cargo.toml`: Run native backend test suite verifying SQLite split overrides.
+*   **Compilation & Static Type Checks**:
+    *   `npm run build`: Validate that all TypeScript compilation (`tsc -b`) and Vite production bundling succeed with zero errors.
+*   **Automated Regression Suite**:
+    *   `npx tsx src/test/testCurationLifecycle.ts`: Execute automated test suite validating queue discovery, soundtrack clustering, and state immutability.
 *   **Manual End-to-End Verification**:
-    1.  *Navigation Hierarchy*: Navigate through `Library Browse`, `Playlists`, `Physical Folder Tree`, and `Audit & Hygiene`. Confirm that `Albums | Artists | Composers | Tracks` switch views cleanly and that the grid toolbar disappears inside Album Detail.
-    2.  *Search Bounding*: Press `⌘K`, search for an album or directory, and verify direct navigation. In `Physical Folder Tree`, press `⌘F` and verify fast in-memory branch pruning without disk activity.
-    3.  *Multi-Disc & Split Override*: Locate a multi-disc box set. Confirm it renders as a single card with a `X Discs` badge. Open Album Detail, click `Split Multi-Disc Release`, and verify the cards separate in the grid and remain split after restarting the application.
-    4.  *Curate Inspector State*: Open Album Detail and switch to `Curate (⌘2)`. Verify the right inspector collapses automatically on initial entry. Toggle it open, switch to `Listen`, and return to `Curate`; verify the inspector remains open.
-    5.  *Staged Commit Counter & Modal*: Stage an artwork update and a tag edit. Verify the Top Utility Header displays `● 1 Album · N Staged`. Open the modal and verify `Tag Edits` and `With Artwork Updates` tabs show non-zero counts, and row badges change when switching between `Sidecar Files` and `Embed Headers`.
-    6.  *Formatting & Microcopy*: Verify track durations in `All Tracks` display clean `MM:SS` without floats, provenance pills render in muted slate, and raw model strings or worker thread names are absent.
+    1.  *Cold-Start Curate Navigation*: Open Cadence with no track selected, click `Curate (⌘2)`. Verify the Curation Queue opens with 15 albums, no "Dil Se" track lock occurs, and the left rail collapses to 64px icon-only mode.
+    2.  *Compilation Disaggregation*: Select *A World Of Music* in the queue. Verify tracks are grouped under *Dil Se..* (1998) and *Guru* (2007). Click `Stage & Next` on *Dil Se..*; verify only Track 1 is staged, leaving Track 2 unmutated.
+    3.  *Copilot Dry-Run Proposal*: Open Copilot, click `Disentangle 1 Compilation Boxset Conflicts`. Verify `BatchProposalSheet` opens showing the diff preview. Test both `[Stage All as Draft]` and `[Inspect in Curate]`.
+    4.  *Two-Phase Commit Verification*: Click `● 15 Albums · 82 Staged`. Verify summary badges match filter tabs, `Current` artwork box displays the true embedded image, and toggling write modes updates all album row badges dynamically.
 
 --------------------------------------------------------------------------------
 
 *Drafted with EGM*
-
-

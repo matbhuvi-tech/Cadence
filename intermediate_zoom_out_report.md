@@ -1,45 +1,42 @@
-# Stage 8: Intermediate Zoom Out Review Report
+# Intermediate Zoom Out Review Report
 
-*   **Target Document:** `docs/designs/UX_AND_UI_ARCHITECTURE_REFACTOR.md`
-*   **Evaluator:** Skeptical Architect (`egm-zoom-out`)
-*   **Evaluation Standard:** `resources/document_standards/zoom-out-standard.md`
-*   **Context:** Ingested `zoom_out_report.md`, `comprehension_report.md`, and `goldfish_review_report.md`
-*   **Date:** 2026-10-27
-
----
-
-## Executive Assessment
-
-The Intermediate Zoom Out Review evaluates whether the remediations applied from the Comprehension (Stage 6) and Critic (Stage 7) reviews preserved high-level architectural simplicity and adhered to the Zoom Out Standard without introducing unnecessary abstractions or weeds.
-
-The additions—specifically the in-memory pre-loading of `user_split_releases`, the playback-idle guard on `useCatalogHealth`, and the explicit `## Risks & Mitigations` table—strengthen the technical contract while strictly upholding Cadence's audiophile playback invariants.
+*   **Target File:** `docs/designs/CURATION_AND_TRIAGE_LIFECYCLE_ARCHITECTURE.md`
+*   **Standard:** [Zoom Out Standard](file:///C:/Users/Mathan/.gemini/config/plugins/elephant-goldfish-model/resources/document_standards/zoom-out-standard.md)
+*   **Reviewer Persona:** Skeptical Architect (`egm-zoom-out`)
+*   **Context:** Evaluated against findings from `zoom_out_report.md`, `comprehension_report.md`, and `critic_report.md`.
+*   **Mode:** Review (Stage 8)
 
 ---
 
-## Evaluation Against Zoom-Out Vectors
+## Executive Summary
 
-1. **Root Problem Focus**:
-   * The design remains anchored to resolving application shell duplication, search contention, multi-disc fragmentation, and telemetry drift. The added idle-guards ensure that resolving catalog health drift does not introduce transport jitter.
-
-2. **Simplicity & YAGNI**:
-   * Pre-loading split release IDs into an in-memory `Set<string>` eliminates async SQLite roundtrips during grid layout, avoiding complex layout synchronization logic.
-   * Debouncing and memoizing `useCatalogHealth` avoids building a bespoke background query queue.
-
-3. **Anti-Weeds (Altitude Control)**:
-   * The new `Risks & Mitigations` section provides a crisp, high-altitude matrix of potential failure modes and concrete safeguards without degrading into line-by-line pseudocode.
-
-4. **Leverage Existing**:
-   * Reuses SQLite `PRAGMA busy_timeout = 5000` and the existing `tracksVersion` invalidation counter.
+Re-evaluating the architecture after the Comprehension and Critic stages confirms that the design's high-altitude trajectory is sound. Crucially, addressing the findings from the earlier stages actually **simplifies** the architecture rather than adding weight:
+1. Reusing the existing `federatedResolversService.ts` and `compilationCanonicalizerService.ts` eliminates the need to author and maintain a redundant `metadataFederationService.ts` or invent new provider adapters.
+2. Replacing eager compilation clustering with lazy on-demand resolution keeps the queue discovery service (`curationQueueService`) lightweight and responsive.
+3. Consolidating `FocusedWorkbench` into `CurationReconciliationStage` prevents component fragmentation.
 
 ---
 
-## Findings
+## Architectural Verification
 
-*   **Findings Count:** 0 Blockers, 0 Majors, 0 Nits.
-*   **Assessment:** The high-level architecture has survived rigorous stress-testing and is structurally verified.
+### 1. Code Minimization & Reuse Validation
+*   **Status:** ✅ Improved
+*   **Assessment:** By pivoting away from a greenfield `metadataFederationService.ts` to extending the existing `federatedResolversService.ts`, the implementation footprint shrinks by approximately 300 lines of boilerplate network logic. Furthermore, routing compilation disaggregation through the established `compilationCanonicalizerService` leverages an already debugged, audiophile-gated Gemini integration.
+
+### 2. State & Data Flow Simplicity
+*   **Status:** ✅ Clean
+*   **Assessment:** The data flow remains strictly linear and unidirectional:
+    `Catalog / Audit Issues` $\rightarrow$ `curationQueueService` $\rightarrow$ `CurationQueueRail` $\rightarrow$ `CurationReconciliationStage` $\rightarrow$ `track.pendingSidecarEdits` $\rightarrow$ `useStagedChanges` $\rightarrow$ `TwoPhaseCommitModal`.
+    No circular state bindings, global event buses, or mutable track mutations are introduced.
+
+### 3. YAGNI & Complexity Boundaries
+*   **Status:** ⚠️ Guarded
+*   **Assessment:** The proposed mitigations from the Critic review (300ms debounce, `AbortController` cancellation, and offline fallback) are lightweight, native browser mechanisms that do not violate YAGNI. They prevent real-world failure modes (API bans, network stalls) without requiring external caching layers, Redis, or background thread pools.
 
 ---
 
-## Recommendation
+## Residual Architectural Directives for Implementation
 
-Advance immediately to Stage 9 (Implementation Readiness Test) to audit the detailed 20-file implementation breakdown (`DetailedRange`: lines 330–511).
+1. **Do not create `metadataFederationService.ts`**: Adapt `federatedResolversService.ts` in-place.
+2. **Do not evaluate soundtrack clusters during queue discovery**: Keep `computeCurationQueue` fast and synchronous (<10ms).
+3. **Consolidate `FocusedWorkbench`**: Do not maintain two separate 4-way reconciliation components.

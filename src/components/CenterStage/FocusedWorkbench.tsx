@@ -95,11 +95,14 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
   const handleSave = () => {
     const chosenArt = artworkCandidates.find((a) => a.id === selectedArtworkId)
     onApplyEdits({
-      title: selectedFields.title,
-      artistCredit: selectedFields.artist,
-      composerName: selectedFields.composer,
       sidecarStatus: 'uncommitted_sidecar',
-      pendingSidecarEdits: chosenArt?.url ? { coverArtUrl: chosenArt.url } : undefined,
+      pendingSidecarEdits: {
+        ...(track.pendingSidecarEdits || {}),
+        title: selectedFields.title,
+        artistCredit: selectedFields.artist,
+        composerName: selectedFields.composer,
+        ...(chosenArt?.url ? { coverArtUrl: chosenArt.url } : {}),
+      },
     } as any)
     showToast(`Staged metadata match for "${track.title}". Preserved bit-perfectly in sidecar.`)
     onClose()
@@ -189,17 +192,6 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {release && (
-            <button
-              onClick={handleToggleSplit}
-              disabled={isSplitting}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-xs font-mono text-[#E5E5EA] hover:text-white transition-all cursor-pointer border border-white/[0.06] disabled:opacity-50"
-              title={isSplit ? 'Re-merge into single master card' : 'Split multi-disc album into individual disc cards'}
-            >
-              <Disc3 className="w-3.5 h-3.5 text-[#D4AF37]" />
-              <span>{isSplit ? 'Re-merge Release' : 'Split Multi-Disc'}</span>
-            </button>
-          )}
           <button
             onClick={onClose}
             className="px-3.5 py-1.5 text-xs text-[#8E8E93] hover:text-white transition-colors cursor-pointer"

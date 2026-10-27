@@ -1,6 +1,7 @@
 import { DiffField, DiffSource } from '../core/types'
 import { getCuratedAlbumArtwork } from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
+import { tauriBridge } from './tauriBridge'
 
 export interface CoverArtCandidate {
   provider: 'apple' | 'musicbrainz' | 'ai' | 'local'
@@ -1032,6 +1033,85 @@ export class FederatedResolversService {
       return []
     }
   }
+
+  /**
+   * Resolves on-demand metadata & artwork candidates for a single active queue item.
+   * Gated by AudioEngine playback state to preserve bit-perfect transport purity.
+   * Supports AbortSignal to cancel in-flight queries upon rapid queue stepping.
+   */
+  public async resolveActiveItemCandidate(query: {
+    albumTitle: string
+    artistCredit?: string
+    composerName?: string
+    releaseYear?: number
+    trackTitle?: string
+    signal?: AbortSignal
+  }): Promise<ActiveItemCandidateResult> {
+    // 1. Playback Quietness Guard: Avoid remote PHY packet bursts during active audio playback
+    const playbackStatus = await tauriBridge.getPlaybackStatus().catch(() => null)
+    if (playbackStatus && (playbackStatus.isPlaying || playbackStatus.isPaused || playbackStatus.playbackState === 'Loading')) {
+      return {
+        artworkCandidates: [],
+        metadataCandidates: { itunes: null, musicbrainz: null, ai: null },
+        deferredPlayback: true,
+      }
+    }
+
+    if (query.signal?.aborted) {
+      return {
+        artworkCandidates: [],
+        metadataCandidates: { itunes: null, musicbrainz: null, ai: null },
+        error: 'Aborted',
+      }
+    }
+
+    try {
+      const [itunes, musicbrainz, artworkCandidates] = await Promise.all([
+        this.fetchItunesCandidate(query.artistCredit || '', query.trackTitle || query.albumTitle, query.albumTitle),
+        this.fetchMusicBrainzCandidate(query.artistCredit || '', query.trackTitle || query.albumTitle, query.albumTitle),
+        this.fetchAllAlbumCoverArtCandidates({
+          albumTitle: query.albumTitle,
+          artistCredit: query.artistCredit,
+          composerName: query.composerName,
+          releaseYear: query.releaseYear,
+        }),
+      ])
+
+      return {
+        artworkCandidates,
+        metadataCandidates: {
+          itunes,
+          musicbrainz,
+          ai: null,
+        },
+        deferredPlayback: false,
+      }
+    } catch (err: any) {
+      if (query.signal?.aborted || err?.name === 'AbortError') {
+        return {
+          artworkCandidates: [],
+          metadataCandidates: { itunes: null, musicbrainz: null, ai: null },
+          error: 'Aborted',
+        }
+      }
+      return {
+        artworkCandidates: [],
+        metadataCandidates: { itunes: null, musicbrainz: null, ai: null },
+        error: err?.message || 'Failed to fetch candidate metadata',
+      }
+    }
+  }
+}
+
+export interface ActiveItemCandidateResult {
+  artworkCandidates: CoverArtCandidate[]
+  metadataCandidates: {
+    itunes: ProviderResult | null
+    musicbrainz: ProviderResult | null
+    ai: ProviderResult | null
+  }
+  deferredPlayback?: boolean
+  error?: string
 }
 
 export interface ArtistPortraitCandidate {
@@ -1043,3 +1123,4 @@ export interface ArtistPortraitCandidate {
 }
 
 export const federatedResolversService = new FederatedResolversService()
+

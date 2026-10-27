@@ -1368,19 +1368,18 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                   <span>Inspecting</span>
                                 </span>
                               )}
-                              {stagedCoverArt ? (
+                              {stagedCoverArt && (
                                 <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30">
                                   Cover Art Updated
                                 </span>
-                              ) : relTracks.some((t) => getTrackRealEdits(t, release).length > 0) ? (
-                                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                                  {commitTarget === 'embedded' ? 'Header Write Staged' : 'Sidecar Staged'}
-                                </span>
-                              ) : (
-                                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                                  Sidecar Staged
-                                </span>
                               )}
+                              <span className={`text-[10px] font-mono font-medium px-2 py-0.5 rounded-full ${
+                                commitTarget === 'embedded'
+                                  ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
+                                  : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                              }`}>
+                                {commitTarget === 'embedded' ? 'Header Write Staged' : 'Sidecar Staged'}
+                              </span>
                               <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-zinc-300 border border-white/10">
                                 {relTracks.length} track{relTracks.length > 1 ? 's' : ''}
                               </span>

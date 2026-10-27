@@ -30,6 +30,8 @@ export interface AgentPipelineResult {
   total: number
 }
 
+import { BatchProposalData } from '../components/Agent/BatchProposalSheet'
+
 export interface AgentDispatcherContext {
   setViewMode: (mode: CanvasViewMode) => void
   setFacets: (facets: FacetSelections) => void
@@ -38,6 +40,7 @@ export interface AgentDispatcherContext {
   openModal: (modalName: string, payload?: any) => void
   refreshFromEngine: () => void
   showToast: (msg: string) => void
+  openBatchProposal?: (data: BatchProposalData) => void
   currentTrack?: Track | null
   currentRelease?: Release | null
 }
@@ -237,10 +240,6 @@ export class AgentActionDispatcher {
               if (soundtrackMatch) {
                 const cleanTitle = soundtrackMatch[1].trim()
                 const performers = soundtrackMatch[3]?.trim()
-                t.title = cleanTitle
-                if (performers && (!t.artistCredit || t.artistCredit === 'Unknown Artist')) {
-                  t.artistCredit = performers
-                }
                 t.sidecarStatus = 'uncommitted_sidecar'
                 t.pendingSidecarEdits = {
                   ...(t.pendingSidecarEdits || {}),
@@ -252,8 +251,6 @@ export class AgentActionDispatcher {
               } else if (movMatch && (movMatch[1] || movMatch[3])) {
                 const movNo = movMatch[1] || 'I'
                 const movTitle = (movMatch[3] || movMatch[2]).trim()
-                t.movementNumber = movNo
-                t.movementTitle = movTitle
                 t.sidecarStatus = 'uncommitted_sidecar'
                 t.pendingSidecarEdits = {
                   ...(t.pendingSidecarEdits || {}),

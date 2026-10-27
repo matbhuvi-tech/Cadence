@@ -144,8 +144,8 @@ export function resolveCurateTargetTrack({
     return currentPlayingTrack
   }
 
-  // 5. Global tracks[0] fallback
-  return tracks[0] || null
+  // 5. Zero arbitrary fallback - return null so Curate view initializes via CurationQueue
+  return null
 }
 
 /**

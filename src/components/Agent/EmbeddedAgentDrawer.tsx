@@ -28,6 +28,8 @@ import {
 import { agentSnapshotService, CatalogStatistics, AgentRecommendation } from '../../services/agentSnapshotService'
 import { agentActionDispatcher, AgentActionCommand, AgentDispatcherContext } from '../../services/agentActionDispatcher'
 import { Track, Release } from '../../core/types'
+import { auditService } from '../../services/auditService'
+import { BatchProposalDiffRow } from './BatchProposalSheet'
 import { MarkdownText } from './MarkdownText'
 import { CatalogPulseCard } from './CatalogPulseCard'
 import { MicroDiffCard } from './MicroDiffCard'
@@ -231,6 +233,109 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
       commandResult: cmdResult,
     }
     setMessages((prev) => [...prev, agentMsg])
+  }
+
+  const handleRecommendationClick = (rec: AgentRecommendation) => {
+    if (rec.actionType === 'OPEN_COMMIT_MODAL') {
+      handleExecuteAction({
+        tool: 'open_modal',
+        args: { modalName: 'commit' },
+        explanation: rec.title,
+      })
+      return
+    }
+
+    if (dispatcherContext.openBatchProposal) {
+      const diffs: BatchProposalDiffRow[] = []
+      const affectedAlbumSet = new Set<string>()
+
+      if (rec.actionType === 'NORMALIZE_GENRES') {
+        tracks.forEach((t) => {
+          const rawGenre = (t.pendingSidecarEdits?.genre as string) || (t as any).genre || ''
+          if (rawGenre && (rawGenre !== rawGenre.trim() || rawGenre === rawGenre.toLowerCase())) {
+            const proposed = rawGenre.trim().replace(/\b\w/g, (c: string) => c.toUpperCase())
+            diffs.push({
+              trackId: t.id,
+              trackTitle: t.title,
+              albumTitle: t.albumTitle || t.canonicalAlbumTitle || 'Album',
+              fieldName: 'genre',
+              currentValue: rawGenre,
+              proposedValue: proposed,
+            })
+            if (t.releaseId) affectedAlbumSet.add(t.releaseId)
+          }
+        })
+      } else if (rec.actionType === 'RESOLVE_UNKNOWN_ARTISTS_FROM_FOLDER') {
+        tracks.forEach((t) => {
+          if (!t.artistCredit || t.artistCredit === 'Unknown Artist') {
+            const parts = (t.filePath || '').split(/[/\\]/)
+            const folderArtist = parts.length > 2 ? parts[parts.length - 3] : 'Various Artists'
+            diffs.push({
+              trackId: t.id,
+              trackTitle: t.title,
+              albumTitle: t.albumTitle || t.canonicalAlbumTitle || 'Album',
+              fieldName: 'artistCredit',
+              currentValue: t.artistCredit || 'Unknown Artist',
+              proposedValue: folderArtist,
+            })
+            if (t.releaseId) affectedAlbumSet.add(t.releaseId)
+          }
+        })
+      } else if (rec.actionType === 'SYNC_FOLDER_TO_ALBUM') {
+        tracks.forEach((t) => {
+          if (t.folderName && t.canonicalAlbumTitle && t.folderName !== t.canonicalAlbumTitle) {
+            diffs.push({
+              trackId: t.id,
+              trackTitle: t.title,
+              albumTitle: t.canonicalAlbumTitle,
+              fieldName: 'albumTitle',
+              currentValue: t.canonicalAlbumTitle,
+              proposedValue: t.folderName,
+            })
+            if (t.releaseId) affectedAlbumSet.add(t.releaseId)
+          }
+        })
+      }
+
+      if (diffs.length === 0) {
+        const sampleTracks = (currentRelease ? tracks.filter((t) => t.releaseId === currentRelease.id) : tracks).slice(0, 10)
+        sampleTracks.forEach((t) => {
+          diffs.push({
+            trackId: t.id,
+            trackTitle: t.title,
+            albumTitle: t.albumTitle || t.canonicalAlbumTitle || 'Album',
+            fieldName: 'title',
+            currentValue: t.title,
+            proposedValue: t.title,
+          })
+          if (t.releaseId) affectedAlbumSet.add(t.releaseId)
+        })
+      }
+
+      dispatcherContext.openBatchProposal({
+        proposalId: `prop-${Date.now()}`,
+        title: rec.title,
+        description: rec.description,
+        scopeLabel: currentRelease ? `Scoped: ${currentRelease.title}` : 'Catalog-Wide',
+        affectedAlbumsCount: affectedAlbumSet.size || (currentRelease ? 1 : Math.max(1, Math.round(diffs.length / 8))),
+        affectedTracksCount: diffs.length || (rec.affectedCount || 1),
+        diffs,
+        onStageAll: async () => {
+          await auditService.remediateIssue(rec.actionType, { releaseId: currentRelease?.id })
+          dispatcherContext.refreshFromEngine()
+        },
+        onInspectInCurate: (_affectedTitles: string[]) => {
+          dispatcherContext.openModal('curate')
+        },
+      })
+      return
+    }
+
+    handleExecuteAction({
+      tool: 'remediate_issue',
+      args: { actionType: rec.actionType },
+      explanation: rec.title,
+    })
   }
 
   // Submit a user prompt to the Agent
@@ -686,13 +791,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
                     {rec.affectedCount ? `${rec.affectedCount} ${rec.affectedCount === 1 ? 'track' : 'tracks'} affected` : 'Catalog-wide'}
                   </span>
                   <button
-                    onClick={() =>
-                      handleExecuteAction({
-                        tool: rec.actionType === 'OPEN_COMMIT_MODAL' ? 'open_modal' : 'remediate_issue',
-                        args: { actionType: rec.actionType, modalName: 'commit' },
-                        explanation: rec.title,
-                      })
-                    }
+                    onClick={() => handleRecommendationClick(rec)}
                     className="px-3 py-1 rounded-lg bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 border border-[#00F5FF]/40 text-[#00F5FF] font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
                   >
                     <Sparkles className="w-3 h-3" />

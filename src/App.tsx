@@ -43,6 +43,7 @@ import { CompilationProvenanceModal } from './components/Modals/CompilationProve
 import { GuidedTutorialModal } from './components/Tutorial/GuidedTutorialModal'
 import { TutorialActions } from './tutorial/tutorialSteps'
 import { EmbeddedAgentDrawer } from './components/Agent/EmbeddedAgentDrawer'
+import { BatchProposalSheet, BatchProposalData } from './components/Agent/BatchProposalSheet'
 import { AgentDispatcherContext } from './services/agentActionDispatcher'
 import { AudioPlayerProvider, useAudioPlayer } from './context/AudioPlayerContext'
 import { NowPlayingBar } from './components/AudioPlayer/NowPlayingBar'
@@ -56,6 +57,7 @@ import { NormalizationRulesModal } from './components/Modals/NormalizationRulesM
 import { MobileRemoteModal } from './components/Modals/MobileRemoteModal'
 import { MaintainCockpit, MaintainSubTab } from './components/Maintain/MaintainCockpit'
 import { FocusedWorkbench } from './components/CenterStage/FocusedWorkbench'
+import { CurationWorkbench } from './components/Curate/CurationWorkbench'
 import { SanctuaryListeningLounge } from './components/AudioPlayer/SanctuaryListeningLounge'
 import { ScanProgressPayload, WatchedFolder, SkippedFile } from './core/types'
 import { backdropAnalyzer } from './services/backdropAnalyzer'
@@ -119,7 +121,7 @@ function AppContent() {
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set())
 
   // Canonical staged mutations hook
-  const { stagedAlbumsCount, stagedTracksCount, hasPendingCommits } = useStagedChanges(tracks, releases)
+  const { stagedAlbumsCount, stagedTracksCount, triageAlbumsCount, hasPendingCommits } = useStagedChanges(tracks, releases)
 
   // View & Filter State
   const [viewMode, setViewMode] = useState<CanvasViewMode>('cover_grid')
@@ -203,8 +205,8 @@ function AppContent() {
   const [watchedFolders, setWatchedFolders] = useState<WatchedFolder[]>([])
   const [skippedFiles, setSkippedFiles] = useState<SkippedFile[]>([])
 
-  // Top-Level Unified Product Model: Library vs Maintain & Sanctuary Lounge
-  const [topMode, setTopMode] = useState<'library' | 'maintain'>('library')
+  // Top-Level Unified Product Model: Library vs Maintain vs Curate & Sanctuary Lounge
+  const [topMode, setTopMode] = useState<'library' | 'curate' | 'maintain'>('library')
   const [maintainSubTab, setMaintainSubTab] = useState<MaintainSubTab>('needs_attention')
   const [isSanctuaryOpen, setIsSanctuaryOpen] = useState<boolean>(false)
   const [focusedWorkbenchTrack, setFocusedWorkbenchTrack] = useState<Track | null>(null)
@@ -219,6 +221,7 @@ function AppContent() {
   const [isAddTracksModalOpen, setIsAddTracksModalOpen] = useState(false)
   const [tracksToAdd, setTracksToAdd] = useState<Track[]>([])
   const [initialPlaylistTracks, setInitialPlaylistTracks] = useState<Track[]>([])
+  const [activeBatchProposal, setActiveBatchProposal] = useState<BatchProposalData | null>(null)
 
   const {
     isPlaying,
@@ -293,7 +296,8 @@ function AppContent() {
         setFocusedWorkbenchTrack(null)
       } else if ((e.ctrlKey || e.metaKey) && e.key === '2') {
         e.preventDefault()
-        handleOpenCurate()
+        setTopMode('curate')
+        setFocusedWorkbenchTrack(null)
       } else if ((e.ctrlKey || e.metaKey) && e.key === '3') {
         e.preventDefault()
         setTopMode('maintain')
@@ -1021,19 +1025,8 @@ function AppContent() {
 
   // Scoped Curate Trigger Handler
   const handleOpenCurate = () => {
-    const trk = resolveCurateTargetTrack({
-      tracks,
-      releases,
-      selectedTrackId,
-      selectedAlbumId,
-      selectedArtist,
-      selectedComposer,
-      currentPlayingTrack: currentTrack,
-    })
-    if (trk) {
-      setFocusedWorkbenchTrack(trk)
-    }
-    setTopMode('library')
+    setTopMode('curate')
+    setFocusedWorkbenchTrack(null)
   }
 
   // Library statistics
@@ -1331,6 +1324,10 @@ function AppContent() {
       openModal: (modalName: string, payload?: any) => {
         if (modalName === 'import') setIsImportModalOpen(true)
         else if (modalName === 'commit' || modalName === 'twophase') setIsCommitModalOpen(true)
+        else if (modalName === 'curate') {
+          setTopMode('curate')
+          setFocusedWorkbenchTrack(null)
+        }
         else if (modalName === 'pathrule') setIsPathRuleModalOpen(true)
         else if (modalName === 'batch_diff' || modalName === 'batch_ai') setIsBatchDiffModalOpen(true)
         else if (modalName === 'tutorial') setIsTutorialOpen(true)
@@ -1341,6 +1338,7 @@ function AppContent() {
           else if (currentRelease) setCustomizingRelease(currentRelease)
         }
       },
+      openBatchProposal: (data: BatchProposalData) => setActiveBatchProposal(data),
       refreshFromEngine: () => {
         refreshFromEngine()
         persistCurrentLibrary()
@@ -1582,18 +1580,21 @@ function AppContent() {
           </button>
 
           <button
-            onClick={handleOpenCurate}
+            onClick={() => {
+              setTopMode('curate')
+              setFocusedWorkbenchTrack(null)
+            }}
             title="Precision Metadata Workbench (⌘2)"
             className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
-              focusedWorkbenchTrack
+              topMode === 'curate'
                 ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
                 : 'text-[#8E8E93] hover:text-[#EDEDED]'
             }`}
           >
             <span>Curate</span>
-            {uncommittedCount > 0 && (
+            {triageAlbumsCount > 0 && (
               <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-[#D4AF37]/20 text-[#D4AF37] font-mono font-medium">
-                {uncommittedCount}
+                {triageAlbumsCount}
               </span>
             )}
             <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘2</span>
@@ -1757,9 +1758,10 @@ function AppContent() {
             setInitialPlaylistTracks([])
             setIsCreatePlaylistOpen(true)
           }}
+          isIconOnly={topMode === 'curate'}
         />
 
-        {/* 2. Center Stage: MaintainCockpit OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
+        {/* 2. Center Stage: MaintainCockpit OR CurationWorkbench OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
         {topMode === 'maintain' ? (
           <MaintainCockpit
             tracks={tracks}
@@ -1830,6 +1832,25 @@ function AppContent() {
               setSelectedAlbumId(null)
               setSelectedArtist(null)
               setSelectedComposer(null)
+            }}
+          />
+        ) : topMode === 'curate' ? (
+          <CurationWorkbench
+            tracks={tracks}
+            releases={releases}
+            auditIssues={auditIssues}
+            initialSelectedAlbumId={selectedAlbumId}
+            onOpenCommitModal={() => {
+              if (isPlaying) {
+                showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
+              }
+              setIsCommitModalOpen(true)
+            }}
+            onBackToLibrary={() => setTopMode('library')}
+            showToast={showToast}
+            onRefreshLibrary={() => {
+              refreshFromEngine()
+              persistCurrentLibrary()
             }}
           />
         ) : focusedWorkbenchTrack ? (
@@ -2320,6 +2341,14 @@ function AppContent() {
         activeTriageLabel={activeTriageIssue?.title}
         activeFilterCount={gridScopedTracks.length}
         isGridFiltered={isGridFilterActive}
+      />
+
+      {/* Copilot Batch Proposal Safety Layer Modal */}
+      <BatchProposalSheet
+        proposal={activeBatchProposal}
+        isOpen={Boolean(activeBatchProposal)}
+        onClose={() => setActiveBatchProposal(null)}
+        showToast={showToast}
       />
 
       {/* Comprehensive Library & Storage Management Modal */}

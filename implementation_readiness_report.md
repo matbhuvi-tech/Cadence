@@ -1,82 +1,72 @@
-# Stage 9: Implementation Readiness Test Report
+# Implementation Readiness Test Report
 
-**Status:** resolved
-*   **Target Document:** `docs/designs/UX_AND_UI_ARCHITECTURE_REFACTOR.md`
-*   **Target Scope:** `DetailedRange` (Lines 330–511)
-*   **Reviewers:** 
-    *   Implementation Readiness Lead (`egm-implementation-readiness`)
-    *   Codebase Details Compliance Auditor (`egm-codebase-details`)
-    *   Style Copy Editor (`egm-style`)
-*   **Evaluation Standards:** `resources/document_standards/implementation-readiness-standard.md`
-*   **Date:** 2026-10-27
+*   **Target File:** `docs/designs/CURATION_AND_TRIAGE_LIFECYCLE_ARCHITECTURE.md`
+*   **Standard:** [Implementation Readiness Standard](file:///C:/Users/Mathan/.gemini/config/plugins/elephant-goldfish-model/resources/document_standards/implementation-readiness-standard.md)
+*   **Reviewers:** Pragmatic Tech Lead (`egm-implementation-readiness`), Codebase Auditor (`egm-codebase-details`), Style Editor (`egm-style`)
+*   **Target Scope:** `DetailedRange` (Lines 307–450)
+*   **Mode:** Review (Stage 9)
 
 ---
 
-## Executive Assessment
+## Executive Summary
 
-The implementation plan provides an exhaustive, 20-file inventory spanning the native Rust backend, domain hooks, shell layout, and detail reconciliation views. File rationales and proposed changes are actionable and accurately reflect observed codebase defects (e.g. `VirtualDataTable.tsx` duration float and `FocusedWorkbench.tsx` candidate selection).
+The Detailed Implementation Plan identifies the correct target files across the repository and accurately isolates key defects (e.g. `scopeUtils.ts` line 148 fallback, `TwoPhaseCommitModal` badge desynchronization).
 
-To satisfy the Zero-Decision Rule and ensure ground-truth alignment with the native Rust codebase, the file mapping for the database layer must be updated to target `src-tauri/src/db/schema.rs`, `src-tauri/src/db/operations.rs`, and `src-tauri/src/commands/library.rs` instead of the non-existent `src-tauri/src/db.rs`, and exact IPC method signatures must be declared.
-
----
-
-## Findings
-
-### Finding 1: File Drift on Native Rust SQLite Database Architecture
-*   **Reviewer:** `egm-codebase-details`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Implementation Plan File 5 (`src-tauri/src/db.rs`, lines 357–363)
-*   **Discrepancy Description:** 
-    The implementation plan lists `src-tauri/src/db.rs` as the target for DDL migration and database operations. In the actual codebase, `src-tauri/src/db/` is a multi-file module:
-    *   `src-tauri/src/db/schema.rs` houses database initialization and table migrations (`init_db_schema`).
-    *   `src-tauri/src/db/operations.rs` houses concrete SQLite CRUD operations.
-    *   `src-tauri/src/commands/library.rs` houses Tauri IPC command handlers.
-*   **Actionable Recommendation:** 
-    Split File 5 into:
-    *   `src-tauri/src/db/schema.rs`: Add DDL for `user_split_releases (release_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL)`.
-    *   `src-tauri/src/db/operations.rs`: Add `insert_split_release`, `delete_split_release`, and `get_all_split_releases`.
-    *   `src-tauri/src/commands/library.rs`: Add Tauri command wrappers `db_set_release_split`, `db_remove_release_split`, and `db_get_split_releases`.
+However, the plan fails the **Zero-Decision Rule** and **Phasing Standard** in three critical areas:
+1. **Unpartitioned Work Breakdown**: The 15 file tasks are presented as a flat, unsequenced list without phased checkpoints or buildability milestones.
+2. **Codebase Target Drift**: File #2 specifies creating `metadataFederationService.ts` from scratch, failing to target the existing 1,046-line `src/services/federatedResolvers.ts`.
+3. **Missing Data Flow & State Bindings**: Key state mechanisms (such as how `useStagedChanges` derives `triageAlbumsCount` without circular dependencies, and how `TwoPhaseCommitModal` binds global `commitTarget` to row badges) are described vaguely.
 
 ---
 
-### Finding 2: Zero-Decision Gap for Tauri IPC and Grouping Service Signatures
+## Detailed Findings
+
+### 1. Missing Phased Execution & Checkpoint Architecture
 *   **Reviewer:** `egm-implementation-readiness`
 *   **Severity:** 🟡 Major
-*   **Affected Scope:** Files 4 & 7 (`src/services/albumGroupingService.ts` and `src/services/tauriBridge.ts`, lines 350–356 and 371–377)
-*   **Discrepancy Description:** 
-    The plan describes creating `albumGroupingService.ts` and updating `tauriBridge.ts`, but omits the exact TypeScript method signatures. An implementer must guess parameter types and return contracts.
-*   **Actionable Recommendation:** 
-    Document the explicit method signatures in the plan:
-    ```typescript
-    // src/services/tauriBridge.ts
-    export async function dbSetReleaseSplit(releaseId: string): Promise<void>
-    export async function dbRemoveReleaseSplit(releaseId: string): Promise<void>
-    export async function dbGetSplitReleases(): Promise<string[]>
+*   **Affected Scope:** Lines 307–433 (`Detailed Implementation Plan`)
+*   **Finding & Guidance:** 
+    *   *Defect:* The implementation plan presents a flat list of 15 file modifications without phased dependencies. Attempting to build the UI components (e.g. `CurationQueueRail.tsx` or `CurationWorkbench.tsx`) before the underlying domain services and hooks are compile-ready will result in a broken build state.
+    *   *Remediation:* Partition the implementation into four strictly ordered, buildable phases:
+        *   **Phase 1: Domain State & Service Layer**: `scopeUtils.ts`, `curationQueueService.ts`, `federatedResolvers.ts`, `useStagedChanges.ts`. (Checkpoint: `npm run build` cleanly validates domain services).
+        *   **Phase 2: Master-Detail Curation Workbench**: `LeftRail.tsx`, `CurationQueueRail.tsx`, `CurationReconciliationStage.tsx`, `CurationWorkbench.tsx`, `App.tsx`. (Checkpoint: `⌘2` navigates cleanly to Curate workbench with 64px rail).
+        *   **Phase 3: Copilot Batch Proposal Safety Layer**: `BatchProposalSheet.tsx`, `agentActionDispatcher.ts`, `EmbeddedAgentDrawer.tsx`. (Checkpoint: Copilot recommendations trigger proposal sheet instead of direct mutations).
+        *   **Phase 4: Commit Modal Alignment & Verification Suite**: `TwoPhaseCommitModal.tsx`, `FocusedWorkbench.tsx`, `testCurationLifecycle.ts`. (Checkpoint: Automated test suite passes; commit modal counters synchronize).
 
-    // src/services/albumGroupingService.ts
-    export interface GroupedReleaseCard {
-      masterRelease: Release
-      constituentReleases: Release[]
-      discCount: number
-      isSplit: boolean
-    }
-    export function groupAlbumReleases(
-      releases: Release[],
-      splitReleaseIds: Set<string>
-    ): GroupedReleaseCard[]
-    ```
+### 2. File Target Correction: Modify `federatedResolvers.ts` instead of Creating `metadataFederationService.ts`
+*   **Reviewer:** `egm-codebase-details`
+*   **Severity:** 🔴 Blocker
+*   **Affected Scope:** Lines 320–328 (`Detailed Implementation Plan § 2`)
+*   **Discrepancy Description & Rationale:**
+    *   *Defect:* The plan instructs creating a new file `src/services/metadataFederationService.ts`. In Cadence, metadata federation across Apple Music/iTunes, MusicBrainz, and AI is already consolidated in [src/services/federatedResolvers.ts](file:///e:/Mathan/Code/Music%20Agent/src/services/federatedResolvers.ts) (`federatedResolversService`). Creating a duplicate service fragments provider configurations and cache lifecycles.
+    *   *Remediation:* Change Target File #2 to `src/services/federatedResolvers.ts` ([Modify]). Specify extending `federatedResolversService` with an on-demand active item resolution method: `resolveActiveItemCandidate(albumId: string, trackId?: string): Promise<CoverArtCandidate[]>`.
 
----
+### 3. Missing State Binding Specification for `useStagedChanges.ts` and `TwoPhaseCommitModal.tsx`
+*   **Reviewer:** `egm-implementation-readiness`
+*   **Severity:** 🟡 Major
+*   **Affected Scope:** Lines 370–376, 415–422 (`Detailed Implementation Plan § 8, 14`)
+*   **Finding & Guidance:**
+    *   *Defect:* Line 373 states that `useStagedChanges` exposes `triageAlbumsCount`, but does not specify how this value is computed or whether it imports `curationQueueService`. If `useStagedChanges` imports `curationQueueService` while `curationQueueService` imports staging status from `useStagedChanges`, a circular dependency loop occurs.
+    *   *Defect:* Line 419 states: "Fixes row-level badge toggle loop so switching write modes in the footer updates badges across all album rows". It omits the concrete mechanism.
+    *   *Remediation:*
+        *   In `useStagedChanges.ts`: Specify that `triageAlbumsCount` is computed by querying uncommitted sidecar status and catalog hygiene defect IDs directly from `graphEngine`, preventing circular dependencies with `curationQueueService`.
+        *   In `TwoPhaseCommitModal.tsx`: Elevate `writeMode` (`'headers' | 'sidecar'`) to parent modal state, and pass it as a prop to each child `TwoPhaseCommitModalRow` component rather than having rows maintain independent local state.
 
-### Finding 3: Exact State Binding in FocusedWorkbench Artwork Selection
-*   **Reviewer:** `egm-style` & `egm-implementation-readiness`
-*   **Severity:** 🟢 Nit
-*   **Affected Scope:** File 13 (`src/components/CenterStage/FocusedWorkbench.tsx`, lines 415–424)
-*   **Discrepancy Description:** 
-    The plan states candidate selection binds to `selectedArtworkId === art.id`, but does not declare the state variable initialization.
-*   **Actionable Recommendation:** 
-    Explicitly specify:
-    ```typescript
-    const [selectedArtworkId, setSelectedArtworkId] = useState<string>('local')
-    ```
-    and bind `onClick={() => setSelectedArtworkId(art.id)}` with candidate `id` strings `'local' | 'apple' | 'musicbrainz'`.
+### 4. Vague Automated Test Specification in `testCurationLifecycle.ts`
+*   **Reviewer:** `egm-implementation-readiness`
+*   **Severity:** 🟡 Major
+*   **Affected Scope:** Lines 423–433 (`Detailed Implementation Plan § 15`)
+*   **Finding & Guidance:**
+    *   *Defect:* Section 15 lists high-level test objectives (e.g. "Unit test: Case A uniform staging vs Case B compilation soundtrack clustering") without specifying test fixtures, mock data, or assertion criteria.
+    *   *Remediation:* Define explicit test fixtures and assertion thresholds:
+        1. *Fixture*: Mock Release *A World Of Music* (5 tracks: 2 from *Dil Se..*, 3 from *Guru*). Assert that accepting *Dil Se..* updates `track[0].pendingSidecarEdits` while `track[2].pendingSidecarEdits` remains undefined.
+        2. *Fixture*: Empty track array and cold start. Assert `resolveCurateTargetTrack()` returns `null` and `curationQueueService.resolveCurateInitialAlbum()` returns the first defect album.
+        3. *Fixture*: Staging 3 tag edits on 1 album. Assert `stagedAlbumsCount === 1`, `stagedTracksCount === 1`, `stagedTagEditsCount === 3`.
+
+### 5. In-Memory Direct Mutation Cleanup in `agentActionDispatcher.ts`
+*   **Reviewer:** `egm-codebase-details`
+*   **Severity:** 🟡 Major
+*   **Affected Scope:** Lines 408–414 (`Detailed Implementation Plan § 13`)
+*   **Discrepancy Description & Rationale:**
+    *   *Defect:* In `agentActionDispatcher.ts` lines 240–242, `resolve_work_hierarchy` directly mutates `t.title = cleanTitle` and `t.artistCredit = performers` on base in-memory tracks. The plan mentions refactoring `remediate_issue`, but fails to target `resolve_work_hierarchy` to enforce strict `pendingSidecarEdits` immutability.
+    *   *Remediation:* Explicitly instruct removing direct assignments `t.title = ...` and `t.artistCredit = ...` in `resolve_work_hierarchy`, routing changes strictly into `t.pendingSidecarEdits`.

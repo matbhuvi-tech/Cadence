@@ -1,66 +1,73 @@
-# Stage 6: Comprehension Test Report
+# Comprehension Test Report
 
-*   **Target Document:** `docs/designs/UX_AND_UI_ARCHITECTURE_REFACTOR.md`
-*   **Evaluator:** Naive Reader (`egm-comprehension`)
-*   **Evaluation Standard:** `resources/document_standards/re-implementation-standard.md`
-*   **Date:** 2026-10-27
-
----
-
-## Executive Assessment
-
-The document is well-written, logically structured, and provides clear architectural intent. However, applying the Zero-Assumption Rule reveals several unstated contracts and edge-case ambiguities where an implementer would be forced to make independent design assumptions during implementation.
+*   **Target File:** `docs/designs/CURATION_AND_TRIAGE_LIFECYCLE_ARCHITECTURE.md`
+*   **Standard:** [Re-Implementation Standard](file:///C:/Users/Mathan/.gemini/config/plugins/elephant-goldfish-model/resources/document_standards/re-implementation-standard.md)
+*   **Reviewer Persona:** Naive Reader (`egm-comprehension`)
+*   **Mode:** Review (Stage 6)
 
 ---
 
-## Findings
+## Executive Summary
 
-### Finding 1: Unstated ID Contract for `user_split_releases` on Grouped Releases
+The document establishes a coherent narrative and clear motivations for the 3-stage curation lifecycle. However, when evaluated under the **Zero-Assumption Rule**, a fresh engineer attempting to implement the plan without prior knowledge would encounter critical omissions:
+1. It references a non-existent service name (`geminiCompilationSoundtrackService`) when the actual codebase service is `compilationCanonicalizerService.ts`.
+2. It mandates passing `BatchProposalData` into `openBatchProposal` without defining the interface or schema.
+3. It omits queue boundary behavior (e.g. actions upon completing Item 15 of 15) and error state handling for failed provider queries.
+
+---
+
+## Detailed Findings
+
+### 1. Phantom Service Identifier: `geminiCompilationSoundtrackService`
+*   **Severity:** 🔴 Blocker
+*   **Affected Scope:** Lines 35, 197, 324
+*   **Discrepancy Description & Rationale:** The document repeatedly directs the implementer to integrate with `geminiCompilationSoundtrackService.ts` for disaggregating Indian / world soundtrack compilations. In reality, no file with that name exists in the codebase. The actual service implemented in Cadence is [compilationCanonicalizerService.ts](file:///e:/Mathan/Code/Music%20Agent/src/services/compilationCanonicalizerService.ts), which exports `compilationCanonicalizerService` and `resolveCompilationSoundtracks(release, tracks, allReleases)`. A fresh implementer would fail to compile on the first attempt due to an invalid import.
+*   **Remediation:** Replace all references to `geminiCompilationSoundtrackService` with `compilationCanonicalizerService` and document the exact method signature: `compilationCanonicalizerService.resolveCompilationSoundtracks(release, tracks)`.
+
+### 2. Missing Interface Definition: `BatchProposalData`
+*   **Severity:** 🔴 Blocker
+*   **Affected Scope:** Lines 223, 358–361, 411–413 (`Technical Plan § 4` and `Detailed Implementation Plan § 6, 13`)
+*   **Discrepancy Description & Rationale:** The document states that the dispatcher invokes `openBatchProposal(proposalData)` and extends `AgentDispatcherContext` with `openBatchProposal: (data: BatchProposalData) => void`. However, nowhere in the document is `BatchProposalData` defined. The implementer must guess what fields `BatchProposalSheet` expects (e.g., action ID, title, diff arrays, track IDs, rollback callbacks).
+*   **Remediation:** Explicitly define the `BatchProposalData` TypeScript contract inline in the specification:
+    ```typescript
+    export interface BatchProposalDiffRow {
+      trackId: string
+      trackTitle: string
+      albumTitle: string
+      fieldName: 'title' | 'artistCredit' | 'composerName' | 'albumTitle' | 'releaseYear' | 'genre'
+      currentValue: string | number | undefined
+      proposedValue: string | number | undefined
+    }
+
+    export interface BatchProposalData {
+      proposalId: string
+      title: string
+      description: string
+      scopeLabel: string
+      affectedAlbumsCount: number
+      affectedTracksCount: number
+      diffs: BatchProposalDiffRow[]
+      onStageAll: () => Promise<void>
+      onInspectInCurate: (affectedAlbumIds: string[]) => void
+    }
+    ```
+
+### 3. Ambiguous Dependency Contract in `curationQueueService.ts`
 *   **Severity:** 🟡 Major
-*   **Affected Scope:** Section 4.B (`User Split Overrides via SQLite`, lines 155–166)
-*   **Discrepancy Description & Rationale:** 
-    The document states:
-    > *"Triggering `Split Multi-Disc Release` inserts the `release_id` into `user_split_releases`."*
-    
-    In Cadence, multi-disc box sets are typically composed of multiple discrete underlying `Release` records in SQLite, each with its own UUID. When grouped in the UI, does the UI synthesize a composite release ID (e.g., `mbid:<mbid>` or `group:<normalized_title>`), or does it use the primary disc's release UUID? If a composite ID is written, what does the grouping query match against? If individual release UUIDs are used, which one is written?
-*   **Required Contract:** 
-    Specify whether `release_id` in `user_split_releases` stores:
-    1. The MusicBrainz Release Group ID (`musicbrainzReleaseGroupId`) for Tier 1 groupings.
-    2. A deterministic normalized composite key (e.g., `${normalized_artist}::${normalized_title}`) for Tier 2 groupings.
-    3. Or all constituent member release UUIDs.
+*   **Affected Scope:** Lines 314–318 (`Detailed Implementation Plan § 1`)
+*   **Discrepancy Description & Rationale:** The plan states: `computeCurationQueue(tracks: Track[], releases: Release[]): AlbumCurationQueueItem[]` and notes that it "scans `AuditIssue` items". It does not specify whether `auditIssues: AuditIssue[]` should be passed as a third parameter or whether `curationQueueService` should call `auditService.computeCatalogAudit(tracks, releases)` internally. If `AuditContext` already has active `issues` in memory, recomputing catalog audits inside the queue service duplicates CPU cycles.
+*   **Remediation:** Define the exact signature: `computeCurationQueue(tracks: Track[], releases: Release[], existingIssues?: AuditIssue[]): AlbumCurationQueueItem[]`. If `existingIssues` is provided, reuse them; otherwise fall back to `auditService.computeCatalogAudit`.
 
----
-
-### Finding 2: Undefined Lazy-Loading Boundary for In-Memory Folder Tree Filtering
+### 4. Undefined Queue Completion & Provider Error States
 *   **Severity:** 🟡 Major
-*   **Affected Scope:** Section 3.B (`In-Place Folder Tree Filtering`, lines 139–145) & File 12
+*   **Affected Scope:** Lines 171–178, 351–352
 *   **Discrepancy Description & Rationale:** 
-    The document states:
-    > *"Filtering operates strictly against the in-memory array of loaded tree nodes: matching child branches are retained and expanded, while non-matching siblings are dimmed. No network queries or recursive filesystem disk traversals are performed over SMB shares."*
-    
-    In virtual tree views, child directories are typically loaded lazily upon expanding a folder node to avoid walking massive directory trees at startup. If a user enters `⌘F` to search for a subfolder that resides inside an unexpanded root folder, will it match? A reader must guess whether the filter is strictly confined to currently expanded/cached nodes, or if the tree is fully pre-indexed into memory during catalog scan.
-*   **Required Contract:** 
-    Explicitly clarify whether `FolderTreeExplorer` operates on an already pre-loaded directory manifest in memory, or if `⌘F` filtering is explicitly limited to nodes that have already been expanded/cached in memory, with a visible UI empty state/note explaining that collapsed unexpanded subtrees are not searched without network traversal.
+    *   What happens when the user clicks `Stage & Next → (⌘↵)` on the final queue item (Item 15 of 15)? Does the stepper wrap around to Item 1, transition to a "All Queued Items Addressed" completion card, or trigger a modal prompting the user to commit staged changes?
+    *   What is the behavior in the 4-way reconciliation table if an external provider query (e.g., MusicBrainz) returns HTTP 429 (rate-limited) or fails due to network outage? Does the column render an empty state, a retry action, or a fallback badge?
+*   **Remediation:** Specify terminal queue behavior (e.g., display a "Queue Cleared: 15 Albums Staged" completion screen with a direct button to `[Review & Commit Changes]`) and define failure states in the provider columns (`Error / Retry` button).
 
----
-
-### Finding 3: Ambiguous Sequence Rule for Incomplete Multi-Disc Box Sets
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Section 4.A (`Grouping Logic & Hierarchy`, lines 152–153)
-*   **Discrepancy Description & Rationale:** 
-    The rule states:
-    > *"valid, sequential `discNumber` (`1..totalDiscs`) where `totalDiscs > 1` or multiple disc numbers exist for the release."*
-    
-    What is the expected behavior if a user's library contains only Disc 1 and Disc 3 of a 3-disc release (missing Disc 2)? Does "sequential" require a strict unbroken sequence `[1, 2, 3]`, causing the set to fail Tier 2 grouping and render as scattered albums, or does it mean each constituent album has `discNumber > 0` and `discNumber <= totalDiscs`?
-*   **Required Contract:** 
-    Clarify whether partial/sparse disc sets (e.g. discs 1 and 3 present) group together into a multi-disc card or remain separate until all sequential discs are present.
-
----
-
-### Finding 4: Schema Origin of Candidate ID in Artwork Selection
+### 5. Unspecified Navigation Rail Restoration Behavior
 *   **Severity:** 🟢 Nit
-*   **Affected Scope:** Section 6.B (`Curate Mode & Inspector Layout`, lines 240–245) & File 13
-*   **Discrepancy Description & Rationale:** 
-    The document specifies changing radio selection from `selectedArtwork === art.url` to `selectedArtworkId === art.id`. The reader must know if `art.id` is an existing field on `ArtworkCandidate` or if candidate objects must be constructed with a synthetic identifier (such as `art.source: 'embedded' | 'directory' | 'apple_music'`).
-*   **Required Contract:** 
-    Confirm whether `id` exists on `ArtworkCandidate` or explicitly state that `art.source` serves as the unique candidate identifier.
+*   **Affected Scope:** Lines 381, 389–391
+*   **Discrepancy Description & Rationale:** The plan specifies passing `isIconOnly={topMode === 'curate'}` to `LeftRail`. It does not clarify whether a user's manual expand/collapse preference in `Listen` or `Audit` mode is preserved when switching into and out of `Curate`.
+*   **Remediation:** Note that `isIconOnly` is an override active only while `topMode === 'curate'`, restoring the user's prior sidebar state upon returning to `Listen` or `Audit`.
