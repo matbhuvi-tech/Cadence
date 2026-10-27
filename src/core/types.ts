@@ -237,6 +237,7 @@ export interface FacetSelections {
   ensemble?: string
   mastering?: string
   rating?: number
+  reviewStatus?: 'staged' | 'all'
 }
 
 export type DRSource = 'embedded_tag' | 'replaygain_calc' | 'measured' | 'decoded_pcm' | 'estimated'

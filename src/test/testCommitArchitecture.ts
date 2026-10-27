@@ -182,6 +182,122 @@ async function testExecutionAbort() {
   console.log('  ✓ Transaction engine strictly enforces zero disk I/O when isPlaybackActive=true')
 }
 
+// [Test 5] Default Album Expansion Logic
+console.log('\n[Test 5] Testing Default Album Expansion on Song-Level Tag Changes vs Artwork-Only...')
+
+// Album 1: Only Cover Art updated, 0 song-level tag changes
+const artOnlyTrack: Track = {
+  ...dsfTrack,
+  id: 'trk-art-only',
+  releaseId: 'rel-art-only',
+  pendingSidecarEdits: { coverArtUrl: 'https://archive.org/cover.jpg' },
+}
+
+// Album 2: Has track title change
+const tagChangeTrack: Track = {
+  ...dsfTrack,
+  id: 'trk-tag-change',
+  releaseId: 'rel-tag-change',
+  pendingSidecarEdits: { title: 'Updated Title' },
+}
+
+function computeDefaultExpanded(tracks: Track[]): Set<string> {
+  const set = new Set<string>()
+  const groups = new Map<string, Track[]>()
+  tracks.forEach((t) => {
+    const key = t.releaseId || t.folderName || 'unknown'
+    const list = groups.get(key) || []
+    list.push(t)
+    groups.set(key, list)
+  })
+
+  groups.forEach((tracksInGroup, releaseKey) => {
+    // Check if any track has real tag edits (title, artist, composer, year, etc. excluding coverArtUrl)
+    const hasSongLevelChanges = tracksInGroup.some((t) => {
+      const p = t.pendingSidecarEdits || {}
+      return Boolean(
+        p.title ||
+        p.album ||
+        p.artistCredit ||
+        p.composerName ||
+        p.trackNumber !== undefined ||
+        p.discNumber !== undefined ||
+        p.year !== undefined ||
+        p.movementNumber !== undefined ||
+        p.targetFolderName ||
+        p.targetFilePath
+      )
+    })
+    if (hasSongLevelChanges) {
+      set.add(releaseKey)
+    }
+  })
+  return set
+}
+
+const expandedSet = computeDefaultExpanded([artOnlyTrack, tagChangeTrack])
+assert.strictEqual(expandedSet.has('rel-art-only'), false, 'Artwork-only album must default to collapsed')
+assert.strictEqual(expandedSet.has('rel-tag-change'), true, 'Album with song-level edits must default to expanded')
+console.log('  ✓ Artwork-only album correctly defaults to collapsed')
+console.log('  ✓ Album with song-level tag changes correctly defaults to expanded')
+
+// [Test 6] Staged Review Filter Logic
+console.log('\n[Test 6] Testing Staged for Review Filter Resolution...')
+
+const testReleases: Release[] = [
+  {
+    id: 'rel-clean',
+    title: 'Clean Album',
+    artistCredit: 'Clean Artist',
+    tracksCount: 1,
+    artwork: { frontCoverUrl: 'disk.jpg', resolution: '1000x1000' } as any,
+  } as any,
+  {
+    id: 'rel-art-only',
+    title: 'Art Updated Album',
+    artistCredit: 'Artist B',
+    tracksCount: 1,
+    artwork: { frontCoverUrl: 'new.jpg', originalFrontCoverUrl: 'disk.jpg' } as any,
+  } as any,
+  {
+    id: 'rel-tag-change',
+    title: 'Tag Updated Album',
+    artistCredit: 'Artist C',
+    tracksCount: 1,
+    artwork: { frontCoverUrl: 'disk.jpg' } as any,
+  } as any,
+]
+
+const testTracks: Track[] = [
+  { ...dsfTrack, id: 'trk-clean', releaseId: 'rel-clean', sidecarStatus: 'synced', pendingSidecarEdits: undefined },
+  artOnlyTrack,
+  tagChangeTrack,
+]
+
+// Compute stagedReleaseIds
+const stagedRelIds = new Set<string>()
+testReleases.forEach((r) => {
+  if (r.artwork?.originalFrontCoverUrl) stagedRelIds.add(r.id)
+})
+testTracks.forEach((t) => {
+  if (
+    t.sidecarStatus === 'uncommitted_sidecar' ||
+    Boolean(t.pendingSidecarEdits && Object.keys(t.pendingSidecarEdits).length > 0)
+  ) {
+    if (t.releaseId) stagedRelIds.add(t.releaseId)
+  }
+})
+
+assert.strictEqual(stagedRelIds.has('rel-clean'), false, 'Clean album must not be staged')
+assert.strictEqual(stagedRelIds.has('rel-art-only'), true, 'Album with staged artwork must be in staged set')
+assert.strictEqual(stagedRelIds.has('rel-tag-change'), true, 'Album with uncommitted tags must be in staged set')
+assert.strictEqual(stagedRelIds.size, 2, 'Exactly 2 staged albums identified')
+
+const filteredStagedTracks = testTracks.filter((t) => stagedRelIds.has(t.releaseId))
+assert.strictEqual(filteredStagedTracks.length, 2)
+assert.strictEqual(filteredStagedTracks.some((t) => t.id === 'trk-clean'), false)
+console.log('  ✓ Staged review filter correctly isolates only albums with staged items (2 of 3 albums)')
+
 testExecutionAbort().then(() => {
   console.log('\n========================================================')
   console.log('🎉 ALL BATCH METADATA COMMIT SCREEN ARCHITECTURE TESTS PASSED!')

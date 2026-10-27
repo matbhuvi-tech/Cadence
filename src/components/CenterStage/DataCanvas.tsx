@@ -87,6 +87,7 @@ interface DataCanvasProps {
   onSelectArtist?: (artist: string | null) => void
   selectedComposer?: string | null
   onSelectComposer?: (composer: string | null) => void
+  stagedAlbumsCount?: number
 }
 
 export const DataCanvas: React.FC<DataCanvasProps> = ({
@@ -128,6 +129,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   onSelectArtist,
   selectedComposer,
   onSelectComposer,
+  stagedAlbumsCount: propStagedAlbumsCount,
 }) => {
   const [isMultiEditOpen, setIsMultiEditOpen] = useState(false)
   const [expandedReleaseIds, setExpandedReleaseIds] = useState<Set<string>>(new Set())
@@ -205,11 +207,33 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
     })
   }
 
+  // Staged albums count
+  const stagedAlbumsCount = useMemo(() => {
+    if (propStagedAlbumsCount !== undefined) return propStagedAlbumsCount
+    const set = new Set<string>()
+    releases.forEach((r) => {
+      if (r.artwork?.originalFrontCoverUrl) set.add(r.id)
+    })
+    tracks.forEach((t) => {
+      if (
+        t.sidecarStatus === 'uncommitted_sidecar' ||
+        Boolean(t.pendingSidecarEdits && Object.keys(t.pendingSidecarEdits).length > 0)
+      ) {
+        if (t.releaseId) set.add(t.releaseId)
+        if (t.folderName) set.add(t.folderName)
+      }
+    })
+    return set.size
+  }, [propStagedAlbumsCount, releases, tracks])
+
   // Active filter count and tokens
   const activeTokens = useMemo(() => {
     const tokens: { key: keyof FacetSelections | 'search'; label: string; value: string }[] = []
     if (searchQuery.trim()) {
       tokens.push({ key: 'search', label: 'Search', value: searchQuery.trim() })
+    }
+    if (facets.reviewStatus === 'staged') {
+      tokens.push({ key: 'reviewStatus', label: 'Review', value: 'Staged for Review' })
     }
     if (facets.era) {
       tokens.push({ key: 'era', label: 'Era', value: facets.era })
@@ -272,51 +296,93 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
         {/* Left: View Title or Translucent Entity Switcher & Active Filter Tokens */}
         <div className="flex items-center gap-3 min-w-0">
           {viewMode === 'cover_grid' ? (
-            <div className="flex items-center gap-1 p-0.5 rounded-xl bg-white/[0.04] border border-white/[0.08] shrink-0">
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1 p-0.5 rounded-xl bg-white/[0.04] border border-white/[0.08] shrink-0">
+                <button
+                  onClick={() => {
+                    setActiveCoverTab('albums')
+                    onSelectAlbumId?.(null)
+                    onSelectArtist?.(null)
+                    onSelectComposer?.(null)
+                  }}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    activeCoverTab === 'albums'
+                      ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
+                      : 'text-[#8E8E93] hover:text-[#F5F5F7]'
+                  }`}
+                >
+                  Albums ({releases.length})
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveCoverTab('artists')
+                    onSelectAlbumId?.(null)
+                    onSelectArtist?.(null)
+                    onSelectComposer?.(null)
+                  }}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    activeCoverTab === 'artists'
+                      ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
+                      : 'text-[#8E8E93] hover:text-[#F5F5F7]'
+                  }`}
+                >
+                  Artists ({artistCount})
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveCoverTab('composers')
+                    onSelectAlbumId?.(null)
+                    onSelectArtist?.(null)
+                    onSelectComposer?.(null)
+                  }}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    activeCoverTab === 'composers'
+                      ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
+                      : 'text-[#8E8E93] hover:text-[#F5F5F7]'
+                  }`}
+                >
+                  Composers ({composerCount})
+                </button>
+              </div>
+
+              {/* Quick Filter: Staged for Review */}
               <button
                 onClick={() => {
-                  setActiveCoverTab('albums')
-                  onSelectAlbumId?.(null)
-                  onSelectArtist?.(null)
-                  onSelectComposer?.(null)
+                  onFacetChange?.({
+                    ...facets,
+                    reviewStatus: facets.reviewStatus === 'staged' ? undefined : 'staged',
+                  })
                 }}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activeCoverTab === 'albums'
-                    ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
-                    : 'text-[#8E8E93] hover:text-[#F5F5F7]'
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-mono transition-all cursor-pointer shrink-0 ${
+                  facets.reviewStatus === 'staged'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold shadow-sm'
+                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-[#F5F5F7] border border-white/[0.06]'
                 }`}
+                title={
+                  facets.reviewStatus === 'staged'
+                    ? 'Clear Staged for Review filter'
+                    : 'Filter albums that have pending edits or artwork staged for review'
+                }
               >
-                Albums ({releases.length})
-              </button>
-              <button
-                onClick={() => {
-                  setActiveCoverTab('artists')
-                  onSelectAlbumId?.(null)
-                  onSelectArtist?.(null)
-                  onSelectComposer?.(null)
-                }}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activeCoverTab === 'artists'
-                    ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
-                    : 'text-[#8E8E93] hover:text-[#F5F5F7]'
-                }`}
-              >
-                Artists ({artistCount})
-              </button>
-              <button
-                onClick={() => {
-                  setActiveCoverTab('composers')
-                  onSelectAlbumId?.(null)
-                  onSelectArtist?.(null)
-                  onSelectComposer?.(null)
-                }}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  activeCoverTab === 'composers'
-                    ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
-                    : 'text-[#8E8E93] hover:text-[#F5F5F7]'
-                }`}
-              >
-                Composers ({composerCount})
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    facets.reviewStatus === 'staged'
+                      ? 'bg-amber-400 animate-pulse'
+                      : stagedAlbumsCount > 0
+                      ? 'bg-amber-400'
+                      : 'bg-zinc-600'
+                  }`}
+                />
+                <span>Staged</span>
+                <span
+                  className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+                    facets.reviewStatus === 'staged'
+                      ? 'bg-amber-400 text-black font-bold'
+                      : 'bg-white/[0.06] text-[#8E8E93]'
+                  }`}
+                >
+                  {stagedAlbumsCount}
+                </span>
               </button>
             </div>
           ) : (
@@ -572,6 +638,35 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                   {dr.label}
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Review Status Row */}
+          <div className="flex items-center gap-2 overflow-x-auto">
+            <span className="w-16 font-mono text-[10px] uppercase text-[#8E8E93] font-semibold shrink-0">
+              Review:
+            </span>
+            <div className="flex items-center gap-1 flex-wrap">
+              <button
+                onClick={() =>
+                  onFacetChange?.({
+                    ...facets,
+                    reviewStatus: facets.reviewStatus === 'staged' ? undefined : 'staged',
+                  })
+                }
+                className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 ${
+                  facets.reviewStatus === 'staged'
+                    ? 'bg-amber-400 text-black font-semibold shadow-sm'
+                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    facets.reviewStatus === 'staged' ? 'bg-black' : 'bg-amber-400'
+                  }`}
+                />
+                <span>Staged for Review ({stagedAlbumsCount})</span>
+              </button>
             </div>
           </div>
         </div>

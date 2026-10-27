@@ -414,8 +414,8 @@ function AppContent() {
         lastImportedTimestamp: new Date().toISOString(),
       })
 
-      // Immediately synchronize releases (frontCoverUrl, backdropUrl, etc.) into native SQLite database
-      await sqliteLibraryService.persistReleasesToDb(allReleases)
+      // Immediately synchronize tracks and releases into native SQLite database
+      await sqliteLibraryService.persistLibraryToDb(allTracks, allReleases)
     } catch (err) {
       console.warn('Failed to persist library to local database:', err)
     }
@@ -821,8 +821,27 @@ function AppContent() {
     facets.format ||
     facets.genre ||
     facets.ensemble ||
-    facets.mastering
+    facets.mastering ||
+    facets.reviewStatus
   )
+
+  // Set of all release IDs that currently have items staged for review (sidecars, pending edits, or cover art)
+  const stagedReleaseIds = useMemo(() => {
+    const set = new Set<string>()
+    releases.forEach((r) => {
+      if (r.artwork?.originalFrontCoverUrl) set.add(r.id)
+    })
+    tracks.forEach((t) => {
+      if (
+        t.sidecarStatus === 'uncommitted_sidecar' ||
+        Boolean(t.pendingSidecarEdits && Object.keys(t.pendingSidecarEdits).length > 0)
+      ) {
+        if (t.releaseId) set.add(t.releaseId)
+        if (t.folderName) set.add(t.folderName)
+      }
+    })
+    return set
+  }, [releases, tracks])
 
   // 1. Grid-scoped tracks: filter by Search, Facets (era, composer, language, format), Storage Mount, and Folder.
   // EXCLUDES activeTriageFilter so that selecting an anomaly isolates tracks in the grid without collapsing the diagnostic queue!
@@ -852,8 +871,17 @@ function AppContent() {
     if (selectedFolderFilter) {
       result = result.filter((t) => (t.filePath || '').replace(/\\/g, '/').startsWith(selectedFolderFilter))
     }
+    if (facets.reviewStatus === 'staged') {
+      result = result.filter(
+        (t) =>
+          stagedReleaseIds.has(t.releaseId) ||
+          (t.folderName && stagedReleaseIds.has(t.folderName)) ||
+          t.sidecarStatus === 'uncommitted_sidecar' ||
+          Boolean(t.pendingSidecarEdits && Object.keys(t.pendingSidecarEdits).length > 0)
+      )
+    }
     return result
-  }, [searchQuery, facets, selectedMountId, selectedFolderFilter, tracks, releases, works, auditIssues, storageMounts])
+  }, [searchQuery, facets, selectedMountId, selectedFolderFilter, tracks, releases, works, auditIssues, storageMounts, stagedReleaseIds])
 
   // 2. Dynamic hygiene diagnostics & health score scoped to the active grid slice
   const scopedAuditResult = useMemo(() => {
@@ -897,6 +925,16 @@ function AppContent() {
       return true
     })
   }, [gridScopedTracks, activeTriageFilter, scopedAuditIssues])
+
+  // 3b. Derived displayed releases: scoped when filtering by staged review status
+  const displayedReleases = useMemo(() => {
+    if (facets.reviewStatus === 'staged') {
+      return releases.filter(
+        (r) => stagedReleaseIds.has(r.id) || (r.folderName && stagedReleaseIds.has(r.folderName))
+      )
+    }
+    return releases
+  }, [releases, facets.reviewStatus, stagedReleaseIds])
 
   // 4. Currently active triage anomaly details (if any)
   const activeTriageIssue = useMemo(() => {
@@ -1913,7 +1951,7 @@ function AppContent() {
                 searchQuery={searchQuery}
                 onSearchChange={setSearchQuery}
                 works={works}
-                releases={releases}
+                releases={displayedReleases}
                 tracks={filteredTracks}
                 facets={facets}
                 onFacetChange={setFacets}
@@ -1934,6 +1972,7 @@ function AppContent() {
                 onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
                 onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
                 totalLibraryTracksCount={tracks.length}
+                stagedAlbumsCount={stagedReleaseIds.size}
                 onResetFilters={() => {
                   setFacets({})
                   setActiveTriageFilter(undefined)
@@ -2105,7 +2144,11 @@ function AppContent() {
       {/* Staged for Commit Modal */}
       {isCommitModalOpen && (
         <TwoPhaseCommitModal
-          uncommittedTracks={tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar')}
+          uncommittedTracks={tracks.filter(
+            (t) =>
+              t.sidecarStatus === 'uncommitted_sidecar' ||
+              Boolean(t.pendingSidecarEdits && Object.keys(t.pendingSidecarEdits).length > 0)
+          )}
           releases={releases}
           onClose={() => setIsCommitModalOpen(false)}
           onSuccess={() => {
@@ -2143,6 +2186,9 @@ function AppContent() {
             refreshFromEngine()
             persistCurrentLibrary()
             showToast(`Discarded staged cover art across all ${count} tracks. Real metadata edits preserved.`)
+          }}
+          onUpdateReleaseArtwork={(releaseId, url) => {
+            handleUpdateReleaseDetails(releaseId, { coverArtUrl: url })
           }}
         />
       )}
