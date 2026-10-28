@@ -5,6 +5,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import type { UpdateArtistEditorialPayload } from '../core/types'
 
 export interface AudioStreamTelemetry {
   filePath: string
@@ -75,6 +76,25 @@ class TauriBridgeService {
   private browserDeviceMap: Map<string, string> = new Map()
   private activeDeviceId: string = 'default'
   private currentVolume: number = 1
+  private playbackStateListeners: ((state: string) => void)[] = []
+
+  /**
+   * Subscribe to playback state changes (Playing, Paused, Stopped, Loading).
+   */
+  public onPlaybackStateChanged(fn: (state: string) => void): () => void {
+    this.playbackStateListeners.push(fn)
+    return () => {
+      this.playbackStateListeners = this.playbackStateListeners.filter((l) => l !== fn)
+    }
+  }
+
+  public notifyPlaybackState(state: string): void {
+    this.playbackStateListeners.forEach((fn) => {
+      try {
+        fn(state)
+      } catch {}
+    })
+  }
 
   /**
    * Check if running in native Tauri desktop environment
@@ -185,6 +205,7 @@ class TauriBridgeService {
    * Pause playback
    */
   public async pause(): Promise<void> {
+    this.notifyPlaybackState('Paused')
     if (this.isTauri()) {
       await invoke('pause_audio')
     } else if (this.browserAudio) {
@@ -196,6 +217,7 @@ class TauriBridgeService {
    * Resume playback
    */
   public async resume(): Promise<void> {
+    this.notifyPlaybackState('Playing')
     if (this.isTauri()) {
       await invoke('resume_audio')
     } else if (this.browserAudio) {
@@ -207,6 +229,7 @@ class TauriBridgeService {
    * Stop playback
    */
   public async stop(): Promise<void> {
+    this.notifyPlaybackState('Stopped')
     if (this.isTauri()) {
       await invoke('stop_audio')
     } else if (this.browserAudio) {
@@ -624,6 +647,15 @@ class TauriBridgeService {
   ): Promise<void> {
     if (this.isTauri()) {
       await invoke('db_set_artist_portrait', { artistId, portraitUrl, status })
+    }
+  }
+
+  public async updateCanonicalArtistEditorial(
+    artistId: string,
+    payload: UpdateArtistEditorialPayload
+  ): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_update_canonical_artist_editorial', { artistId, payload })
     }
   }
 

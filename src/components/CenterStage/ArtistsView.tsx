@@ -112,6 +112,7 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
   const [isSearchingPortraits, setIsSearchingPortraits] = useState(false)
   const [customPortraitUrl, setCustomPortraitUrl] = useState('')
   const [queuedPortraitNotification, setQueuedPortraitNotification] = useState<string | null>(null)
+  const [isEnrichingEditorial, setIsEnrichingEditorial] = useState(false)
 
   // Ambient Hardware Telemetry: Curation state subscription
   const [curationState, setCurationState] = useState(ambientCurationService.getState())
@@ -294,6 +295,64 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
     }
   }
 
+  // Hydrate & Enrich Artist Editorial Profile (Bio, Era, MBID, Portrait)
+  const handleEnrichEditorialProfile = async () => {
+    if (!artistDetail) return
+    setIsEnrichingEditorial(true)
+    try {
+      const profile = await federatedResolversService.hydrateArtistEditorialProfile(
+        artistDetail.artist.name,
+        artistDetail.artist.id
+      )
+
+      if (profile) {
+        const isAudioPlaying = Boolean(playbackState?.isPlaying)
+        if (!isAudioPlaying) {
+          await sqliteLibraryService.updateArtistEditorialProfile(artistDetail.artist.id, {
+            bioSummary: profile.bioSummary,
+            eraActive: profile.eraActive,
+            primaryRole: profile.primaryRole,
+            mbid: profile.mbid,
+            appleArtistId: profile.appleArtistId,
+            portraitUrl: profile.portraitUrl,
+          })
+        }
+
+        setArtistDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                artist: {
+                  ...prev.artist,
+                  bioSummary: profile.bioSummary || prev.artist.bioSummary,
+                  eraActive: profile.eraActive || prev.artist.eraActive,
+                  portraitUrl: profile.portraitUrl || prev.artist.portraitUrl,
+                  mbid: profile.mbid || prev.artist.mbid,
+                  appleArtistId: profile.appleArtistId || prev.artist.appleArtistId,
+                },
+              }
+            : null
+        )
+
+        setArtists((prev) =>
+          prev.map((a) =>
+            a.id === artistDetail.artist.id
+              ? {
+                  ...a,
+                  portraitUrl: profile.portraitUrl || a.portraitUrl,
+                  eraActive: profile.eraActive || a.eraActive,
+                }
+              : a
+          )
+        )
+      }
+    } catch (err) {
+      console.warn('[ArtistsView] Error enriching artist editorial profile:', err)
+    } finally {
+      setIsEnrichingEditorial(false)
+    }
+  }
+
   // Play Artist's Essential Tracks
   const handlePlayEssentialTracks = () => {
     if (!artistDetail || artistDetail.appearingTracks.length === 0) return
@@ -417,7 +476,7 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
               {artist.name}
             </h1>
 
-            <div className="flex flex-wrap items-center justify-center md:justify-start gap-3 text-xs text-[#8E8E93] font-mono mb-6">
+            <div className="flex flex-wrap items-center justify-center md:justify-start gap-3 text-xs text-[#8E8E93] font-mono mb-4">
               <span className="text-[#F5F5F7] font-semibold">{albumsCount} Albums</span>
               <span>&bull;</span>
               <span>{tracksCount} Tracks</span>
@@ -428,6 +487,12 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
                 </>
               )}
             </div>
+
+            {artist.bioSummary && (
+              <p className="text-xs text-[#A1A1AA] max-w-2xl leading-relaxed mb-6 line-clamp-3">
+                {artist.bioSummary}
+              </p>
+            )}
 
             {/* Hero Quick Action Buttons */}
             <div className="flex flex-wrap items-center justify-center md:justify-start gap-3">
@@ -455,6 +520,15 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Change Portrait</span>
+              </button>
+
+              <button
+                onClick={handleEnrichEditorialProfile}
+                disabled={isEnrichingEditorial}
+                className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 text-[#D4AF37] hover:text-[#E5C158] font-medium text-xs border border-[#D4AF37]/30 transition-all cursor-pointer disabled:opacity-40"
+              >
+                <Sparkles className={`w-3.5 h-3.5 ${isEnrichingEditorial ? 'animate-spin' : ''}`} />
+                <span>{isEnrichingEditorial ? 'Enriching...' : 'Enrich Profile'}</span>
               </button>
             </div>
           </div>

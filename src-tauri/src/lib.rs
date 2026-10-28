@@ -131,6 +131,7 @@ pub fn run() {
             db_get_canonical_artists,
             db_get_canonical_artist_detail,
             db_set_artist_portrait,
+            db_update_canonical_artist_editorial,
             db_backfill_artist_credits,
             db_search_catalog,
             // Playlists

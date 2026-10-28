@@ -323,6 +323,16 @@ pub fn db_set_artist_portrait(
 }
 
 #[tauri::command]
+pub fn db_update_canonical_artist_editorial(
+    db: State<'_, AppDb>,
+    artist_id: String,
+    payload: crate::db::UpdateArtistEditorialPayload,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    crate::db::DbOperations::update_artist_editorial(&conn, &artist_id, &payload).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn db_backfill_artist_credits(db: State<'_, AppDb>) -> Result<usize, String> {
     let mut conn = db.conn.lock();
     crate::db::DbOperations::backfill_artist_credits_from_tracks(&mut conn).map_err(|e| e.to_string())

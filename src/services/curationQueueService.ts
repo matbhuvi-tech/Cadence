@@ -6,8 +6,10 @@
  * prioritized Album Curation Cards for the Master-Detail Curation Workbench.
  */
 
-import { Track, Release, AuditIssue } from '../core/types'
+import { Track, Release, AuditIssue, ReleaseConsensusResult } from '../core/types'
 import { auditService } from './auditService'
+import { tauriBridge } from './tauriBridge'
+import { federatedResolversService, globalMusicBrainzQueue } from './federatedResolvers'
 
 export interface AlbumCurationQueueItem {
   albumId: string
@@ -207,7 +209,161 @@ export function resolveCurateInitialAlbum(
   return queue[0] || null
 }
 
+export class LRUCache<K, V> {
+  private capacity: number
+  private map = new Map<K, V>()
+
+  constructor(capacity = 50) {
+    this.capacity = capacity
+  }
+
+  get(key: K): V | undefined {
+    if (!this.map.has(key)) return undefined
+    const val = this.map.get(key)!
+    this.map.delete(key)
+    this.map.set(key, val)
+    return val
+  }
+
+  set(key: K, value: V): void {
+    if (this.map.has(key)) {
+      this.map.delete(key)
+    } else if (this.map.size >= this.capacity) {
+      const oldestKey = this.map.keys().next().value
+      if (oldestKey !== undefined) {
+        this.map.delete(oldestKey)
+      }
+    }
+    this.map.set(key, value)
+  }
+
+  has(key: K): boolean {
+    return this.map.has(key)
+  }
+
+  clear(): void {
+    this.map.clear()
+  }
+}
+
+/**
+ * Lookahead Queue Prefetcher (Depth = 2)
+ * Eliminates MusicBrainz 1 req/sec stepper latency while strictly enforcing
+ * the Audiophile Transport Silence invariant during playback and cooldown.
+ */
+export class LookaheadQueuePrefetcher {
+  private cache = new LRUCache<string, ReleaseConsensusResult>(50)
+  private lastPlaybackStoppedTime = 0
+
+  constructor() {
+    // Initialized to 0 on boot. Subscribe to playback stops to track cooldown.
+    if (typeof tauriBridge?.onPlaybackStateChanged === 'function') {
+      tauriBridge.onPlaybackStateChanged((state: string) => {
+        if (state === 'Stopped') {
+          this.lastPlaybackStoppedTime = Date.now()
+        }
+      })
+    }
+  }
+
+  public notifyPlaybackStopped(): void {
+    this.lastPlaybackStoppedTime = Date.now()
+  }
+
+  public setLastPlaybackStoppedTime(time: number): void {
+    this.lastPlaybackStoppedTime = time
+  }
+
+  public getLastPlaybackStoppedTime(): number {
+    return this.lastPlaybackStoppedTime
+  }
+
+  /**
+   * Transport Silence Invariant: Returns false if playback is active, paused, loading,
+   * or within a 30-second quietness cooldown window after playback stopped.
+   */
+  public async isTransportQuiet(statusOverride?: {
+    isPlaying?: boolean
+    isPaused?: boolean
+    playbackState?: string
+  }): Promise<boolean> {
+    try {
+      const status = statusOverride || (await tauriBridge.getPlaybackStatus().catch(() => null))
+      if (status) {
+        if (
+          status.isPlaying ||
+          status.isPaused ||
+          (status as any).playbackState === 'Loading' ||
+          (status as any).playbackState === 'Playing' ||
+          (status as any).playbackState === 'Paused'
+        ) {
+          return false
+        }
+      }
+      if (this.lastPlaybackStoppedTime > 0 && Date.now() - this.lastPlaybackStoppedTime < 30000) {
+        return false
+      }
+      return true
+    } catch {
+      return true
+    }
+  }
+
+  public getCachedConsensus(albumId: string): ReleaseConsensusResult | undefined {
+    return this.cache.get(albumId)
+  }
+
+  public setCachedConsensus(albumId: string, result: ReleaseConsensusResult): void {
+    this.cache.set(albumId, result)
+  }
+
+  public clearCache(): void {
+    this.cache.clear()
+  }
+
+  public cancelPendingPrefetch(): void {
+    globalMusicBrainzQueue.cancelPendingPrefetch()
+  }
+
+  /**
+   * Prefetches metadata candidates for upcoming albums (N+1 and N+2) in the queue.
+   */
+  public async prefetchLookahead(
+    queue: AlbumCurationQueueItem[],
+    currentIndex: number,
+    releases: Release[],
+    tracks: Track[]
+  ): Promise<void> {
+    const isQuiet = await this.isTransportQuiet()
+    if (!isQuiet) {
+      return
+    }
+
+    const targetIndices = [currentIndex + 1, currentIndex + 2]
+    for (const idx of targetIndices) {
+      if (idx >= queue.length) continue
+      const targetItem = queue[idx]
+      if (!targetItem || this.cache.has(targetItem.albumId)) continue
+
+      const targetRelease = releases.find((r) => r.id === targetItem.albumId)
+      if (!targetRelease) continue
+
+      const targetTracks = tracks.filter((t) => t.releaseId === targetItem.albumId)
+
+      federatedResolversService
+        .resolve2of3ReleaseConsensus(targetRelease, targetTracks, true)
+        .then((result) => {
+          this.cache.set(targetItem.albumId, result)
+        })
+        .catch(() => {})
+    }
+  }
+}
+
+export const lookaheadQueuePrefetcher = new LookaheadQueuePrefetcher()
+
 export const curationQueueService = {
   computeCurationQueue,
   resolveCurateInitialAlbum,
+  lookaheadQueuePrefetcher,
 }

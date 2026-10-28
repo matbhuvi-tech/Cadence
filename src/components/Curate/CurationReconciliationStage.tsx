@@ -26,9 +26,10 @@ import {
   Eye,
   X,
   Volume2,
+  Split,
 } from 'lucide-react'
-import { Track, Release } from '../../core/types'
-import { AlbumCurationQueueItem } from '../../services/curationQueueService'
+import { Track, Release, ReleaseConsensusResult, ConsensusFieldSource } from '../../core/types'
+import { AlbumCurationQueueItem, lookaheadQueuePrefetcher } from '../../services/curationQueueService'
 import {
   federatedResolversService,
   CoverArtCandidate,
@@ -45,6 +46,8 @@ export interface CurationReconciliationStageProps {
   release?: Release
   tracks: Track[]
   allReleases?: Release[]
+  allTracks?: Track[]
+  queue?: AlbumCurationQueueItem[]
   currentIndex: number
   totalCount: number
   onPrev: () => void
@@ -61,6 +64,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   release,
   tracks,
   allReleases = [],
+  allTracks = [],
+  queue = [],
   currentIndex,
   totalCount,
   onPrev,
@@ -74,8 +79,48 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   // Candidate loading state
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false)
   const [candidatesResult, setCandidatesResult] = useState<ActiveItemCandidateResult | null>(null)
+  const [consensusResult, setConsensusResult] = useState<ReleaseConsensusResult | null>(null)
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [isPlaybackQuietNotice, setIsPlaybackQuietNotice] = useState(false)
+
+  // Provenance Badge Helper
+  const renderProvenanceBadge = (source?: ConsensusFieldSource, confidence?: number) => {
+    if (!source) return null
+    if (source.startsWith('consensus_')) {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
+          <ShieldCheck className="w-3 h-3" />
+          <span>2-of-3 Consensus</span>
+        </span>
+      )
+    }
+    if (source === 'earliest_year_rule') {
+      return (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">
+          Earliest Year Master
+        </span>
+      )
+    }
+    if (source === 'single_provider_match') {
+      return (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-500/15 text-blue-300 border border-blue-500/25">
+          Provider Match
+        </span>
+      )
+    }
+    if (source === 'local_fallback') {
+      return (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-500/15 text-zinc-300 border border-zinc-500/25">
+          Local Container
+        </span>
+      )
+    }
+    return (
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/25">
+        {source}
+      </span>
+    )
+  }
 
   // Field selection state for Case A
   const [selectedFields, setSelectedFields] = useState<{
@@ -181,6 +226,70 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
         setIsPlaybackQuietNotice(false)
 
+        // 1. Check Lookahead Cache first for 2-of-3 consensus
+        let consensus = lookaheadQueuePrefetcher.getCachedConsensus(albumItem.albumId)
+        if (!consensus) {
+          const targetRelease = (release || {
+            id: albumItem.albumId,
+            masterReleaseId: albumItem.albumId,
+            title: albumItem.albumTitle,
+            folderName: albumItem.albumTitle,
+            folderPath: '',
+            targetFolderPath: '',
+            artistCredit: albumItem.artistCredit,
+            composerName: tracks[0]?.composerName,
+            releaseYear: tracks[0]?.canonicalReleaseYear || 0,
+            originalYear: tracks[0]?.originalYear || tracks[0]?.canonicalReleaseYear || 0,
+            label: 'Lossless Master',
+            catalogNumber: '',
+            mediaFormat: 'Lossless Audio',
+            country: 'Global',
+            matrixRunout: '',
+            artwork: {
+              frontCoverUrl: albumItem.coverArtUrl || '',
+              resolution: albumItem.coverArtUrl ? '3000x3000px' : 'No Embedded Art',
+              width: 3000,
+              height: 3000,
+              dpi: 300,
+              colorProfile: 'sRGB',
+              isLowRes: !albumItem.coverArtUrl,
+              hasBookletPdf: false,
+            },
+            genres: [],
+            tracks: tracks,
+            isLocalOnline: true,
+            storageMountId: 'mount-main',
+            isCompilation: false,
+            genreTags: [],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }) as unknown as Release
+
+          consensus = await federatedResolversService.resolve2of3ReleaseConsensus(
+            targetRelease,
+            tracks,
+            false
+          )
+          lookaheadQueuePrefetcher.setCachedConsensus(albumItem.albumId, consensus)
+        }
+
+        if (controller.signal.aborted) return
+
+        setConsensusResult(consensus)
+
+        // Prepopulate staged fields with consensus values if present
+        if (consensus) {
+          setSelectedFields((prev) => ({
+            title: consensus?.albumTitle?.value || prev.title,
+            artistCredit: consensus?.albumArtist?.value || prev.artistCredit,
+            composerName: consensus?.composer?.value || prev.composerName,
+            releaseYear: consensus?.releaseYear?.value
+              ? String(consensus.releaseYear.value)
+              : prev.releaseYear,
+            genre: consensus?.genre?.value || prev.genre,
+          }))
+        }
+
         const result = await federatedResolversService.resolveActiveItemCandidate({
           albumTitle: albumItem.albumTitle,
           artistCredit: albumItem.artistCredit,
@@ -198,6 +307,11 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
         if (result.artworkCandidates.length > 0) {
           setSelectedArtwork(result.artworkCandidates[0])
         }
+
+        // 2. Dispatch Lookahead Prefetch for next 2 queue items in idle background
+        if (queue && queue.length > 0 && allTracks && allTracks.length > 0 && allReleases) {
+          lookaheadQueuePrefetcher.prefetchLookahead(queue, currentIndex, allReleases, allTracks)
+        }
       } catch (err: any) {
         if (!controller.signal.aborted) {
           setFetchError(err?.message || 'Remote candidate query failed')
@@ -208,7 +322,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
         }
       }
     },
-    [albumItem, tracks]
+    [albumItem, release, tracks, queue, allTracks, allReleases, currentIndex]
   )
 
   // Debounced candidate fetching on album selection
@@ -402,6 +516,39 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
     onStageAndNext(editsMap)
     showToast(`Staged soundtrack provenance "${cluster.soundtrackTitle}" for ${cluster.tracks.length} track(s).`)
+  }
+
+  // Handle Splitting a Combo Release into Virtual Albums
+  const handleSplitVirtualAlbums = () => {
+    if (!consensusResult?.subReleaseGroupings || consensusResult.subReleaseGroupings.length === 0) return
+    const editsMap = new Map<string, Partial<Track>>()
+
+    consensusResult.subReleaseGroupings.forEach((grouping, groupIdx) => {
+      const targetTracks = grouping.trackIds && grouping.trackIds.length > 0
+        ? tracks.filter((t) => grouping.trackIds!.includes(t.id))
+        : tracks.filter((t) => grouping.trackNumbers.includes(t.trackNumber || 0))
+
+      targetTracks.forEach((t) => {
+        const edits: Record<string, any> = {
+          originalAlbum: grouping.subTitle,
+          canonicalAlbumTitle: grouping.subTitle,
+          discNumber: groupIdx + 1,
+        }
+        if (grouping.originalYear) {
+          edits.originalYear = grouping.originalYear
+        }
+        if (grouping.composer) {
+          edits.composerName = grouping.composer
+        }
+        if (selectedArtwork?.coverArtUrl) {
+          edits.coverArtUrl = selectedArtwork.coverArtUrl
+        }
+        editsMap.set(t.id, edits)
+      })
+    })
+
+    onStageAndNext(editsMap)
+    showToast(`Staged virtual album split for ${consensusResult.subReleaseGroupings.length} releases in "${albumItem?.albumTitle}".`)
   }
 
   // Keyboard shortcut listener for (⌘↵)
@@ -650,6 +797,39 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
           </div>
         </div>
 
+        {/* Combo CD Virtual Release Split Banner */}
+        {consensusResult?.isComboRelease && consensusResult?.subReleaseGroupings && consensusResult.subReleaseGroupings.length > 0 && (
+          <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-amber-500/5">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-xl bg-amber-500/20 text-amber-300 shrink-0">
+                <Split className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-xs font-semibold text-amber-200">
+                  Combo / 2-in-1 CD Release Detected
+                </h3>
+                <p className="text-[11px] text-amber-300/80 mt-0.5 leading-relaxed">
+                  This release packages multiple distinct soundtrack or album works:
+                  {' '}
+                  <span className="text-amber-100 font-medium">
+                    {consensusResult.subReleaseGroupings
+                      .map((g) => `"${g.subTitle}" (${g.trackIds?.length ?? g.trackNumbers.length} tracks)`)
+                      .join(' & ')}
+                  </span>
+                  . You can stage a virtual split to index them cleanly while leaving audio files bit-perfect.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={handleSplitVirtualAlbums}
+              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-semibold text-xs transition-all shadow-md shadow-amber-500/20 cursor-pointer shrink-0 flex items-center gap-1.5"
+            >
+              <Split className="w-4 h-4" />
+              <span>Split into Virtual Albums</span>
+            </button>
+          </div>
+        )}
+
         {/* 4-Way Reconciliation Table */}
         <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/[0.06] space-y-3">
           <div className="flex items-center justify-between">
@@ -714,12 +894,15 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                     {mbCandidate?.releaseTitle || '—'}
                   </td>
                   <td className="py-2.5 px-3">
-                    <input
-                      type="text"
-                      value={selectedFields.title}
-                      onChange={(e) => setSelectedFields((prev) => ({ ...prev, title: e.target.value }))}
-                      className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
-                    />
+                    <div className="flex flex-col gap-1.5">
+                      {renderProvenanceBadge(consensusResult?.albumTitle?.source, consensusResult?.albumTitle?.confidence)}
+                      <input
+                        type="text"
+                        value={selectedFields.title}
+                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, title: e.target.value }))}
+                        className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
+                      />
+                    </div>
                   </td>
                 </tr>
 
@@ -762,12 +945,15 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                     {mbCandidate?.artistCredit || '—'}
                   </td>
                   <td className="py-2.5 px-3">
-                    <input
-                      type="text"
-                      value={selectedFields.artistCredit}
-                      onChange={(e) => setSelectedFields((prev) => ({ ...prev, artistCredit: e.target.value }))}
-                      className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
-                    />
+                    <div className="flex flex-col gap-1.5">
+                      {renderProvenanceBadge(consensusResult?.albumArtist?.source, consensusResult?.albumArtist?.confidence)}
+                      <input
+                        type="text"
+                        value={selectedFields.artistCredit}
+                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, artistCredit: e.target.value }))}
+                        className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
+                      />
+                    </div>
                   </td>
                 </tr>
 
@@ -810,12 +996,15 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                     {mbCandidate?.composer || '—'}
                   </td>
                   <td className="py-2.5 px-3">
-                    <input
-                      type="text"
-                      value={selectedFields.composerName}
-                      onChange={(e) => setSelectedFields((prev) => ({ ...prev, composerName: e.target.value }))}
-                      className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
-                    />
+                    <div className="flex flex-col gap-1.5">
+                      {renderProvenanceBadge(consensusResult?.composer?.source, consensusResult?.composer?.confidence)}
+                      <input
+                        type="text"
+                        value={selectedFields.composerName}
+                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, composerName: e.target.value }))}
+                        className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
+                      />
+                    </div>
                   </td>
                 </tr>
 
@@ -858,12 +1047,15 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                     {mbCandidate?.releaseYear || '—'}
                   </td>
                   <td className="py-2.5 px-3 font-mono">
-                    <input
-                      type="text"
-                      value={selectedFields.releaseYear}
-                      onChange={(e) => setSelectedFields((prev) => ({ ...prev, releaseYear: e.target.value }))}
-                      className="w-24 px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs font-mono"
-                    />
+                    <div className="flex flex-col gap-1.5">
+                      {renderProvenanceBadge(consensusResult?.releaseYear?.source, consensusResult?.releaseYear?.confidence)}
+                      <input
+                        type="text"
+                        value={selectedFields.releaseYear}
+                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, releaseYear: e.target.value }))}
+                        className="w-24 px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs font-mono"
+                      />
+                    </div>
                   </td>
                 </tr>
               </tbody>

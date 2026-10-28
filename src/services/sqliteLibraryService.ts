@@ -15,6 +15,7 @@ import {
   AudioFormat,
   Playlist,
   PressingVariant,
+  UpdateArtistEditorialPayload,
 } from '../core/types'
 import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags, disambiguateComboTitle, extractMeaningfulFolderName } from '../core/taxonomyUtils'
 import type { UnlistenFn } from '@tauri-apps/api/event'
@@ -1469,6 +1470,13 @@ export class SqliteLibraryService {
     // Sort by albums count desc, then name asc
     summaries.sort((a, b) => b.albumsCount - a.albumsCount || a.name.localeCompare(b.name))
     return summaries
+  }
+
+  public async updateArtistEditorialProfile(
+    artistId: string,
+    payload: UpdateArtistEditorialPayload
+  ): Promise<void> {
+    await tauriBridge.updateCanonicalArtistEditorial(artistId, payload)
   }
 
   public cleanupListeners(): void {

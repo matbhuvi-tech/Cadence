@@ -1018,6 +1018,7 @@ export interface ComboDisambiguationResult {
   resolvedTitle: string
   physicalComboTitle?: string
   isCombo: boolean
+  parts?: string[]
 }
 
 function stripRepeatedLetters(str: string): string {
@@ -1031,13 +1032,13 @@ function stripRepeatedLetters(str: string): string {
  * and the folder name or path positively corroborates one of the soundtrack segments
  * (e.g., "Dharma Dorai CD RIP"), this resolves the individual soundtrack album title.
  */
-export function disambiguateComboTitle(rawTitle: string, folderNameOrPath: string): ComboDisambiguationResult {
-  if (!rawTitle) return { resolvedTitle: rawTitle, isCombo: false }
+export function disambiguateComboTitle(rawTitle: string, folderNameOrPath?: string): ComboDisambiguationResult {
+  if (!rawTitle) return { resolvedTitle: rawTitle, isCombo: false, parts: [] }
 
   const delims = ['/', ';', ' - ']
   const matchedDelim = delims.find((d) => rawTitle.includes(d))
   if (!matchedDelim) {
-    return { resolvedTitle: rawTitle, isCombo: false }
+    return { resolvedTitle: rawTitle, isCombo: false, parts: [rawTitle] }
   }
 
   const rawSegments = rawTitle
@@ -1045,14 +1046,24 @@ export function disambiguateComboTitle(rawTitle: string, folderNameOrPath: strin
     .map((s) => s.trim())
     .filter((s) => s.length > 2 && !/^(cd|disc)\s*\d+$/i.test(s))
   if (rawSegments.length <= 1) {
-    return { resolvedTitle: rawTitle, isCombo: false }
+    return { resolvedTitle: rawTitle, isCombo: false, parts: [rawTitle] }
+  }
+
+  // If no folder path provided, return parsed segments directly
+  if (!folderNameOrPath) {
+    return {
+      resolvedTitle: rawTitle,
+      physicalComboTitle: rawTitle,
+      isCombo: true,
+      parts: rawSegments,
+    }
   }
 
   // Extract base folder name from path if full path is provided
   const baseFolder = folderNameOrPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || folderNameOrPath
   const cleanFolder = stripRipNoiseAndTags(baseFolder).toLowerCase().trim()
   if (!cleanFolder) {
-    return { resolvedTitle: rawTitle, isCombo: false }
+    return { resolvedTitle: rawTitle, isCombo: false, parts: rawSegments }
   }
 
   // Check which segments match the folder name
@@ -1097,16 +1108,113 @@ export function disambiguateComboTitle(rawTitle: string, folderNameOrPath: strin
     return st.some((s) => folderTokens.some((f) => f === s || (s.length >= 4 && f.startsWith(s.slice(0, 4)))))
   })
   if (segmentsInFolder.length > 1) {
-    return { resolvedTitle: rawTitle, isCombo: false }
+    return { resolvedTitle: rawTitle, isCombo: false, parts: rawSegments }
   }
 
   // High confidence: exactly ONE distinct segment matched this folder
   if (uniqueMatches.length === 1) {
     const bestSeg = matchingSegs[0]
-    return { resolvedTitle: bestSeg, physicalComboTitle: rawTitle, isCombo: true }
+    return { resolvedTitle: bestSeg, physicalComboTitle: rawTitle, isCombo: true, parts: rawSegments }
   }
 
   // If multiple distinct segments matched (e.g. unified disc folder like "Face Off" or "Chinna Thambi & Dharma Dorai"),
   // preserve the unified title.
-  return { resolvedTitle: rawTitle, isCombo: false }
+  return { resolvedTitle: rawTitle, isCombo: false, parts: rawSegments }
 }
+
+/**
+ * Aggressively sanitizes album and track titles for consensus arbitration.
+ * Strips rip tags, file format brackets, deluxe/remaster flags, and streaming suffixes.
+ */
+export function cleanConsensusTitle(rawTitle: string): string {
+  if (!rawTitle) return ''
+  let cleaned = stripRipNoiseAndTags(rawTitle)
+
+  // Strip technical format noise in brackets or parentheses like [FLAC 24-96], [24bit/96kHz], etc.
+  cleaned = cleaned.replace(/\s*[\(\[]\s*(?:flac|alac|wav|dsd\d*|mp3|aac|hi-?res|24bit|16bit|lossless)?(?:\s*[-/]?\s*(?:\d{1,3}[-/]\d{1,3}(?:\.\d)?|\d{2,4}khz|master|audio|\d{1,3}bit))*\s*[\)\]]/gi, '')
+
+  // Strip Disc / CD suffixes like [Disc 1], (CD 2), (Disc 01)
+  cleaned = cleaned.replace(/\s*[\(\[]\s*(?:disc|cd|part)\s*\d+\s*[\)\]]/gi, '')
+
+  // Strip commercial soundtrack suffixes
+  cleaned = cleaned.replace(/\s*\(\s*(?:original\s+motion\s+picture\s+soundtrack|original\s+soundtrack|ost)\s*\)/gi, '')
+  cleaned = cleaned.replace(/\s*\[\s*(?:original\s+motion\s+picture\s+soundtrack|original\s+soundtrack|ost)\s*\]/gi, '')
+
+  // Strip deluxe / remaster / anniversary suffixes
+  cleaned = cleaned.replace(/\s*[\(\[]\s*(?:deluxe(?:\s+edition|\s+version)?|special\s+edition|expanded\s+edition|anniversary(?:\s+edition)?|collector'?s\s+edition)\s*[\)\]]/gi, '')
+  cleaned = cleaned.replace(/\s*[\(\[]\s*(?:\d{4}\s+)?(?:re-?master(?:ed)?|digitally\s+remastered)(?:\s+\d{4})?\s*[\)\]]/gi, '')
+
+  // Strip streaming release suffixes
+  cleaned = cleaned.replace(/\s*-\s*(?:single|ep)\b/gi, '')
+  cleaned = cleaned.replace(/\s*[\(\[]\s*(?:single|ep)\s*[\)\]]/gi, '')
+
+  return cleaned.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * Evaluates whether a metadata tag value is an uninformative placeholder
+ * that should be disqualified from voting pools (e.g. "Unknown Artist", "Track 01").
+ */
+export function isPlaceholderTag(val?: string | null): boolean {
+  if (!val) return true
+  const trimmed = val.trim()
+  if (trimmed.length === 0) return true
+
+  const placeholderRegex = /^(unknown(?:\s+artist|\s+album)?|various(?:\s+artists)?|track\s*\d+|untitled|none|0000|\?+|null|undefined|blank)$/i
+  if (placeholderRegex.test(trimmed)) return true
+
+  // Bare number-only values under 4 digits (e.g. "01")
+  if (/^\d{1,3}$/.test(trimmed)) return true
+
+  return false
+}
+
+/**
+ * Computes earliest historically valid release year from available candidate providers.
+ * Enforces the Audiophile Earliest Release Date Protection rule: min(Apple.year, MB.firstReleaseDate.year),
+ * preventing digital reissue/remaster years from outvoting historical master releases.
+ */
+export function calculateEarliestValidYear(
+  localYear?: number,
+  appleYear?: number,
+  mbYear?: number,
+  folderYear?: number
+): number | undefined {
+  const currentYear = new Date().getFullYear()
+  const isValidYear = (y?: number): y is number =>
+    typeof y === 'number' && !isNaN(y) && y >= 1900 && y <= currentYear + 1
+
+  const validApple = isValidYear(appleYear) ? appleYear : undefined
+  const validMB = isValidYear(mbYear) ? mbYear : undefined
+  const validLocal = isValidYear(localYear) ? localYear : undefined
+  const validFolder = isValidYear(folderYear) ? folderYear : undefined
+
+  // 1. If both external providers (Apple & MusicBrainz) have valid years, take the earliest
+  if (validApple !== undefined && validMB !== undefined) {
+    return Math.min(validApple, validMB)
+  }
+
+  // 2. If MusicBrainz has a first release date, it is the historical gold standard
+  if (validMB !== undefined) {
+    if (validLocal !== undefined && validLocal < validMB && validLocal >= 1950) {
+      // Local is even earlier than MB
+      return validLocal
+    }
+    return validMB
+  }
+
+  // 3. If Apple is present, compare against local/folder
+  if (validApple !== undefined) {
+    if (validLocal !== undefined && validLocal < validApple) {
+      return validLocal
+    }
+    return validApple
+  }
+
+  // 4. Fallback to valid local or folder year
+  if (validLocal !== undefined) return validLocal
+  if (validFolder !== undefined) return validFolder
+
+  return undefined
+}
+

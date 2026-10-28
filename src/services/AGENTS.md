@@ -17,8 +17,8 @@ Houses business logic, external API integrations, background service workers, SQ
 - `normalizationService.ts`: Configurable tag normalization engine applying string transforms, title casing, and zero padding.
 - `compilationCanonicalizerService.ts`: Detects and standardizes compilation releases (Various Artists, soundtracks).
 - `albumGroupingService.ts`: Deterministic multi-disc box set grouping engine, canonical master album clustering, and format edition stacking.
-- `curationQueueService.ts`: Curation queue generator prioritizing defect queues (soundtrack conflicts, incomplete tags, missing art).
-- `federatedResolvers.ts`: Metadata resolvers querying MusicBrainz, Discogs, and Wikipedia for credit enrichment.
+- `curationQueueService.ts`: Curation queue generator prioritizing defect queues (soundtrack conflicts, incomplete tags, missing art) and `LookaheadQueuePrefetcher` with 50-item LRU cache and transport quietness cooldown guard.
+- `federatedResolvers.ts`: Multi-source metadata resolvers querying MusicBrainz, Apple Music, and Wikipedia/Wikidata with `GlobalMusicBrainzQueue` rate-limiting (1050ms interval, priority preemption), 2-of-3 consensus arbitration (`resolve2of3ReleaseConsensus`), and artist biographical enrichment (`hydrateArtistEditorialProfile`).
 - `integrityScanner.ts`: Evaluates audio container integrity, checks FLAC MD5 hashes, and measures clipping peaks.
 - `backgroundArtworkService.ts`: Asynchronously fetches, caches, and prioritizes album cover artwork.
 - `backdropAnalyzer.ts` & `panoramicBackdropGenerator.ts`: Analyzes artwork color palettes and generates atmospheric backdrop gradients.

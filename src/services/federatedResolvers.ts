@@ -1,7 +1,108 @@
-import { DiffField, DiffSource } from '../core/types'
-import { getCuratedAlbumArtwork } from '../core/taxonomyUtils'
+import {
+  DiffField,
+  DiffSource,
+  AlbumSignature,
+  ReleaseConsensusResult,
+  ConsensusFieldResult,
+  ConsensusFieldSource,
+  SubReleaseGrouping,
+  UpdateArtistEditorialPayload,
+  Release,
+  Track,
+} from '../core/types'
+import {
+  getCuratedAlbumArtwork,
+  cleanConsensusTitle,
+  isPlaceholderTag,
+  calculateEarliestValidYear,
+  disambiguateComboTitle,
+} from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
 import { tauriBridge } from './tauriBridge'
+
+// --- Singleton Preemptive Rate Limiter ---
+
+interface MBQueueTask<T> {
+  execute: () => Promise<T>
+  resolve: (val: T) => void
+  reject: (err: any) => void
+  isPrefetch: boolean
+}
+
+export class GlobalMusicBrainzQueue {
+  private queue: MBQueueTask<any>[] = []
+  private isProcessing = false
+  private lastDispatchTime = 0
+  private readonly minIntervalMs = 1050
+
+  /**
+   * Enqueues high-priority active user lookup at the front of the pending queue.
+   */
+  public enqueueActive<T>(execute: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const firstPrefetchIdx = this.queue.findIndex((t) => t.isPrefetch)
+      const task: MBQueueTask<T> = { execute, resolve, reject, isPrefetch: false }
+      if (firstPrefetchIdx >= 0) {
+        this.queue.splice(firstPrefetchIdx, 0, task)
+      } else {
+        this.queue.push(task)
+      }
+      this.processQueue()
+    })
+  }
+
+  /**
+   * Enqueues background prefetch lookup at the back of the queue.
+   */
+  public enqueuePrefetch<T>(execute: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queue.push({ execute, resolve, reject, isPrefetch: true })
+      this.processQueue()
+    })
+  }
+
+  /**
+   * Purges unexecuted prefetch tasks from the queue to preserve rate-limit tokens.
+   */
+  public cancelPendingPrefetch(): void {
+    const activeTasks: MBQueueTask<any>[] = []
+    for (const task of this.queue) {
+      if (task.isPrefetch) {
+        task.reject(new DOMException('Prefetch cancelled by navigation', 'AbortError'))
+      } else {
+        activeTasks.push(task)
+      }
+    }
+    this.queue = activeTasks
+  }
+
+  private async processQueue(): Promise<void> {
+    if (this.isProcessing || this.queue.length === 0) return
+    this.isProcessing = true
+
+    while (this.queue.length > 0) {
+      const task = this.queue.shift()
+      if (!task) break
+
+      const elapsed = Date.now() - this.lastDispatchTime
+      if (elapsed < this.minIntervalMs) {
+        await new Promise((r) => setTimeout(r, this.minIntervalMs - elapsed))
+      }
+
+      this.lastDispatchTime = Date.now()
+      try {
+        const res = await task.execute()
+        task.resolve(res)
+      } catch (err) {
+        task.reject(err)
+      }
+    }
+
+    this.isProcessing = false
+  }
+}
+
+export const globalMusicBrainzQueue = new GlobalMusicBrainzQueue()
 
 export interface CoverArtCandidate {
   provider: 'apple' | 'musicbrainz' | 'ai' | 'local'
@@ -1100,6 +1201,392 @@ export class FederatedResolversService {
         error: err?.message || 'Failed to fetch candidate metadata',
       }
     }
+  }
+
+  /**
+   * Fetches real album-level candidate from Apple iTunes Search API.
+   */
+  public async fetchItunesAlbumCandidate(
+    signature: AlbumSignature
+  ): Promise<ProviderResult | null> {
+    try {
+      const url = `${this.getBaseUrl()}/api/itunes-search?album=${encodeURIComponent(
+        signature.sanitizedTitle
+      )}&artist=${encodeURIComponent(signature.sanitizedArtist)}`
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 4000)
+
+      const res = await fetch(url, { signal: controller.signal })
+      clearTimeout(timeoutId)
+      if (!res.ok) return null
+      const data = await res.json()
+      if (!data.success) return null
+
+      return normalizationService.applyToCandidate<ProviderResult>({
+        provider: 'itunes',
+        confidenceScore: data.confidenceScore || 0.95,
+        releaseTitle: data.releaseTitle || signature.sanitizedTitle,
+        trackTitle: data.trackTitle || signature.firstTrackTitle,
+        artistCredit: data.artistCredit || signature.sanitizedArtist,
+        composer: data.composer || data.artistCredit || signature.sanitizedArtist,
+        releaseYear: data.releaseYear,
+        catalogNumber: data.catalogNumber || '',
+        label: data.label || 'Apple Music Catalog',
+        barcodeUpc: data.barcodeUpc || '',
+        coverArtUrl: data.coverArtUrl || '',
+        coverResolution: data.coverResolution || '3000x3000px (Apple Music Master Scan)',
+        genre: data.genre || 'Soundtrack',
+      })
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Fetches album-level candidate from MusicBrainz API with rate-limiting and priority dispatch.
+   */
+  public async fetchMusicBrainzReleaseCandidate(
+    signature: AlbumSignature,
+    isPrefetch = false
+  ): Promise<ProviderResult | null> {
+    const execute = async () => {
+      try {
+        const url = `${this.getBaseUrl()}/api/musicbrainz-search?album=${encodeURIComponent(
+          signature.sanitizedTitle
+        )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&trackNum=1`
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 4000)
+
+        const res = await fetch(url, { signal: controller.signal })
+        clearTimeout(timeoutId)
+        if (!res.ok) return null
+        const data = await res.json()
+        if (!data.success) return null
+
+        return normalizationService.applyToCandidate<ProviderResult>({
+          provider: 'musicbrainz',
+          confidenceScore: data.confidenceScore || 0.92,
+          releaseTitle: data.releaseTitle || signature.sanitizedTitle,
+          trackTitle: data.trackTitle || signature.firstTrackTitle,
+          artistCredit: data.artistCredit || signature.sanitizedArtist,
+          composer: data.composer || data.artistCredit || signature.sanitizedArtist,
+          releaseYear: data.releaseYear,
+          catalogNumber: data.catalogNumber || '',
+          label: data.label || 'MusicBrainz Verified',
+          barcodeUpc: data.barcodeUpc || '',
+          coverArtUrl: data.coverArtUrl || '',
+          coverResolution: data.coverResolution || 'Archival Front (Cover Art Archive)',
+          genre: data.genre,
+        })
+      } catch {
+        return null
+      }
+    }
+
+    if (isPrefetch) {
+      return globalMusicBrainzQueue.enqueuePrefetch(execute)
+    } else {
+      return globalMusicBrainzQueue.enqueueActive(execute)
+    }
+  }
+
+  /**
+   * Performs 2-of-3 consensus arbitration across Local tags, Apple Music, and MusicBrainz.
+   */
+  public async resolve2of3ReleaseConsensus(
+    localRelease: Release,
+    localTracks: Track[],
+    isPrefetch = false
+  ): Promise<ReleaseConsensusResult> {
+    const rawTitle = localRelease.title || ''
+    const sanitizedTitle = cleanConsensusTitle(rawTitle)
+    const localArtist = localRelease.artistCredit || ''
+    const sanitizedArtist = cleanConsensusTitle(localArtist)
+    const localComposer = localRelease.composerName || ''
+
+    const signature: AlbumSignature = {
+      sanitizedTitle,
+      sanitizedArtist: isPlaceholderTag(sanitizedArtist) ? '' : sanitizedArtist,
+      trackCount: localTracks.length,
+      firstTrackTitle: localTracks[0]?.title,
+    }
+
+    const [itunes, mb] = await Promise.all([
+      this.fetchItunesAlbumCandidate(signature),
+      this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch),
+    ])
+
+    const earliestYear = calculateEarliestValidYear(
+      localRelease.releaseYear,
+      itunes?.releaseYear,
+      mb?.releaseYear
+    )
+
+    const arbitrateField = (
+      localVal: string,
+      appleVal?: string,
+      mbVal?: string,
+      defaultVal: string = ''
+    ): ConsensusFieldResult<string> => {
+      const norm = (s?: string) => (s ? cleanConsensusTitle(s).toLowerCase() : '')
+      const isLocalPlaceholder = isPlaceholderTag(localVal)
+      const isApplePlaceholder = isPlaceholderTag(appleVal)
+      const isMbPlaceholder = isPlaceholderTag(mbVal)
+
+      const normLocal = isLocalPlaceholder ? '' : norm(localVal)
+      const normApple = isApplePlaceholder ? '' : norm(appleVal)
+      const normMb = isMbPlaceholder ? '' : norm(mbVal)
+
+      const candidates = {
+        local: localVal,
+        itunes: appleVal,
+        musicbrainz: mbVal,
+      }
+
+      // 1. All three agree
+      if (normLocal && normApple && normMb && normLocal === normApple && normApple === normMb) {
+        return { value: localVal, source: 'consensus_all', confidence: 0.99, candidates }
+      }
+
+      // 2. Apple and MB agree
+      if (normApple && normMb && normApple === normMb) {
+        return { value: mbVal || appleVal!, source: 'consensus_apple_mb', confidence: 0.95, candidates }
+      }
+
+      // 3. Local and MB agree
+      if (normLocal && normMb && normLocal === normMb) {
+        return { value: mbVal || localVal, source: 'consensus_local_mb', confidence: 0.92, candidates }
+      }
+
+      // 4. Local and Apple agree
+      if (normLocal && normApple && normLocal === normApple) {
+        return { value: appleVal || localVal, source: 'consensus_local_apple', confidence: 0.88, candidates }
+      }
+
+      // 5. External when local is placeholder
+      if (isLocalPlaceholder) {
+        if (mbVal && !isMbPlaceholder) {
+          return { value: mbVal, source: 'single_provider_match', confidence: 0.85, candidates }
+        }
+        if (appleVal && !isApplePlaceholder) {
+          return { value: appleVal, source: 'single_provider_match', confidence: 0.82, candidates }
+        }
+      }
+
+      // 6. External preference
+      if (mbVal && !isMbPlaceholder) {
+        return { value: mbVal, source: 'single_provider_match', confidence: 0.70, candidates }
+      }
+      if (appleVal && !isApplePlaceholder) {
+        return { value: appleVal, source: 'single_provider_match', confidence: 0.65, candidates }
+      }
+
+      // 7. Fallback to local
+      return {
+        value: !isLocalPlaceholder ? localVal : defaultVal,
+        source: 'local_fallback',
+        confidence: !isLocalPlaceholder ? 0.60 : 0.30,
+        candidates,
+      }
+    }
+
+    const albumTitle = arbitrateField(sanitizedTitle || rawTitle, itunes?.releaseTitle, mb?.releaseTitle, rawTitle)
+    const albumArtist = arbitrateField(localArtist, itunes?.artistCredit, mb?.artistCredit, 'Unknown Artist')
+    const composer = arbitrateField(localComposer, itunes?.composer, mb?.composer, '')
+    const genre = arbitrateField(localRelease.genreTags?.[0] || '', itunes?.genre, mb?.genre, 'Soundtrack')
+    const label = arbitrateField(localRelease.label || '', itunes?.label, mb?.label, '')
+
+    // Check combo releases
+    const comboDisambig = disambiguateComboTitle(rawTitle, localRelease.folderPath)
+    const isCombo = comboDisambig.isCombo
+
+    let subReleaseGroupings: SubReleaseGrouping[] | undefined = undefined
+    if (isCombo && comboDisambig.parts && comboDisambig.parts.length >= 2) {
+      const halfCount = Math.ceil(localTracks.length / comboDisambig.parts.length)
+      subReleaseGroupings = comboDisambig.parts.map((part, idx) => {
+        const start = idx * halfCount
+        const end = Math.min(start + halfCount, localTracks.length)
+        const sliceTracks = localTracks.slice(start, end)
+        return {
+          subTitle: part,
+          trackNumbers: sliceTracks.map((t) => t.trackNumber || 0),
+          trackIds: sliceTracks.map((t) => t.id),
+        }
+      })
+    }
+
+    const yearSource: ConsensusFieldSource =
+      earliestYear !== undefined && (earliestYear === mb?.releaseYear || earliestYear === itunes?.releaseYear)
+        ? 'earliest_year_rule'
+        : 'local_fallback'
+
+    const releaseYearResult: ConsensusFieldResult<number | undefined> = {
+      value: earliestYear,
+      source: yearSource,
+      confidence: earliestYear ? 0.90 : 0.40,
+      candidates: {
+        local: localRelease.releaseYear,
+        itunes: itunes?.releaseYear,
+        musicbrainz: mb?.releaseYear,
+      },
+    }
+
+    const requiresAiFallback =
+      albumTitle.confidence < 0.60 ||
+      albumArtist.confidence < 0.60 ||
+      (isCombo && (!subReleaseGroupings || subReleaseGroupings.length === 0))
+
+    return {
+      releaseId: localRelease.id,
+      albumTitle,
+      albumArtist,
+      composer,
+      releaseYear: releaseYearResult,
+      genre,
+      label,
+      barcode: mb?.barcodeUpc
+        ? { value: mb.barcodeUpc, source: 'single_provider_match', confidence: 0.9, candidates: { musicbrainz: mb.barcodeUpc } }
+        : undefined,
+      catalogNumber: mb?.catalogNumber
+        ? { value: mb.catalogNumber, source: 'single_provider_match', confidence: 0.9, candidates: { musicbrainz: mb.catalogNumber } }
+        : undefined,
+      isComboRelease: isCombo,
+      subReleaseGroupings,
+      requiresAiFallback,
+    }
+  }
+
+  /**
+   * Multi-source hydration of SQLite artist profiles from MusicBrainz, Wikidata/Wikipedia, and Apple Music.
+   */
+  public async hydrateArtistEditorialProfile(
+    artistName: string,
+    canonicalId: string
+  ): Promise<UpdateArtistEditorialPayload> {
+    const payload: UpdateArtistEditorialPayload = {}
+    const cleanName = cleanConsensusTitle(artistName)
+
+    try {
+      // 1. Query MusicBrainz Artist Search
+      const mbUrl = `https://musicbrainz.org/ws/2/artist/?query=artist:"${encodeURIComponent(cleanName)}"&fmt=json&limit=1`
+      const mbRes = await fetch(mbUrl, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(4000),
+      }).catch(() => null)
+
+      let mbid: string | undefined
+      let beginYear: string | undefined
+      let endYear: string | undefined
+
+      if (mbRes && mbRes.ok) {
+        const mbData = await mbRes.json()
+        const topArtist = mbData.artists?.[0]
+        if (topArtist) {
+          mbid = topArtist.id
+          payload.mbid = mbid
+          beginYear = topArtist['life-span']?.begin?.slice(0, 4)
+          endYear = topArtist['life-span']?.ended ? topArtist['life-span']?.end?.slice(0, 4) : 'present'
+          if (beginYear) {
+            payload.eraActive = `${beginYear}–${endYear || 'present'}`
+          }
+          if (topArtist.type) {
+            payload.primaryRole = topArtist.type === 'Person' ? (topArtist.disambiguation || 'Performer') : topArtist.type
+          }
+        }
+      }
+
+      // 2. Resolve Wikipedia summary
+      let resolvedWikiTitle: string | null = null
+
+      if (mbid) {
+        try {
+          const relUrl = `https://musicbrainz.org/ws/2/artist/${mbid}?inc=url-rels&fmt=json`
+          const relRes = await fetch(relUrl, {
+            headers: { Accept: 'application/json' },
+            signal: AbortSignal.timeout(4000),
+          })
+          if (relRes.ok) {
+            const relData = await relRes.json()
+            const wikiRel = relData.relations?.find((r: any) =>
+              r.url?.resource?.includes('wikipedia.org/wiki/')
+            )
+            if (wikiRel?.url?.resource) {
+              const parts = wikiRel.url.resource.split('/wiki/')
+              if (parts[1]) {
+                resolvedWikiTitle = decodeURIComponent(parts[1])
+              }
+            }
+
+            if (!resolvedWikiTitle) {
+              const wdRel = relData.relations?.find((r: any) =>
+                r.url?.resource?.includes('wikidata.org/wiki/Q')
+              )
+              if (wdRel?.url?.resource) {
+                const qidMatch = wdRel.url.resource.match(/Q\d+/)
+                if (qidMatch) {
+                  const qid = qidMatch[0]
+                  const sitelinkUrl = `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${qid}&props=sitelinks&sitefilter=enwiki&format=json&origin=*`
+                  const sitelinkRes = await fetch(sitelinkUrl, { signal: AbortSignal.timeout(4000) })
+                  if (sitelinkRes.ok) {
+                    const sitelinkData = await sitelinkRes.json()
+                    const enTitle = sitelinkData.entities?.[qid]?.sitelinks?.enwiki?.title
+                    if (enTitle) {
+                      resolvedWikiTitle = enTitle
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // Fallback search on Wikipedia REST API if Wikidata relation wasn't found
+      if (!resolvedWikiTitle) {
+        try {
+          const searchUrl = `https://en.wikipedia.org/w/rest.php/v1/search/page?q=${encodeURIComponent(cleanName)}&limit=1`
+          const searchRes = await fetch(searchUrl, { signal: AbortSignal.timeout(4000) })
+          if (searchRes.ok) {
+            const searchData = await searchRes.json()
+            const firstPage = searchData.pages?.[0]
+            if (firstPage?.key) {
+              resolvedWikiTitle = firstPage.key
+            }
+          }
+        } catch {}
+      }
+
+      // Fetch clean Wikipedia summary
+      if (resolvedWikiTitle) {
+        try {
+          const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(resolvedWikiTitle)}`
+          const summaryRes = await fetch(summaryUrl, { signal: AbortSignal.timeout(4000) })
+          if (summaryRes.ok) {
+            const summaryData = await summaryRes.json()
+            if (summaryData.extract) {
+              payload.bioSummary = summaryData.extract
+            }
+          }
+        } catch {}
+      }
+
+      // 3. Apple iTunes Artist portrait lookup
+      try {
+        const itunesUrl = `${this.getBaseUrl()}/api/itunes-search?artist=${encodeURIComponent(cleanName)}&title=${encodeURIComponent(cleanName)}`
+        const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(4000) })
+        if (itunesRes.ok) {
+          const itunesData = await itunesRes.json()
+          if (itunesData.coverArtUrl) {
+            payload.portraitUrl = itunesData.coverArtUrl
+          }
+        }
+      } catch {}
+
+      // Persist to native SQLite via IPC
+      await tauriBridge.updateCanonicalArtistEditorial(canonicalId, payload)
+    } catch {}
+
+    return payload
   }
 }
 

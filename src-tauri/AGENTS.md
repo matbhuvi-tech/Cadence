@@ -9,7 +9,7 @@ Houses the native Rust application project configured with Tauri v2. Provides th
 - `tauri.conf.json`: Tauri application configuration specifying window dimensions, bundle identifiers, security capabilities, and permissions.
 
 ## Subdirectories & System Boundaries
-- [src](./src/AGENTS.md): Native application source tree (Audio Engine, Commands, DB, Maintenance, Remote, Scanner).
+- [src](./src/AGENTS.md): Native application source tree (Audio Engine, Commands including `db_update_canonical_artist_editorial`, DB Operations, Maintenance, Remote, Scanner).
 
 ## Global Invariants
 - Must compile cleanly against Windows 10/11 x86_64 target with MSVC toolchain.

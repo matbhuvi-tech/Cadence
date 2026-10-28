@@ -214,6 +214,8 @@ export const CurationWorkbench: React.FC<CurationWorkbenchProps> = ({
         release={currentRelease}
         tracks={currentAlbumTracks}
         allReleases={releases}
+        allTracks={tracks}
+        queue={filteredQueue}
         currentIndex={currentItemIndex >= 0 ? currentItemIndex : 0}
         totalCount={filteredQueue.length}
         onPrev={handlePrev}

@@ -165,6 +165,17 @@ pub struct DbCanonicalArtist {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateArtistEditorialPayload {
+    pub bio_summary: Option<String>,
+    pub era_active: Option<String>,
+    pub primary_role: Option<String>,
+    pub mbid: Option<String>,
+    pub apple_artist_id: Option<String>,
+    pub portrait_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DbArtistSummary {
     pub id: String,
     pub name: String,
@@ -1631,6 +1642,37 @@ impl DbOperations {
         conn.execute(
             "UPDATE canonical_artists SET portrait_status = 'not_found', portrait_checked_at = ?1 WHERE id = ?2",
             params![now_sec, artist_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_artist_editorial(
+        conn: &Connection,
+        artist_id: &str,
+        payload: &UpdateArtistEditorialPayload,
+    ) -> Result<()> {
+        let now_sec = Utc::now().timestamp();
+        conn.execute(
+            "UPDATE canonical_artists 
+             SET bio_summary = COALESCE(?1, bio_summary),
+                 era_active = COALESCE(?2, era_active),
+                 primary_role = COALESCE(?3, primary_role),
+                 mbid = COALESCE(?4, mbid),
+                 apple_artist_id = COALESCE(?5, apple_artist_id),
+                 portrait_url = COALESCE(?6, portrait_url),
+                 portrait_status = CASE WHEN ?6 IS NOT NULL THEN 'enriched' ELSE portrait_status END,
+                 portrait_checked_at = CASE WHEN ?6 IS NOT NULL THEN ?7 ELSE portrait_checked_at END
+             WHERE id = ?8",
+            params![
+                payload.bio_summary,
+                payload.era_active,
+                payload.primary_role,
+                payload.mbid,
+                payload.apple_artist_id,
+                payload.portrait_url,
+                now_sec,
+                artist_id,
+            ],
         )?;
         Ok(())
     }

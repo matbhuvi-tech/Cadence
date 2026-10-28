@@ -477,3 +477,74 @@ export interface SampleRateTransition {
   settlingDelayMs: number
 }
 
+// --- Federated Metadata Recommendation & Consensus Contracts ---
+
+export interface AlbumSignature {
+  sanitizedTitle: string
+  sanitizedArtist: string
+  trackCount: number
+  totalDurationSecs?: number
+  firstTrackTitle?: string
+}
+
+export interface UpdateArtistEditorialPayload {
+  bioSummary?: string
+  eraActive?: string
+  primaryRole?: string
+  mbid?: string
+  appleArtistId?: string
+  portraitUrl?: string
+}
+
+export type ConsensusFieldSource =
+  | 'consensus_all'
+  | 'consensus_local_mb'
+  | 'consensus_apple_mb'
+  | 'consensus_local_apple'
+  | 'earliest_year_rule'
+  | 'ai_synthesized'
+  | 'local_fallback'
+  | 'single_provider_match'
+  | 'manual_override'
+
+export interface ConsensusFieldResult<T = string | number> {
+  value: T
+  source: ConsensusFieldSource
+  confidence: number // 0.0 - 1.0
+  candidates: {
+    local?: T
+    itunes?: T
+    musicbrainz?: T
+    ai?: T
+  }
+}
+
+export interface SubReleaseGrouping {
+  subTitle: string
+  originalYear?: number
+  trackNumbers: number[]
+  trackIds?: string[]
+  composer?: string
+}
+
+export interface ReleaseConsensusResult {
+  releaseId: string
+  albumTitle: ConsensusFieldResult<string>
+  albumArtist: ConsensusFieldResult<string>
+  composer: ConsensusFieldResult<string>
+  releaseYear: ConsensusFieldResult<number | undefined>
+  genre: ConsensusFieldResult<string>
+  label: ConsensusFieldResult<string>
+  barcode?: ConsensusFieldResult<string>
+  catalogNumber?: ConsensusFieldResult<string>
+  isComboRelease: boolean
+  subReleaseGroupings?: SubReleaseGrouping[]
+  trackConsensus?: Record<string, {
+    title: ConsensusFieldResult<string>
+    artists: ConsensusFieldResult<string>
+    composer?: ConsensusFieldResult<string>
+    trackNumber?: number
+  }>
+  requiresAiFallback?: boolean
+}
+
