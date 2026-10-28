@@ -10,6 +10,7 @@ Organizes all React user interface components for the Cadence desktop audiophile
   - [AudioPlayer](./AudioPlayer/AGENTS.md): Audiophile transport bar, device selector, and Sanctuary lounge.
   - [CenterStage](./CenterStage/AGENTS.md): Album grid, virtual table, works/movements, and workbench viewports.
   - [CommandBar](./CommandBar/AGENTS.md): Omni search bar and background task activity center.
+  - [Curate](./Curate/AGENTS.md): Master-detail curation workbench, defect triage queue, and 4-way metadata reconciliation.
   - [LeftRail](./LeftRail/AGENTS.md): Navigation scopes, faceted filters, health triage, and storage mounts.
   - [Maintain](./Maintain/AGENTS.md): Library maintenance cockpit and batch audit tools.
   - [Modals](./Modals/AGENTS.md): Modals for two-phase commit, library import, playlists, and settings.

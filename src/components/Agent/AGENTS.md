@@ -5,6 +5,7 @@ Provides the embedded interactive AI Copilot and assistant UI components for Cad
 
 ## Interface
 - `EmbeddedAgentDrawer`: Main slide-out conversational drawer handling user chat queries, action execution feedback, and triage suggestions.
+- `BatchProposalSheet`: Pre-flight dry-run presentation sheet displaying proposed metadata mutations for AI Copilot recommendations before they enter the staging pool.
 - `AgentChatMessage`: Contract representing chat messages, attached commands, telemetry snapshots, and suggested follow-ups.
 - `CatalogPulseCard`: Component displaying catalog health pulses, score metrics, and actionable diagnostics recommendations.
 - `MicroDiffCard`: Visual card showing proposed metadata modifications before applying them to tracks.
