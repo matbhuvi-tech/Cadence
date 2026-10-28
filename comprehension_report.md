@@ -1,73 +1,49 @@
-# Comprehension Test Report
+# Stage 6 Review Report: Comprehension Test
 
-*   **Target File:** `docs/designs/CURATION_AND_TRIAGE_LIFECYCLE_ARCHITECTURE.md`
-*   **Standard:** [Re-Implementation Standard](file:///C:/Users/Mathan/.gemini/config/plugins/elephant-goldfish-model/resources/document_standards/re-implementation-standard.md)
-*   **Reviewer Persona:** Naive Reader (`egm-comprehension`)
-*   **Mode:** Review (Stage 6)
-
----
-
-## Executive Summary
-
-The document establishes a coherent narrative and clear motivations for the 3-stage curation lifecycle. However, when evaluated under the **Zero-Assumption Rule**, a fresh engineer attempting to implement the plan without prior knowledge would encounter critical omissions:
-1. It references a non-existent service name (`geminiCompilationSoundtrackService`) when the actual codebase service is `compilationCanonicalizerService.ts`.
-2. It mandates passing `BatchProposalData` into `openBatchProposal` without defining the interface or schema.
-3. It omits queue boundary behavior (e.g. actions upon completing Item 15 of 15) and error state handling for failed provider queries.
+**Target**: `docs/designs/FEDERATED_ALBUM_AND_ARTIST_METADATA_RECOMMENDATION_ENGINE.md` (Lines 1–436)  
+**Evaluator**: `egm-comprehension`  
+**Standard**: `resources/document_standards/re-implementation-standard.md`  
+**Status**: Passed with Observations
 
 ---
 
-## Detailed Findings
+## Comprehension & Clarity Assessment
 
-### 1. Phantom Service Identifier: `geminiCompilationSoundtrackService`
-*   **Severity:** 🔴 Blocker
-*   **Affected Scope:** Lines 35, 197, 324
-*   **Discrepancy Description & Rationale:** The document repeatedly directs the implementer to integrate with `geminiCompilationSoundtrackService.ts` for disaggregating Indian / world soundtrack compilations. In reality, no file with that name exists in the codebase. The actual service implemented in Cadence is [compilationCanonicalizerService.ts](file:///e:/Mathan/Code/Music%20Agent/src/services/compilationCanonicalizerService.ts), which exports `compilationCanonicalizerService` and `resolveCompilationSoundtracks(release, tracks, allReleases)`. A fresh implementer would fail to compile on the first attempt due to an invalid import.
-*   **Remediation:** Replace all references to `geminiCompilationSoundtrackService` with `compilationCanonicalizerService` and document the exact method signature: `compilationCanonicalizerService.resolveCompilationSoundtracks(release, tracks)`.
+The document is well-organized and clearly explains the technical mechanisms underpinning consensus, prefetching, and artist hydration. A fresh engineer can understand the system's core job. However, several terms, dependencies, and state transitions are assumed without explicit definition or endpoint specification.
 
-### 2. Missing Interface Definition: `BatchProposalData`
-*   **Severity:** 🔴 Blocker
-*   **Affected Scope:** Lines 223, 358–361, 411–413 (`Technical Plan § 4` and `Detailed Implementation Plan § 6, 13`)
-*   **Discrepancy Description & Rationale:** The document states that the dispatcher invokes `openBatchProposal(proposalData)` and extends `AgentDispatcherContext` with `openBatchProposal: (data: BatchProposalData) => void`. However, nowhere in the document is `BatchProposalData` defined. The implementer must guess what fields `BatchProposalSheet` expects (e.g., action ID, title, diff arrays, track IDs, rollback callbacks).
-*   **Remediation:** Explicitly define the `BatchProposalData` TypeScript contract inline in the specification:
-    ```typescript
-    export interface BatchProposalDiffRow {
-      trackId: string
-      trackTitle: string
-      albumTitle: string
-      fieldName: 'title' | 'artistCredit' | 'composerName' | 'albumTitle' | 'releaseYear' | 'genre'
-      currentValue: string | number | undefined
-      proposedValue: string | number | undefined
-    }
+---
 
-    export interface BatchProposalData {
-      proposalId: string
-      title: string
-      description: string
-      scopeLabel: string
-      affectedAlbumsCount: number
-      affectedTracksCount: number
-      diffs: BatchProposalDiffRow[]
-      onStageAll: () => Promise<void>
-      onInspectInCurate: (affectedAlbumIds: string[]) => void
-    }
-    ```
+## Findings
 
-### 3. Ambiguous Dependency Contract in `curationQueueService.ts`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 314–318 (`Detailed Implementation Plan § 1`)
-*   **Discrepancy Description & Rationale:** The plan states: `computeCurationQueue(tracks: Track[], releases: Release[]): AlbumCurationQueueItem[]` and notes that it "scans `AuditIssue` items". It does not specify whether `auditIssues: AuditIssue[]` should be passed as a third parameter or whether `curationQueueService` should call `auditService.computeCatalogAudit(tracks, releases)` internally. If `AuditContext` already has active `issues` in memory, recomputing catalog audits inside the queue service duplicates CPU cycles.
-*   **Remediation:** Define the exact signature: `computeCurationQueue(tracks: Track[], releases: Release[], existingIssues?: AuditIssue[]): AlbumCurationQueueItem[]`. If `existingIssues` is provided, reuse them; otherwise fall back to `auditService.computeCatalogAudit`.
+### Finding 1: Undefined `AlbumSignature` Interface
+* **Severity**: 🟡 Major
+* **Affected Scope**: Component 2 (Lines 139, 142) and Detailed Implementation File 7 (Line 336)
+* **Rationale**: The functions `fetchItunesAlbumCandidate(signature: AlbumSignature)` and `fetchMusicBrainzReleaseCandidate(signature: AlbumSignature)` take an `AlbumSignature` parameter, but its type shape is not defined in Component 2 or `src/core/types.ts`.
+* **Recommendation**: Explicitly define `AlbumSignature` in Component 2 and in File 2 of the manifest:
+  ```typescript
+  export interface AlbumSignature {
+    sanitizedTitle: string;
+    sanitizedArtist: string;
+    trackCount: number;
+    totalDurationSecs?: number;
+    firstTrackTitle?: string;
+  }
+  ```
 
-### 4. Undefined Queue Completion & Provider Error States
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 171–178, 351–352
-*   **Discrepancy Description & Rationale:** 
-    *   What happens when the user clicks `Stage & Next → (⌘↵)` on the final queue item (Item 15 of 15)? Does the stepper wrap around to Item 1, transition to a "All Queued Items Addressed" completion card, or trigger a modal prompting the user to commit staged changes?
-    *   What is the behavior in the 4-way reconciliation table if an external provider query (e.g., MusicBrainz) returns HTTP 429 (rate-limited) or fails due to network outage? Does the column render an empty state, a retry action, or a fallback badge?
-*   **Remediation:** Specify terminal queue behavior (e.g., display a "Queue Cleared: 15 Albums Staged" completion screen with a direct button to `[Review & Commit Changes]`) and define failure states in the provider columns (`Error / Retry` button).
+### Finding 2: Unspecified Wikipedia Search Endpoint
+* **Severity**: 🟡 Major
+* **Affected Scope**: Component 6 (Lines 229–230)
+* **Rationale**: Component 6 specifies: *"fallback to querying the Wikipedia REST summary search directly by verified {canonical_name} + {primary_role}"*. The summary API `/api/rest_v1/page/summary/{title}` requires an exact Wikipedia article title (e.g., `A._R._Rahman`), not a search query string. If the Wikidata QID is missing, the fallback mechanism needs a specific search query endpoint.
+* **Recommendation**: Specify the exact search endpoint: `https://en.wikipedia.org/w/rest.php/v1/search/page?q={query}&limit=1` or `https://en.wikipedia.org/w/api.php?action=opensearch&search={query}&limit=1&format=json` to resolve the article title before calling `/api/rest_v1/page/summary/{title}`.
 
-### 5. Unspecified Navigation Rail Restoration Behavior
-*   **Severity:** 🟢 Nit
-*   **Affected Scope:** Lines 381, 389–391
-*   **Discrepancy Description & Rationale:** The plan specifies passing `isIconOnly={topMode === 'curate'}` to `LeftRail`. It does not clarify whether a user's manual expand/collapse preference in `Listen` or `Audit` mode is preserved when switching into and out of `Curate`.
-*   **Remediation:** Note that `isIconOnly` is an override active only while `topMode === 'curate'`, restoring the user's prior sidebar state upon returning to `Listen` or `Audit`.
+### Finding 3: Ambiguous `lastPlaybackStoppedTime` Provenance
+* **Severity**: 🟡 Major
+* **Affected Scope**: Component 4 (Line 190) and Detailed Implementation File 8 (Line 357)
+* **Rationale**: The 30-second cooldown check evaluates `(Date.now() - lastPlaybackStoppedTime) < 30000`. It is not explained where `lastPlaybackStoppedTime` originates—does `tauriBridge.getPlaybackStatus()` return this timestamp, or must `curationQueueService` listen to playback status changes and record the timestamp when state transitions from `Playing`/`Paused` to `Stopped`?
+* **Recommendation**: Explicitly state that `curationQueueService` subscribes to playback state events via `tauriBridge.onPlaybackStateChanged` to record `lastPlaybackStoppedTime` locally whenever playback stops.
+
+### Finding 4: Remnant Option B Brainstorming Terminology
+* **Severity**: 🟢 Nit
+* **Affected Scope**: CUJ 2 (Line 51), Component 5 (Line 197), and Manifest File 10 (Line 372)
+* **Rationale**: Phrases like *"Option B Architecture"* and *"Option B virtual album split"* refer to brainstorming discussions. A reader of the finalized design doc should see the architecture named directly (e.g., *"Virtual Split in Queue"*) without referencing obsolete brainstorming labels.
+* **Recommendation**: Replace *"Option B Architecture"* with *"Virtual Split in Queue"*.

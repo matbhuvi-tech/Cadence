@@ -1,66 +1,50 @@
-# Critic Review Report
+# Stage 7 Review Report: Critic Review
 
-*   **Target File:** `docs/designs/CURATION_AND_TRIAGE_LIFECYCLE_ARCHITECTURE.md`
-*   **Standard:** [Feature Specification Standard](file:///C:/Users/Mathan/.gemini/config/plugins/elephant-goldfish-model/resources/document_standards/feature-spec-standard.md)
-*   **Reviewers:** Design Critic (`egm-design`), Structural Validator (`egm-structural`), Style Editor (`egm-style`)
-*   **Target Scope:** `FeatureRange` (Lines 1–306)
-*   **Mode:** Review (Stage 7)
-
----
-
-## Executive Summary
-
-The feature specification establishes a solid foundation for unifying curation, auto-suggestion, and commit verification. The alternatives analysis is rigorous, and the separation of concerns between triage, reconciliation, and commit is clear. 
-
-However, the specification exhibits three notable gaps:
-1. **Architectural & Operational Risks (`egm-design`)**: It lacks request debouncing and cancellation for rapid queue stepping, risking HTTP 429/503 rate-limit bans from external providers (MusicBrainz 1 req/sec), and omits offline/air-gapped degradation behavior.
-2. **Structural Standard Compliance (`egm-structural`)**: It lacks an explicit, dedicated `## Risks & Mitigations` section required by the Feature Specification Standard, leaving failure modes scattered across NFRs and Alternatives.
-3. **Terminology Precision (`egm-style`)**: It misapplies audio transport terminology to metadata tags (e.g. "conforming to bit-perfect standards" for tags) and contains subjective emotional language in rejected alternatives ("excruciatingly tedious").
+**Target**: `docs/designs/FEDERATED_ALBUM_AND_ARTIST_METADATA_RECOMMENDATION_ENGINE.md` (FeatureRange: Lines 1–284)  
+**Evaluators**: `egm-design`, `egm-structural`, `egm-style`  
+**Standard**: `resources/document_standards/feature-spec-standard.md`  
+**Status**: Passed with Actionable Critiques
 
 ---
 
-## Detailed Findings
+## Technical & Architecture Critique
 
-### 1. Rapid Queue Stepping Rate-Limiting & Cancellation Defect
-*   **Reviewer:** `egm-design`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 168, 190–199 (`Technical Plan § 2.B` and `§ 3.A`)
-*   **Finding & Recommendation:** 
-    *   *Flaw:* MusicBrainz enforces a strict rate limit of 1 request per second per IP address. If a user rapidly navigates through the curation queue using keyboard shortcuts (`⌘]` / `⌘[`), 10–15 lookups will be dispatched concurrently, triggering 429 / 503 rate-limit blocks and IP bans.
-    *   *Recommendation:* Mandate a 300ms debounce on queue item selection before triggering network lookups. Require all external fetch calls to pass an `AbortController.signal` so that selecting a new queue item immediately aborts any in-flight lookups for the previous item.
+The architecture elegantly solves the core requirements: 2-of-3 consensus, original release year preservation, audiophile quietness guards, and rich SQLite profile hydration. However, stress-testing the architecture against high concurrency, external API terms of service, and edge-case token limits reveals several unmitigated risks.
 
-### 2. Missing Offline / Air-Gapped Catalog Operation Mode
-*   **Reviewer:** `egm-design`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 190–199 (`Technical Plan § 3.A`)
-*   **Finding & Recommendation:**
-    *   *Flaw:* High-end audiophile workstations are frequently disconnected from the Internet (or placed in air-gapped network configurations) to minimize network PHY noise. The specification does not define how the 4-way reconciliation stage behaves when the system has no active Internet connection.
-    *   *Recommendation:* Explicitly document offline fallback behavior: when network calls fail or are offline, external provider columns render as `Offline · Not Queried`, allowing users to perform local tag editing and manual sidecar staging without UI blocking or infinite loading spinners.
+---
 
-### 3. Missing Mandatory `## Risks & Mitigations` Section
-*   **Reviewer:** `egm-structural`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 287–306 (Following `Non-Functional Requirements`)
-*   **Discrepancy Description & Rationale:**
-    *   *Flaw:* The Feature Specification Standard explicitly mandates a dedicated `## Risks & Mitigations` section. While some risks are touched upon in NFRs (e.g. playback quietness), operational risks such as rate-limit lockouts, DOM performance with large Copilot diffs, and concurrent SQLite writes are not consolidated into a dedicated risk matrix.
-    *   *Recommendation:* Add a formal `## Risks & Mitigations` section addressing:
-        1. Rate limiting on external APIs (Mitigation: 300ms debounce + `AbortController`).
-        2. UI thread freeze on large batch proposals (Mitigation: virtualized diff list in `BatchProposalSheet`).
-        3. Offline network state (Mitigation: immediate passive fallback to local tags).
+## Findings
 
-### 4. DOM Virtualization in `BatchProposalSheet`
-*   **Reviewer:** `egm-design`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 228–234 (`Technical Plan § 4.B`)
-*   **Finding & Recommendation:**
-    *   *Flaw:* A catalog-wide operation triggered from Copilot (such as normalizing genres or folder synchronization) can produce diffs across 1,000+ tracks. Rendering an unvirtualized HTML table with 1,000+ rows inside a modal drawer will cause substantial DOM reflow lag and jank.
-    *   *Recommendation:* Explicitly mandate windowing/virtualization (e.g. `@tanstack/react-virtual` or CSS-contained fixed windowing) for the diff table in `BatchProposalSheet.tsx`.
+### Finding 1: MusicBrainz Queue Starvation / Lack of Preemption for Active Navigation
+* **Severity**: 🔴 Blocker
+* **Affected Scope**: Component 2 (Lines 137–139) & Component 4 (Lines 187–193)
+* **Risk & Critique**:
+  Component 2 mandates an application-wide singleton FIFO queue enforcing $\ge 1050\text{ms}$ between all outbound MusicBrainz requests. Component 4 enqueues prefetch tasks for Albums $N+1$ and $N+2$.
+  If the user skips ahead 3 albums rapidly in the UI (`⌘↵`, `⌘↵`, `⌘↵`), the active album's lookup task will be placed at the tail of the FIFO queue behind 4–6 already enqueued prefetch tasks. The user will experience a multi-second UI freeze waiting for outdated background tasks to drain at 1.05s intervals.
+* **Mitigation Recommendation**:
+  1. The `GlobalMusicBrainzQueue` must support **Priority Preemption**: Active user-facing lookups must take priority over background prefetch tasks.
+  2. Implement task cancellation (`AbortController`): When the user navigates away from Album $N$, any pending prefetch tasks for $N+1$ or $N+2$ that have not yet sent their network request must be purged from the queue.
 
-### 5. Imprecise Terminology & Subjective Phrasing
-*   **Reviewer:** `egm-style`
-*   **Severity:** 🟢 Nit
-*   **Affected Scope:** Lines 215, 282, 352
-*   **Style Rationale:**
-    *   *Line 215:* "guaranteeing 100% diff symmetry" is promotional phrasing. Replace with "ensuring identical diff representations".
-    *   *Line 282:* "excruciatingly tedious and frustrating" is emotional hyperbole. Replace with "imposes excessive interaction friction".
-    *   *Line 352:* "All catalog items conform to bit-perfect standards". The term "bit-perfect" refers strictly to unadulterated audio transport (WASAPI Exclusive, sample rate preservation). Metadata tags cannot be "bit-perfect"; they conform to "catalog hygiene standards". Replace "bit-perfect" with "hygiene".
+### Finding 2: Wikipedia & MusicBrainz API User-Agent Policy Violation
+* **Severity**: 🟡 Major
+* **Affected Scope**: Component 2 (Line 137) & Component 6 (Lines 226–232)
+* **Risk & Critique**:
+  Both the MusicBrainz API and the Wikimedia REST API strictly enforce a custom `User-Agent` header containing application identification and contact details (e.g., `Cadence/1.0.0 ( contact@cadence.audio )`). Default browser `fetch()` headers or generic client headers are automatically throttled or blocked with HTTP 403 Forbidden by Wikimedia Cloud Services and MusicBrainz rate limiters.
+* **Mitigation Recommendation**:
+  Explicitly specify in Component 2 and Component 6 that all outbound HTTP calls to MusicBrainz and Wikimedia APIs include an explicit compliant `User-Agent` header configured in the service layer or native HTTP client.
+
+### Finding 3: Gemini Token Budget Underestimation for Anthologies
+* **Severity**: 🟡 Major
+* **Affected Scope**: Problem Statement 3 (Line 23) & Component 5 (Lines 185–201)
+* **Risk & Critique**:
+  Component 5 states that Gemini resolves album and per-track credits in a single prompt of "~400 tokens". While ~400 tokens may suffice for an 8-track pop album, Problem Statement 3 explicitly calls out 30+ track custom anthologies (e.g., *"A World Of Music"*). Generating structured JSON containing canonical title, composer, year, and per-track titles, playback singers, and film soundtracks across 30 tracks requires 1200–1800 completion tokens. A 400-token cap would truncate the response, resulting in a JSON parse failure.
+* **Mitigation Recommendation**:
+  Update Component 5 to specify a dynamic response token ceiling (`maxOutputTokens: 2048`) to accommodate full-tracklist box sets and anthologies without JSON truncation.
+
+### Finding 4: Offline & Network Timeout Degradation Path
+* **Severity**: 🟡 Major
+* **Affected Scope**: Component 3 (Lines 164–170)
+* **Risk & Critique**:
+  The document does not detail what happens when the user has no internet connection or when an external API times out. If external calls hang indefinitely, the reconciliation stage will stall.
+* **Mitigation Recommendation**:
+  Define a strict 4-second timeout on external provider calls. When external providers fail or the system is offline, the consensus engine must cleanly fall back to local file tags, set confidence to `0.50`, and render the `[Local Fallback]` neutral badge.

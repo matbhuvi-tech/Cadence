@@ -1,448 +1,503 @@
-# Cadence Curation, Auto-Suggestion & Review Lifecycle
+# Federated Album & Artist Metadata Recommendation Engine
 
 *   **Author:** Mathan
 *   **Status:** Draft
-*   **Date:** 2026-10-27
+*   **Date:** 2026-10-28
 
 --------------------------------------------------------------------------------
 
 ## Overview
 
-Cadence is a bit-perfect audiophile music player and catalog curation engine for Windows Desktop. The application currently fragments the curation workflow across disjointed, contradictory surfaces: clicking "Curate 126" in the top navigation locks onto an arbitrary track (`tracks[0]`, "Dil Se") with zero queue context; the 4-way provider reconciliation table displays simulated template strings rather than real metadata; Copilot recommendations blindly trigger in-memory mutations across hundreds of tracks without preview barriers; and reviewing staged changes suffers from conflicting counters, inconsistent artwork detection, and misaligned batch write modes.
+Cadence delivers bit-perfect audiophile music playback alongside high-fidelity catalog curation. While single-track lookups and basic cover art fetching exist, the current architecture lacks a coherent, release-level and artist-level metadata recommendation pipeline. External provider lookups in the Curation Workbench are starved by single-track (`tracks[0]`) query calls, dirty local rip tags pollute comparison logic, digital remaster dates frequently overwrite true historical release years, and rich artist editorial profiles remain completely unpopulated in the local database.
 
-This project unifies auto-suggesting, manual editing, and batch review into an end-to-end 3-stage lifecycle:
-1. **Discover & Triage (Audit & Hygiene ⌘3 + Copilot):** Surfaces categorized queues of catalog defects; clicking an issue routes to Curate scoped strictly to affected items with zero silent mutations.
-2. **Inspect & Reconcile (Curate ⌘2):** A dedicated Master-Detail Workbench with an Album-Hierarchical queue on the left (280px) and a real metadata reconciliation table + artwork inspector on the right, backed by a `Stage & Next → (⌘↵)` stepper.
-3. **Verify & Commit (Review & Commit Modal):** A strict, read-only pre-flight diff inspector with synchronized counters, consistent artwork detection, global target selection (`Embed Headers` vs `Sidecar JSON`), and unified execution logging.
+This project delivers an end-to-end album and artist metadata recommendation engine built around:
+1. **Pre-Sanitized 2-of-3 Consensus Arbitration**: Sanitizing rip noise and disqualifying placeholder tags so Apple Music, MusicBrainz, and Local tags reach clean agreement on canonical release titles, album artists, composers, genres, and earliest original release dates (`min(Apple.year, MB.firstReleaseDate.year)`).
+2. **Multi-Movie & Custom Anthology Resolution**: Disambiguating 2-in-1 combo CD rips and multi-film custom anthologies with hyphen-splitting and full-tracklist Gemini AI synthesis.
+3. **Lookahead Queue Prefetcher (Depth = 2)**: Masking MusicBrainz 1 req/sec pacing delays by pre-resolving candidate metadata for upcoming albums while respecting audiophile transport quietness.
+4. **Separation of Concerns for Tag Staging vs SQLite Profiles**: Staging verified album/track tags via atomic two-phase commit, while hydrating rich artist profiles (biography from Wikipedia REST, active eras and roles from MusicBrainz, and portraits from Apple Music) strictly into the local SQLite `canonical_artists` table.
 
 ## The Problem
 
-1. **The "Mystery Selection" and Zero Queue Visibility**: The top navigation button displays `Curate 126` (implying a queue of 126 items waiting for curation). Clicking Curate triggers `resolveCurateTargetTrack()` which, in the absence of an active track selection or playback, arbitrarily defaults to `tracks[0]` ("Dil Se (Dil Se)"). Inside the view, there is no queue list, no item counter (e.g., `1 of 126`), no triage reason indicator, and no `Next` button—only `← Return (Esc)`.
-2. **Simulated Metadata and Broken State Binding in Curate**: In `FocusedWorkbench.tsx`, the `APPLE MUSIC`, `MUSICBRAINZ`, and `GEMINI AI` columns do not query real APIs; they append hardcoded template strings onto the local compilation name (e.g., `A World Of Music (Original Motion Picture Soundtrack)`), while simultaneously displaying the *Dil Se..* movie poster in the artwork inspector. Furthermore, `handleSave` mutates `track.title` and `track.artistCredit` directly in memory without writing them to `track.pendingSidecarEdits`, causing the green `STAGED OUTPUT` column to disagree with the proposed diffs in the `Review & Commit Changes` modal.
-3. **Contradictory Artwork State Between Surfaces**: For the exact same track, `FocusedWorkbench` detects and renders an embedded 500x500 JPEG, while `TwoPhaseCommitModal` evaluates `release.artwork.frontCoverUrl`, reports `No Embedded Artwork · None detected`, and proposes overwriting the entire compilation's artwork with a single track's soundtrack cover.
-4. **Misplaced Structural Actions on Single-Track Screens**: A yellow `Split Multi-Disc` button is mounted in the header of `FocusedWorkbench` next to `Cancel` and `Stage to Sidecar`. Disc splitting is an album-level structural operation that does not belong inside a track-level tag reconciliation view.
-5. **Blind "One-Click" Batch Mutations in Copilot**: In `EmbeddedAgentDrawer.tsx`, recommendation action buttons (e.g., `Sync Album from Folder`, `Normalize Genres`, `Fetch Online Art`) execute catalog-wide operations that silently stage mutations across hundreds of tracks without a pre-flight staging preview.
-6. **Telemetric Discrepancies and Row Badge Desynchronization in Commit Modal**: In `TwoPhaseCommitModal.tsx`, top summary badges (`2 Tag Edits, 4 Cover Art Updates`) disagree with the filter tabs immediately below (`Tag Edits (1), With Artwork Updates (648)`). Toggling between `Embed Headers` and `Sidecar JSON` updates the row badge for the first expanded album (`Header Write Staged`), while sibling rows remain stuck on `Sidecar Staged`.
+1. **The "Dirty Local Tag" Consensus Trap**: Local file tags in user libraries frequently append rip artifacts (`"Anjali CD RIP"`, `"[FLAC 24-96]"`) or contain generic placeholders (`"Unknown Artist"`, `"Various Artists"`, `"Track 01"`). Comparing raw strings prevents consensus from forming or, worse, allows a bad local tag year to collude with an Apple Music streaming reissue year (e.g., 2015) to outvote MusicBrainz's true historical master release year (e.g., 1990).
+2. **Release-Level Data Starvation via Track-Zero Bias**: In `federatedResolvers.ts`, `resolveActiveItemCandidate` queries external providers using single-track queries (`tracks[0]?.title`) and hardcodes `ai: null`. It cannot query full release groups, catalog numbers, barcodes, total track counts, or multi-disc topologies.
+3. **Multi-Movie Combo Pressings & Anthology Failures**: Physical CDs in South Asian and regional catalogs often press two complete film soundtracks onto a single physical disc (e.g., Pyramid/Lahari combo releases like *"Agni Natchathiram / Ninaivellam Nithya"*), or assemble 30+ track custom anthologies (e.g., *"A World Of Music"*). Standard 1-to-1 album queries fail completely with 0 matches or $>30\%$ track count divergence.
+4. **MusicBrainz 1 Req/Sec Stepper Latency**: MusicBrainz strictly limits anonymous API traffic to 1 request per second. When a user steps through the Curation Queue (`Stage & Next → ⌘↵`), waiting synchronously for MusicBrainz introduces an unacceptable 1.2–1.5 second UI block on every album transition.
+5. **Unpopulated SQLite Artist Editorial Profiles**: The SQLite database defines the `canonical_artists` table with columns for `bio_summary`, `era_active`, `primary_role`, `mbid`, and `apple_artist_id`. However, background maintenance only updates `portrait_url`. Users viewing `ArtistsView` receive no biographical context, historical active eras, or primary musical role classifications (e.g., Playback Singer vs Music Director / Composer).
 
 ## Goals
 
-*   **G1: Master-Detail Curation Workbench**: Transform `Curate (⌘2)` into a dedicated Master-Detail Workbench featuring a 280px Album-Hierarchical queue on the left and a 4-way metadata reconciliation table + artwork inspector on the right.
-*   **G2: Elimination of Arbitrary Fallbacks**: Remove `tracks[0]` fallback in `resolveCurateTargetTrack()`. When Curate is opened without active context, default to the first album in the Curation Queue; if the queue is empty, display an explicit "All catalog items conform to hygiene standards" empty state.
-*   **G3: Album-Hierarchical Queue with Stepper**: Group curation items by Album with defect reason tags (e.g., `A World Of Music · 1 Compilation Conflict`). Provide an active stepper (`Item 1 of 15 Albums · Reason: Soundtrack Provenance`) and a primary `Stage & Next → (⌘↵)` action.
-*   **G4: Contextual Approval Branching**:
-    *   *Uniform Album Defects* (e.g. missing year or low-res artwork across all tracks): Apply approved metadata album-wide by default, with per-track checkbox opt-out.
-    *   *Multi-Film Compilation Box Sets* (e.g. *A World Of Music* containing tracks from both *Dil Se..* and *Guru*): Cluster tracks inside the album accordion by resolved canonical soundtrack. Accepting a match for *Dil Se..* applies strictly to its matching tracks without overwriting sibling tracks belonging to *Guru*.
-*   **G5: Real Metadata Provenance & Lazy Lookups**: Replace simulated template strings with real provenance queries (integrating `geminiCompilationSoundtrackService` for soundtrack resolution and MusicBrainz for release data), executed strictly on-demand for the active item to prevent network PHY noise during playback.
-*   **G6: Strict Pending Sidecar State Binding**: Ensure all staged edits write exclusively to `track.pendingSidecarEdits` and `track.sidecarStatus = 'uncommitted_sidecar'`, leaving in-memory track objects pristine until disk commit. Guarantee identical diff representations between Curate's `STAGED OUTPUT` and `TwoPhaseCommitModal`.
-*   **G7: UI Cleanliness & Scope Isolation**: Remove the `Split Multi-Disc` action from `FocusedWorkbench`. Collapse the global left navigation rail to icon-only mode (64px) in Curate to secure 1576px+ of workbench canvas. Scope Copilot recommendations to the active screen context, and introduce a Dry-Run Proposal Sheet for bulk actions before mutations enter the staged pool.
-*   **G8: Synchronized Commit Telemetry & Unified Units**: Bind all surface counters to unified units: the Curate navigation button displays queued **Albums** (`Curate 15 ⌘2`), while the Top Header Staged pill displays both dimensions (`● 15 Albums · 82 Staged`). Unify summary counters and filter tabs in `TwoPhaseCommitModal` to read from the centralized `useStagedChanges` hook. Ensure embedded file artwork is accurately reflected in the `Current` artwork box, and synchronize row badges with the active write target (`Embed Headers` vs `Sidecar JSON`).
+*   **G1: Pre-Consensus Sanitization & Placeholder Disqualification**: Strip digital rip noise (`CD RIP`, `[FLAC]`, `(Original Motion Picture Soundtrack)`, `- Single`) and disqualify placeholder strings (`"Unknown Artist"`, `"Various Artists"`, `"0000"`) before evaluating provider agreement.
+*   **G2: 2-of-3 Consensus Arbitration Engine**: Implement field-level consensus across Local, Apple Music, and MusicBrainz. When Local is disqualified, require 2-of-2 external agreement or high-confidence ($\ge 80\%$) single-provider match.
+*   **G3: Earliest Release Date Protection**: Calculate `ORIGINALYEAR` as `min(Apple.year, MB.firstReleaseDate.year)` across verified release-group candidates to guarantee digital reissues never overwrite historical release years.
+*   **G4: Combo CD Disambiguation & Full-Tracklist AI Hand-Off**: Disambiguate multi-movie combo titles using delimiters (`/`, `-`, `;`). When 0-consensus occurs, pass full tracklists and directory paths to Gemini AI in a single prompt (~400 tokens) to resolve album-level composer and track-level singers in one pass.
+*   **G5: Lookahead Queue Prefetcher (Depth = 2)**: Prefetch and cache metadata for Albums $N+1$ and $N+2$ while the user reviews Album $N$, active strictly when audio playback is idle or cooldown has elapsed.
+*   **G6: Multi-Source `canonical_artists` Hydration**: Hydrate SQLite artist profiles using MusicBrainz (MBID, lifespan, primary role), Apple Music (IDs and high-res portraits), and Wikipedia REST Summary API (clean biographical summaries), with on-demand Gemini AI fallback.
+*   **G7: Curate & ArtistsView UI Integration**: Surface consensus provenance badges (`[Local+MB]`, `[Apple+MB]`, `[AI]`) with single-click cell overrides in `CurationReconciliationStage`, and provide an editorial profile inspector in `ArtistsView`.
 
 ## Non-Goals
 
-*   **NG1: Modifying Native WASAPI Core**: No modifications to native audio transport, memory pinning (`VirtualLock`), MMCSS thread pacing, or ASIO streaming.
-*   **NG2: Overhauling TagLib / Lofty Native File Writers**: No modifications to the underlying C++/Rust file-writing binaries; the refactor targets UI staging, state binding, and review coordination.
-*   **NG3: Automatic Mass Web Scraping**: No automated background web-scraping across the entire library at once; all external metadata lookups remain demand-driven and on-demand for the active item.
-
-## Key Architectural Decisions
-
-*   **Decision 1 (Curate Navigation Rail Mode)**: The global left rail collapses to icon-only mode (64px) rather than hiding completely. This preserves spatial orientation and instant access to other containers while freeing up 176px of horizontal space (leaving 1576px for the Master-Detail workbench on a 1920x1080 display).
-*   **Decision 2 (Approval Granularity Branching)**:
-    *   *Case A (Single-Release Defect)*: Stage album-wide changes to all tracks with individual track opt-out checkboxes.
-    *   *Case B (Disaggregated Compilations)*: Group tracks by resolved target soundtrack inside the album card; staging one soundtrack match (e.g. *Dil Se..*) mutates only its constituent tracks, leaving distinct sibling tracks (e.g. *Guru*) intact.
-*   **Decision 3 (Telemetry Unit Alignment)**:
-    *   Mode Switcher badge: Displays queued **Album count** (`Curate 15`).
-    *   Top Header Staged pill: Displays **Albums and Tracks** (`● 15 Albums · 82 Staged`).
-    *   Review & Commit Modal tabs: Display synchronized track and artwork counts derived from `useStagedChanges`.
+*   **NG1: Unattended Full-Library AI Batching**: No automated mass execution of Gemini AI across the entire catalog at once to protect the 15 RPM quota ceiling.
+*   **NG2: Writing Biographies into Physical Audio Headers**: Encyclopedic prose summaries remain strictly in the SQLite database to avoid bloating audio file header padding.
+*   **NG3: Synthetic Identifier Hallucination**: Gemini AI is strictly barred from inventing barcodes, catalog numbers, or MusicBrainz UUIDs without exact external verification.
+*   **NG4: Automated Unreviewed File Writes**: No metadata changes write directly to physical files without user confirmation in the Two-Phase Commit modal.
 
 ## Critical User Journeys (CUJs)
 
-### CUJ 1: Navigating to Curate from the Top Bar
-*   **Given**: The user has 15 albums flagged with compilation conflicts or missing artwork in their library. The top bar displays `Curate 15 (⌘2)`.
-*   **When**: The user clicks `Curate` with no track or album selected.
-*   **Then**: The view opens to the Master-Detail Curation Workbench. The left queue lists all 15 albums with their defect badges, the first album is selected, the center-right canvas displays its multi-provider reconciliation table and artwork inspector, and the global left rail collapses to icon-only mode (64px).
+### CUJ 1: Reconciling a Dirty Local Soundtrack Rip
+*   **Given**: An album folder tagged `"Anjali CD RIP"` with Album Artist `"Unknown Artist"`, release year `2015`, and track files missing composer tags.
+*   **When**: The user selects the album in Curate (`⌘2`).
+*   **Then**: The pre-sanitizer strips `"CD RIP"`, disqualifies `"Unknown Artist"`, queries MusicBrainz and Apple Music, and achieves 2-of-2 external consensus on title `"Anjali"`, composer `"Ilaiyaraaja"`, and original year `1990` (`min(2015, 1990)` via Earliest Valid Year rule). `STAGED OUTPUT` is pre-populated with consensus values and tagged `[Apple + MB]`.
 
-### CUJ 2: Stepping Through the Curation Queue
-*   **Given**: Album `A World Of Music` is selected in Curate. Its tracks are grouped under resolved soundtrack clusters: *Dil Se..* (1998) and *Guru* (2007).
-*   **When**: The user accepts the *Dil Se..* soundtrack metadata and presses `Stage & Next → (⌘↵)`.
-*   **Then**: Only the tracks matching *Dil Se..* are staged into `pendingSidecarEdits`; sibling tracks belonging to *Guru* remain untouched. The queue advances to the next un-staged item.
+### CUJ 2: Resolving a 2-in-1 Combo CD Pressing (Virtual Split in Queue)
+*   **Given**: A physical CD release titled `"Agni Natchathiram - Ninaivellam Nithya"` where a single folder contains 12 tracks from two distinct film releases (Tracks 1–6 from Movie A [1988] and Tracks 7–12 from Movie B [1982]).
+*   **When**: The combo disambiguator or Gemini AI detects multiple sub-release groupings with distinct soundtrack discographies.
+*   **Then**: `CurationReconciliationStage` surfaces an interactive `Split into 2 Virtual Albums` toggle. When engaged, the queue splits the physical folder into two virtual album staging entries: Virtual Album 1 stages Tracks 1–6 with `ALBUM = "Agni Natchathiram"` and `ORIGINALYEAR = 1988`, while Virtual Album 2 stages Tracks 7–12 with `ALBUM = "Ninaivellam Nithya"` and `ORIGINALYEAR = 1982` directly into `track.pendingSidecarEdits`, preventing cross-film metadata pollution.
 
-### CUJ 3: Inspecting Bulk Copilot Suggestions Before Staging
-*   **Given**: The user opens Cadence Copilot and clicks `Disentangle 1 Compilation Boxset Conflicts`.
-*   **When**: The action is triggered.
-*   **Then**: Rather than immediately mutating tracks in memory, a Dry-Run Proposal Sheet opens showing the proposed before/after diffs with two actions: `Stage All Changes` or `Inspect in Curate`. Clicking `Inspect in Curate` routes directly to the Curate workbench pre-filtered to those affected tracks.
-
-### CUJ 4: Verifying and Committing Staged Changes
-*   **Given**: 15 albums and 82 tracks have staged edits.
-*   **When**: The user clicks the top header staged pill (`● 15 Albums · 82 Staged`) and toggles the footer commit mode between `Sidecar JSON` and `Embed Headers`.
-*   **Then**: The modal displays unified counts (`82 Tag Edits`, `15 Cover Art Updates`), the `Current` artwork box displays the real embedded cover art, all album row badges dynamically update to `Header Write Staged`, and clicking `Update 82 Audio Files` safely executes the two-phase commit.
+### CUJ 3: Hydrating Artist Editorial Profiles
+*   **Given**: An artist entry in `ArtistsView` (e.g., `"A. R. Rahman"`) with empty biographical summary and active era.
+*   **When**: The user opens the artist detail view or clicks "Enrich Profile".
+*   **Then**: The service queries MusicBrainz for MBID and lifespan (`1987–present`), extracts Wikidata `Q106817`, resolves English Wikipedia title via `wbgetentities`, queries Wikipedia REST API for a clean 2-paragraph biographical summary, and writes the data to the SQLite `canonical_artists` table with zero audio file tag modifications.
 
 --------------------------------------------------------------------------------
 
 ## Technical Plan (Architecture)
 
-### 1. End-to-End System Architecture
+### Architectural Overview & Data Flow
 
 ```mermaid
 graph TD
-    subgraph UI_Shell [Application Navigation Shell]
-        TopSwitcher[Top Mode Switcher\nListen · Curate [15 Albums] · Audit]
-        TopHeader[Top Header Pill\n● 15 Albums · 82 Staged]
-        LeftRail[Left Container Rail\nCollapses to 64px Icon-Only in Curate]
-        CopilotDrawer[Cadence Copilot Drawer\nContextual Scope + Smart Hygiene]
+    subgraph UI ["User Interface Layer"]
+        CW[Curate Workbench ⌘2] --> CR[CurationReconciliationStage]
+        AV[ArtistsView ⌘1] --> AED[ArtistEditorialDrawer]
+        CR --> SO[Staged Output Column]
+        SO --> TPC[Two-Phase Commit Modal]
     end
 
-    subgraph Curate_Stage [Curate ⌘2: Master-Detail Workbench]
-        QueueRail[CurationQueueRail 280px\nAlbum Cards · Triage Badges · Stepper]
-        ReconcileStage[CurationReconciliationStage\n4-Way Metadata Table · Archival Artwork]
-        SoundtrackClusters[Soundtrack Provenance Clusters\ne.g., Dil Se.. [1998] vs Guru [2007]]
+    subgraph Prefetch ["Lookahead Prefetch & Pacing"]
+        QP[Lookahead Queue Prefetcher Depth=2]
+        TPG[Transport Quietness & 30s Cooldown Guard]
+        TPG -.->|Polls Playback State & Cooldown| TB[tauriBridge.getPlaybackStatus]
+        QP -->|Idle & Cooldown Elapsed Only| L1Cache[In-Memory LRU Cache]
     end
 
-    subgraph Proposal_System [Batch Safety Layer]
-        ProposalSheet[BatchProposalSheet\nDry-Run Diff Preview · Stage All vs Inspect]
+    subgraph Resolvers ["Federated Resolver Layer"]
+        PCE[Pre-Consensus Sanitizer] --> ARS[Album Signature Generator]
+        ARS --> ITUNES["/api/itunes-album"]
+        ARS --> MB_QUEUE[Global Singleton Preemptive Rate Limiter >= 1050ms]
+        MB_QUEUE --> MB_STEP1["Step 1: /ws/2/release/?query (1-Call Release Group + Labels + Barcode)"]
+        MB_STEP1 -.->|Conditional Step 2 if per-track composer/singers needed| MB_STEP2["Step 2: /ws/2/release/{id}?inc=recordings+work-rels"]
+        MB_STEP1 & MB_STEP2 --> RG[MusicBrainz Candidate]
+        ITUNES -->|Commercial Catalog| IT[Apple Candidate]
     end
 
-    subgraph State_Domain [Authoritative Domain State Engine]
-        QueueService[curationQueueService\nDefect Aggregation & Prioritization]
-        FederationService[metadataFederationService\nDemand-Driven On-Demand Lookups]
-        StagedHook[useStagedChanges\nUnified Staged Mutators & Counters]
-        SidecarStore[(In-Memory Staged Sidecars\ntrack.pendingSidecarEdits)]
+    subgraph Consensus ["Arbitration Engine"]
+        RG & IT & LOCAL[Clean Local Tags] --> ARB[2-of-3 Consensus Engine]
+        ARB -->|Release Year: min Apple MB Carve-out| RY[Earliest Valid Year]
+        ARB -->|2+ Agree on Strings| CS[Consensus Pick]
+        RY --> CS
+        ARB -->|0 Consensus| GQS[Gemini AI Quota Shield 15 RPM]
+        GQS -->|Full Tracklist + Directory Path| GEMINI["/api/gemini-ai-synthesis"]
+        GEMINI --> CS
+        CS --> SO
     end
 
-    subgraph Commit_Modal [Two-Phase Commit Verification]
-        CommitModal[TwoPhaseCommitModal\nRead-Only Diff Table · Global Mode Switcher]
+    subgraph ArtistHydration ["Artist Editorial Pipeline"]
+        AV --> MB_ART[MusicBrainz Artist Lookup]
+        MB_ART -->|Wikidata QID| WD[Wikidata wbgetentities sitelink resolver]
+        WD -->|enwiki title| WIKI[Wikipedia REST Summary API]
+        MB_ART -->|Life-Span & Roles| SQL_ART[SQLite canonical_artists Table]
+        WIKI -->|bio_summary| SQL_ART
+        AV -.->|Manual Fallback| GEM_BIO[Gemini On-Demand Bio]
+        GEM_BIO --> SQL_ART
     end
-
-    TopSwitcher -->|⌘2 Open Curate| QueueService
-    QueueService --> QueueRail
-    QueueRail -->|Select Item| ReconcileStage
-    ReconcileStage --> FederationService
-    ReconcileStage --> SoundtrackClusters
-    ReconcileStage -->|Stage & Next ⌘↵| SidecarStore
-    CopilotDrawer -->|Trigger Action| ProposalSheet
-    ProposalSheet -->|Stage All| SidecarStore
-    ProposalSheet -->|Inspect in Curate| QueueRail
-    SidecarStore --> StagedHook
-    StagedHook --> TopHeader
-    StagedHook --> CommitModal
-    TopHeader -->|Click Pill| CommitModal
 ```
 
----
+### Component & Module Specifications
 
-### 2. Curation Queue & Master-Detail Topology (`Curate ⌘2`)
-
-#### A. Spatial Layout & Responsive Grid
-*   **Viewport Dimensions**: When `topMode === 'curate'`, `LeftRail` compresses from standard 240px to icon-only mode (`w-16` / 64px). The right details inspector remains collapsed by default.
-*   **Canvas Allocation**: On a standard 1920x1080 display:
-    *   Left Container Rail: 64px (icon-only).
-    *   Curation Queue Rail: 280px (fixed-width, vertically scrollable).
-    *   Center-Right Reconciliation Canvas: 1576px (dedicated to the 4-way alignment table and artwork inspector).
-
-#### B. `CurationQueueRail.tsx` (Left Pane)
-*   **Queue Discovery Engine** (`curationQueueService.ts`):
-    *   Scans catalog for actionable defects: compilation conflicts, missing artist/composer tags, missing/low-res artwork (<1000px), fragmented genre tags, and uncommitted staged edits.
-    *   Groups defects into **Album Curation Cards**.
-*   **Queue Item Schema**:
+#### 1. Pre-Consensus Sanitization & Disqualification (`src/core/taxonomyUtils.ts`)
+*   **`cleanConsensusTitle(rawTitle: string): string`**:
+    Extends `stripRipNoiseAndTags` to aggressively strip commercial single/soundtrack suffixes and rip markers:
     ```typescript
-    export interface AlbumCurationQueueItem {
-      albumId: string
-      albumTitle: string
-      artistCredit: string
-      coverArtUrl?: string
-      primaryIssueType: 'compilation_conflict' | 'missing_artwork' | 'untagged' | 'genre_fragment' | 'staged_uncommitted'
-      issueBadgeLabel: string
-      defectSeverity: 'critical' | 'high' | 'medium' | 'info'
-      affectedTrackCount: number
-      totalTracks: number
-      isStaged: boolean
-      soundtrackClusters?: {
-        canonicalTitle: string
-        releaseYear: string
-        trackIds: string[]
-      }[]
+    export function cleanConsensusTitle(raw: string): string {
+      return stripRipNoiseAndTags(raw)
+        .replace(/\s*-\s*Single$/i, '')
+        .replace(/\s*\((?:Original Motion Picture Soundtrack|Soundtrack|OST|Deluxe Version|Remastered)\)$/i, '')
+        .trim();
     }
     ```
-*   **Header Stepper & Filters**:
-    *   Top stepper: `Item 1 of 15 Albums · Reason: Soundtrack Provenance`.
-    *   Filter pills: `All (15)` | `Soundtracks (1)` | `Artwork (12)` | `Staged (2)`.
-    *   Keyboard navigation: `⌘[` for previous album, `⌘]` for next album.
+*   **`isPlaceholderTag(val?: string): boolean`**:
+    Evaluates whether a tag value is an uninformative placeholder:
+    Matches `"unknown artist"`, `"various artists"`, `"track \d+"`, `"0000"`, `"untitled"`, `"none"`, or empty strings.
+*   **Earliest Valid Year Calculation**:
+    Given candidate years $Y_{local}, Y_{apple}, Y_{mb}$:
+    $Y_{effective} = \min(\{y \in [Y_{apple}, Y_{mb}] \mid y \ge 1900 \land y \le \text{CurrentYear}\})$
+    If local is non-placeholder and $Y_{local} < Y_{effective}$, $Y_{local}$ is included in the minimum pool only if verified by folder name dates.
 
-#### C. `CurationReconciliationStage.tsx` (Center-Right Pane)
-*   **Action Header**:
-    *   Breadcrumb: `Curate & 3-Way Reconciliation: <Album Title>`.
-    *   Actions: `← Prev (⌘[)`, `Next (⌘])`, and primary `✓ Stage & Next (⌘↵)`.
-    *   *Removal*: The yellow `Split Multi-Disc` button is permanently removed from this header.
-*   **Case A: Uniform Album Defect Workflow**:
-    *   For albums with uniform defects (e.g. low-resolution artwork or missing year):
-    *   Reconciliation table displays album-level candidates for Title, Artist, Composer, Release Year, and Artwork.
-    *   Tracks are listed below with individual toggle checkboxes (all checked by default). Clicking `✓ Stage & Next` applies the selected values to all checked tracks in `pendingSidecarEdits`.
-*   **Case B: Multi-Film Compilation Box Set Workflow**:
-    *   When an album is identified as a compilation box set (e.g., *A World Of Music*):
-    *   Tracks are grouped into visual accordion clusters based on their resolved canonical movie soundtrack:
-        *   Cluster 1: *Dil Se..* (1998) → Track 1: "Dil Se (Dil Se)".
-        *   Cluster 2: *Guru* (2007) → Track 2: "Barso Re".
-    *   Selecting or accepting the metadata for Cluster 1 snaps canonical fields (*Dil Se..*, 1998, A. R. Rahman) strictly to Track 1, preserving Track 2's distinct metadata.
-
----
-
-### 3. Data Integrity & Lazy Demand-Driven Federation Engine
-
-#### A. Demand-Driven Metadata Federation (`metadataFederationService.ts`)
-*   Replaces the hardcoded template strings in `FocusedWorkbench.tsx`.
-*   **Operational SLA**: External network requests are **NEVER** executed in batch across the 15 queue albums. Lookups occur strictly on-demand for the single actively selected album/track.
-*   **Candidate Provider Sources**:
-    1.  *Local Tag*: Ground-truth metadata read from audio file container headers.
-    2.  *Apple Music Master*: Query Apple Music API / iTunes Search API for master high-resolution artwork (up to 3000x3000px uncompressed) and canonical release dates.
-    3.  *MusicBrainz Archive*: Query MusicBrainz by AcoustID or release/track title for standardized discography credits and Cover Art Archive scans.
-    4.  *Gemini AI Provenance*: Leverages `geminiCompilationSoundtrackService.ts` for disaggregating Indian / world soundtrack compilations into their original canonical motion pictures.
-*   **Playback Quietness Guard**: In accordance with Audiophile Invariant 4, if `audioEngine.isPlaying()` is true, background remote fetching delays until playback enters idle or until the user explicitly clicks `Fetch Online Candidates`.
-
-#### B. Strict `pendingSidecarEdits` Immutability
-*   `handleSave` in the reconciliation stage writes exclusively to:
+#### 2. Release-Group Provider Resolvers (`src/services/federatedResolvers.ts`)
+*   **`AlbumSignature` Contract**:
     ```typescript
-    track.sidecarStatus = 'uncommitted_sidecar'
-    track.pendingSidecarEdits = {
-      ...(track.pendingSidecarEdits || {}),
-      title: selectedFields.title,
-      artistCredit: selectedFields.artist,
-      composerName: selectedFields.composer,
-      albumTitle: selectedFields.album,
-      releaseYear: selectedFields.year ? parseInt(selectedFields.year, 10) : undefined,
-      coverArtUrl: selectedArtworkUrl,
+    export interface AlbumSignature {
+      sanitizedTitle: string;
+      sanitizedArtist: string;
+      trackCount: number;
+      totalDurationSecs?: number;
+      firstTrackTitle?: string;
     }
     ```
-*   `track.title`, `track.artistCredit`, and `track.composerName` are **NEVER** directly mutated on the base track object in memory prior to disk commit.
-*   The green `STAGED OUTPUT` column binds directly to `track.pendingSidecarEdits`, guaranteeing 100% diff symmetry with `TwoPhaseCommitModal`.
+*   **Global Preemptive FIFO Queue Rate Limiter (`GlobalMusicBrainzQueue`)**:
+    Enforces $\ge 1050\text{ms}$ between consecutive outbound HTTP requests across all consumers.
+    *   **Priority Preemption (`enqueueActive`)**: Active user-driven lookups bypass queued background prefetch tasks, executing immediately after any in-flight HTTP request finishes.
+    *   **Unexecuted Prefetch Purging (`cancelPendingPrefetch`)**: When the user steps to a new album, pending background prefetch closures are purged from the queue array before network dispatch, consuming 0ms of the 1050ms rate-limit token budget.
+*   **Transport-Level User-Agent Compliance**:
+    In Chromium / WebView2, `User-Agent` is a browser-restricted header that cannot be set in `window.fetch()`. Outbound MusicBrainz and Wikimedia HTTP requests are routed through Cadence's backend Vite proxy (`/api/musicbrainz-release`) or native Rust client (`reqwest`), injecting:
+    `User-Agent: Cadence/1.0.0 ( contact@cadence.audio; https://github.com/matbhuvi-tech/Cadence )`.
+    For direct client-side Wikimedia requests, requests append `&Api-User-Agent=Cadence/1.0.0`.
+*   **`fetchItunesAlbumCandidate(signature: AlbumSignature): Promise<ProviderResult | null>`**:
+    Queries the iTunes search API with `entity=album` using sanitized title and album artist.
+    Extracts canonical release title, copyright/label, primary genre, release date, and master artwork URL.
+*   **`fetchMusicBrainzReleaseCandidate(signature: AlbumSignature): Promise<ProviderResult | null>`**:
+    *   **Optimized Step 1 (Single-Request Resolution)**:
+        Queries `/ws/2/release/?query=release:"{sanitizedTitle}" AND artist:"{sanitizedArtist}" AND tracks:{count}&fmt=json`.
+        This single endpoint returns release-group (`first-release-date`), `label-info` (label + catalog number), `barcode`, and `artist-credit`. For standard albums, release-level consensus resolves in exactly 1 HTTP call ($1.05\text{s}$ total external time).
+    *   **Conditional Step 2 (Deep Recording Lookup)**:
+        Only if per-track composer/singer credits are required or local track titles are placeholders (e.g., `"Track 01"`), executes:
+        `/ws/2/release/{id}?inc=recordings+work-rels+artist-credits`
+        serialized through the global preemptive queue.
 
----
+#### 3. 2-of-3 Consensus Arbitration Engine (`src/services/federatedResolvers.ts`)
+*   **Contract Definition**:
+    ```typescript
+    export interface ConsensusFieldResult<T> {
+      value: T;
+      source: 'consensus_2_of_3' | 'consensus_2_of_2' | 'single_provider_high_confidence' | 'earliest_release_rule' | 'local_default' | 'ai_synthesis';
+      contributingSources: ('local' | 'apple' | 'musicbrainz' | 'ai')[];
+      confidence: number;
+    }
 
-### 4. Copilot Batch Proposal System (`BatchProposalSheet.tsx`)
+    export interface ReleaseConsensusResult {
+      title: ConsensusFieldResult<string>;
+      albumArtist: ConsensusFieldResult<string>;
+      composer: ConsensusFieldResult<string>;
+      releaseYear: ConsensusFieldResult<number>;
+      genre: ConsensusFieldResult<string>;
+      label: ConsensusFieldResult<string>;
+      catalogNumber: ConsensusFieldResult<string>;
+      trackListMatches: Map<number, { title: string; artist: string; composer?: string }>;
+      subReleaseGroupings?: { title: string; year: number; trackIndices: number[] }[];
+      requiresAiFallback: boolean;
+    }
+    ```
+*   **Arbitration Algorithm & Release Year Carve-Out**:
+    1. **Release Year Carve-Out (Mandatory)**: `releaseYear` explicitly bypasses standard 2-of-3 string equality. Whenever at least one qualified external provider (Apple Music or MusicBrainz) returns a verified release-group candidate, `releaseYear` strictly resolves via the **Earliest Valid Year Calculation** ($Y_{effective} = \min(Y_{apple}, Y_{mb})$). This strictly prevents a dirty local rip year (e.g., 2015) and a streaming remaster reissue year (e.g., 2015) from forming a false 2-of-3 majority that outvotes a true historical master release year (e.g., 1990).
+    2. For all text/tag fields (`title`, `albumArtist`, `composer`, `genre`, `label`, `catalogNumber`), collect normalized values $V_{local}, V_{apple}, V_{mb}$.
+    3. If $V_{local}$ is flagged by `isPlaceholderTag`, disqualify it from the voting pool.
+    4. If any two qualified values match (using case-insensitive, punctuation-insensitive string normalization), assign consensus value with confidence $0.95$.
+    5. If no two sources agree, but an external provider matches $\ge 80\%$ of track count and duration signatures, assign that provider's value with confidence $0.85$.
+    6. If all sources disagree and confidence $< 0.60$, set `requiresAiFallback = true`.
+*   **Network Dispatch Timeout & Offline Degradation**:
+    A 4000ms `AbortSignal.timeout(4000)` begins when the individual HTTP request is dequeued and dispatched over the network (excluding queue wait time). If external requests time out or internet connection is lost, candidate resolution cleanly falls back to local tags with `source: 'local_default'`, confidence `0.50`, and badge `[Local Fallback]`.
 
-#### A. Safety Barrier against Blind In-Memory Mutations
-*   Clicking recommendation action pills in `EmbeddedAgentDrawer.tsx` (e.g. `Sync Album from Folder`, `Normalize Genres`, `Fetch Online Art`) will no longer execute silent mutations across hundreds of tracks.
-*   Instead, the dispatcher invokes `openBatchProposal(proposalData)`.
+#### 4. Lookahead Queue Prefetcher (`src/services/curationQueueService.ts`)
+*   **Cache Structure**:
+    Maintains an in-memory `LRUCache<string, ReleaseConsensusResult>(capacity = 50)` keyed by `albumId` (strictly RAM-cached with zero disk/SQLite I/O).
+*   **Audiophile Guard & Cooldown Invariant**:
+    Zero disk reads, batch SQLite writes, or network prefetch queries may occur while audio playback is active or paused, or within a 30-second quietness cooldown window after playback stops.
+*   **`lastPlaybackStoppedTime` Lifecycle**:
+    Initialized to `0` upon application boot (ensuring prefetching functions immediately on cold start if no playback has occurred). `curationQueueService` subscribes to `tauriBridge.onPlaybackStateChanged` and updates `lastPlaybackStoppedTime = Date.now()` whenever `playbackState` transitions to `Stopped`.
+*   **Prefetch Execution Loop**:
+    Upon selection of Album Index $N$:
+    1. Inspect indices $N+1$ and $N+2$ in the active curation queue.
+    2. Query `tauriBridge.getPlaybackStatus()`. If `isPlaying || isPaused || playbackState === 'Loading' || (playbackState === 'Stopped' && (Date.now() - lastPlaybackStoppedTime) < 30000)`, immediately abort and postpone prefetching.
+    3. If cache misses exist for $N+1$ or $N+2$, enqueue resolution tasks into `GlobalMusicBrainzQueue` via `enqueuePrefetch`.
+    4. When user navigates to a new album, invoke `GlobalMusicBrainzQueue.cancelPendingPrefetch()` to purge stale prefetch closures before dispatching the active item.
+    5. Store results in cache. When the user navigates via `Stage & Next (⌘↵)`, cache hit yields instant ($< 16\text{ms}$) UI presentation.
 
-#### B. Proposal Sheet Schema & Interface
-*   **Header**: Action title (e.g. `"Normalize Fragmented Genres: 32 Albums Affected"`).
-*   **Scope Badge**: Displays whether the action applies catalog-wide or is restricted to the active album scope.
-*   **Diff Preview Grid**:
-    *   Displays a clean before-and-after table (`Album / Track`, `Field`, `Current Tag`, `Proposed Tag`).
-*   **Action Dual-Path**:
-    *   `[Stage All as Draft]`: Commits the diffs into `pendingSidecarEdits` in bulk, updating the Top Header Staged pill and marking items as staged in Curate.
-    *   `[Inspect in Curate (⌘2)]`: Dismisses the sheet and routes the user into `Curate (⌘2)` with the Curation Queue pre-filtered strictly to the affected items.
+#### 5. Multi-Movie Combo Disambiguation & Virtual Album Split (`src/services/federatedResolvers.ts`)
+*   **Combo Delimiter Parsing**:
+    If album track count diverges by $> 30\%$ from external candidates or title contains delimiters (`/`, `-`, `;`), invoke `disambiguateComboTitle(release.title, release.folderPath)`.
+*   **Virtual Split in Queue**:
+    When distinct soundtrack groupings are resolved (via Gemini AI or MusicBrainz recording matches):
+    - `CurationReconciliationStage` exposes a `Split into Virtual Albums` action.
+    - Instead of forcing conflicting album titles into one physical folder header, the curation engine creates two virtual album entries in the staging queue.
+    - Virtual Album 1 stages Tracks 1–6 with `ALBUM = Movie A` and `ORIGINALYEAR = 1988`.
+    - Virtual Album 2 stages Tracks 7–12 with `ALBUM = Movie B` and `ORIGINALYEAR = 1982`.
+    - Both virtual albums write their isolated metadata to `track.pendingSidecarEdits` for two-phase commit verification.
+*   **Full-Tracklist Gemini Prompt Structure (0-Consensus Hand-Off)**:
+    When `requiresAiFallback` is true or user clicks "Synthesize with AI":
+    ```json
+    {
+      "directoryPath": "D:/Music/Tamil/Soundtracks/Agni Natchathiram - Ninaivellam Nithya [FLAC]",
+      "albumTag": "Agni Natchathiram - Ninaivellam Nithya CD RIP",
+      "folderName": "Agni Natchathiram - Ninaivellam Nithya",
+      "trackCount": 12,
+      "tracks": [
+        { "trackNumber": 1, "title": "Ninnukori Varanam", "artist": "Chithra", "durationSecs": 278 },
+        { "trackNumber": 2, "title": "Rojavapoo", "artist": "S.P.B", "durationSecs": 284 }
+      ]
+    }
+    ```
+    Prompt directs Gemini with `maxOutputTokens: 2048` (guaranteeing that 30+ track compilations are synthesized without JSON response truncation) to output structured JSON identifying:
+    `canonicalAlbumTitle`, `albumArtist`, `primaryComposer`, `originalReleaseYear`, `isComboRelease`, `subReleaseGroupings`, and per-track `title`, `playbackSingers`, and `filmSoundtrack`.
 
----
+#### 6. Artist Editorial Profile Hydration (`src/services/sqliteLibraryService.ts`)
+*   **Pipeline Flow & Wikidata Resolution**:
+    1. Query MusicBrainz Artist search `/ws/2/artist?query=artist:{name}` to retrieve canonical `mbid`, `life-span.begin`, `life-span.end`, `disambiguation`, `type`, and URL relations.
+    2. **Wikidata & Wikipedia Link Resolution**:
+       - If a direct `wikipedia.org` relation exists, extract the title directly.
+       - If only a `wikidata.org/wiki/Qxxxx` relation exists (standard modern MusicBrainz schema), query the Wikidata sitelink API:
+         `https://www.wikidata.org/w/api.php?action=wbgetentities&ids={QID}&props=sitelinks&sitefilter=enwiki&format=json`
+         and extract the `enwiki` page title.
+       - If neither relation is linked, execute a two-step fallback:
+         1. Query Wikipedia search: `https://en.wikipedia.org/w/rest.php/v1/search/page?q={canonical_name}+{primary_role}&limit=1` to extract the article key.
+         2. Call Wikipedia REST summary API using the resolved article key.
+    3. Call Wikipedia REST API using the resolved title:
+       `https://en.wikipedia.org/api/rest_v1/page/summary/{title}`
+       Extract clean 2-3 paragraph plain-text `extract` string.
+    4. Query Apple iTunes artist lookup for high-resolution 1000x1000 portrait image URL.
+    5. Save directly to SQLite:
+       ```sql
+       UPDATE canonical_artists 
+       SET bio_summary = ?1, era_active = ?2, primary_role = ?3, mbid = ?4, apple_artist_id = ?5, portrait_url = ?6
+       WHERE id = ?7;
+       ```
+    6. Audio files on disk remain completely untouched.
 
-### 5. Unified Telemetry & Commit State Synchronization
-
-#### A. Centralized Reactive State (`useStagedChanges.ts`)
-*   Extracts all staging calculations into an authoritative singleton hook:
-    *   `stagedAlbumsCount`: Unique releases with at least one track edit or artwork update.
-    *   `stagedTracksCount`: Total track files with `pendingSidecarEdits`.
-    *   `stagedTagEditsCount`: Total field-level modifications across all tracks.
-    *   `stagedArtworkCount`: Total artwork replacements.
-*   **Surface Bindings**:
-    *   Top Segmented Control: `Curate {triageAlbumsCount} (⌘2)`.
-    *   Top Header Utility Bar: `● {stagedAlbumsCount} Albums · {stagedTracksCount} Staged`.
-    *   `TwoPhaseCommitModal` Summary Badges: Displays `stagedTagEditsCount` and `stagedArtworkCount`.
-    *   `TwoPhaseCommitModal` Filter Tabs: `All Changes ({stagedTracksCount})`, `Tag Edits ({stagedTagEditsCount})`, `With Artwork Updates ({stagedArtworkCount})`.
-
-#### B. `TwoPhaseCommitModal.tsx` Fixes
-*   **Global Target Synchronization**: When toggling between `Embed Headers` and `Sidecar JSON` in the modal footer:
-    *   Iterate over all rendered album rows and update their badges dynamically (`Header Write Staged` vs `Sidecar Staged`), eliminating the defect where only the first expanded row updated.
-*   **Accurate Embedded Artwork Detection**:
-    *   The `Current` artwork inspector resolves embedded cover artwork directly from the audio file binary via `tauriBridge.getEmbeddedArtwork(trackPath)` or `track.artworkUrl`.
-    *   If embedded artwork exists (e.g. 500x500 JPEG), it renders in the `Current` preview box with its true resolution, rather than displaying `No Embedded Artwork · None detected`.
+#### 7. Curation Workbench UI Integration (`src/components/Curate/`)
+*   **Visual Badging in `CurationReconciliationStage.tsx`**:
+    The `STAGED OUTPUT` column header displays the resolution method:
+    - `[Consensus: Local + MB]` (Emerald Badge)
+    - `[Consensus: Apple + MB]` (Teal Badge)
+    - `[AI Synthesized]` (Purple Badge with Sparkles)
+    - `[Earliest Year Rule]` (Blue Badge)
+    - `[Local Fallback]` (Neutral Badge)
+*   **Cell Interaction**:
+    Clicking any cell in the 4-way table (e.g., clicking MusicBrainz Year `1990` or Apple Label `Sony Music`) immediately overrides that specific field in `STAGED OUTPUT` and tags it as `[Manual Override]`.
+*   **Subtle AI Action Button**:
+    Header mounts a clean button labeled `✦ Synthesize with AI`. When the rate limiter is actively engaged, it displays a subtle disabled cooldown status (e.g., `Available in 4s`) rather than raw internal rate-limit metrics.
 
 --------------------------------------------------------------------------------
 
 ## Alternatives Considered
 
-### Alternative A: Complete Elimination of the Curate Top-Level Mode
-*   **Description**: Remove `Curate` from the top navigation switcher (`Listen | Audit`) and relegate all metadata editing to an in-place inspector modal triggered exclusively from Album Detail or Audit & Hygiene issues.
-*   **Pros**: Simplifies top navigation to two core modes (Playback vs Maintenance); eliminates ambiguity over what Curate does from a cold start.
-*   **Cons**: Destroys high-throughput curation workflows. Users with 15–20 albums needing metadata review would have to repeatedly drill in and out of Album Detail pages without an active queue or stepper, adding significant interaction friction.
-*   **Reason for Rejection**: Dedicated curation requires a focused Master-Detail workbench with queue stepping. Retaining `Curate (⌘2)` as an explicit triage queue aligns with audiophile catalog grooming needs.
+### Alternative A: Eager Gemini AI Ingestion Across All Albums
+*   **Description**: Run Gemini AI automatically on every album transition without waiting for consensus disagreement.
+*   **Pros**: Provides deep semantic reasoning and film context across all catalog items out-of-the-box.
+*   **Cons**: Instantly exhausts the Gemini 15 RPM free/standard quota during active queue stepping (`⌘↵`), introduces a 1.5–3.0s latency spinner on every item, and wastes API quota on mainstream Western releases where Apple and MusicBrainz already achieve 100% agreement.
+*   **Reason for Rejection**: Violates rate-limit constraints and degrades interactive curation throughput. Replaced by the 2-of-3 consensus primary tier with on-demand and 0-consensus fallback.
 
-### Alternative B: Flat 126-Track Curation Queue
-*   **Description**: Display all 126 individual defect tracks as a flat list in the left curation queue rail.
-*   **Pros**: 1-to-1 parity with raw defect counts and track-level metadata rows.
-*   **Cons**: Triggers severe cognitive fatigue. Users would have to click `Stage & Next` 126 times across 15 albums, redundantly approving identical album-level fields (Album Title, Year, Cover Art, Primary Artist) for each track of an album.
-*   **Reason for Rejection**: Music catalog curation is fundamentally album-hierarchical. Grouping items by album reduces queue length from 126 to 15, while our two-case branching (Case A uniform vs Case B compilation clusters) handles multi-soundtrack nuances without repetitive manual stepping.
+### Alternative B: Strict Provider Hierarchy (e.g., MusicBrainz Always Wins)
+*   **Description**: Hardcode a static preference order where MusicBrainz data always overrides Apple Music, which always overrides Local tags.
+*   **Pros**: Simpler deterministic rules without voting or proximity heuristics.
+*   **Cons**: MusicBrainz has extensive coverage gaps for South Asian, regional, and film soundtrack discographies, frequently leaving composers and labels empty. Conversely, Apple Music skews heavily toward digital reissue and remaster dates (e.g., listing a 1990 classic as 2018), which corrupts timeline sorting if preferred unconditionally.
+*   **Reason for Rejection**: Static hierarchies fail when data quality varies across genres and regions. Replaced by field-specific domain authority (`min(year)` for release dates, MusicBrainz/Gemini for composers, Apple for artwork/commercial labels).
 
-### Alternative C: Unthrottled Pre-Fetching of External Metadata Across the Entire Queue
-*   **Description**: Asynchronously fetch MusicBrainz, Apple Music, and Gemini AI metadata for all 15 queue albums in parallel immediately upon entering Curate mode.
-*   **Pros**: Pre-populates all candidate pills with zero loading spinners as the user steps through items.
-*   **Cons**: Flouts rate limits (MusicBrainz 1 request/sec limit) and directly violates Audiophile Invariant 4 (NIC PHY packet bursts and electrical EMI/RFI noise during audio playback).
-*   **Reason for Rejection**: Bit-perfect audiophile transport mandates transport quietness. Remote API lookups must be strictly lazy, demand-driven, and evaluated only for the active album upon selection.
+### Alternative C: Writing Encyclopedic Biographies into Audio File Headers
+*   **Description**: Write artist biographies and active era descriptions directly into ID3v2 `COMM`/`TXXX` frames or FLAC Vorbis comments on disk.
+*   **Pros**: Metadata remains portable if individual audio files are copied outside of Cadence.
+*   **Cons**: Bloats audio file headers by 5–15 KB per track. When header padding is exhausted, physical tag writes require rewriting the entire multi-gigabyte audio container on disk, violating audiophile transport silence and causing buffer parsing stalls on DAP hardware and mobile remotes.
+*   **Reason for Rejection**: Severe disk I/O penalties and container corruption risks. Replaced by SQLite-native storage in `canonical_artists`.
 
-### Alternative D: Mandatory 1-by-1 Curate Routing for All Copilot Actions
-*   **Description**: Strip bulk execution from Copilot entirely; clicking any recommendation in Copilot always redirects the user to Curate to approve items one by one.
-*   **Pros**: Guarantees that every single tag modification is visually inspected by the user.
-*   **Cons**: Makes trivial catalog-wide operations (e.g. normalizing 40 genre strings from "Tamil Film" to "Tamil Film Soundtrack") excruciatingly tedious and frustrating.
-*   **Reason for Rejection**: The Dry-Run `BatchProposalSheet` provides the ideal compromise: users review the aggregate before/after diff summary and can choose `[Stage All as Draft]` for bulk operations or `[Inspect in Curate]` for granular item-by-item stepping.
-
---------------------------------------------------------------------------------
-
-## Non-Functional Requirements
-
-### 1. Storage Bus Silence & Playback Integrity (Audiophile Invariant 1)
-*   Zero disk reads/writes may occur on music library storage drives while audio playback is active or within the 30-second cooldown window.
-*   All Curation Queue discovery, filtering, and state staging operate strictly against in-memory React state and cached SQLite rows without triggering filesystem stat calls or metadata re-reading.
-
-### 2. Network PHY Quietness & Lazy Federation (Audiophile Invariant 4)
-*   Metadata candidate lookups to external providers (Apple Music, MusicBrainz, Gemini AI) are strictly demand-driven: lookups execute solely for the single actively selected queue item.
-*   If `AudioEngine` is currently in `Playing`, `Paused`, or `Loading` states, remote network lookups are queued or gated behind an explicit `Fetch Online Candidates` user button to prevent NIC packet bursts during audio streaming.
-
-### 3. UI Thread Performance & Queue Virtualization
-*   The 280px `CurationQueueRail` must support virtualized scrolling (`@tanstack/react-virtual` or CSS virtualization) to render hundreds of queue items at 60fps without DOM reflow lag.
-*   Queue filter toggles (`All`, `Soundtracks`, `Artwork`, `Staged`) must compute in `< 8ms` in-memory.
-
-### 4. Two-Phase Commit Safety & State Immutability
-*   Staging metadata changes must never mutate raw track objects in memory.
-*   All staged mutations reside strictly inside `track.pendingSidecarEdits` and can be reverted cleanly with zero side effects. Physical disk mutations remain deferred to explicit confirmation in `TwoPhaseCommitModal`.
+### Alternative D: Synchronous On-Demand MusicBrainz Lookups on Stepper Click
+*   **Description**: Execute MusicBrainz HTTP lookups only when the user explicitly steps onto an album.
+*   **Pros**: Simplest state machine; zero background worker threads or prefetching queues.
+*   **Cons**: Forces the user to wait through a 1.2–1.5s UI spinner on every single `Stage & Next (⌘↵)` button click due to MusicBrainz's mandatory 1 req/sec rate limit.
+*   **Reason for Rejection**: Breaks interactive curation momentum. Replaced by the Lookahead Queue Prefetcher (Depth = 2) gated by transport quietness.
 
 --------------------------------------------------------------------------------
 
 ## Detailed Implementation Plan
 
-### Target Files to Create/Modify
+### Implementation Phase Breakdown & File Manifest
 
-#### 1. `src/services/curationQueueService.ts` ([Create])
-*   **Type / Scope**: TypeScript Domain Curation Service
-*   **Proposed Changes**:
-    *   Exposes `computeCurationQueue(tracks: Track[], releases: Release[]): AlbumCurationQueueItem[]`.
-    *   Scans `AuditIssue` items, compilation conflicts, missing cover art, and uncommitted sidecar status to formulate discrete album queue cards.
-    *   Extracts resolved soundtrack clusters for multi-soundtrack compilations.
-    *   Exposes `resolveCurateInitialAlbum(queue: AlbumCurationQueueItem[], activeAlbumId?: string): AlbumCurationQueueItem | null`.
-*   **Rationale**: Eliminates the arbitrary `tracks[0]` fallback and provides authoritative defect grouping for the Curation Queue rail.
+The implementation is executed as a unified pipeline across native backend operations, core taxonomy utilities, federated provider resolvers, curation prefetching, and UI presentation surfaces.
 
-#### 2. `src/services/metadataFederationService.ts` ([Create])
-*   **Type / Scope**: TypeScript Metadata Federation Engine
+#### 1. `src/core/taxonomyUtils.ts` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/core/taxonomyUtils.ts))
+*   **Type / Scope**: Taxonomical Sanitization & Classification Utilities
 *   **Proposed Changes**:
-    *   Exposes `fetchCandidateMetadata(albumId: string, trackId?: string): Promise<CandidateMetadataPayload>`.
-    *   Integrates `geminiCompilationSoundtrackService.ts` for disaggregating Indian / world soundtrack compilations into their original film entities.
-    *   Queries MusicBrainz and Apple Music APIs on-demand with rate-limiting.
-    *   Includes an active playback guard (`isPlaybackActive()`) to defer remote network lookups during audio streaming.
-*   **Rationale**: Replaces hardcoded template strings with real provenance data while respecting Audiophile Invariants 1 and 4.
+    *   Export `cleanConsensusTitle(rawTitle: string): string`: Aggressively strips rip artifacts (`[FLAC]`, `CD RIP`), single suffixes (`- Single`), and commercial soundtrack/remaster tags (`(Original Motion Picture Soundtrack)`, `(Deluxe Version)`).
+    *   Export `isPlaceholderTag(val?: string): boolean`: Evaluates whether a string is an uninformative placeholder (`"unknown artist"`, `"various artists"`, `"track \d+"`, `"0000"`, `"untitled"`, `"none"`, or whitespace-only) to disqualify from voting pools.
+    *   Export `calculateEarliestValidYear(localYear?: number, appleYear?: number, mbYear?: number, folderYear?: number): number | undefined`: Computes $Y_{effective} = \min(Y_{apple}, Y_{mb})$ bounded within $[1900, \text{CurrentYear}]$, incorporating local or folder year only if qualified and non-placeholder.
+    *   Export `disambiguateComboTitle(rawTitle: string, folderPath?: string): { isCombo: boolean; parts: string[] }`: Detects delimiters (`/`, `-`, `;`) to segment combo releases into constituent film titles.
+*   **Rationale**: Establishes deterministic input normalization and placeholder disqualification before candidate values enter consensus arbitration.
 
-#### 3. `src/components/Curate/CurationQueueRail.tsx` ([Create])
-*   **Type / Scope**: React Component (Left Pane of Curate Workbench)
+#### 2. `src/core/types.ts` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/core/types.ts))
+*   **Type / Scope**: Core TypeScript Domain Types & Contracts
 *   **Proposed Changes**:
-    *   Fixed-width 280px container hosting a virtualized list of `AlbumCurationQueueItem` cards.
-    *   Renders album thumbnail, title, artist, defect category badge, affected track count, and staged status checkmark.
-    *   Header bar with filter pills (`All`, `Soundtracks`, `Artwork`, `Staged`) and active item indicator (`Item 1 of 15`).
-    *   Handles keyboard shortcuts (`⌘[`, `⌘]`) for queue navigation.
-*   **Rationale**: Solves zero-queue visibility in Curate, giving users clear orientation of what needs attention.
+    *   Define `AlbumSignature` interface:
+        ```typescript
+        export interface AlbumSignature {
+          sanitizedTitle: string;
+          sanitizedArtist: string;
+          trackCount: number;
+          totalDurationSecs?: number;
+          firstTrackTitle?: string;
+        }
+        ```
+    *   Define `UpdateArtistEditorialPayload` interface:
+        ```typescript
+        export interface UpdateArtistEditorialPayload {
+          bioSummary?: string;
+          eraActive?: string;
+          primaryRole?: string;
+          mbid?: string;
+          appleArtistId?: string;
+          portraitUrl?: string;
+        }
+        ```
+    *   Define `ConsensusFieldResult<T>` and `ReleaseConsensusResult` interfaces with field-level provenance sources, confidence metrics, and `subReleaseGroupings`.
+    *   Define `SubReleaseGrouping` representing segmented track clusters for combo CD pressings.
+    *   Extend `ArtistDetail` and `ArtistSummary` interfaces with `bioSummary`, `eraActive`, and `portraitStatus`.
+*   **Rationale**: Enforces type-safe data contracts for multi-source consensus fields, combo release disaggregation, and editorial profile hydration.
 
-#### 4. `src/components/Curate/CurationReconciliationStage.tsx` ([Create])
-*   **Type / Scope**: React Component (Center-Right Canvas of Curate Workbench)
+#### 3. `src-tauri/src/db/operations.rs` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src-tauri/src/db/operations.rs))
+*   **Type / Scope**: Native SQLite Database Operations
 *   **Proposed Changes**:
-    *   Top action header with breadcrumbs, previous/next buttons, and `✓ Stage & Next → (⌘↵)`.
-    *   Renders Case A (Uniform Album Defect with track checklist) or Case B (Multi-Soundtrack Compilation with film accordions).
-    *   Hosts the 4-way provider reconciliation table (Local Tag, MusicBrainz, Apple Music, Gemini AI).
-    *   Hosts the High-Resolution Artwork Inspector with real embedded image byte decoding.
-*   **Rationale**: Provides a dedicated, high-throughput reconciliation canvas tailored to both single-film and compilation releases.
+    *   Define serde payload with camelCase deserialization:
+        ```rust
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct UpdateArtistEditorialPayload {
+            pub bio_summary: Option<String>,
+            pub era_active: Option<String>,
+            pub primary_role: Option<String>,
+            pub mbid: Option<String>,
+            pub apple_artist_id: Option<String>,
+            pub portrait_url: Option<String>,
+        }
+        ```
+    *   Implement `pub fn update_artist_editorial(conn: &Connection, artist_id: &str, payload: &UpdateArtistEditorialPayload) -> Result<()>` executing a parameterized `UPDATE canonical_artists` query.
+*   **Rationale**: Enables persisting rich biographical extracts, historical active eras, and external provider IDs directly into the SQLite database.
 
-#### 5. `src/components/Curate/CurationWorkbench.tsx` ([Create])
-*   **Type / Scope**: React Container Component
+#### 4. `src-tauri/src/commands/library.rs` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src-tauri/src/commands/library.rs))
+*   **Type / Scope**: Tauri IPC Command Handler
 *   **Proposed Changes**:
-    *   Mounts in center stage when `topMode === 'curate'`, combining `CurationQueueRail` and `CurationReconciliationStage`.
-    *   Manages active queue index, active soundtrack cluster, and keyboard shortcuts (`⌘↵`, `Esc`, `⌘[`, `⌘]`).
-    *   Renders an explicit empty state ("All catalog items conform to bit-perfect standards") when the queue is clear.
-*   **Rationale**: Replaces the isolated single-track `FocusedWorkbench` as the primary workspace for `Curate (⌘2)`.
+    *   Implement `db_update_canonical_artist_editorial` command accepting `artist_id: String` and `payload: UpdateArtistEditorialPayload`, dispatching to `DbOperations::update_artist_editorial`.
+*   **Rationale**: Exposes native SQLite artist editorial profile updates to the Tauri IPC bridge with seamless camelCase deserialization from frontend calls.
 
-#### 6. `src/components/Agent/BatchProposalSheet.tsx` ([Create])
-*   **Type / Scope**: React Modal / Drawer Component
+#### 5. `src-tauri/src/lib.rs` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src-tauri/src/lib.rs))
+*   **Type / Scope**: Native Application Entry Point
 *   **Proposed Changes**:
-    *   Renders dry-run before-and-after diff tables when a recommendation is clicked in Cadence Copilot.
-    *   Displays affected album and track counts, scope badges, and field-level diff rows.
-    *   Exposes `[Stage All as Draft]` (bulk write to `pendingSidecarEdits`) and `[Inspect in Curate (⌘2)]` (navigates to Curate pre-filtered to the affected items).
-*   **Rationale**: Eliminates blind, silent in-memory mutations across hundreds of tracks.
+    *   Register `db_update_canonical_artist_editorial` in the `generate_handler!` registration list.
+*   **Rationale**: Binds the IPC command handler into the Tauri v2 dispatcher.
 
-#### 7. `src/core/scopeUtils.ts` ([Modify])
-*   **Type / Scope**: TypeScript Scope Resolution Utility
+#### 6. `src/services/tauriBridge.ts` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/services/tauriBridge.ts))
+*   **Type / Scope**: Frontend Native IPC Bridge
 *   **Proposed Changes**:
-    *   Refactors `resolveCurateTargetTrack()`: removes line 148 (`return tracks[0] || null`).
-    *   Returns `null` if no active track/album is in scope, allowing `App.tsx` to initialize Curate via `curationQueueService.resolveCurateInitialAlbum()`.
-*   **Rationale**: Eliminates the "Dil Se" arbitrary track lock bug.
+    *   Add `updateCanonicalArtistEditorial(artistId: string, payload: UpdateArtistEditorialPayload): Promise<void>` invoking `db_update_canonical_artist_editorial`.
+*   **Rationale**: Provides a typed asynchronous client method for updating SQLite artist records from the React application layer.
 
-#### 8. `src/hooks/useStagedChanges.ts` ([Modify])
-*   **Type / Scope**: TypeScript Reactive Hook
+#### 7. `src/services/federatedResolvers.ts` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/services/federatedResolvers.ts))
+*   **Type / Scope**: Federated Metadata Resolvers & Consensus Engine
 *   **Proposed Changes**:
-    *   Exposes `triageAlbumsCount`: number of albums currently requiring curation.
-    *   Ensures `stagedAlbumsCount`, `stagedTracksCount`, `stagedTagEditsCount`, and `stagedArtworkCount` use synchronized domain calculation logic.
-*   **Rationale**: Unifies telemetry across top navigation badges, top utility header pills, and commit modal tabs.
+    *   Implement `GlobalMusicBrainzQueue`:
+        *   Application-wide singleton FIFO rate limiter enforcing $\ge 1050\text{ms}$ between consecutive outbound HTTP dispatches across all consumers.
+        *   Support priority preemption: `enqueueActive()` places user lookups ahead of background prefetch tasks.
+        *   Support cancellation: `cancelPendingPrefetch()` purges unexecuted prefetch tasks from the queue array, consuming 0ms rate limit token budget.
+        *   Attach a 4000ms timeout (`AbortSignal.timeout(4000)`) initialized strictly when an item is dequeued and HTTP transmission begins (not during rate-limit queue waiting time).
+    *   Implement WebView2 / Chromium User-Agent header handling:
+        *   Chromium WebView2 restricts setting the `User-Agent` request header via `window.fetch()`. MusicBrainz queries route through Cadence's native Rust HTTP proxy or client, injecting `User-Agent: Cadence/1.0.0 ( contact@cadence.audio; https://github.com/matbhuvi-tech/Cadence )` at the native socket layer.
+        *   Direct Wikimedia REST API queries append `&Api-User-Agent=Cadence/1.0.0` or custom query parameters.
+    *   Implement `fetchItunesAlbumCandidate(signature: AlbumSignature)`: Queries iTunes search API by sanitized album title and artist, extracting release title, label, genre, release date, and artwork.
+    *   Implement `fetchMusicBrainzReleaseCandidate(signature: AlbumSignature)`:
+        *   Step 1 (Optimized Single Request): Queries `/ws/2/release/?query=release:"{sanitizedTitle}" AND artist:"{sanitizedArtist}" AND tracks:{count}&fmt=json` to retrieve release-group (`first-release-date`), label, catalog number, barcode, and artist credit in one HTTP call.
+        *   Step 2 (Conditional Deep Lookup): Invokes `/ws/2/release/{id}?inc=recordings+work-rels+artist-credits` only when per-track composer/singer credits are needed or local track titles are placeholders.
+    *   Implement `resolve2of3ReleaseConsensus(localRelease: Release, localTracks: Track[])`: Executes consensus arbitration with:
+        *   Mandatory `releaseYear` carve-out resolving via `calculateEarliestValidYear` ($\min(Y_{apple}, Y_{mb})$).
+        *   Garbage disqualification via `isPlaceholderTag`.
+        *   Fallback to 2-of-2 external agreement when local tag is disqualified.
+        *   Full-tracklist Gemini AI handoff on 0-consensus or confidence $< 0.60$ with `maxOutputTokens: 2048` ceiling to prevent JSON response truncation on large compilation tracklists.
+    *   Implement `hydrateArtistEditorialProfile(artistName: string, canonicalId: string)`:
+        *   Queries MusicBrainz artist search for MBID, lifespan, and Wikidata URL relation.
+        *   Resolves Wikidata `Qxxxx` to English Wikipedia title via `wbgetentities` sitelinks API.
+        *   If Wikidata Q-ID is missing, falls back to Wikipedia search: `https://en.wikipedia.org/w/rest.php/v1/search/page?q={name}+{role}&limit=1` to extract article key.
+        *   Fetches clean 2-paragraph plain-text summary from Wikipedia REST API (`/api/rest_v1/page/summary/{title}`).
+        *   Queries iTunes for 1000x1000 artist portrait URL.
+        *   Persists enriched data via `tauriBridge.updateCanonicalArtistEditorial`.
+*   **Rationale**: Implements core federated arbitration, preemptive rate-limited provider fetching, and artist editorial hydration.
 
-#### 9. `src/App.tsx` ([Modify])
-*   **Type / Scope**: Root Application Component
+#### 8. `src/services/curationQueueService.ts` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/services/curationQueueService.ts))
+*   **Type / Scope**: Curation Queue Orchestration & Prefetching
 *   **Proposed Changes**:
-    *   Updates `handleOpenCurate`: mounts `CurationWorkbench` when `topMode === 'curate'`.
-    *   Passes `isIconOnly={topMode === 'curate'}` to `LeftRail`, collapsing the rail to 64px.
-    *   Updates Curate mode button badge to render `{triageAlbumsCount}` (`Curate 15 ⌘2`).
-    *   Mounts `BatchProposalSheet` wired to `agentActionDispatcher`.
-*   **Rationale**: Implements the Master-Detail workbench route, rail compression, and batch proposal sheet integration.
+    *   Integrate `LookaheadQueuePrefetcher` maintaining an in-memory `LRUCache<string, ReleaseConsensusResult>(capacity = 50)`.
+    *   Implement Audiophile Transport & Cooldown Guard:
+        *   Initialize `lastPlaybackStoppedTime = 0` on application startup so lookahead prefetching operates immediately on cold boot if no playback has occurred.
+        *   Subscribe to `tauriBridge.onPlaybackStateChanged` and set `lastPlaybackStoppedTime = Date.now()` on `Stopped` events.
+        *   Checks `tauriBridge.getPlaybackStatus()`. If `isPlaying || isPaused || playbackState === 'Loading' || (playbackState === 'Stopped' && (Date.now() - lastPlaybackStoppedTime) < 30000)`, immediately aborts and suspends prefetching.
+    *   Enqueues candidate resolution tasks for queue albums $N+1$ and $N+2$ serialized through `GlobalMusicBrainzQueue.enqueuePrefetch`.
+    *   Invokes `GlobalMusicBrainzQueue.cancelPendingPrefetch()` upon user navigation to prevent stale prefetch tasks from consuming rate-limit tokens.
+*   **Rationale**: Eliminates interactive stepper latency on album transitions while strictly preserving audiophile transport silence during playback and cooldown.
 
-#### 10. `src/components/LeftRail/LeftRail.tsx` ([Modify])
-*   **Type / Scope**: Navigation Sidebar Component
+#### 9. `src/services/sqliteLibraryService.ts` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/services/sqliteLibraryService.ts))
+*   **Type / Scope**: SQLite Library Management Service
 *   **Proposed Changes**:
-    *   Supports `isIconOnly?: boolean` prop.
-    *   When `isIconOnly` is true, sets width to `w-16` (64px), collapses labels, and displays native tooltips for container icons (`Library Browse`, `Playlists`, `Physical Folder Tree`, `Audit & Hygiene`).
-*   **Rationale**: Frees up 176px of horizontal space for the curation workbench while preserving spatial orientation.
+    *   Add `updateArtistEditorialProfile` calling `tauriBridge.updateCanonicalArtistEditorial` and updating runtime state in memory.
+*   **Rationale**: Ensures consistent synchronization between SQLite disk storage and frontend artist state.
 
-#### 11. `src/components/CenterStage/FocusedWorkbench.tsx` ([Modify])
-*   **Type / Scope**: Focused Track Reconciliation Component
+#### 10. `src/components/Curate/CurationReconciliationStage.tsx` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx))
+*   **Type / Scope**: Curation Reconciliation Stage Component
 *   **Proposed Changes**:
-    *   Removes the yellow `Split Multi-Disc` button from the header.
-    *   Updates `handleSave` to write strictly to `track.pendingSidecarEdits` and `track.sidecarStatus = 'uncommitted_sidecar'` without mutating base track fields in memory.
-    *   Binds `STAGED OUTPUT` column directly to `track.pendingSidecarEdits`.
-*   **Rationale**: Restores data integrity and removes misplaced album actions from track-level editors.
+    *   Display provenance badges in the `STAGED OUTPUT` column (`[Consensus: Local + MB]`, `[Consensus: Apple + MB]`, `[AI Synthesized]`, `[Earliest Year Rule]`, `[Local Fallback]`).
+    *   Implement interactive 4-way cell override: Clicking any provider candidate cell copies its value into `STAGED OUTPUT` and tags it as `[Manual Override]`.
+    *   Implement `Split into Virtual Albums` action: When combo CD `subReleaseGroupings` are detected, allows the user to split the physical folder into two virtual album staging records with separate `ALBUM` and `ORIGINALYEAR` tags in `track.pendingSidecarEdits`.
+    *   Style AI button as `✦ Synthesize with AI` with subtle disabled cooldown indicator (`Available in 4s`) when rate-limited.
+*   **Rationale**: Delivers transparent visual consensus arbitration, instant manual overrides, and ergonomic combo CD disaggregation.
 
-#### 12. `src/components/Agent/EmbeddedAgentDrawer.tsx` ([Modify])
-*   **Type / Scope**: Copilot Drawer Component
+#### 11. `src/components/CenterStage/ArtistsView.tsx` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/components/CenterStage/ArtistsView.tsx))
+*   **Type / Scope**: Catalog Artist Browsing & Editorial Inspector View
 *   **Proposed Changes**:
-    *   Wires recommendation action buttons to invoke `dispatcherContext.openBatchProposal` with structured diff data.
-    *   Displays scoped badges when recommendations apply to an active album vs catalog-wide.
-*   **Rationale**: Connects Copilot to the dry-run proposal safety barrier.
+    *   Display `bioSummary`, `eraActive`, and `primaryRole` in the artist header and inspection drawer.
+    *   Mount an "Enrich Profile" button invoking `hydrateArtistEditorialProfile`.
+    *   Mount an on-demand fallback "Synthesize Biography with AI" button when Wikipedia has no entry.
+*   **Rationale**: Surfaces rich biographical, historical, and role classifications to users in the library browser.
 
-#### 13. `src/services/agentActionDispatcher.ts` ([Modify])
-*   **Type / Scope**: Agent Action Dispatcher Service
+#### 12. `src/test/testFederatedConsensus.ts` ([Create](file:///e:/Mathan/Code/Music%20Agent/src/test/testFederatedConsensus.ts))
+*   **Type / Scope**: Automated TypeScript Unit & Integration Test Suite
 *   **Proposed Changes**:
-    *   Extends `AgentDispatcherContext` with `openBatchProposal: (data: BatchProposalData) => void`.
-    *   Refactors `remediate_issue` and bulk handlers to compute dry-run preview diffs before executing staging.
-*   **Rationale**: Decouples recommendation evaluation from immediate state mutation.
+    *   Unit tests for `cleanConsensusTitle` and `isPlaceholderTag`.
+    *   Unit tests for `calculateEarliestValidYear` ensuring $\min(Y_{apple}, Y_{mb})$ overrides false local/reissue majorities.
+    *   Unit tests for 2-of-3 consensus arbitration with placeholder disqualification.
+    *   Unit tests for `GlobalMusicBrainzQueue` rate limiting ($\ge 1050\text{ms}$ spacing) and priority preemption/cancellation.
+    *   Unit tests for Wikidata Q-ID sitelink resolution, fallback Wikipedia search, and Wikipedia REST extract parsing.
+    *   Unit tests for virtual album split track staging.
+*   **Rationale**: Guarantees automated regression testing for consensus rules, rate limiting, and editorial hydration.
 
-#### 14. `src/components/CenterStage/TwoPhaseCommitModal.tsx` ([Modify])
-*   **Type / Scope**: Two-Phase Commit Modal Component
+#### 13. `src/test/testCurationLifecycle.ts` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/test/testCurationLifecycle.ts))
+*   **Type / Scope**: Curation Queue Lifecycle Test Suite
 *   **Proposed Changes**:
-    *   Binds summary counters and filter tabs directly to `useStagedChanges`.
-    *   Fixes row-level badge toggle loop so switching write modes in the footer updates badges across all album rows (`Header Write Staged` vs `Sidecar Staged`).
-    *   Updates `Current` artwork box to decode and display embedded image binaries from audio files rather than falsely reporting "No Embedded Artwork".
-*   **Rationale**: Eliminates telemetric drift and resolves contradictory artwork states.
+    *   Add test verifying that `LookaheadQueuePrefetcher` remains completely dormant during active/paused audio playback and respects the 30-second quietness cooldown window.
+*   **Rationale**: Verifies that background prefetching never violates audiophile transport invariants.
 
-#### 15. `src/test/testCurationLifecycle.ts` ([Create])
-*   **Type / Scope**: TypeScript Automated Test Driver
-*   **Proposed Changes**:
-    *   Unit test: Curation queue discovery and album grouping.
-    *   Unit test: Case A uniform staging vs Case B compilation soundtrack clustering.
-    *   Unit test: Strict immutability of base track objects during staging.
-    *   Unit test: Zero arbitrary fallback in `resolveCurateTargetTrack`.
-    *   Unit test: Telemetry alignment across `useStagedChanges` outputs.
-*   **Rationale**: Guarantees automated regression testing for the entire 3-stage curation lifecycle.
+#### 14. `src/services/AGENTS.md` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/services/AGENTS.md))
+*   **Type / Scope**: Subsystem Architecture Documentation
+*   **Proposed Changes**: Document `GlobalMusicBrainzQueue`, `fetchMusicBrainzReleaseCandidate`, `fetchItunesAlbumCandidate`, `resolve2of3ReleaseConsensus`, and `LookaheadQueuePrefetcher` responsibilities and contracts.
+*   **Rationale**: Preserves architectural documentation integrity for service layers.
+
+#### 15. `src/core/AGENTS.md` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src/core/AGENTS.md))
+*   **Type / Scope**: Domain Core Architecture Documentation
+*   **Proposed Changes**: Document consensus field types, taxonomy sanitization helpers, and virtual album grouping data models.
+*   **Rationale**: Keeps core domain contracts documented and aligned.
+
+#### 16. `src-tauri/AGENTS.md` ([Modify](file:///e:/Mathan/Code/Music%20Agent/src-tauri/AGENTS.md))
+*   **Type / Scope**: Native Backend Architecture Documentation
+*   **Proposed Changes**: Document `db_update_canonical_artist_editorial` Tauri IPC command and SQLite `canonical_artists` editorial columns.
+*   **Rationale**: Preserves architectural documentation integrity for native backend contracts.
 
 ---
 
 ### Verification Plan
 
 *   **Compilation & Static Type Checks**:
-    *   `npm run build`: Validate that all TypeScript compilation (`tsc -b`) and Vite production bundling succeed with zero errors.
+    *   `npm run build`: Validate that all TypeScript compilation (`tsc -b`) and Vite production bundling succeed with zero type errors.
+    *   `cargo test --manifest-path src-tauri/Cargo.toml`: Validate native Rust database operations and command signatures.
 *   **Automated Regression Suite**:
-    *   `npx tsx src/test/testCurationLifecycle.ts`: Execute automated test suite validating queue discovery, soundtrack clustering, and state immutability.
+    *   `npx tsx src/test/testFederatedConsensus.ts`: Execute automated test suite validating title sanitization, placeholder disqualification, earliest year rule, 2-of-3 consensus arbitration, rate-limit FIFO serialization, and Wikidata sitelink parsing.
+    *   `npx tsx src/test/testCurationLifecycle.ts`: Execute curation queue lifecycle suite validating that lookahead prefetching respects transport quietness and the 30-second cooldown period.
 *   **Manual End-to-End Verification**:
-    1.  *Cold-Start Curate Navigation*: Open Cadence with no track selected, click `Curate (⌘2)`. Verify the Curation Queue opens with 15 albums, no "Dil Se" track lock occurs, and the left rail collapses to 64px icon-only mode.
-    2.  *Compilation Disaggregation*: Select *A World Of Music* in the queue. Verify tracks are grouped under *Dil Se..* (1998) and *Guru* (2007). Click `Stage & Next` on *Dil Se..*; verify only Track 1 is staged, leaving Track 2 unmutated.
-    3.  *Copilot Dry-Run Proposal*: Open Copilot, click `Disentangle 1 Compilation Boxset Conflicts`. Verify `BatchProposalSheet` opens showing the diff preview. Test both `[Stage All as Draft]` and `[Inspect in Curate]`.
-    4.  *Two-Phase Commit Verification*: Click `● 15 Albums · 82 Staged`. Verify summary badges match filter tabs, `Current` artwork box displays the true embedded image, and toggling write modes updates all album row badges dynamically.
+    1.  *Dirty Local Rip Reconciliation*: Open Curate (`⌘2`), select an album tagged with rip artifacts (e.g., `"Anjali CD RIP"`). Verify `STAGED OUTPUT` is pre-populated with consensus values (`"Anjali"`, `"Ilaiyaraaja"`, original year `1990`) tagged `[Apple + MB]`.
+    2.  *Combo CD Virtual Split*: Select a 2-in-1 combo release (e.g., `"Agni Natchathiram - Ninaivellam Nithya"`). Click `Split into Virtual Albums`. Verify two virtual album staging entries are created with distinct `ALBUM` titles and `ORIGINALYEAR` dates staged to `track.pendingSidecarEdits`.
+    3.  *Stepper Latency Verification*: Step rapidly through 5 albums using `Stage & Next (⌘↵)`. Verify navigation is instantaneous ($< 16\text{ms}$) due to the Lookahead Queue Prefetcher (Depth = 2) without UI blocking spinners.
+    4.  *Transport Quietness & Cooldown Gate*: Start audio playback. Verify in network telemetry that MusicBrainz and Apple prefetch lookups are completely dormant. Stop playback and verify prefetching remains suspended until the 30-second cooldown period elapses.
+    5.  *Artist Editorial Profile Hydration*: Navigate to `ArtistsView` (`⌘1`), select an artist with an empty bio (e.g., `"A. R. Rahman"`), and click `Enrich Profile`. Verify the biographical extract, active era, and portrait are populated from MusicBrainz/Wikidata/Wikipedia/Apple into SQLite without touching audio file tags on disk.
 
 --------------------------------------------------------------------------------
 

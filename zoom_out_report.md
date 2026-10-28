@@ -1,44 +1,39 @@
-# Initial Zoom Out Review Report
+# Stage 5 Review Report: Initial Zoom Out
 
-*   **Target File:** `docs/designs/CURATION_AND_TRIAGE_LIFECYCLE_ARCHITECTURE.md`
-*   **Standard:** [Zoom Out Standard](file:///C:/Users/Mathan/.gemini/config/plugins/elephant-goldfish-model/resources/document_standards/zoom-out-standard.md)
-*   **Reviewer Persona:** Skeptical Architect (`egm-zoom-out`)
-*   **Mode:** Review (Stage 5)
-
----
-
-## Executive Summary
-
-The proposed architecture correctly isolates the root causes of Cadence's curation incoherence: the arbitrary fallback to `tracks[0]` in `scopeUtils.ts`, fake template strings in `FocusedWorkbench.tsx`, silent Copilot batch mutations, and telemetric drift in `TwoPhaseCommitModal.tsx`. 
-
-However, from a high-altitude architectural perspective, the proposal suffers from two major reuse and boundary flaws:
-1. It proposes a new service (`metadataFederationService.ts`) to query Apple Music, MusicBrainz, and Gemini AI, ignoring the existing 1,046-line `src/services/federatedResolvers.ts` which already implements these exact provider queries and candidate schemas.
-2. It introduces three new components (`CurationWorkbench`, `CurationQueueRail`, `CurationReconciliationStage`) while simultaneously retaining and modifying `FocusedWorkbench.tsx`, resulting in component duplication and ambiguous ownership over 4-way reconciliation.
+**Target**: `docs/designs/FEDERATED_ALBUM_AND_ARTIST_METADATA_RECOMMENDATION_ENGINE.md` (Lines 1–436)  
+**Evaluator**: `egm-zoom-out`  
+**Standard**: `resources/document_standards/zoom-out-standard.md`  
+**Status**: Passed with Nits
 
 ---
 
-## Detailed Findings
+## High-Altitude Assessment
 
-### 1. Reinventing the Wheel: Redundant `metadataFederationService.ts`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 190–199, 320–328 (`Technical Plan § 3.A` and `Detailed Implementation Plan § 2`)
-*   **Simplicity Rationale:** The document calls for creating `src/services/metadataFederationService.ts` to query Apple Music, MusicBrainz, and Gemini AI on-demand. However, `src/services/federatedResolvers.ts` already contains an established `federatedResolversService` with typed provider schemas (`CoverArtCandidate`, `ProviderResult`, `BatchDiffTrackResult`) and provider lookups. Introducing a second federation service creates duplicate types, divergent rate limiters, and split maintenance.
-*   **Recommendation:** Eliminate `metadataFederationService.ts`. Instead, extend or wrap the existing `federatedResolversService` to add the required on-demand single-item method and active playback guard (`isPlaybackActive()`).
+The design document demonstrates strong adherence to the Zoom Out Standard. It anchors squarely on verified root architectural bottlenecks:
+1. Single-track query bias in `federatedResolvers.ts`.
+2. Dirty local rip tag pollution in string equality voting.
+3. MusicBrainz 1 req/sec stepper latency.
+4. Combo CD pressing collisions.
+5. Unpopulated SQLite `canonical_artists` table.
 
-### 2. Component Duplication: `CurationReconciliationStage` vs. `FocusedWorkbench`
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 170–185, 338–353, 393–400 (`Technical Plan § 2.C` and `Detailed Implementation Plan § 4, 5, 11`)
-*   **Simplicity Rationale:** The plan creates `CurationWorkbench.tsx` and `CurationReconciliationStage.tsx` to host the 4-way metadata table and artwork inspector, but also specifies modifications to `FocusedWorkbench.tsx` for the same purpose. Having two separate components rendering identical 4-way metadata comparison tables creates long-term UI maintenance drift.
-*   **Recommendation:** Clarify component boundaries. Either refactor `FocusedWorkbench.tsx` to act as the reconciliation stage inside `CurationWorkbench`, or explicitly deprecate `FocusedWorkbench.tsx` and consolidate all track/album curation into the new workbench.
+The architecture maximizes codebase reuse:
+- Reuses existing SQLite schema columns (`bio_summary`, `era_active`, `primary_role`, `mbid`, `apple_artist_id`, `portrait_url`) without requiring disruptive database migrations.
+- Reuses existing string taxonomy infrastructure (`stripRipNoiseAndTags`).
+- Reuses the atomic two-phase commit staging pipeline (`track.pendingSidecarEdits`).
+- Strictly enforces audiophile playback quietness invariants via `tauriBridge.getPlaybackStatus()`.
 
-### 3. Premature Computation: Eager Compilation Clustering in Queue Engine
-*   **Severity:** 🟡 Major
-*   **Affected Scope:** Lines 146–164 (`Technical Plan § 2.B CurationQueueRail.tsx`)
-*   **Simplicity Rationale:** The `AlbumCurationQueueItem` interface includes `soundtrackClusters?: { canonicalTitle: string; releaseYear: string; trackIds: string[] }[]`. Computing compilation soundtrack disaggregation eagerly across all 15+ queue albums during the initial queue scan (`computeCurationQueue`) is unnecessary work. Compilation clustering heuristics should be evaluated lazily only when the specific compilation album is selected for editing in the right-hand canvas.
-*   **Recommendation:** Remove `soundtrackClusters` from the queue item schema. Keep `AlbumCurationQueueItem` lightweight (ID, Title, Artist, Defect Category, Affected Count). Resolve soundtrack clusters on-demand when the album is loaded into the reconciliation stage.
+---
 
-### 4. Code-Level Weeds in High-Level Architecture
-*   **Severity:** 🟢 Nit
-*   **Affected Scope:** Lines 201–216 (`Technical Plan § 3.B Strict pendingSidecarEdits Immutability`)
-*   **Simplicity Rationale:** Lines 204–213 display concrete TypeScript object spread assignment syntax (`track.pendingSidecarEdits = { ...(track.pendingSidecarEdits || {}), ... }`). High-level architecture sections should define invariants, lifecycle states, and immutability guarantees rather than syntax-level assignments.
-*   **Recommendation:** Move the specific TypeScript snippet to the Detailed Implementation Plan or a test case, and summarize the state invariant concisely in the Technical Plan.
+## Findings
+
+### Finding 1: Caching Scope Discrepancy (In-Memory vs SQLite)
+* **Severity**: 🟢 Nit
+* **Affected Scope**: Architecture Diagram (Line 80) vs. Component 4 (Line 183)
+* **Rationale**: The Mermaid architecture diagram labels the prefetch cache as `L1Cache[In-Memory / SQLite Cache]`, but Component 4 specifies `LRUCache<string, ReleaseConsensusResult>(capacity = 50)` strictly in memory. Writing prefetch candidate lookups to SQLite on every queue step would introduce unnecessary disk I/O.
+* **Recommendation**: Clarify that prefetch results are held exclusively in the in-memory LRU cache, and only finalized user-confirmed tag staging or enriched artist records write to SQLite/disk.
+
+### Finding 2: Concrete Regex Implementation Anchoring
+* **Severity**: 🟢 Nit
+* **Affected Scope**: Component 1 (Lines 118–122)
+* **Rationale**: Providing a raw JavaScript regular expression (`replace(/\s*-\s*Single$/i, '')`) in high-level architecture drops slightly into implementation weeds.
+* **Recommendation**: Specify the normalization contract behaviorally, keeping the specific regex patterns in the detailed implementation section or source code.
