@@ -888,17 +888,14 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     setCustomUrlInput('')
   }
 
-  // Commit Execution Handler with Adaptive Sidecar Verification
+  // Commit Execution Handler with Native Asynchronous Queue Handoff
   const handleStartCommit = async (tracksToRun: Track[] = activeTracksToCommit) => {
-    if (tracksToRun.length === 0 || !preflight.canProceed) return
+    if (tracksToRun.length === 0 || !preflight.storageWritable) return
 
     setIsRunning(true)
     setErrorMessage(undefined)
     setDetailedProgress(null)
     setFailedTracks([])
-
-    // Immediately switch to execution pipeline so user has clear verification & progress proof
-    setActiveTab('pipeline')
 
     const startTime = Date.now()
     const description = `Batch Commit ${tracksToRun.length} tracks to ${
@@ -913,6 +910,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
       {
         destination: commitTarget,
         isPlaybackActive,
+        allowAsyncQueue: true,
       }
     )
 
@@ -930,15 +928,9 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
       setLastTxId(result.transactionId)
       onSuccess()
 
-      // Adaptive Sidecar Execution: If Sidecar commit finishes < 250ms with zero errors, close smoothly
-      if (commitTarget === 'sidecar' && duration < 250) {
-        onClose()
-      } else {
-        // Long-running or embedded: stay on progress view so user sees completion
-        setActiveTab('pipeline')
-      }
+      // Close modal smoothly to return user to listening & browsing; CommitStatusPill tracks background save
+      onClose()
     } else {
-      // Errors occurred or partial failures: stay in/switch to pipeline view
       setActiveTab('pipeline')
       setErrorMessage(result.error || 'Transaction encountered write errors on disk.')
       if (result.failedTracks && result.failedTracks.length > 0) {
@@ -1221,11 +1213,11 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                   <div className="flex items-center gap-2.5">
                     <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                     <span>
-                      <strong>Audiophile Transport Purity Lock Active:</strong> AudioEngine is currently playing or paused. Commit execution is locked until playback is stopped to prevent storage bus jitter.
+                      <strong>Audiophile Storage Bus Silence Active:</strong> Playback is active. Changes will be safely queued and written to storage during 30s playback silence.
                     </span>
                   </div>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/30 text-amber-300 shrink-0">
-                    Playback Active
+                    Paced Background Queue
                   </span>
                 </div>
               )}
@@ -2366,28 +2358,20 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
             {!isCompleted && uncommittedTracks.length > 0 && (
               <button
                 type="button"
-                onClick={() => {
-                  if (!preflight.playbackIdle) {
-                    togglePlayPause()
-                    return
-                  }
-                  handleStartCommit()
-                }}
+                onClick={() => handleStartCommit()}
                 disabled={isRunning || !preflight.storageWritable || activeTracksToCommit.length === 0}
                 title={
-                  !preflight.playbackIdle
-                    ? 'Audio playback active. Click to pause playback and unlock saving.'
-                    : !preflight.storageWritable
+                  !preflight.storageWritable
                     ? 'Storage mount is read-only locked.'
                     : activeTracksToCommit.length === 0
                     ? 'All staged tracks are currently excluded.'
+                    : !preflight.playbackIdle
+                    ? 'Audio playback active. Changes will be saved safely in background during playback silence.'
                     : undefined
                 }
                 className={`px-5 py-2 rounded-xl text-xs font-mono font-semibold transition-all flex items-center gap-2 shadow-lg cursor-pointer ${
                   isRunning
                     ? 'bg-amber-500/50 text-black cursor-wait'
-                    : !preflight.playbackIdle
-                    ? 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 animate-pulse'
                     : !preflight.storageWritable || activeTracksToCommit.length === 0
                     ? 'bg-zinc-800 text-zinc-500 border border-zinc-700 cursor-not-allowed'
                     : 'bg-amber-400 hover:bg-amber-300 text-black shadow-amber-400/20'
@@ -2396,11 +2380,7 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                 {isRunning ? (
                   <>
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Committing...</span>
-                  </>
-                ) : !preflight.playbackIdle ? (
-                  <>
-                    <span>⏸ Pause Playback to Save</span>
+                    <span>Enqueuing...</span>
                   </>
                 ) : !preflight.storageWritable ? (
                   <>
@@ -2411,8 +2391,8 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                     <ShieldCheck className="w-3.5 h-3.5 stroke-[2.5]" />
                     <span>
                       {commitTarget === 'sidecar'
-                        ? `Write ${activeMetrics.albumCount} Album Sidecar${activeMetrics.albumCount === 1 ? '' : 's'}`
-                        : `Update ${activeMetrics.audioTrackCount} Audio File${activeMetrics.audioTrackCount === 1 ? '' : 's'}`}
+                        ? `Save ${activeMetrics.albumCount} Album Sidecar${activeMetrics.albumCount === 1 ? '' : 's'}`
+                        : `Save ${activeMetrics.audioTrackCount} Track${activeMetrics.audioTrackCount === 1 ? '' : 's'} in Background`}
                     </span>
                   </>
                 )}

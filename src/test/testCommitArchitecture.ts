@@ -339,7 +339,33 @@ async function testCommitDestinations() {
   console.log('  ✓ Destination "embedded" (default) updates embedded audio file headers and step label')
 }
 
-Promise.all([testExecutionAbort(), testCommitDestinations()]).then(() => {
+// [Test 8] Asynchronous Background Queue Handoff & Sub-second Modal Handoff
+console.log('\n[Test 8] Testing Asynchronous Background Queue Fast Handoff...')
+
+async function testAsyncBackgroundQueueHandoff() {
+  const start = Date.now()
+  let progressSteps: any[] = []
+  const result = await transactionEngine.executeTwoPhaseCommit(
+    [tagChangeTrack],
+    'Test Async Background Handoff',
+    (steps) => { progressSteps = steps },
+    undefined,
+    { allowAsyncQueue: true, destination: 'embedded' }
+  )
+
+  const durationMs = Date.now() - start
+  assert.strictEqual(result.success, true)
+  assert.ok(durationMs < 1000, `Handoff must be sub-second (took ${durationMs}ms)`)
+  assert.strictEqual(progressSteps.length, 5)
+  assert.strictEqual(progressSteps[0].completed, true, 'Mount preflight completed')
+  assert.strictEqual(progressSteps[1].completed, true, 'Checksum verification completed')
+  assert.strictEqual(progressSteps[2].completed, true, 'Snapshot created')
+  assert.strictEqual(progressSteps[3].completed, true, 'Phase 2 enqueue completed')
+  assert.strictEqual(progressSteps[4].completed, true, 'Finalize journal completed')
+  console.log(`  ✓ Fast background queue handoff completed in ${durationMs}ms with all 5 steps verified`)
+}
+
+Promise.all([testExecutionAbort(), testCommitDestinations(), testAsyncBackgroundQueueHandoff()]).then(() => {
   console.log('\n========================================================')
   console.log('🎉 ALL BATCH METADATA COMMIT SCREEN ARCHITECTURE TESTS PASSED!')
   console.log('========================================================\n')

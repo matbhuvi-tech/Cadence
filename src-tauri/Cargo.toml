@@ -43,7 +43,9 @@ rusty-chromaprint = "0.3.0"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Media",
+    "Win32_Storage_FileSystem",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }

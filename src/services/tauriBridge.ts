@@ -6,6 +6,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { UpdateArtistEditorialPayload } from '../core/types'
+import type { CommitQueueSummary, CommitTelemetryPayload, EnqueueBatchPayload } from '../types/commit'
 
 export interface AudioStreamTelemetry {
   filePath: string
@@ -1165,6 +1166,107 @@ class TauriBridgeService {
       return await invoke<string[]>('db_get_split_releases')
     }
     return []
+  }
+
+  // Asynchronous Background Commit Queue IPC
+  public async commitEnqueueBatch(request: EnqueueBatchPayload): Promise<string> {
+    if (this.isTauri()) {
+      return await invoke<string>('commit_enqueue_batch', { request })
+    }
+    return `mock-batch-${Date.now()}`
+  }
+
+  public async commitGetQueueSummary(): Promise<CommitQueueSummary> {
+    if (this.isTauri()) {
+      return await invoke<CommitQueueSummary>('commit_get_queue_summary')
+    }
+    return {
+      totalBatches: 0,
+      pendingItems: 0,
+      inflightItems: 0,
+      completedItems: 0,
+      failedItems: 0,
+      totalWrittenBytes: 0,
+      isPaused: false,
+      isEmpty: true,
+    }
+  }
+
+  public async commitGetTelemetry(): Promise<CommitTelemetryPayload> {
+    if (this.isTauri()) {
+      return await invoke<CommitTelemetryPayload>('commit_get_telemetry')
+    }
+    return {
+      state: 'idle',
+      pendingItems: 0,
+      inflightItems: 0,
+      completedItems: 0,
+      failedItems: 0,
+      totalItems: 0,
+      percent: 100,
+      throughputItemsPerSec: 0,
+      offlineMounts: [],
+    }
+  }
+
+  public async commitSetOverride(batchId: string, allow: boolean): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('commit_set_override', { batchId, allow })
+    }
+  }
+
+  public async commitTogglePause(): Promise<boolean> {
+    if (this.isTauri()) {
+      return await invoke<boolean>('commit_toggle_pause')
+    }
+    return false
+  }
+
+  public async commitRetryOfflineMounts(): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('commit_retry_offline_mounts')
+    }
+  }
+
+  public async commitCancelBatch(batchId: string): Promise<number> {
+    if (this.isTauri()) {
+      return await invoke<number>('commit_cancel_batch', { batchId })
+    }
+    return 0
+  }
+
+  public async commitUndoBatch(batchId: string): Promise<string> {
+    if (this.isTauri()) {
+      return await invoke<string>('commit_undo_batch', { batchId })
+    }
+    return `mock-undo-${Date.now()}`
+  }
+
+  public async commitGetQueuedTrackIds(): Promise<string[]> {
+    if (this.isTauri()) {
+      return await invoke<string[]>('commit_get_queued_track_ids')
+    }
+    return []
+  }
+
+  public async listenCommitTelemetry(
+    callback: (payload: CommitTelemetryPayload) => void
+  ): Promise<() => void> {
+    if (this.isTauri()) {
+      try {
+        const { listen } = await import('@tauri-apps/api/event')
+        const unlisten = await listen<CommitTelemetryPayload>(
+          'commit://telemetry',
+          (event) => {
+            callback(event.payload)
+          }
+        )
+        return unlisten
+      } catch (err) {
+        console.warn('[TauriBridge] Failed to subscribe to commit://telemetry:', err)
+      }
+    }
+    return () => {}
   }
 }
 

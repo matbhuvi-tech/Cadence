@@ -361,6 +361,10 @@ impl ScannerController {
                 }
                 if entry.file_type().is_file() {
                     let path = entry.path();
+                    let fname = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                    if fname.contains(".cadence-tmp-") {
+                        continue;
+                    }
                     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                         let ext_lower = ext.to_lowercase();
                         if matches!(

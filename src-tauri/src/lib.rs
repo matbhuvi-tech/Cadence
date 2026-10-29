@@ -20,6 +20,7 @@ pub fn run() {
     let audio_engine = AudioEngine::new();
     let engine_for_remote = audio_engine.clone();
     let engine_for_maintenance = audio_engine.clone();
+    let engine_for_commit = audio_engine.clone();
     let scanner_controller = ScannerController::new(Some(audio_engine.clone()));
 
     tauri::Builder::default()
@@ -60,9 +61,17 @@ pub fn run() {
             maintenance_worker.set_app_handle(app.handle().clone());
             maintenance_worker.start();
 
+            let commit_worker = crate::maintenance::CommitQueueWorker::new(
+                engine_for_commit,
+                app_db.clone(),
+            );
+            commit_worker.set_app_handle(app.handle().clone());
+            commit_worker.start();
+
             app.manage(app_db);
             app.manage(remote_state);
             app.manage(maintenance_worker);
+            app.manage(commit_worker);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -86,6 +95,16 @@ pub fn run() {
             scan_directory_native,
             read_cover_art_base64,
             commit_track_tags_native,
+            // Asynchronous Background Commit Queue commands
+            commit_enqueue_batch,
+            commit_get_queue_summary,
+            commit_get_telemetry,
+            commit_set_override,
+            commit_toggle_pause,
+            commit_retry_offline_mounts,
+            commit_cancel_batch,
+            commit_undo_batch,
+            commit_get_queued_track_ids,
             // Remote Mobile Controller commands
             get_remote_server_info,
             regenerate_pairing_token,

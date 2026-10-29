@@ -212,6 +212,40 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             release_id TEXT PRIMARY KEY,
             created_at INTEGER NOT NULL
         );
+
+        -- 5. Asynchronous Background Commit Queue
+        CREATE TABLE IF NOT EXISTS commit_queue_batches (
+            id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            total_tracks INTEGER NOT NULL,
+            destination TEXT NOT NULL CHECK(destination IN ('embedded', 'sidecar')),
+            force_override INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'paused_playback', 'paused_mount_offline', 'completed', 'failed', 'cancelled')),
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS commit_queue_items (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES commit_queue_batches(id) ON DELETE CASCADE,
+            track_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            mount_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            backup_json TEXT NOT NULL,
+            expected_crc TEXT,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'in_flight', 'completed', 'failed', 'cancelled')),
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            written_bytes INTEGER DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_commit_queue_status ON commit_queue_items(status, batch_id);
+        CREATE INDEX IF NOT EXISTS idx_commit_queue_mount ON commit_queue_items(mount_id, status);
+        CREATE INDEX IF NOT EXISTS idx_commit_queue_track ON commit_queue_items(track_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_commit_queue_unique_pending ON commit_queue_items(track_id) WHERE status = 'pending';
         "
     )?;
 
@@ -240,6 +274,45 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         )",
         [],
     );
+
+    // Ensure commit queue tables and indexes exist on upgraded databases
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS commit_queue_batches (
+            id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            total_tracks INTEGER NOT NULL,
+            destination TEXT NOT NULL CHECK(destination IN ('embedded', 'sidecar')),
+            force_override INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'paused_playback', 'paused_mount_offline', 'completed', 'failed', 'cancelled')),
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS commit_queue_items (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES commit_queue_batches(id) ON DELETE CASCADE,
+            track_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            mount_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            backup_json TEXT NOT NULL,
+            expected_crc TEXT,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'in_flight', 'completed', 'failed', 'cancelled')),
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            written_bytes INTEGER DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT
+        )",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE commit_queue_items ADD COLUMN expected_crc TEXT", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_status ON commit_queue_items(status, batch_id)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_mount ON commit_queue_items(mount_id, status)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_track ON commit_queue_items(track_id)", []);
+    let _ = conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_commit_queue_unique_pending ON commit_queue_items(track_id) WHERE status = 'pending'", []);
 
     Ok(())
 }

@@ -49,6 +49,7 @@ import { NowPlayingBar } from './components/AudioPlayer/NowPlayingBar'
 import { sqliteLibraryService } from './services/sqliteLibraryService'
 import { tauriBridge } from './services/tauriBridge'
 import { ActivityPill } from './components/CommandBar/ActivityPill'
+import { CommitStatusPill } from './components/CommandBar/CommitStatusPill'
 import { ActivityCenterPopover } from './components/CommandBar/ActivityCenterPopover'
 import { StorageManagerModal } from './components/Modals/StorageManagerModal'
 import { QuarantineLogModal } from './components/Modals/QuarantineLogModal'
@@ -1660,6 +1661,9 @@ function AppContent() {
             <span className="hidden sm:inline">Search</span>
             <kbd className="text-[10px] px-1 py-0.2 rounded bg-black/40 text-[#636366] font-mono">⌘K</kbd>
           </button>
+
+          {/* Background Save Queue status pill */}
+          <CommitStatusPill />
 
           {/* Activity telemetry */}
           <ActivityPill

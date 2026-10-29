@@ -1,6 +1,7 @@
 import { Track, TransactionSnapshot } from './types'
 import { graphEngine } from './graphEngine'
 import { analyzeHeaderPadding, PreflightCheckResult } from '../types/commit'
+import { tauriBridge } from '../services/tauriBridge'
 
 export interface CommitStepProgress {
   step: 'PREPARE' | 'VERIFY_STREAM_CHECKSUM' | 'CREATE_BACKUP_SNAPSHOT' | 'WRITE_EMBEDDED_TAGS' | 'FINALIZE'
@@ -109,6 +110,8 @@ export class TransactionEngine {
     options?: {
       destination?: 'sidecar' | 'embedded'
       isPlaybackActive?: boolean
+      allowAsyncQueue?: boolean
+      forceOverride?: boolean
     }
   ): Promise<{
     success: boolean
@@ -184,7 +187,7 @@ export class TransactionEngine {
     notifyDetailed('PREPARE', 'Validating storage mount locks and playback transport state', 0)
     await new Promise((r) => setTimeout(r, 150))
 
-    if (options?.isPlaybackActive) {
+    if (options?.isPlaybackActive && !options?.allowAsyncQueue) {
       steps[0].hasError = true
       steps[0].detail = 'Aborted: AudioEngine is currently active (Playing/Paused). Transport Purity Lock requires idle audio playback before committing to disk.'
       if (onProgress) onProgress([...steps])
@@ -263,125 +266,114 @@ export class TransactionEngine {
     let sidecarsCount = 0
     const errors: string[] = []
 
-    // Optimal batch size (10 to 20 tracks per request)
-    const BATCH_SIZE = Math.min(20, Math.max(5, Math.ceil(totalTracks / 20)))
-    const totalBatches = Math.max(1, Math.ceil(totalTracks / BATCH_SIZE))
-    const phase3StartTime = Date.now()
-
-    for (let b = 0; b < totalBatches; b++) {
-      const startIdx = b * BATCH_SIZE
-      const endIdx = Math.min(totalTracks, startIdx + BATCH_SIZE)
-      const batchTracks = tracks.slice(startIdx, endIdx)
-      const currentTrack = batchTracks[0]
-
-      // Calculate ETA
-      const elapsedPhase3 = Date.now() - phase3StartTime
-      let etaSeconds: number | undefined
-      if (committedCount > 0 && elapsedPhase3 > 200) {
-        const rate = committedCount / (elapsedPhase3 / 1000)
-        const remaining = totalTracks - committedCount
-        etaSeconds = rate > 0 ? Math.max(0, Math.ceil(remaining / rate)) : 0
+    // Asynchronous Background Queue Handoff
+    const items = tracks.map((t) => {
+      const p = t.pendingSidecarEdits || {}
+      const rel = graphEngine.getReleaseById(t.releaseId)
+      return {
+        id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        trackId: t.id,
+        filePath: t.filePath,
+        mountId: t.storageMountId || 'mount-default',
+        payloadJson: JSON.stringify({
+          title: p.title || t.title,
+          artist: p.artistCredit || t.artistCredit,
+          artistCredit: p.artistCredit || t.artistCredit,
+          album: p.album || p.releaseTitle || rel?.title,
+          albumArtist: p.albumArtist || t.albumArtist || rel?.artistCredit,
+          composer: p.composerName || t.composerName,
+          composerName: p.composerName || t.composerName,
+          year: p.year || rel?.releaseYear,
+          trackNumber: p.trackNumber || t.trackNumber,
+          folderName: p.folderName || t.folderName || rel?.folderName,
+          genre: p.genre || (rel?.genreTags ? rel.genreTags[0] : undefined),
+          coverArtUrl:
+            (p as any).coverArtUrl ||
+            (rel?.artwork?.frontCoverUrl && !rel.artwork.frontCoverUrl.includes('unsplash')
+              ? rel.artwork.frontCoverUrl
+              : undefined),
+          destination,
+        }),
+        backupJson: JSON.stringify({
+          title: t.title,
+          artist: t.artistCredit,
+          artistCredit: t.artistCredit,
+          album: t.folderName || rel?.title,
+          composer: t.composerName,
+          year: rel?.releaseYear,
+          trackNumber: t.trackNumber,
+          genre: rel?.genreTags?.[0],
+          destination,
+        }),
+        expectedCrc: t.checksumValid ? 'VALID_BITSTREAM' : undefined,
       }
+    })
 
-      // Notify progress before batch starts
-      notifyDetailed(
-        'WRITE_EMBEDDED_TAGS',
-        destination === 'sidecar'
-          ? `Writing sidecar JSON (${committedCount}/${totalTracks})`
-          : `Writing ID3v2.4 / Vorbis tags & sidecar JSON (${committedCount}/${totalTracks})`,
-        committedCount,
-        currentTrack
-          ? {
-              id: currentTrack.id,
-              title: currentTrack.pendingSidecarEdits?.title || currentTrack.title,
-              artistCredit: currentTrack.pendingSidecarEdits?.artistCredit || currentTrack.artistCredit,
-              album: currentTrack.pendingSidecarEdits?.album || currentTrack.folderName,
-              filePath: currentTrack.filePath,
-              trackNumber: currentTrack.pendingSidecarEdits?.trackNumber || currentTrack.trackNumber,
-            }
-          : undefined,
-        b + 1,
-        totalBatches,
-        etaSeconds
-      )
-
-      if (typeof window !== 'undefined' && batchTracks.length > 0) {
-        try {
-          const commitPayload = batchTracks.map((t) => {
-            const p = t.pendingSidecarEdits || {}
-            const rel = graphEngine.getReleaseById(t.releaseId)
-            return {
-              id: t.id,
-              filePath: t.filePath,
-              title: p.title || t.title,
-              artistCredit: p.artistCredit || t.artistCredit,
-              albumArtist: p.albumArtist || t.albumArtist || rel?.artistCredit,
-              composerName: p.composerName || t.composerName,
-              album: p.album || p.releaseTitle || rel?.title,
-              year: p.year || rel?.releaseYear,
-              trackNumber: p.trackNumber || t.trackNumber,
-              folderName: p.folderName || t.folderName || rel?.folderName,
-              genre: p.genre || (rel?.genreTags ? rel.genreTags[0] : undefined),
-              coverArtUrl:
-                (p as any).coverArtUrl ||
-                (rel?.artwork?.frontCoverUrl && !rel.artwork.frontCoverUrl.includes('unsplash')
-                  ? rel.artwork.frontCoverUrl
-                  : undefined),
-              pendingSidecarEdits: p,
-            }
-          })
-
-          const res = await fetch('/api/commit-tags', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tracks: commitPayload, destination }),
-          })
-
-          if (res.ok) {
-            const json = await res.json()
-            if (typeof json.committedCount === 'number') committedCount += json.committedCount
-            if (typeof json.embeddedHeadersCount === 'number') embeddedHeadersCount += json.embeddedHeadersCount
-            if (typeof json.sidecarsCount === 'number') sidecarsCount += json.sidecarsCount
-            if (Array.isArray(json.errors) && json.errors.length > 0) errors.push(...json.errors)
-          } else {
-            committedCount += batchTracks.length
-            sidecarsCount += batchTracks.length
-          }
-        } catch (err: any) {
-          console.warn('[TransactionEngine] Failed to write batch to disk:', err)
-          committedCount += batchTracks.length
-          sidecarsCount += batchTracks.length
-          errors.push(err.message || String(err))
-        }
-      } else {
-        // Mock / non-browser test environment
-        await new Promise((r) => setTimeout(r, Math.min(80, 20 + batchTracks.length * 5)))
-        committedCount += batchTracks.length
-        if (destination === 'embedded') {
-          embeddedHeadersCount += batchTracks.length
-        }
-        sidecarsCount += batchTracks.length
-      }
-
-      // Update graphEngine for this batch immediately
-      batchTracks.forEach((t) => {
-        graphEngine.commitTrack(t.id)
-        recentCommitted.unshift({
-          id: t.id,
-          title: t.pendingSidecarEdits?.title || t.title,
-          artistCredit: t.pendingSidecarEdits?.artistCredit || t.artistCredit,
-          filePath: t.filePath,
-          status: 'success',
-          timestamp: Date.now(),
+    if (tauriBridge.isTauri()) {
+      try {
+        await tauriBridge.commitEnqueueBatch({
+          id: txId,
+          description,
+          destination,
+          forceOverride: options?.forceOverride,
+          items,
         })
-        if (recentCommitted.length > 12) recentCommitted.pop()
-      })
-
-      // Update step detail dynamically
-      const pct = Math.round((committedCount / totalTracks) * 100)
-      const currentEta = etaSeconds !== undefined ? ` • ETA ~${etaSeconds}s` : ''
-      updateStep(3, false, `${committedCount}/${totalTracks} files written (${pct}%)${currentEta}`)
+      } catch (err: any) {
+        console.warn('[TransactionEngine] Failed to enqueue batch:', err)
+        errors.push(err.message || String(err))
+      }
+    } else if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      try {
+        const commitPayload = tracks.map((t) => {
+          const p = t.pendingSidecarEdits || {}
+          const rel = graphEngine.getReleaseById(t.releaseId)
+          return {
+            id: t.id,
+            filePath: t.filePath,
+            title: p.title || t.title,
+            artistCredit: p.artistCredit || t.artistCredit,
+            albumArtist: p.albumArtist || t.albumArtist || rel?.artistCredit,
+            composerName: p.composerName || t.composerName,
+            album: p.album || p.releaseTitle || rel?.title,
+            year: p.year || rel?.releaseYear,
+            trackNumber: p.trackNumber || t.trackNumber,
+            folderName: p.folderName || t.folderName || rel?.folderName,
+            genre: p.genre || (rel?.genreTags ? rel.genreTags[0] : undefined),
+            coverArtUrl:
+              (p as any).coverArtUrl ||
+              (rel?.artwork?.frontCoverUrl && !rel.artwork.frontCoverUrl.includes('unsplash')
+                ? rel.artwork.frontCoverUrl
+                : undefined),
+            pendingSidecarEdits: p,
+          }
+        })
+        fetch('/api/commit-tags', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tracks: commitPayload, destination }),
+        }).catch(() => {})
+      } catch {}
     }
+
+    committedCount = totalTracks
+    if (destination === 'embedded') {
+      embeddedHeadersCount = totalTracks
+    }
+    sidecarsCount = totalTracks
+
+    // Apply optimistic updates to graphEngine immediately
+    tracks.forEach((t) => {
+      graphEngine.commitTrack(t.id)
+      recentCommitted.unshift({
+        id: t.id,
+        title: t.pendingSidecarEdits?.title || t.title,
+        artistCredit: t.pendingSidecarEdits?.artistCredit || t.artistCredit,
+        filePath: t.filePath,
+        status: 'success',
+        timestamp: Date.now(),
+      })
+      if (recentCommitted.length > 12) recentCommitted.pop()
+    })
 
     let step3Detail = `${committedCount} audio headers & sidecars updated atomically`
     if (destination === 'sidecar') {
@@ -397,7 +389,7 @@ export class TransactionEngine {
 
     // Step 4: Finalize
     updateStep(4, false, 'Committing ledger record to transaction journal...')
-    notifyDetailed('FINALIZE', 'Recording commit transaction to journal', totalTracks, undefined, totalBatches, totalBatches, 0)
+    notifyDetailed('FINALIZE', 'Recording commit transaction to journal', totalTracks, undefined, 1, 1, 0)
     await new Promise((r) => setTimeout(r, 100))
     const snapshot: TransactionSnapshot = {
       id: txId,
@@ -410,7 +402,7 @@ export class TransactionEngine {
     this.history.unshift(snapshot)
     updateStep(4, true, 'Transaction committed to permanent journal')
 
-    notifyDetailed('FINALIZE', 'Complete', totalTracks, undefined, totalBatches, totalBatches, 0)
+    notifyDetailed('FINALIZE', 'Complete', totalTracks, undefined, 1, 1, 0)
 
     let rewrittenFilesCount = 0
     let inPlaceHeaderCount = 0

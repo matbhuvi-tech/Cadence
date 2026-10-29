@@ -254,6 +254,66 @@ pub struct DbPlaylistWithTracks {
     pub tracks: Vec<DbTrack>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbCommitQueueBatch {
+    pub id: String,
+    pub description: Option<String>,
+    pub total_tracks: i64,
+    pub destination: String,
+    pub force_override: bool,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbCommitQueueItem {
+    pub id: String,
+    pub batch_id: String,
+    pub track_id: String,
+    pub file_path: String,
+    pub mount_id: String,
+    pub payload_json: String,
+    pub backup_json: String,
+    pub expected_crc: Option<String>,
+    pub status: String,
+    pub retry_count: i64,
+    pub error_message: Option<String>,
+    pub written_bytes: i64,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewCommitItem {
+    pub id: String,
+    pub track_id: String,
+    pub file_path: String,
+    pub mount_id: String,
+    pub payload_json: String,
+    pub backup_json: String,
+    pub expected_crc: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitQueueSummary {
+    pub total_batches: i64,
+    pub active_batch_id: Option<String>,
+    pub active_batch_description: Option<String>,
+    pub pending_items: i64,
+    pub inflight_items: i64,
+    pub completed_items: i64,
+    pub failed_items: i64,
+    pub total_written_bytes: i64,
+    pub is_paused: bool,
+    pub is_empty: bool,
+}
+
+
 pub fn check_directory_accessible_sync(path_str: &str) -> bool {
     let norm = path_str.replace('/', "\\");
     if norm.starts_with(r"\\") {
@@ -2263,5 +2323,509 @@ impl DbOperations {
             ids.push(id?);
         }
         Ok(ids)
+    }
+
+    // Commit Queue Operations
+    pub fn insert_commit_batch_and_items(
+        conn: &mut Connection,
+        batch: &DbCommitQueueBatch,
+        items: &[NewCommitItem],
+    ) -> Result<()> {
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO commit_queue_batches (id, description, total_tracks, destination, force_override, status, created_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                batch.id,
+                batch.description,
+                batch.total_tracks,
+                batch.destination,
+                if batch.force_override { 1 } else { 0 },
+                batch.status,
+                batch.created_at,
+                batch.completed_at,
+            ],
+        )?;
+
+        let mut stmt = tx.prepare(
+            "INSERT INTO commit_queue_items (
+                id, batch_id, track_id, file_path, mount_id, payload_json, backup_json, expected_crc,
+                status, retry_count, error_message, written_bytes, started_at, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, NULL, 0, NULL, NULL)
+             ON CONFLICT(track_id) WHERE status = 'pending' DO UPDATE SET
+                payload_json = excluded.payload_json,
+                batch_id = excluded.batch_id,
+                file_path = excluded.file_path,
+                mount_id = excluded.mount_id,
+                expected_crc = excluded.expected_crc",
+        )?;
+
+        for item in items {
+            stmt.execute(params![
+                item.id,
+                batch.id,
+                item.track_id,
+                item.file_path,
+                item.mount_id,
+                item.payload_json,
+                item.backup_json,
+                item.expected_crc,
+            ])?;
+        }
+        drop(stmt);
+
+        let mut count_stmt = tx.prepare("SELECT COUNT(*) FROM commit_queue_items WHERE batch_id = ?1")?;
+        let actual_count: i64 = count_stmt.query_row(params![batch.id], |r| r.get(0))?;
+        drop(count_stmt);
+
+        tx.execute(
+            "UPDATE commit_queue_batches SET total_tracks = ?1 WHERE id = ?2",
+            params![actual_count, batch.id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn fetch_next_pending_commit_item(
+        conn: &Connection,
+        excluded_mounts: &[String],
+    ) -> Result<Option<DbCommitQueueItem>> {
+        let query = if excluded_mounts.is_empty() {
+            "SELECT id, batch_id, track_id, file_path, mount_id, payload_json, backup_json,
+                    expected_crc, status, retry_count, error_message, written_bytes, started_at, completed_at
+             FROM commit_queue_items
+             WHERE status = 'pending'
+             ORDER BY rowid ASC
+             LIMIT 1".to_string()
+        } else {
+            let placeholders = excluded_mounts.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            format!(
+                "SELECT id, batch_id, track_id, file_path, mount_id, payload_json, backup_json,
+                        expected_crc, status, retry_count, error_message, written_bytes, started_at, completed_at
+                 FROM commit_queue_items
+                 WHERE status = 'pending' AND mount_id NOT IN ({})
+                 ORDER BY rowid ASC
+                 LIMIT 1",
+                placeholders
+            )
+        };
+
+        let mut stmt = conn.prepare(&query)?;
+        let mut rows = if excluded_mounts.is_empty() {
+            stmt.query([])?
+        } else {
+            let params_vec: Vec<&dyn rusqlite::ToSql> = excluded_mounts.iter().map(|m| m as &dyn rusqlite::ToSql).collect();
+            stmt.query(&params_vec[..])?
+        };
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(DbCommitQueueItem {
+                id: row.get(0)?,
+                batch_id: row.get(1)?,
+                track_id: row.get(2)?,
+                file_path: row.get(3)?,
+                mount_id: row.get(4)?,
+                payload_json: row.get(5)?,
+                backup_json: row.get(6)?,
+                expected_crc: row.get(7)?,
+                status: row.get(8)?,
+                retry_count: row.get(9)?,
+                error_message: row.get(10)?,
+                written_bytes: row.get(11)?,
+                started_at: row.get(12)?,
+                completed_at: row.get(13)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn update_commit_item_status(
+        conn: &Connection,
+        item_id: &str,
+        status: &str,
+        error_message: Option<&str>,
+        written_bytes: i64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let started_at = if status == "in_flight" { Some(now.clone()) } else { None };
+        let completed_at = if status == "completed" || status == "failed" || status == "cancelled" {
+            Some(now.clone())
+        } else {
+            None
+        };
+
+        if let Some(ref st) = started_at {
+            conn.execute(
+                "UPDATE commit_queue_items
+                 SET status = ?1, started_at = ?2, error_message = ?3, written_bytes = ?4
+                 WHERE id = ?5",
+                params![status, st, error_message, written_bytes, item_id],
+            )?;
+        } else if let Some(ref ct) = completed_at {
+            conn.execute(
+                "UPDATE commit_queue_items
+                 SET status = ?1, completed_at = ?2, error_message = ?3, written_bytes = ?4
+                 WHERE id = ?5",
+                params![status, ct, error_message, written_bytes, item_id],
+            )?;
+
+            let batch_id: Option<String> = conn
+                .query_row(
+                    "SELECT batch_id FROM commit_queue_items WHERE id = ?1",
+                    params![item_id],
+                    |r| r.get(0),
+                )
+                .ok();
+
+            if let Some(bid) = batch_id {
+                let pending_or_inflight: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM commit_queue_items WHERE batch_id = ?1 AND status IN ('pending', 'in_flight')",
+                    params![bid],
+                    |r| r.get(0),
+                )?;
+                if pending_or_inflight == 0 {
+                    let has_failed: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM commit_queue_items WHERE batch_id = ?1 AND status = 'failed'",
+                        params![bid],
+                        |r| r.get(0),
+                    )?;
+                    let final_status = if has_failed > 0 { "completed_with_errors" } else { "completed" };
+                    conn.execute(
+                        "UPDATE commit_queue_batches SET status = ?1, completed_at = ?2 WHERE id = ?3",
+                        params![final_status, now, bid],
+                    )?;
+                }
+            }
+        } else {
+            conn.execute(
+                "UPDATE commit_queue_items
+                 SET status = ?1, error_message = ?2, written_bytes = ?3
+                 WHERE id = ?4",
+                params![status, error_message, written_bytes, item_id],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn requeue_inflight_commit_items_sweep(conn: &Connection) -> Result<Vec<DbCommitQueueItem>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, batch_id, track_id, file_path, mount_id, payload_json, backup_json,
+                    expected_crc, status, retry_count, error_message, written_bytes, started_at, completed_at
+             FROM commit_queue_items
+             WHERE status = 'in_flight'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DbCommitQueueItem {
+                id: row.get(0)?,
+                batch_id: row.get(1)?,
+                track_id: row.get(2)?,
+                file_path: row.get(3)?,
+                mount_id: row.get(4)?,
+                payload_json: row.get(5)?,
+                backup_json: row.get(6)?,
+                expected_crc: row.get(7)?,
+                status: row.get(8)?,
+                retry_count: row.get(9)?,
+                error_message: row.get(10)?,
+                written_bytes: row.get(11)?,
+                started_at: row.get(12)?,
+                completed_at: row.get(13)?,
+            })
+        })?;
+
+        let mut inflight_items = Vec::new();
+        for item in rows {
+            inflight_items.push(item?);
+        }
+        drop(stmt);
+
+        if !inflight_items.is_empty() {
+            conn.execute(
+                "UPDATE commit_queue_items
+                 SET status = 'pending', retry_count = retry_count + 1, error_message = 'Reset during startup recovery'
+                 WHERE status = 'in_flight'",
+                [],
+            )?;
+        }
+
+        Ok(inflight_items)
+    }
+
+    pub fn cancel_batch_pending_items(conn: &Connection, batch_id: &str) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let count = conn.execute(
+            "UPDATE commit_queue_items
+             SET status = 'cancelled', completed_at = ?1
+             WHERE batch_id = ?2 AND status = 'pending'",
+            params![now, batch_id],
+        )?;
+
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM commit_queue_items WHERE batch_id = ?1 AND status IN ('pending', 'in_flight')",
+            params![batch_id],
+            |r| r.get(0),
+        )?;
+
+        if remaining == 0 {
+            conn.execute(
+                "UPDATE commit_queue_batches SET status = 'cancelled', completed_at = ?1 WHERE id = ?2",
+                params![now, batch_id],
+            )?;
+        }
+
+        Ok(count)
+    }
+
+    pub fn fetch_completed_items_for_undo(conn: &Connection, batch_id: &str) -> Result<Vec<DbCommitQueueItem>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, batch_id, track_id, file_path, mount_id, payload_json, backup_json,
+                    expected_crc, status, retry_count, error_message, written_bytes, started_at, completed_at
+             FROM commit_queue_items
+             WHERE batch_id = ?1 AND status = 'completed'
+             ORDER BY completed_at DESC",
+        )?;
+        let rows = stmt.query_map(params![batch_id], |row| {
+            Ok(DbCommitQueueItem {
+                id: row.get(0)?,
+                batch_id: row.get(1)?,
+                track_id: row.get(2)?,
+                file_path: row.get(3)?,
+                mount_id: row.get(4)?,
+                payload_json: row.get(5)?,
+                backup_json: row.get(6)?,
+                expected_crc: row.get(7)?,
+                status: row.get(8)?,
+                retry_count: row.get(9)?,
+                error_message: row.get(10)?,
+                written_bytes: row.get(11)?,
+                started_at: row.get(12)?,
+                completed_at: row.get(13)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn get_commit_queue_summary(conn: &Connection) -> Result<CommitQueueSummary> {
+        let pending_items: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM commit_queue_items WHERE status = 'pending'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let inflight_items: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM commit_queue_items WHERE status = 'in_flight'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let completed_items: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM commit_queue_items WHERE status = 'completed'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let failed_items: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM commit_queue_items WHERE status = 'failed'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_written_bytes: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(written_bytes), 0) FROM commit_queue_items WHERE status = 'completed'",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let total_batches: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM commit_queue_batches",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let active_batch: Option<(String, Option<String>)> = conn.query_row(
+            "SELECT b.id, b.description
+             FROM commit_queue_batches b
+             WHERE b.status IN ('pending', 'in_flight')
+                OR EXISTS (SELECT 1 FROM commit_queue_items i WHERE i.batch_id = b.id AND i.status IN ('pending', 'in_flight'))
+             ORDER BY b.created_at ASC
+             LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).ok();
+
+        let (active_batch_id, active_batch_description) = match active_batch {
+            Some((id, desc)) => (Some(id), desc),
+            None => (None, None),
+        };
+
+        let is_empty = pending_items == 0 && inflight_items == 0;
+
+        Ok(CommitQueueSummary {
+            total_batches,
+            active_batch_id,
+            active_batch_description,
+            pending_items,
+            inflight_items,
+            completed_items,
+            failed_items,
+            total_written_bytes,
+            is_paused: false,
+            is_empty,
+        })
+    }
+
+    pub fn set_batch_override(conn: &Connection, batch_id: &str, allow: bool) -> Result<()> {
+        conn.execute(
+            "UPDATE commit_queue_batches SET force_override = ?1 WHERE id = ?2",
+            params![if allow { 1 } else { 0 }, batch_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_batch_override_allowed(conn: &Connection, batch_id: &str) -> Result<bool> {
+        let override_val: i32 = conn.query_row(
+            "SELECT force_override FROM commit_queue_batches WHERE id = ?1",
+            params![batch_id],
+            |r| r.get(0),
+        )?;
+        Ok(override_val != 0)
+    }
+
+    pub fn get_queued_track_ids(conn: &Connection) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT track_id FROM commit_queue_items WHERE status IN ('pending', 'in_flight')",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id?);
+        }
+        Ok(ids)
+    }
+
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::schema::initialize_schema;
+
+    #[test]
+    fn test_commit_queue_operations_and_coalescence() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+
+        // 1. Enqueue initial batch
+        let batch = DbCommitQueueBatch {
+            id: "batch-1".to_string(),
+            description: Some("First Batch".to_string()),
+            total_tracks: 2,
+            destination: "embedded".to_string(),
+            force_override: false,
+            status: "pending".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+        };
+
+        let items = vec![
+            NewCommitItem {
+                id: "item-1".to_string(),
+                track_id: "trk-100".to_string(),
+                file_path: "C:\\Music\\Song1.flac".to_string(),
+                mount_id: "mount-1".to_string(),
+                payload_json: r#"{"title":"Song 1 New"}"#.to_string(),
+                backup_json: r#"{"title":"Song 1 Original"}"#.to_string(),
+                expected_crc: Some("CRC123".to_string()),
+            },
+            NewCommitItem {
+                id: "item-2".to_string(),
+                track_id: "trk-200".to_string(),
+                file_path: "C:\\Music\\Song2.flac".to_string(),
+                mount_id: "mount-2".to_string(),
+                payload_json: r#"{"title":"Song 2 New"}"#.to_string(),
+                backup_json: r#"{"title":"Song 2 Original"}"#.to_string(),
+                expected_crc: None,
+            },
+        ];
+
+        DbOperations::insert_commit_batch_and_items(&mut conn, &batch, &items).unwrap();
+
+        let summary = DbOperations::get_commit_queue_summary(&conn).unwrap();
+        assert_eq!(summary.pending_items, 2);
+        assert_eq!(summary.inflight_items, 0);
+
+        // 2. Re-edit trk-100 before write: should coalesce in-place and PRESERVE original backup_json!
+        let batch2 = DbCommitQueueBatch {
+            id: "batch-2".to_string(),
+            description: Some("Re-edit Batch".to_string()),
+            total_tracks: 1,
+            destination: "embedded".to_string(),
+            force_override: false,
+            status: "pending".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+        };
+
+        let reedit_items = vec![
+            NewCommitItem {
+                id: "item-3".to_string(),
+                track_id: "trk-100".to_string(),
+                file_path: "C:\\Music\\Song1.flac".to_string(),
+                mount_id: "mount-1".to_string(),
+                payload_json: r#"{"title":"Song 1 Re-Edited"}"#.to_string(),
+                backup_json: r#"{"title":"Song 1 Overwrite Attempt"}"#.to_string(),
+                expected_crc: Some("CRC456".to_string()),
+            },
+        ];
+
+        DbOperations::insert_commit_batch_and_items(&mut conn, &batch2, &reedit_items).unwrap();
+
+        // Count pending: still 2 items (not 3!)
+        let summary2 = DbOperations::get_commit_queue_summary(&conn).unwrap();
+        assert_eq!(summary2.pending_items, 2);
+
+        // Fetch trk-100: payload is updated to re-edited, but backup_json is preserved as Song 1 Original!
+        let fetched = DbOperations::fetch_next_pending_commit_item(&conn, &[]).unwrap().unwrap();
+        assert_eq!(fetched.track_id, "trk-100");
+        assert_eq!(fetched.payload_json, r#"{"title":"Song 1 Re-Edited"}"#);
+        assert_eq!(fetched.backup_json, r#"{"title":"Song 1 Original"}"#);
+
+        // 3. Mark in_flight
+        DbOperations::update_commit_item_status(&conn, &fetched.id, "in_flight", None, 0).unwrap();
+        let summary3 = DbOperations::get_commit_queue_summary(&conn).unwrap();
+        assert_eq!(summary3.pending_items, 1);
+        assert_eq!(summary3.inflight_items, 1);
+
+        // 4. Test mount exclusion
+        let next_without_mount2 = DbOperations::fetch_next_pending_commit_item(&conn, &["mount-2".to_string()]).unwrap();
+        assert!(next_without_mount2.is_none());
+
+        let next_with_mount2 = DbOperations::fetch_next_pending_commit_item(&conn, &[]).unwrap().unwrap();
+        assert_eq!(next_with_mount2.track_id, "trk-200");
+
+        // 5. Test startup crash sweep
+        let swept = DbOperations::requeue_inflight_commit_items_sweep(&conn).unwrap();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].id, fetched.id);
+
+        let summary_after_sweep = DbOperations::get_commit_queue_summary(&conn).unwrap();
+        assert_eq!(summary_after_sweep.pending_items, 2);
+        assert_eq!(summary_after_sweep.inflight_items, 0);
+
+        // 6. Test complete and undo
+        DbOperations::update_commit_item_status(&conn, &fetched.id, "completed", None, 1024).unwrap();
+        let undo_items = DbOperations::fetch_completed_items_for_undo(&conn, &fetched.batch_id).unwrap();
+        assert_eq!(undo_items.len(), 1);
+        assert_eq!(undo_items[0].backup_json, r#"{"title":"Song 1 Original"}"#);
     }
 }

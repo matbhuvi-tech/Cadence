@@ -151,3 +151,54 @@ export function analyzeHeaderPadding(track: Track, newArtworkBytes: number = 0):
     reason: 'Generic audio container: stream copy required',
   }
 }
+
+
+export interface CommitTelemetryPayload {
+  state: 'idle' | 'writing' | 'paused_playback' | 'cooldown' | 'paused_mount_offline' | 'user_paused'
+  activeBatchId?: string
+  activeBatchDescription?: string
+  currentTrackId?: string
+  currentTrackTitle?: string
+  currentTrackFilePath?: string
+  pendingItems: number
+  inflightItems: number
+  completedItems: number
+  failedItems: number
+  totalItems: number
+  percent: number
+  throughputItemsPerSec: number
+  cooldownRemainingSecs?: number
+  offlineMounts: string[]
+  errorMessage?: string
+}
+
+export interface CommitQueueSummary {
+  totalBatches: number
+  activeBatchId?: string
+  activeBatchDescription?: string
+  pendingItems: number
+  inflightItems: number
+  completedItems: number
+  failedItems: number
+  totalWrittenBytes: number
+  isPaused: boolean
+  isEmpty: boolean
+}
+
+export interface NewCommitItemPayload {
+  id: string
+  trackId: string
+  filePath: string
+  mountId: string
+  payloadJson: string
+  backupJson: string
+  expectedCrc?: string
+}
+
+export interface EnqueueBatchPayload {
+  id?: string
+  description?: string
+  destination?: 'sidecar' | 'embedded'
+  forceOverride?: boolean
+  items: NewCommitItemPayload[]
+}
