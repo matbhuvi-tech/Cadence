@@ -1,104 +1,40 @@
 # Goldfish Annotated Review Report
 
-**Target:** [`docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md`](file:///e:/Mathan/Code/Music%20Agent/docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md) (`full file`)
 **Status:** resolved
+**Target:** `docs/designs/ASYNCHRONOUS_BACKGROUND_COMMIT_QUEUE_ARCHITECTURE.md` (`full file`)
+**Applied Fixes:** 11 accepted, 0 contested, 0 remaining
 
-## Prioritized Findings & AI Suggestions
+## Prioritized Findings & Applied Resolutions
 
-### ACT-1: Replace Phantom Search Engine File with Real Codebase Targets [`egm-zoom-out` / `egm-codebase-details`] - Severity: High (Blocker)
-*   **Affected Scope:** [Table 4.1, Subsystem 2.4, Step 4](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L273-L281)
-*   **Discrepancy Description:** The impact ledger targets `src/services/searchEngine.ts`, which does not exist in the codebase.
-*   **Rationale:** Search in Cadence is split between in-memory filtering in `AlbumCoverGrid.tsx` and database queries in `sqliteLibraryService.ts`.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Replaced phantom file with real codebase targets: `AlbumCoverGrid.tsx` lines 326–335 (expanding in-memory performer search loop) and `sqliteLibraryService.ts` (`searchCatalog`).
+### 1. [CQ-01] Playback Paused Transport Invariant Gap - Severity: High (RESOLVED)
+*   **Resolution:** Updated Section 3 preemption loop and Goal G2 to check `AudioEngine::is_playing() || AudioEngine::is_paused()`. The 30-second silent cooldown is strictly measured after audio has fully stopped.
 
----
+### 2. [CQ-02] Status Pill Embedded in Modal Command Palette - Severity: High (RESOLVED)
+*   **Resolution:** Retargeted File 13 from `OmniCommandBar.tsx` to `src/App.tsx` (lines 1665-1670), mounting `CommitStatusPill` in the persistent top header beside `ActivityPill`.
 
-### ACT-2: Add TypeScript Nullability Type Updates for Bypassed DR [`egm-implementation-readiness`] - Severity: High (Blocker)
-*   **Affected Scope:** [Subsystem 5.2, Table 4.1, Step 1](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L356-L370)
-*   **Discrepancy Description:** Returning `{ drScore: null }` from `calculateDynamicRangeScore` violates strict types where `drScore` is typed as `number`.
-*   **Rationale:** `tsc -b` compilation must remain clean per repository invariants.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Updated design document to explicitly require updating `IntegrityScanResult.drScore` in `src/services/integrityScanner.ts` and `Track.drScore?: number | null` in `src/core/types.ts` to `number | null`.
+### 3. [CQ-03] Temp Audio Files Trigger Scanner Storms - Severity: High (RESOLVED)
+*   **Resolution:** Added `*.cadence-tmp-*` to the global scanner ignore filter in `src-tauri/src/scanner/engine.rs`.
 
----
+### 4. [CQ-04] Upsert Re-edits Overwrite Prior Unwritten Tags - Severity: Medium (RESOLVED)
+*   **Resolution:** Implemented `json_patch(commit_queue_items.payload_json, excluded.payload_json)` in SQLite DDL/upsert and decremented `total_tracks` in the vacated batch envelope.
 
-### ACT-3: Clarify Agglomerative Grouping in `albumGroupingService.ts` [`egm-codebase-details`] - Severity: Medium (Major)
-*   **Affected Scope:** [Subsystem 3.1, Step 5](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L289-L305)
-*   **Discrepancy Description:** `computeGroupingKey(release)` takes a single release and cannot execute pairwise similarity checks in isolation.
-*   **Rationale:** Agglomerative clustering requires comparing candidate groups pairwise.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Clarified two-stage process: `computeGroupingKey` sanitizes rip noise to form clean base grouping keys, followed by an agglomerative clustering pass in `groupAlbumReleases` running pairwise Jaro-Winkler comparisons ($\ge 0.88$).
+### 5. [CQ-05] Missing `expected_crc` in SQLite Schema - Severity: Medium (RESOLVED)
+*   **Resolution:** Added `expected_crc TEXT` column to `commit_queue_items` table in `src-tauri/src/db/schema.rs`.
 
----
+### 6. [CQ-06] CPU Affinity Mask Hard Failure on $\le 2$ Core CPUs - Severity: Medium (RESOLVED)
+*   **Resolution:** Added adaptive check `if num_cpus::get() > 2` before masking Core 0/1; on $\le 2$ core hardware, runs with default affinity under low thread priority.
 
-### ACT-4: Apply Composer Name Normalization in Scoring Uniformity Check [`egm-design`] - Severity: Medium (Major)
-*   **Affected Scope:** [Subsystem 2.1, Step 4](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L226-L235)
-*   **Discrepancy Description:** Spelling differences like `Ilaiyaraaja` vs `Ilayaraja` across tracks break `uniqueComposers.size === 1`.
-*   **Rationale:** Tag discrepancies in real-world albums cause false negatives in soundtrack detection.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Normalized composer names with `normalizeArtistForGrouping` before checking uniformity.
+### 7. [CQ-07] Sidecar Destination Pipeline Unspecified in Worker Loop - Severity: Medium (RESOLVED)
+*   **Resolution:** Added explicit sidecar write branch in Section 3 and File 3: loads `cadence-album.sidecar.json`, deep-merges payload, streams to temp file, and performs atomic rename.
 
----
+### 8. [CQ-08] Win32 `WM_DEVICECHANGE` UI-to-Worker Bridge Gap - Severity: Medium (RESOLVED)
+*   **Resolution:** Added Win32 window message hook in `src-tauri/src/lib.rs` that dispatches volume change signals to the worker loop over a channel.
 
-### ACT-5: Add Zero-Duration Guard to Duration Invariant [`egm-design`] - Severity: Medium (Major)
-*   **Affected Scope:** [Subsystem 3.1, Step 5](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L297-L301)
-*   **Discrepancy Description:** In unindexed files with 0 duration, `0 / 0 = NaN <= 0.05` evaluates to `false`, breaking grouping.
-*   **Rationale:** Edge cases with unparsed audio track durations must not corrupt stacking logic.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Added `maxDur > 0 ? (Math.abs(durationA - durationB) / maxDur <= 0.05) : true` guard.
+### 9. [CQ-09] Zustand Store Misnomer for `useStagedChanges` - Severity: Low (RESOLVED)
+*   **Resolution:** Corrected terminology in Section 1 and File 11 to React Hook / State Coordinator (`useMemo`).
 
----
+### 10. [CQ-10] Cyan Indicator Conflicts with Search Result Highlighting - Severity: Low (RESOLVED)
+*   **Resolution:** Updated `Saving Pending` indicator from solid cyan dot to a clock glyph badge with subtle slate/cyan border.
 
-### ACT-6: Clarify Staged Edits Persistence Across Navigation Transitions [`egm-comprehension`] - Severity: Medium (Major)
-*   **Affected Scope:** [CUJ 1, Subsystem 1.2](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L80-L84)
-*   **Discrepancy Description:** The lifecycle of uncommitted metadata changes when returning to Listen was ambiguous.
-*   **Rationale:** Users must have total confidence that navigating away does not discard pending sidecar edits.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Explicitly documented that uncommitted edits persist in `pendingSidecarEdits` and the amber "Staged" badge remains visible on album cards in Listen.
-
----
-
-### ACT-7: Rewire Orphaned Inspector Shortcuts in `App.tsx` [`egm-codebase-details`] - Severity: Low (Nit)
-*   **Affected Scope:** [Subsystem 1.1, Step 2](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L151)
-*   **Discrepancy Description:** Retiring the sidebar inspector tab left the `⌘I` shortcut and `handleInspectRelease` orphaned.
-*   **Rationale:** Keyboard shortcuts should not lead to dead ends.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Rewired `⌘I` shortcut and `handleInspectRelease` to call `navigateToCurate(activeReleaseId, anchor)`.
-
----
-
-### ACT-8: Standardize Authority Toggle Microcopy [`egm-comprehension`] - Severity: Low (Nit)
-*   **Affected Scope:** [Subsystem 2.2](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L254)
-*   **Discrepancy Description:** Inconsistent toggle button labels in design doc.
-*   **Rationale:** Consistent UI microcopy reduces cognitive load.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Standardized labels to `[Soundtrack (Composer Credit)]` vs `[Album Artist (Performer Credit)]`.
-
----
-
-### ACT-9: Distinguish Box Sets from Pressing Stacks [`egm-comprehension`] - Severity: Low (Nit)
-*   **Affected Scope:** [Subsystem 3](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L286-L288)
-*   **Discrepancy Description:** Subsystem 3 did not clearly distinguish multi-disc releases from version stacks.
-*   **Rationale:** Clear mental models prevent domain confusion between disc containers and edition variants.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Added explicit one-sentence clarification distinguishing multi-disc releases from pressing variant stacks.
-
----
-
-### ACT-10: Strip Prohibited Promotional Adjective ("seamless") [`egm-style`] - Severity: Low (Nit)
-*   **Affected Scope:** [Alternative 1](docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md#L390)
-*   **Discrepancy Description:** Use of prohibited marketing buzzword "seamless".
-*   **Rationale:** Adherence to strict plain-English technical writing standards.
-*   ***AI Suggestion:*** PROPOSE FIX
-*   ***Resolution Status:*** Applied
-*   ***Justification:*** Replaced "seamless experience" with "single-surface continuity".
+### 11. [CQ-11] Redundant Window Close Confirmation on Durable WAL - Severity: Low (RESOLVED)
+*   **Resolution:** Streamlined window exit flow to allow immediate close backed by SQLite WAL persistence, showing a toast on next launch.

@@ -2,6 +2,7 @@
 
 | Design Document | Date | Author | Core Subsystems | Summary |
 | :--- | :--- | :--- | :--- | :--- |
+| [Asynchronous Background Commit Queue with Playback Preemption](./ASYNCHRONOUS_BACKGROUND_COMMIT_QUEUE_ARCHITECTURE.md) | 2026-10-30 | Cadence Core Engineering | Rust Backend, SQLite WAL, Storage Bus Silence, App Top Header, UI Staging | Decouples the 50-minute commit modal into an asynchronous SQLite background worker yielding during playback, with partial unique index edit coalescing and Apple HIG telemetry. |
 | [Unified Metadata Management & Catalog Coherence Architecture](./UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md) | 2026-10-29 | Mathan | UI, Curate, Grouping, Scanner, Intelligence | Surface consolidation into Curate, Soundtrack composer authority taxonomy, bounded fuzzy version stacking, federated authority, and DR bypass. |
 | [Federated Album & Artist Metadata Recommendation Engine](./FEDERATED_ALBUM_AND_ARTIST_METADATA_RECOMMENDATION_ENGINE.md) | 2026-10-28 | Mathan | Resolvers, Curation Queue, ArtistsView | Multi-provider consensus (Apple + MusicBrainz + Gemini), lookahead prefetching, and canonical artist hydration. |
 | [Curation and Triage Lifecycle Architecture](./CURATION_AND_TRIAGE_LIFECYCLE_ARCHITECTURE.md) | 2026-10-27 | Mathan | Curate, Triage, Staging | Atomic two-phase commit lifecycle and curation queue staging buffers. |

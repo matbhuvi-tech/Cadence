@@ -1,66 +1,62 @@
-# Unified Metadata Management & Catalog Coherence Architecture
+# Asynchronous Background Commit Queue with Playback Preemption
 
-* **Author:** Mathan
+* **Author:** EGM Swarm Synthesizer & Elephant Partner
 * **Date:** 2026-10-29
-* **Status:** Synthesized RFC Concepts Brief (Multi-Lens Goldfish Review Complete)
+* **Target System:** Cadence Audio Engine & Desktop Core Architecture
 
 ## Overview
 
-Cadence metadata management currently suffers from fragmented editing surfaces (`CustomizeAlbumModal`, playback drawer `Details` tab, standalone `Identify Soundtracks` modal, and `Curate` workbench), inverted credit attributions in South Asian and soundtrack catalogs (playback singers mistakenly assigned as Album Artist), brittle version stacking (minor typos or rip tags causing duplicate album cards), isolated automation runs (fetching artwork without fixing dirty titles or credits), and unverified dynamic range (DR) metrics.
+Cadence currently locks all application interactions behind a blocking full-screen modal (`TwoPhaseCommitModal.tsx`) while writing metadata changes to storage. In large batch curation sessions (such as 489 tracks across multiple boxed sets), this lock lasts up to an hour. During this window, the user cannot browse the library, edit other albums, or listen to music without aborting the pending transaction.
 
-This initiative establishes a single, consolidated metadata system:
-1. **Single Unified Surface in Curate (⌘2)**: Eliminates competing modals and sidecar tabs. The right drawer in **Listen (⌘1)** is strictly restricted to **Queue** and **Playlists**. Any "Edit Metadata" or "Identify Soundtracks" trigger immediately loads the album into **Curate (⌘2)** with a clean "← Return to Album" breadcrumb.
-2. **Confidence-Scored Role Inference & Authority Taxonomy**: Automatically infers whether `Composer = Album Artist` (soundtracks / film releases) or `Performer = Album Artist` (classical, ghazal, devotional) using multi-signal scoring (release type, genre, track-credit distributions). User manual overrides in Curate are permanently persisted so automated refreshes never silently undo them.
-3. **Resilient Fuzzy Stacking with Curate Override**: Normalizes rip noise from both titles and artists, applies bounded fuzzy title clustering (catching *Captain* vs *Captian* with track count validation), and provides a manual "Stack / Unstack Edition" control in Curate.
-4. **Source-Specific Authority with Configurable Transliteration**: Designates Apple Music as the authority for commercial display titles and artwork, MusicBrainz for structured credits and release relationships, and Gemini AI strictly as a fallback for transliteration and conflict resolution. Preserves original script tags and provides clear review, parameter adjustment, and atomic two-phase commit.
-5. **Complete DR Bypass**: Disables dynamic range calculations entirely during file ingestion and scanning, hiding all DR filters and badges via `FEATURE_DYNAMIC_RANGE = false`.
+This feature decouples the review process from the physical disk write. When the user approves staged edits in the commit screen, preflight checks complete in under one second, the modal dismisses immediately, and the transaction is handed off to an asynchronous native Rust background worker backed by SQLite persistence. Disk operations execute only when audio playback has been silent for at least 30 seconds (satisfying the Global Storage Bus Silence invariant). If playback begins, writes yield at the current track boundary. Progress, throughput, and transport diagnostics surface via an Apple HIG-compliant status pill in the top header.
 
----
+## Analysis
 
-## Analysis & Multi-Lens Review Findings
+### 1. Audiophile Transport & Invariant Conflicts (ISSUE-01: Blocker)
+* **The Conflict:** Global Invariant 1 dictates zero disk I/O on library drives while playback is active or within a 30-second cooldown window. Offering an unconstrained user toggle to "force commit during playback" introduces storage controller and bus contention, DPC latency jitter, and cache eviction risks while WASAPI Exclusive streaming is active.
+* **The Resolution (Purity Mode Interlock):** 
+  * In **Purity Mode** (WASAPI Exclusive, memory-pinned buffers): Force-commit is strictly locked. The background worker halts writes whenever audio is playing and enforces the 30-second cooldown without exception.
+  * In **Shared/Standard Mode**: The user may manually override the queue to write during playback, but must first accept an explicit warning modal detailing possible audio dropouts.
 
-### 1. Contrarian & YAGNI Lens (Code Minimization & Simplicity)
-* **Elimination over Addition:** Retiring `CustomizeAlbumModal` (974 lines) and stripping the "Details" inspector from `UnifiedRightSidebar` (removing `SideBySideDiff` and `GranularCreditMatrix` from the playback drawer) eliminates over 1,500 lines of redundant UI code and prevents state drift between competing editors.
-* **Avoid Heuristic Bloat:** Rather than building an opaque machine-learning classifier for credit roles, use a deterministic 3-rule confidence scoring system based on existing file metadata: genre tag presence, release type keywords (`OST`, `Soundtrack`), and track composer uniformity ($\ge 80\%$). If confidence is below threshold, defer to a single two-state button in Curate (`Composer Authority` vs `Performer Authority`) rather than guessing.
+### 2. Execution Ownership & Process Durability (ISSUE-02: Blocker)
+* **The Risk:** Running a 56-minute background batch inside the React renderer layer (`transactionEngine.ts`) is structurally unsound. If the user navigates views, triggers a webview reload, or minimizes the client, the JavaScript promise chain can terminate abruptly mid-write, creating orphaned sidecars or corrupt file headers.
+* **The Resolution:** All queue orchestration, file locks, atomic renames, and tag encoders are moved to native Rust (`src-tauri/src/maintenance/commit_worker.rs`). The queue is persisted in SQLite with WAL logging (`commit_queue_batches` and `commit_queue_items`). Telemetry updates emit to the frontend at 4 Hz to avoid React re-render thrashing.
 
-### 2. Codebase Details & Architecture Lens
-* **Right Panel Separation of Concerns:** `UnifiedRightSidebar.tsx` currently conflates playback controls (`queue`, `playlists`) with metadata auditing (`inspector`). Removing `inspector` from the drawer ensures the playback thread and sidecar stay quiet during listening sessions.
-* **Card Subtitle & Filter Binding:** In `AlbumCoverGrid.tsx` (lines 683–703) and `renderAlbumDetail` (lines 830–860), display logic currently relies on `album.artistCredit`. When an album is classified under Composer Authority, the card subtitle, hero header, and artist grouping must bind to `effectiveAlbumArtist = album.composerName || album.artistCredit`.
-* **Search Indexing Integrity:** Inverting the album artist to the Composer must not break searchability for vocalists. The local search engine (`searchEngine.ts` and SQLite full-text search) must index `releases.composer`, `releases.artist_credit`, and `tracks.artist` concurrently so typing "Yesudas" still surfaces *Agni Natchathiram*.
-* **Scanner Ingestion Speedup:** In `integrityScanner.ts` (lines 88–111) and `libraryImporter.ts`, skipping peak/RMS and DR calculations completely avoids opening and decoding audio packets during initial file import, significantly reducing CPU usage and library scanning time.
+### 3. Concurrent Storage Operations (ISSUE-03: Major)
+* **The Risk:** If the background library scanner (`ScannerController`) runs a folder rescan while the commit worker is rewriting audio files on the same drive, race conditions occur: files are scanned with partial headers, `mtime` clocks desynchronize, and false corruption alerts are triggered.
+* **The Resolution:** Establish an inter-thread mutual exclusion lock. The library scanner pauses directory sweeps on any mount currently being modified by the commit worker.
 
-### 3. UX & Workflow Ergonomics Lens
-* **Context Preservation on Mode Switch:** Navigating from **Listen (⌘1)** to **Curate (⌘2)** via "Edit Metadata" must not be a disruptive dead end. The application state must record the return anchor (`previousViewMode`, `selectedAlbumId`, scroll position). Curate must provide a prominent top-left button: `← Back to Album in Listen` so users can return directly to their listening session after staging edits.
-* **Ergonomics of Manual Stacking:** Automated fuzzy matching must remain conservative (similarity $\ge 0.88$, track count within $\pm 1$, duration within $\pm 5\%$) to prevent false merges of distinct albums. When fuzzy logic misses (e.g. *Nilavae Oru Sangeetham* variants with completely different titles), Curate's album header must offer an intuitive action: "Stack with another Album...", opening a simple picker to merge release IDs under a single `masterReleaseId`.
-* **Two-Phase Review Clarity:** Staging output in Curate must present changes as an unambiguous diff table with green additions, red deletions, and single-click revert buttons per field. Users must never feel uncertain about what will write to physical file tags upon commit.
+### 4. Application Exit & Crash Recovery (ISSUE-04: Major)
+* **The Risk:** If the application terminates while writes are in flight or pending, files could be corrupted and queued work lost.
+* **The Resolution:**
+  * Intercept window close (`CloseRequested` in Tauri). If items remain in the queue, present an Apple HIG confirmation sheet offering to *Quit & Resume Later* (preserving SQLite queue state) or *Wait for Queue to Finish*.
+  * Employ an atomic file replace pattern: write to `.cadence-tmp-[uuid]`, verify stream CRC, and replace the destination via Win32 `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)`. On launch, any orphaned temporary files are cleaned up and `in_flight` items reset to `pending`.
 
-### 4. Migration & Backward Compatibility Lens
-* **Non-Destructive Tag Staging:** All inferred role corrections, title cleanups, and transliterations remain strictly inside `pendingSidecarEdits` and SQLite until the user explicitly confirms the Two-Phase Commit modal. Existing physical tags on disk are never altered without user approval.
-* **Persistent Authority Flags:** To prevent future library rescans from reverting user corrections, SQLite stores `metadata_authority_override` (`'composer' | 'performer'`) on the `releases` table. If set, automated scanners must respect this override.
-* **Feature Flag Rollout:** Setting `FEATURE_DYNAMIC_RANGE = false` immediately suppresses DR badges, cards, and filters in the frontend without requiring database migrations or dropping existing database columns.
-
----
+### 5. Catalog Truth & Apple HIG Presentation (ISSUE-05 & ISSUE-06: Major / Nit)
+* **The Risk:** Showing queued edits as "Staged" creates user confusion over whether edits were actually approved. Conversely, displaying unmodified disk tags makes the save appear to have failed.
+* **The Resolution:**
+  * Adopt a 4-state lifecycle: `Staged` (draft/mutable) -> `Queued` (approved, persisted in SQLite, awaiting silence) -> `In-Flight` (writing) -> `Committed` (finalized on disk).
+  * CenterStage and virtual table rows reflect newly approved metadata optimistically, decorated with a discrete "Queued for Storage" status badge.
+  * A persistent status pill in the top header indicates queue state (active, paused for playback, or completed) and expands on hover to display throughput, in-flight track details, and manual controls.
+  * Re-editing a queued item updates the queued payload in-place if pending, or stages a follow-up item if the track is actively in-flight.
 
 ## Goals vs. Non-Goals
 
 ### In-Scope Goals
-* **G1: Unified Surface Navigation**: Eliminate `CustomizeAlbumModal` and remove "Details" from `UnifiedRightSidebar`. Route all album metadata editing into **Curate (⌘2)** with a state-preserving "← Return to Album" action.
-* **G2: Confidence-Scored Credit Engine**: Automatic inference for `Composer = Album Artist` on soundtracks vs `Performer = Album Artist` on classical/ghazal/devotional, backed by persistent SQLite override flags and joint search indexing.
-* **G3: Resilient & Manual Version Stacking**: Pre-sanitized Jaro-Winkler fuzzy matching combined with track count/duration bounds, plus an explicit Curate stack/unstack picker.
-* **G4: Federated Source Authority**: Apple Music for titles/art, MusicBrainz for credits/relationships, Gemini AI strictly for fallback disambiguation and transliteration.
-* **G5: Complete DR Bypass**: Zero CPU/disk time spent on fake DR calculations during file ingestion; all DR indicators hidden across the UI behind `FEATURE_DYNAMIC_RANGE = false`.
+* **G1: Native SQLite-Persisted Queue:** Complete persistence for batch metadata jobs surviving application restarts, window closures, and crashes.
+* **G2: Deterministic Preemption with 30s Cooldown:** Zero disk I/O on music storage while playback is active plus 30 seconds of cooldown, pausing cleanly at atomic track boundaries.
+* **G3: Purity-Aware Force Commit Interlock:** Enforced lock preventing disk writes during WASAPI Exclusive playback, with an optional override restricted to shared audio mode.
+* **G4: Optimistic Catalog Presentation:** Immediate reflection of approved metadata across the catalog with clear "Queued for Storage" indicators.
+* **G5: Apple HIG Status Pill & Diagnostics:** Compact top bar status pill displaying throughput, countdown timers, hover diagnostics, and safe window exit prompts.
 
 ### Out-of-Scope Non-Goals
-* **NG1: Building a Custom Offline TT-DR Audio Meter**: Deferred until a bit-perfect native Rust WASAPI/FFmpeg implementation is prioritized.
-* **NG2: Direct Disk Modification Without Review**: Zero uncommitted writes; all changes stage through sidecar buffers and require user confirmation in the Two-Phase Commit modal.
-* **NG3: Unconstrained Fuzzy Merging**: Albums with mismatched track counts ($> 1$ track difference) or diverging durations ($> 5\%$) will not auto-stack without user confirmation.
-
----
+* **NG1: Loading Full Audio Streams into RAM:** Metadata writes stream directly through temp files on the target storage mount; files are not pinned into RAM.
+* **NG2: Read-Only Storage Queueing:** Storage mounts marked read-only fail fast in preflight checks and cannot be queued.
+* **NG3: Parallel Concurrent Writers per Mount:** Disk writes execute sequentially per physical mount to prevent storage head thrashing and acoustic drive chatter.
 
 ## Key Decisions & Staging for Next Steps
 
-* **Decision 1 (Navigation):** `UnifiedRightSidebar` is strictly playback context (Queue/Playlists). All editing operations transition directly to `Curate (⌘2)`, which preserves return navigation state to Listen mode.
-* **Decision 2 (Credit Taxonomy):** Multi-signal confidence engine assigns Composer as Album Artist for soundtracks and Performer for classical/vocal genres, with permanent user override retention and joint search indexing across singers and composers.
-* **Decision 3 (Grouping):** Stacking pairs sanitized fuzzy matching with manual Curate controls to permanently fix variant fragmentation.
-* **Decision 4 (Data Provenance):** Strict role division between Apple (presentation/art), MusicBrainz (structure/credits), and Gemini (fallback/transliteration).
-* **Decision 5 (Audio Metrics):** Complete removal and scanner bypass of DR metrics until native TT-DR analysis is developed.
+1. **Move Execution from Frontend to Native Rust:** Deprecate the in-renderer batch write loop in `transactionEngine.ts`. Implement `CommitQueueWorker` in `src-tauri` running on a dedicated thread with `THREAD_PRIORITY_BELOW_NORMAL` and `THREAD_MODE_BACKGROUND_BEGIN`.
+2. **Purity Mode Enforcement:** Prohibit force-commit overrides when Purity Mode is active to preserve the storage bus silence invariant.
+3. **Database Schema:** Add `commit_queue_batches` and `commit_queue_items` tables with state tracking for crash recovery.
+4. **Header Status Integration:** Build `CommitStatusPill.tsx` for the top navigation bar to replace modal-bound execution monitoring.
