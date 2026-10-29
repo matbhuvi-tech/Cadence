@@ -16,6 +16,7 @@ import {
   Sparkles,
   ExternalLink,
   RotateCcw,
+  Loader2,
   ZoomIn,
   ShieldCheck,
   Check,
@@ -300,6 +301,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     setTrackArtists(initialTrackArtists)
 
     setSelectedArtwork(null)
+    setCandidatesResult(null)
+    setConsensusResult(null)
   }, [albumItem?.albumId, release?.id, tracks])
 
   // Load external candidates on selection with 300ms debounce and playback quietness check
@@ -462,6 +465,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
   // Debounced candidate fetching on album selection
   useEffect(() => {
+    setIsLoadingCandidates(true)
     const timer = setTimeout(() => {
       fetchCandidates()
     }, 300)
