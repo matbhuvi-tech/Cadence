@@ -16,6 +16,8 @@ import {
   isPlaceholderTag,
   calculateEarliestValidYear,
   disambiguateComboTitle,
+  isDefectiveArtistTag,
+  matchTrackArtistFromProviderList,
 } from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
 import { tauriBridge } from './tauriBridge'
@@ -134,6 +136,7 @@ export interface ProviderResult {
   coverResolution: string
   genre?: string
   movementDesignations?: { trackIndex: number; movement: string; title: string }[]
+  tracks?: Array<{ trackNumber?: number; trackName: string; artistName: string }>
 }
 
 export interface BatchItem {
@@ -248,6 +251,7 @@ export class FederatedResolversService {
         coverArtUrl: data.coverArtUrl || '',
         coverResolution: data.coverResolution || '3000x3000px (Apple Music Master Scan)',
         genre: data.genre || 'Soundtrack',
+        tracks: data.tracks || [],
       })
     } catch {
       return null
@@ -287,6 +291,7 @@ export class FederatedResolversService {
         barcodeUpc: data.barcodeUpc || '',
         coverArtUrl: data.coverArtUrl || '',
         coverResolution: data.coverResolution || 'Archival Front (Cover Art Archive)',
+        tracks: data.tracks || [],
       })
 
     } catch {
@@ -1236,6 +1241,7 @@ export class FederatedResolversService {
         coverArtUrl: data.coverArtUrl || '',
         coverResolution: data.coverResolution || '3000x3000px (Apple Music Master Scan)',
         genre: data.genre || 'Soundtrack',
+        tracks: data.tracks || [],
       })
     } catch {
       return null
@@ -1277,6 +1283,7 @@ export class FederatedResolversService {
           coverArtUrl: data.coverArtUrl || '',
           coverResolution: data.coverResolution || 'Archival Front (Cover Art Archive)',
           genre: data.genre,
+          tracks: data.tracks || [],
         })
       } catch {
         return null
@@ -1436,6 +1443,79 @@ export class FederatedResolversService {
       albumArtist.confidence < 0.60 ||
       (isCombo && (!subReleaseGroupings || subReleaseGroupings.length === 0))
 
+    // Build Track-Level Consensus
+    const trackConsensus: Record<string, {
+      title: ConsensusFieldResult<string>
+      artists: ConsensusFieldResult<string>
+      composer?: ConsensusFieldResult<string>
+      trackNumber?: number
+    }> = {}
+
+    const resolvedAlbumArtist = (albumArtist.value || itunes?.artistCredit || mb?.artistCredit || localRelease.artistCredit || '').trim()
+
+    for (const lt of localTracks) {
+      let matchedArtist: string | null = null
+      let matchedSource: ConsensusFieldSource = 'consensus_all'
+      let matchedConfidence = 0.95
+      let matchedTitle = lt.title
+
+      // 1. Check Apple Music tracklist
+      if (itunes?.tracks && itunes.tracks.length > 0) {
+        const m = matchTrackArtistFromProviderList(lt.title, itunes.tracks, lt.trackNumber)
+        if (m) {
+          matchedArtist = m.artistName
+          matchedSource = 'single_provider_match'
+          matchedConfidence = Math.max(0.7, m.confidence)
+          matchedTitle = m.matchedTitle
+        }
+      }
+
+      // 2. Check MusicBrainz tracklist if no Apple match
+      if (!matchedArtist && mb?.tracks && mb.tracks.length > 0) {
+        const m = matchTrackArtistFromProviderList(lt.title, mb.tracks, lt.trackNumber)
+        if (m) {
+          matchedArtist = m.artistName
+          matchedSource = 'single_provider_match'
+          matchedConfidence = Math.max(0.7, m.confidence)
+          matchedTitle = m.matchedTitle
+        }
+      }
+
+      // 3. Fallback: If local track artist is defective (contains CD RIP, placeholder, folder rip name),
+      // replace with the reconciled album artist!
+      if (!matchedArtist && isDefectiveArtistTag(lt.artistCredit, rawTitle)) {
+        if (resolvedAlbumArtist && !isPlaceholderTag(resolvedAlbumArtist)) {
+          matchedArtist = resolvedAlbumArtist
+          matchedSource = albumArtist.source
+          matchedConfidence = albumArtist.confidence
+        }
+      }
+
+      if (matchedArtist) {
+        trackConsensus[lt.id] = {
+          title: {
+            value: matchedTitle,
+            source: matchedTitle !== lt.title ? matchedSource : 'single_provider_match',
+            confidence: matchedConfidence,
+            candidates: {
+              local: lt.title,
+            },
+          },
+          artists: {
+            value: matchedArtist,
+            source: matchedSource,
+            confidence: matchedConfidence,
+            candidates: {
+              local: lt.artistCredit,
+              itunes: itunes?.tracks?.find((t) => t.trackNumber === lt.trackNumber)?.artistName,
+              musicbrainz: mb?.tracks?.find((t) => t.trackNumber === lt.trackNumber)?.artistName,
+            },
+          },
+          trackNumber: lt.trackNumber,
+        }
+      }
+    }
+
     return {
       releaseId: localRelease.id,
       albumTitle,
@@ -1452,6 +1532,7 @@ export class FederatedResolversService {
         : undefined,
       isComboRelease: isCombo,
       subReleaseGroupings,
+      trackConsensus,
       requiresAiFallback,
     }
   }

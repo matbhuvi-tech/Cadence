@@ -13,37 +13,14 @@ import {
   Plus,
   Edit3,
   BookmarkPlus,
-  Users2,
-  Sparkles,
-  Image,
-  Activity,
-  Maximize2,
   MoreVertical,
   Music2,
-  Info,
 } from 'lucide-react'
-import { Track, Playlist, Release, Credit } from '../../core/types'
+import { Track, Playlist } from '../../core/types'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { sqliteLibraryService } from '../../services/sqliteLibraryService'
-import { RightPanelTab } from './RightPanel'
-import { GranularCreditMatrix } from './GranularCreditMatrix'
-import { SideBySideDiff } from './SideBySideDiff'
-import { ArtworkMediaTray } from './ArtworkMediaTray'
-import { IntegrityCard } from './IntegrityCard'
 
 interface UnifiedRightSidebarProps {
-  track?: Track
-  release?: Release
-  allReleases?: Release[]
-  selectedTrackIds?: Set<string>
-  onOpenBatchDiff?: () => void
-  onOpenBatchAi?: () => void
-  onAddCredit?: (credit: Credit) => void
-  onApplyMerge?: (mergedFields: Record<string, string>) => void
-  onReverifyChecksum?: (trackId: string) => void
-  activeInspectorTab?: RightPanelTab
-  onInspectorTabChange?: (tab: RightPanelTab) => void
-  onOpenFocusedWorkbench?: (track: Track, release?: Release) => void
   onOpenCreatePlaylist: (tracks?: Track[]) => void
   onOpenEditPlaylist: (playlist: Playlist) => void
   onOpenAddTracksModal: (tracks: Track[]) => void
@@ -53,18 +30,6 @@ interface UnifiedRightSidebarProps {
 }
 
 export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
-  track,
-  release,
-  allReleases = [],
-  selectedTrackIds,
-  onOpenBatchDiff,
-  onOpenBatchAi,
-  onAddCredit,
-  onApplyMerge,
-  onReverifyChecksum,
-  activeInspectorTab = 'credits',
-  onInspectorTabChange,
-  onOpenFocusedWorkbench,
   onOpenCreatePlaylist,
   onOpenEditPlaylist,
   onOpenAddTracksModal,
@@ -94,14 +59,6 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
   const [isConfirmingClear, setIsConfirmingClear] = useState(false)
   const dragSourceIndexRef = useRef<number | null>(null)
   const [isNowPlayingMenuOpen, setIsNowPlayingMenuOpen] = useState(false)
-
-  // Internal inspector tab fallback if not controlled
-  const [internalInspectorTab, setInternalInspectorTab] = useState<RightPanelTab>(activeInspectorTab)
-  const effectiveInspectorTab = onInspectorTabChange ? activeInspectorTab : internalInspectorTab
-  const setEffectiveInspectorTab = (tab: RightPanelTab) => {
-    if (onInspectorTabChange) onInspectorTabChange(tab)
-    else setInternalInspectorTab(tab)
-  }
 
   // Load playlists on mount or tab switch
   useEffect(() => {
@@ -142,8 +99,10 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
   // Resolve cover art for a track
   const getTrackCoverArt = (t: Track) => {
     if ((t as any).coverArtUrl) return (t as any).coverArtUrl
-    const rel = allReleases?.find((r) => r.id === t.releaseId)
-    return rel?.coverArtUrl || rel?.artwork?.frontCoverUrl
+    if (currentRelease && currentRelease.id === t.releaseId) {
+      return currentRelease.coverArtUrl || currentRelease.artwork?.frontCoverUrl
+    }
+    return undefined
   }
 
   // Drag and drop for Queue reordering (Ref-based to prevent React re-renders from cancelling Chromium drag)
@@ -231,8 +190,8 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
   }
 
   return (
-    <aside className="w-[400px] shrink-0 h-full border-l border-white/[0.08] bg-[#0c0d10] flex flex-col overflow-hidden select-none z-30 text-neutral-200">
-      {/* Top Header: 3-Way Segmented Tabs (Queue | Playlists | Details) & Close */}
+    <aside className="w-[360px] shrink-0 h-full border-l border-white/[0.08] bg-[#0c0d10] flex flex-col overflow-hidden select-none z-30 text-neutral-200">
+      {/* Top Header: 2-Way Segmented Tabs (Queue | Playlists) & Close */}
       <div className="flex items-center justify-between border-b border-white/[0.08] px-3.5 py-2.5 bg-[#090a0c] shrink-0">
         <div className="flex items-center gap-1 rounded-xl bg-white/[0.04] p-1 border border-white/5">
           {/* Tab 1: Queue */}
@@ -266,21 +225,6 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
           >
             <Disc3 className="h-3.5 w-3.5 text-emerald-400" />
             <span>Playlists</span>
-          </button>
-
-          {/* Tab 3: Track & Album Details / Inspector */}
-          <button
-            type="button"
-            onClick={() => setRightSidebarTab('inspector')}
-            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all cursor-pointer ${
-              rightSidebarTab === 'inspector'
-                ? 'bg-white/[0.12] text-white border border-white/10 shadow-sm'
-                : 'text-neutral-400 hover:text-white'
-            }`}
-            title="Inspect Track Details & Credits (⌘I)"
-          >
-            <Info className="h-3.5 w-3.5 text-[#D4AF37]" />
-            <span>Details</span>
           </button>
         </div>
 
@@ -702,149 +646,7 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
           )}
         </div>
       )}
-
-      {/* ========================================================================= */}
-      {/* TAB 3: TRACK & ALBUM INSPECTOR / DETAILS                                 */}
-      {/* ========================================================================= */}
-      {rightSidebarTab === 'inspector' && (
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          {!track || !release ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-[#636366]">
-              <Users2 className="w-10 h-10 mb-3 stroke-[1.2] opacity-30" />
-              <span className="text-sm font-semibold text-[#8E8E93]">No Selection</span>
-              <span className="text-xs text-[#636366] mt-1 max-w-[240px]">
-                Select an album or track in the library to inspect its credits, smart match differences, and audio integrity.
-              </span>
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-              {/* Contextual Entity Banner */}
-              <div className="px-3 py-2 bg-[#121316] border-b border-white/[0.05] flex items-center justify-between gap-2 shrink-0 text-xs">
-                <div className="flex items-center gap-2.5 truncate min-w-0">
-                  <div className="w-8 h-8 rounded-md bg-black/40 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
-                    {release?.coverArtUrl ? (
-                      <img src={release.coverArtUrl} alt={release.title} className="w-full h-full object-cover" />
-                    ) : (
-                      <Disc3 className="w-4 h-4 text-[#8E8E93]" />
-                    )}
-                  </div>
-                  <div className="truncate">
-                    <div className="font-semibold text-white text-[12px] truncate">{track.title}</div>
-                    <div className="text-[10px] text-[#8E8E93] truncate">
-                      {release.title} ({release.releaseYear || 'Unknown'})
-                    </div>
-                  </div>
-                </div>
-
-                {onOpenFocusedWorkbench && (
-                  <button
-                    onClick={() => onOpenFocusedWorkbench(track, release)}
-                    title="Expand to Full-Stage Curate Workbench (⌘E)"
-                    className="px-2 py-1 rounded-md bg-white/[0.04] hover:bg-white/[0.08] text-[#D4AF37] text-[10px] font-mono flex items-center gap-1 transition-all cursor-pointer border border-white/[0.06] shrink-0"
-                  >
-                    <Maximize2 className="w-3 h-3" />
-                    <span>Full Workbench</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Sub-Tabs: Credits | Match | Media | Stream */}
-              <div className="grid grid-cols-4 p-1.5 bg-[#0C0D10] border-b border-white/[0.05] gap-1 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setEffectiveInspectorTab('credits')}
-                  className={`flex items-center justify-center gap-1 py-1 rounded-md text-xs font-mono transition-all cursor-pointer ${
-                    effectiveInspectorTab === 'credits'
-                      ? 'bg-white/[0.1] text-white font-medium shadow-sm'
-                      : 'text-[#8E8E93] hover:text-white hover:bg-white/[0.03]'
-                  }`}
-                >
-                  <Users2 className="w-3 h-3" />
-                  <span>Credits</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setEffectiveInspectorTab('diff')}
-                  className={`flex items-center justify-center gap-1 py-1 rounded-md text-xs font-mono transition-all cursor-pointer ${
-                    effectiveInspectorTab === 'diff'
-                      ? 'bg-white/[0.1] text-white font-medium shadow-sm'
-                      : 'text-[#8E8E93] hover:text-white hover:bg-white/[0.03]'
-                  }`}
-                  title="Smart Match diff"
-                >
-                  <Sparkles className="w-3 h-3 text-[#D4AF37]" />
-                  <span>Match</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setEffectiveInspectorTab('artwork')}
-                  className={`flex items-center justify-center gap-1 py-1 rounded-md text-xs font-mono transition-all cursor-pointer ${
-                    effectiveInspectorTab === 'artwork'
-                      ? 'bg-white/[0.1] text-white font-medium shadow-sm'
-                      : 'text-[#8E8E93] hover:text-white hover:bg-white/[0.03]'
-                  }`}
-                >
-                  <Image className="w-3 h-3" />
-                  <span>Media</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setEffectiveInspectorTab('integrity')}
-                  className={`flex items-center justify-center gap-1 py-1 rounded-md text-xs font-mono transition-all cursor-pointer ${
-                    effectiveInspectorTab === 'integrity'
-                      ? 'bg-white/[0.1] text-white font-medium shadow-sm'
-                      : 'text-[#8E8E93] hover:text-white hover:bg-white/[0.03]'
-                  }`}
-                >
-                  <Activity className="w-3 h-3" />
-                  <span>Stream</span>
-                </button>
-              </div>
-
-              {/* Sub-Tab Content */}
-              <div className="flex-1 overflow-y-auto">
-                {effectiveInspectorTab === 'credits' && onAddCredit && (
-                  <GranularCreditMatrix track={track} onAddCredit={onAddCredit} />
-                )}
-
-                {effectiveInspectorTab === 'diff' && onApplyMerge && (
-                  <SideBySideDiff
-                    currentData={{
-                      trackTitle: track.title,
-                      releaseTitle: release.title,
-                      title: track.title,
-                      artist: track.artistCredit,
-                      composer: track.composerName || '',
-                      year: String(release.releaseYear),
-                      catalogNo: release.catalogNumber,
-                      label: release.label,
-                      barcode: release.barcodeUpc || '',
-                      matrix: release.matrixRunout,
-                      artResolution: release.artwork.resolution,
-                    }}
-                    track={track}
-                    release={release}
-                    allReleases={allReleases}
-                    selectedTrackIds={selectedTrackIds}
-                    onOpenBatchDiff={onOpenBatchDiff}
-                    onOpenBatchAi={onOpenBatchAi}
-                    onApplyMerge={onApplyMerge}
-                  />
-                )}
-
-                {effectiveInspectorTab === 'artwork' && <ArtworkMediaTray release={release} />}
-
-                {effectiveInspectorTab === 'integrity' && onReverifyChecksum && (
-                  <IntegrityCard track={track} onReverifyChecksum={onReverifyChecksum} />
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
     </aside>
   )
 }
+

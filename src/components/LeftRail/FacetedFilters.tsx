@@ -25,6 +25,7 @@ import {
   KNOWN_COMPOSERS,
 } from '../../core/taxonomyUtils'
 import { FacetSelections } from '../../core/types'
+import { FEATURES } from '../../config/features'
 
 export type { FacetSelections }
 
@@ -356,9 +357,9 @@ export const FacetedFilters: React.FC<FacetedFiltersProps> = ({
   // 7. Dynamic Mastering & Dynamic Range Options
   // ==========================================
   const masteringOptions = useMemo(() => {
-    const dr14Count = tracks.filter((t) => t.drScore >= 14).length
-    const dr10Count = tracks.filter((t) => t.drScore >= 10 && t.drScore <= 13).length
-    const drLowCount = tracks.filter((t) => t.drScore > 0 && t.drScore < 10).length
+    const dr14Count = FEATURES.DYNAMIC_RANGE ? tracks.filter((t) => t.drScore != null && t.drScore >= 14).length : 0
+    const dr10Count = FEATURES.DYNAMIC_RANGE ? tracks.filter((t) => t.drScore != null && t.drScore >= 10 && t.drScore <= 13).length : 0
+    const drLowCount = FEATURES.DYNAMIC_RANGE ? tracks.filter((t) => t.drScore != null && t.drScore > 0 && t.drScore < 10).length : 0
     const highRes24Count = tracks.filter(
       (t) =>
         t.sampleRateStr?.includes('24/') ||
@@ -370,9 +371,11 @@ export const FacetedFilters: React.FC<FacetedFiltersProps> = ({
     ).length
 
     const list = [
-      { label: 'Audiophile Master (DR14+)', value: 'audiophile_dr14', count: dr14Count },
-      { label: 'Wide Dynamic Range (DR10–13)', value: 'high_dr10_13', count: dr10Count },
-      { label: 'Compressed Mastering (DR < 10)', value: 'compressed_dr_low', count: drLowCount },
+      ...(FEATURES.DYNAMIC_RANGE ? [
+        { label: 'Audiophile Master (DR14+)', value: 'audiophile_dr14', count: dr14Count },
+        { label: 'Wide Dynamic Range (DR10–13)', value: 'high_dr10_13', count: dr10Count },
+        { label: 'Compressed Mastering (DR < 10)', value: 'compressed_dr_low', count: drLowCount },
+      ] : []),
       { label: '24-bit / DSD Studio Pressing', value: 'high_res_24bit', count: highRes24Count },
     ]
 

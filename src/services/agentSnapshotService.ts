@@ -97,7 +97,7 @@ export class AgentSnapshotService {
       if (t.sampleRateStr?.includes('24/') || t.sampleRateStr?.includes('32/') || fmtStr === 'DSD' || fmtStr === 'DSF' || fmtStr === 'DFF' || t.isHighRes) hiRes24BitCount++
 
       // Dynamic Range
-      if (t.drScore > 0) {
+      if (t.drScore != null && t.drScore > 0) {
         totalDr += t.drScore
         drCount++
         if (t.drScore >= 14) audiophileDr14Count++

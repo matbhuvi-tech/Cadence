@@ -9,7 +9,7 @@
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { CheckCircle2, Disc, ArrowLeft } from 'lucide-react'
-import { Track, Release, AuditIssue } from '../../core/types'
+import { Track, Release, AuditIssue, NavigationAnchor } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
 import {
   curationQueueService,
@@ -23,6 +23,9 @@ export interface CurationWorkbenchProps {
   releases: Release[]
   auditIssues?: AuditIssue[]
   initialSelectedAlbumId?: string | null
+  navigationAnchor?: NavigationAnchor | null
+  autoTriggerAi?: boolean
+  onReturnToAnchor?: () => void
   onOpenCommitModal: () => void
   onBackToLibrary: () => void
   showToast: (msg: string) => void
@@ -34,6 +37,9 @@ export const CurationWorkbench: React.FC<CurationWorkbenchProps> = ({
   releases,
   auditIssues = [],
   initialSelectedAlbumId,
+  navigationAnchor,
+  autoTriggerAi = false,
+  onReturnToAnchor,
   onOpenCommitModal,
   onBackToLibrary,
   showToast,
@@ -68,6 +74,14 @@ export const CurationWorkbench: React.FC<CurationWorkbenchProps> = ({
   })
 
   const [isQueueCleared, setIsQueueCleared] = useState(false)
+
+  // Sync initialSelectedAlbumId when prop changes
+  useEffect(() => {
+    if (initialSelectedAlbumId) {
+      setSelectedAlbumId(initialSelectedAlbumId)
+      setIsQueueCleared(false)
+    }
+  }, [initialSelectedAlbumId])
 
   // Sync selection if current selected album drops out of queue
   useEffect(() => {
@@ -225,6 +239,9 @@ export const CurationWorkbench: React.FC<CurationWorkbenchProps> = ({
         onBackToLibrary={onBackToLibrary}
         showToast={showToast}
         isQueueCleared={isQueueCleared}
+        navigationAnchor={navigationAnchor}
+        autoTriggerAi={autoTriggerAi}
+        onReturnToAnchor={onReturnToAnchor}
       />
     </div>
   )

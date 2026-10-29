@@ -122,7 +122,7 @@ interface AudioPlayerContextType {
   toggleRightSidebar: (tab?: RightSidebarTab) => void
 }
 
-export type RightSidebarTab = 'queue' | 'playlists' | 'inspector'
+export type RightSidebarTab = 'queue' | 'playlists'
 
 const AudioPlayerContext = createContext<AudioPlayerContextType | null>(null)
 

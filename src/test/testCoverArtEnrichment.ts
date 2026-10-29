@@ -1,5 +1,5 @@
 import { federatedResolversService, CoverArtCandidate } from '../services/federatedResolvers'
-import { cleanRipNoise } from '../components/Modals/CustomizeAlbumModal'
+import { cleanRipNoise } from '../core/taxonomyUtils'
 
 async function runCoverArtEnrichmentTests() {
   console.log('=== [TDD] Testing Cover Art Enrichment Assistance (AI, MB, Apple) ===\n')

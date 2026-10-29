@@ -1,39 +1,30 @@
-# Stage 5 Review Report: Initial Zoom Out
+# Initial Zoom Out Review Report
 
-**Target**: `docs/designs/FEDERATED_ALBUM_AND_ARTIST_METADATA_RECOMMENDATION_ENGINE.md` (Lines 1–436)  
-**Evaluator**: `egm-zoom-out`  
-**Standard**: `resources/document_standards/zoom-out-standard.md`  
-**Status**: Passed with Nits
+**Target:** `docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md` (Lines 1–511)
+**Reviewer Lens:** `egm-zoom-out`
+**Standard:** `resources/document_standards/zoom-out-standard.md`
 
----
-
-## High-Altitude Assessment
-
-The design document demonstrates strong adherence to the Zoom Out Standard. It anchors squarely on verified root architectural bottlenecks:
-1. Single-track query bias in `federatedResolvers.ts`.
-2. Dirty local rip tag pollution in string equality voting.
-3. MusicBrainz 1 req/sec stepper latency.
-4. Combo CD pressing collisions.
-5. Unpopulated SQLite `canonical_artists` table.
-
-The architecture maximizes codebase reuse:
-- Reuses existing SQLite schema columns (`bio_summary`, `era_active`, `primary_role`, `mbid`, `apple_artist_id`, `portrait_url`) without requiring disruptive database migrations.
-- Reuses existing string taxonomy infrastructure (`stripRipNoiseAndTags`).
-- Reuses the atomic two-phase commit staging pipeline (`track.pendingSidecarEdits`).
-- Strictly enforces audiophile playback quietness invariants via `tauriBridge.getPlaybackStatus()`.
+## Executive Summary
+The design document directly targets the root problems identified by the user: fragmented editing workflows, inverted Indian music credit attribution, pressing edition splitting, uncoordinated cover art automation, and inaccurate dynamic range metrics. The architecture achieves strong simplification by decommissioning `CustomizeAlbumModal.tsx` (~1,000 lines) and stripping non-playback inspection tools from `UnifiedRightSidebar.tsx`. However, several implementation details introduce abstraction leaks or reference non-existent services that must be grounded in the active codebase.
 
 ---
 
-## Findings
+## Prioritized Findings
 
-### Finding 1: Caching Scope Discrepancy (In-Memory vs SQLite)
-* **Severity**: 🟢 Nit
-* **Affected Scope**: Architecture Diagram (Line 80) vs. Component 4 (Line 183)
-* **Rationale**: The Mermaid architecture diagram labels the prefetch cache as `L1Cache[In-Memory / SQLite Cache]`, but Component 4 specifies `LRUCache<string, ReleaseConsensusResult>(capacity = 50)` strictly in memory. Writing prefetch candidate lookups to SQLite on every queue step would introduce unnecessary disk I/O.
-* **Recommendation**: Clarify that prefetch results are held exclusively in the in-memory LRU cache, and only finalized user-confirmed tag staging or enriched artist records write to SQLite/disk.
+### Issue 1: Phantom File Reference for Catalog Search - Severity: Major
+* **Reviewer Lens:** `egm-zoom-out` / `egm-codebase-details`
+* **Affected Scope:** Lines 433, 487–489
+* **Discrepancy Description:** The design specifies creating/modifying `src/services/searchEngine.ts` to index composer and track artists. In the actual Cadence codebase, `src/services/searchEngine.ts` does not exist. Catalog search is divided between client-side in-memory filtering in `src/components/CenterStage/AlbumCoverGrid.tsx` (`filtered = cards.filter(...)`) and SQLite FTS queries in `src/services/sqliteLibraryService.ts` / `tauriBridge.ts` (`db_search_catalog`).
+* **Rationale & Recommendation:** Eliminate the speculative `searchEngine.ts` entry. Explicitly target `AlbumCoverGrid.tsx` (to include `album.tracks.some(t => t.artistCredit.includes(q))` in the filter loop) and `sqliteLibraryService.ts` (`searchCatalog`).
 
-### Finding 2: Concrete Regex Implementation Anchoring
-* **Severity**: 🟢 Nit
-* **Affected Scope**: Component 1 (Lines 118–122)
-* **Rationale**: Providing a raw JavaScript regular expression (`replace(/\s*-\s*Single$/i, '')`) in high-level architecture drops slightly into implementation weeds.
-* **Recommendation**: Specify the normalization contract behaviorally, keeping the specific regex patterns in the detailed implementation section or source code.
+### Issue 2: Algorithmic Incongruity in `computeGroupingKey` - Severity: Major
+* **Reviewer Lens:** `egm-zoom-out`
+* **Affected Scope:** Lines 272–285, 432, 491–495
+* **Discrepancy Description:** The plan states that `computeGroupingKey(release: Release)` will compute Jaro-Winkler similarity ($\ge 0.88$) against candidate titles. However, `computeGroupingKey` is a unary, pure hashing function ($Release \to string$). A unary function cannot calculate pairwise similarity between two releases in isolation unless it generates a canonical stem or operates within the grouping reduction loop in `groupAlbumReleases`.
+* **Rationale & Recommendation:** Update the architecture: `computeGroupingKey` should generate a sanitized base stem (stripping rip flags, disc markers, and punctuation). The fuzzy Jaro-Winkler clustering loop ($\ge 0.88$) with track count and duration guards must execute inside `groupAlbumReleases(releases: Release[])` as an agglomerative clustering pass across candidate groups.
+
+### Issue 3: Dangling Inspector Triggers Across the Shell - Severity: Nit
+* **Reviewer Lens:** `egm-zoom-out`
+* **Affected Scope:** Lines 144–151, 426, 453–458
+* **Discrepancy Description:** Stripping the `inspector` tab from `UnifiedRightSidebar` leaves orphaned triggers in `App.tsx` (e.g., keyboard shortcut `⌘I` and `handleInspectRelease`) and `AlbumCoverGrid.tsx` line 575 (`onInspectRelease`).
+* **Rationale & Recommendation:** Specify in Step 2 of the implementation plan that `⌘I` and `onInspectRelease` are either repurposed to trigger Curate navigation (`navigateToCurate`) or cleanly unmounted to prevent dead keybindings.

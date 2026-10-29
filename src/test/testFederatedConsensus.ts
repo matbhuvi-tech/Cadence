@@ -4,6 +4,8 @@ import {
   isPlaceholderTag,
   calculateEarliestValidYear,
   disambiguateComboTitle,
+  isDefectiveArtistTag,
+  matchTrackArtistFromProviderList,
 } from '../core/taxonomyUtils'
 import {
   GlobalMusicBrainzQueue,
@@ -171,7 +173,46 @@ async function runTests() {
   // Items 10..59 should be in cache
   assert.notStrictEqual(prefetcher.getCachedConsensus('album-10'), undefined)
   assert.notStrictEqual(prefetcher.getCachedConsensus('album-59'), undefined)
-  console.log('  ✓ LookaheadQueuePrefetcher strictly enforces transport quietness, 30s cooldown, and 50-item LRU.\n')
+  // -------------------------------------------------------------------------
+  // Test 7: Track Artist Matching & Defective Tag Purging
+  // -------------------------------------------------------------------------
+  console.log('[Test 7] Testing Track Artist Matching & Defective Tag Purging...')
+
+  // 1. Defective tag detection
+  assert.strictEqual(isDefectiveArtistTag('Anbulla Malarey CD RIP', 'Anbulla Malarey CD RIP'), true)
+  assert.strictEqual(isDefectiveArtistTag('Anbulla Malarey CD RIP', 'Anbulla Malare'), true)
+  assert.strictEqual(isDefectiveArtistTag('Various Artists', 'Anbulla Malare'), true)
+  assert.strictEqual(isDefectiveArtistTag('FLAC', 'Anbulla Malare'), true)
+  assert.strictEqual(isDefectiveArtistTag('S.P. Balasubrahmanyam', 'Anbulla Malare'), false)
+  assert.strictEqual(isDefectiveArtistTag('Ilaiyaraaja & S. Janaki', 'Anbulla Malare'), false)
+
+  // 2. Real tracklist matching with Apple Music tracks
+  const itunesTracks = [
+    { trackNumber: 1, trackName: 'Thaaye Thaaye Dharmam', artistName: 'Ilaiyaraaja & S.P. Balasubrahmanyam' },
+    { trackNumber: 2, trackName: 'Thegham Pon Thegham', artistName: 'Ilaiyaraaja & S. Janaki' },
+    { trackNumber: 3, trackName: 'Paathigala Udan Pirappa', artistName: 'Ilaiyaraaja & S.P. Balasubrahmanyam' },
+    { trackNumber: 4, trackName: 'Alai Methu Thadumaruthe', artistName: 'Ilaiyaraaja, S.P. Balasubrahmanyam & Vani Jayaram' },
+    { trackNumber: 5, trackName: 'Enna Venum', artistName: 'Ilaiyaraaja, Sudhakar, Saibaba & Grubb Singh' },
+    { trackNumber: 6, trackName: 'Kaadhal Thegangal', artistName: 'Ilaiyaraaja, S.P. Balasubrahmanyam & P. Susheela' },
+  ]
+
+  // Exact & phonetic matches for local CD rip tracks
+  const m1 = matchTrackArtistFromProviderList('Kaadhal Thegangal', itunesTracks, 1)
+  assert.strictEqual(m1?.artistName, 'Ilaiyaraaja, S.P. Balasubrahmanyam & P. Susheela')
+
+  const m2 = matchTrackArtistFromProviderList('Thaye Thaye', itunesTracks, 2)
+  assert.strictEqual(m2?.artistName, 'Ilaiyaraaja & S.P. Balasubrahmanyam')
+
+  const m4 = matchTrackArtistFromProviderList('Pathi Pazha', itunesTracks, 4)
+  assert.strictEqual(m4?.artistName, 'Ilaiyaraaja & S.P. Balasubrahmanyam')
+
+  const m5 = matchTrackArtistFromProviderList('Alai Meedhu', itunesTracks, 5)
+  assert.strictEqual(m5?.artistName, 'Ilaiyaraaja, S.P. Balasubrahmanyam & Vani Jayaram')
+
+  const m6 = matchTrackArtistFromProviderList('Enna venum Folk Song', itunesTracks, 6)
+  assert.strictEqual(m6?.artistName, 'Ilaiyaraaja, Sudhakar, Saibaba & Grubb Singh')
+
+  console.log('  ✓ Track Artist matching successfully resolves authentic vocalists and purges CD rip artifacts.\n')
 
   console.log('=====================================================================')
   console.log('🎉 ALL FEDERATED CONSENSUS & QUEUE ARCHITECTURE TESTS PASSED CLEANLY!')

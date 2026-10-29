@@ -1,5 +1,5 @@
 import { graphEngine } from '../core/graphEngine'
-import { cleanRipNoise } from '../components/Modals/CustomizeAlbumModal'
+import { cleanRipNoise } from '../core/taxonomyUtils'
 
 async function runTests() {
   console.log('--- Starting Album & Folder Name Customization Tests ---')

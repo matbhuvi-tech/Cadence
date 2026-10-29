@@ -57,7 +57,7 @@ export class SidecarManager {
       curation: {
         rating: track.pendingSidecarEdits?.userRating || 5,
         listeningFlags: [track.pendingSidecarEdits?.listeningFlag || 'Reference Master'],
-        dynamicRangeScore: track.drScore,
+        dynamicRangeScore: track.drScore ?? undefined,
       },
       customTags: {
         ORGANIZATION_ENGINE: 'Cadence Core Relational v2.4',

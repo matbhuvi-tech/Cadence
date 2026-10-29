@@ -27,8 +27,15 @@ import {
   X,
   Volume2,
   Split,
+  Search,
+  SlidersHorizontal,
+  ArrowLeft,
+  Link2,
+  Unlink,
+  Folder,
+  Wand2,
 } from 'lucide-react'
-import { Track, Release, ReleaseConsensusResult, ConsensusFieldSource } from '../../core/types'
+import { Track, Release, ReleaseConsensusResult, ConsensusFieldSource, NavigationAnchor } from '../../core/types'
 import { AlbumCurationQueueItem, lookaheadQueuePrefetcher } from '../../services/curationQueueService'
 import {
   federatedResolversService,
@@ -39,6 +46,9 @@ import {
   compilationCanonicalizerService,
   ProposedTrackCanonicalization,
 } from '../../services/compilationCanonicalizerService'
+import { isDefectiveArtistTag, isPlaceholderTag, cleanRipNoise, extractMeaningfulFolderName } from '../../core/taxonomyUtils'
+import { creditInferenceService } from '../../services/creditInferenceService'
+import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 import { tauriBridge } from '../../services/tauriBridge'
 
 export interface CurationReconciliationStageProps {
@@ -57,6 +67,9 @@ export interface CurationReconciliationStageProps {
   onBackToLibrary: () => void
   showToast: (msg: string) => void
   isQueueCleared?: boolean
+  navigationAnchor?: NavigationAnchor | null
+  autoTriggerAi?: boolean
+  onReturnToAnchor?: () => void
 }
 
 export const CurationReconciliationStage: React.FC<CurationReconciliationStageProps> = ({
@@ -75,6 +88,9 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   onBackToLibrary,
   showToast,
   isQueueCleared = false,
+  navigationAnchor,
+  autoTriggerAi = false,
+  onReturnToAnchor,
 }) => {
   // Candidate loading state
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false)
@@ -82,6 +98,69 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   const [consensusResult, setConsensusResult] = useState<ReleaseConsensusResult | null>(null)
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [isPlaybackQuietNotice, setIsPlaybackQuietNotice] = useState(false)
+
+  // Stacking modal state
+  const [isStackPickerOpen, setIsStackPickerOpen] = useState(false)
+  const [stackSearchQuery, setStackSearchQuery] = useState('')
+
+  // Authority inference
+  const authorityInference = useMemo(() => {
+    return creditInferenceService.inferReleaseAuthority(release, tracks)
+  }, [release, tracks, release?.metadataAuthorityOverride])
+
+  const handleToggleAuthority = async () => {
+    if (!release) return
+    const nextAuth = authorityInference.authority === 'composer' ? 'performer' : 'composer'
+    await sqliteLibraryService.updateReleaseAuthorityOverride(release.id, nextAuth)
+    showToast(`Locked authority to ${nextAuth === 'composer' ? 'Composer (Soundtrack mode)' : 'Performer (Solo/Classical mode)'}`)
+  }
+
+  // Quick Action: Strip Rip Flags
+  const handleStripRipFlags = () => {
+    const rawTitle = selectedFields.title || albumItem?.albumTitle || ''
+    const cleaned = cleanRipNoise(rawTitle)
+    if (cleaned) {
+      setSelectedFields((prev) => ({ ...prev, title: cleaned }))
+      setQueryAlbum(cleaned)
+      showToast(`Stripped rip flags from title: "${cleaned}"`)
+    }
+  }
+
+  // Quick Action: Folder -> Album
+  const handleFolderToAlbum = () => {
+    const rawFolder = release?.folderName || tracks[0]?.folderName
+    const meaningful = extractMeaningfulFolderName(rawFolder, release?.folderPath, release?.artistCredit)
+    const cleaned = cleanRipNoise(meaningful || rawFolder || '')
+    if (cleaned) {
+      setSelectedFields((prev) => ({ ...prev, title: cleaned }))
+      setQueryAlbum(cleaned)
+      showToast(`Adopted folder descriptor as title: "${cleaned}"`)
+    }
+  }
+
+  // Quick Action: Album -> Folder
+  const handleAlbumToFolder = () => {
+    const title = selectedFields.title || albumItem?.albumTitle || ''
+    if (title && release) {
+      release.folderName = title
+      showToast(`Synced folder descriptor to match title: "${title}"`)
+    }
+  }
+
+  // Stacking: Unstack
+  const handleUnstack = async () => {
+    if (!release) return
+    await sqliteLibraryService.unlinkMasterRelease(release.id)
+    showToast(`Unstacked "${release.title}" into a standalone master.`)
+  }
+
+  // Stacking: Link to target master
+  const handleStackWith = async (targetMasterId: string) => {
+    if (!release) return
+    await sqliteLibraryService.setMasterReleaseLink(release.id, targetMasterId)
+    setIsStackPickerOpen(false)
+    showToast(`Stacked edition under master release.`)
+  }
 
   // Provenance Badge Helper
   const renderProvenanceBadge = (source?: ConsensusFieldSource, confidence?: number) => {
@@ -149,6 +228,12 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   // Track-level editable artists (keyed by trackId)
   const [trackArtists, setTrackArtists] = useState<Record<string, string>>({})
 
+  // User query parameter steering for external providers
+  const [queryAlbum, setQueryAlbum] = useState('')
+  const [queryArtist, setQueryArtist] = useState('')
+  const [queryYear, setQueryYear] = useState('')
+  const [isQueryRefineOpen, setIsQueryRefineOpen] = useState(false)
+
   // Case B compilation resolution state
   const [compilationClusters, setCompilationClusters] = useState<{
     soundtrackTitle: string
@@ -190,9 +275,27 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
       genre: initialGenre,
     })
 
+    // Prepare clean initial search terms for external database steering
+    const cleanInitialTitle = initialTitle.replace(/\s*(?:\[|\()?cd\s*rip(?:\s*#?\d*)?(?:\]|\))?/i, '').trim() || initialTitle
+    const cleanInitialArtist = isPlaceholderTag(initialArtist) || isDefectiveArtistTag(initialArtist, initialTitle) ? '' : initialArtist
+    setQueryAlbum(cleanInitialTitle)
+    setQueryArtist(cleanInitialArtist)
+    setQueryYear(initialYear)
+
+    // Auto-disclose query refinement if tag is an obvious placeholder or defective rip
+    if (isPlaceholderTag(initialArtist) || isDefectiveArtistTag(initialArtist, initialTitle)) {
+      setIsQueryRefineOpen(true)
+    } else {
+      setIsQueryRefineOpen(false)
+    }
+
     const initialTrackArtists: Record<string, string> = {}
     tracks.forEach((t) => {
-      initialTrackArtists[t.id] = t.artistCredit || ''
+      if (isDefectiveArtistTag(t.artistCredit, albumItem.albumTitle)) {
+        initialTrackArtists[t.id] = isPlaceholderTag(initialArtist) ? '' : initialArtist
+      } else {
+        initialTrackArtists[t.id] = t.artistCredit || ''
+      }
     })
     setTrackArtists(initialTrackArtists)
 
@@ -201,7 +304,15 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
   // Load external candidates on selection with 300ms debounce and playback quietness check
   const fetchCandidates = useCallback(
-    async (forceEvenIfPlaying = false) => {
+    async (
+      forceEvenIfPlaying = false,
+      queryOverrides?: {
+        albumTitle?: string
+        artistCredit?: string
+        composerName?: string
+        releaseYear?: string
+      }
+    ) => {
       if (!albumItem) return
 
       // Abort previous in-flight lookup
@@ -226,20 +337,28 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
         setIsPlaybackQuietNotice(false)
 
-        // 1. Check Lookahead Cache first for 2-of-3 consensus
-        let consensus = lookaheadQueuePrefetcher.getCachedConsensus(albumItem.albumId)
+        const searchAlbum = (queryOverrides?.albumTitle !== undefined ? queryOverrides.albumTitle : queryAlbum) || albumItem.albumTitle
+        const searchArtist = (queryOverrides?.artistCredit !== undefined ? queryOverrides.artistCredit : queryArtist) || albumItem.artistCredit
+        const searchComposer = (queryOverrides?.composerName !== undefined ? queryOverrides.composerName : release?.composerName) || tracks[0]?.composerName
+        const rawYear = queryOverrides?.releaseYear !== undefined ? queryOverrides.releaseYear : queryYear
+        const searchYear = rawYear ? Number(rawYear) : (release?.releaseYear || tracks[0]?.canonicalReleaseYear || 0)
+
+        const isCustomQuery = Boolean(queryOverrides) || (searchAlbum !== albumItem.albumTitle || searchArtist !== albumItem.artistCredit)
+
+        // 1. Check Lookahead Cache first for 2-of-3 consensus (only if not a custom user-steered search)
+        let consensus = !isCustomQuery ? lookaheadQueuePrefetcher.getCachedConsensus(albumItem.albumId) : null
         if (!consensus) {
-          const targetRelease = (release || {
+          const targetRelease = {
             id: albumItem.albumId,
             masterReleaseId: albumItem.albumId,
-            title: albumItem.albumTitle,
+            title: searchAlbum,
             folderName: albumItem.albumTitle,
             folderPath: '',
             targetFolderPath: '',
-            artistCredit: albumItem.artistCredit,
-            composerName: tracks[0]?.composerName,
-            releaseYear: tracks[0]?.canonicalReleaseYear || 0,
-            originalYear: tracks[0]?.originalYear || tracks[0]?.canonicalReleaseYear || 0,
+            artistCredit: searchArtist,
+            composerName: searchComposer,
+            releaseYear: searchYear || 0,
+            originalYear: searchYear || 0,
             label: 'Lossless Master',
             catalogNumber: '',
             mediaFormat: 'Lossless Audio',
@@ -263,7 +382,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
             genreTags: [],
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-          }) as unknown as Release
+          } as unknown as Release
 
           consensus = await federatedResolversService.resolve2of3ReleaseConsensus(
             targetRelease,
@@ -279,22 +398,38 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
         // Prepopulate staged fields with consensus values if present
         if (consensus) {
+          const resolvedMasterArtist = consensus?.albumArtist?.value || searchArtist
           setSelectedFields((prev) => ({
-            title: consensus?.albumTitle?.value || prev.title,
-            artistCredit: consensus?.albumArtist?.value || prev.artistCredit,
-            composerName: consensus?.composer?.value || prev.composerName,
+            title: consensus?.albumTitle?.value || searchAlbum || prev.title,
+            artistCredit: consensus?.albumArtist?.value || searchArtist || prev.artistCredit,
+            composerName: consensus?.composer?.value || searchComposer || prev.composerName,
             releaseYear: consensus?.releaseYear?.value
               ? String(consensus.releaseYear.value)
-              : prev.releaseYear,
+              : (searchYear ? String(searchYear) : prev.releaseYear),
             genre: consensus?.genre?.value || prev.genre,
           }))
+
+          setTrackArtists((prev) => {
+            const next = { ...prev }
+            tracks.forEach((t) => {
+              const tc = consensus?.trackConsensus?.[t.id]
+              if (tc?.artists?.value) {
+                next[t.id] = tc.artists.value
+              } else if (isDefectiveArtistTag(t.artistCredit, searchAlbum) || !next[t.id]) {
+                if (resolvedMasterArtist && !isPlaceholderTag(resolvedMasterArtist)) {
+                  next[t.id] = resolvedMasterArtist
+                }
+              }
+            })
+            return next
+          })
         }
 
         const result = await federatedResolversService.resolveActiveItemCandidate({
-          albumTitle: albumItem.albumTitle,
-          artistCredit: albumItem.artistCredit,
-          composerName: release?.composerName || tracks[0]?.composerName,
-          releaseYear: release?.releaseYear || tracks[0]?.canonicalReleaseYear,
+          albumTitle: searchAlbum,
+          artistCredit: searchArtist,
+          composerName: searchComposer,
+          releaseYear: searchYear || undefined,
           trackTitle: tracks[0]?.title,
           signal: controller.signal,
         })
@@ -322,7 +457,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
         }
       }
     },
-    [albumItem, release, tracks, queue, allTracks, allReleases, currentIndex]
+    [albumItem, release, tracks, queue, allTracks, allReleases, currentIndex, queryAlbum, queryArtist, queryYear]
   )
 
   // Debounced candidate fetching on album selection
@@ -415,6 +550,40 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     }
   }, [isCaseB, release, tracks, allReleases])
 
+  // Auto-trigger AI soundtrack canonicalization if requested
+  useEffect(() => {
+    if (autoTriggerAi && release && tracks.length > 0) {
+      setIsLoadingClusters(true)
+      compilationCanonicalizerService
+        .resolveCompilationSoundtracks(release, tracks, allReleases)
+        .then((res) => {
+          if (!res.success || res.tracks.length === 0) return
+          const resolvedMap = new Map<string, { soundtrackTitle: string; year?: number; composer?: string; tracks: Track[] }>()
+          res.tracks.forEach((propTrack: ProposedTrackCanonicalization) => {
+            const matchedTrk = tracks.find((t) => t.id === propTrack.trackId)
+            if (!matchedTrk) return
+            const soundtrack = propTrack.proposedOriginalAlbum || release.title
+            if (!resolvedMap.has(soundtrack)) {
+              resolvedMap.set(soundtrack, {
+                soundtrackTitle: soundtrack,
+                year: propTrack.proposedOriginalYear || release.releaseYear,
+                composer: propTrack.composer || matchedTrk.composerName,
+                tracks: [],
+              })
+            }
+            resolvedMap.get(soundtrack)!.tracks.push(matchedTrk)
+          })
+          if (resolvedMap.size > 0) {
+            setCompilationClusters(Array.from(resolvedMap.values()))
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          setIsLoadingClusters(false)
+        })
+    }
+  }, [autoTriggerAi, release, tracks, allReleases])
+
   // Toggle track selection in Case A
   const toggleTrack = (trackId: string) => {
     setSelectedTrackIds((prev) => {
@@ -461,9 +630,14 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
             edits.artistCredit = selectedFields.artistCredit
           }
         } else {
-          // In album_only mode, only stage artistCredit if user specifically edited this track's artist
+          // In album_only mode, stage artistCredit if track has a populated artist different from local
+          // or if local tag was defective
           const editedArtist = trackArtists[trk.id]
-          if (editedArtist !== undefined && editedArtist !== trk.artistCredit && editedArtist.trim().length > 0) {
+          if (
+            editedArtist !== undefined &&
+            editedArtist.trim().length > 0 &&
+            (editedArtist !== trk.artistCredit || isDefectiveArtistTag(trk.artistCredit, release?.title || albumItem?.albumTitle))
+          ) {
             edits.artistCredit = editedArtist.trim()
           }
         }
@@ -551,6 +725,34 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     showToast(`Staged virtual album split for ${consensusResult.subReleaseGroupings.length} releases in "${albumItem?.albumTitle}".`)
   }
 
+  // Handle executing a user-refined search across online databases
+  const handleExecuteRefinedSearch = (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    if (!queryAlbum.trim()) return
+    fetchCandidates(true, {
+      albumTitle: queryAlbum.trim(),
+      artistCredit: queryArtist.trim(),
+      releaseYear: queryYear.trim(),
+    })
+    showToast(`Searching online providers for "${queryAlbum.trim()}"...`)
+  }
+
+  // Handle resetting query parameters back to raw file tags
+  const handleResetQuery = () => {
+    const rawAlbum = albumItem?.albumTitle || ''
+    const rawArtist = release?.artistCredit || tracks[0]?.albumArtist || tracks[0]?.artistCredit || albumItem?.artistCredit || ''
+    const rawYear = String(release?.releaseYear || tracks[0]?.canonicalReleaseYear || '')
+    setQueryAlbum(rawAlbum)
+    setQueryArtist(rawArtist)
+    setQueryYear(rawYear)
+    fetchCandidates(true, {
+      albumTitle: rawAlbum,
+      artistCredit: rawArtist,
+      releaseYear: rawYear,
+    })
+    showToast('Reset search parameters to local container tags.')
+  }
+
   // Keyboard shortcut listener for (⌘↵)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -607,16 +809,27 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
       {/* 1. Action Header */}
       <div className="h-14 px-6 border-b border-white/[0.06] flex items-center justify-between shrink-0 bg-[#0E0F12]/80 backdrop-blur sticky top-0 z-20">
         <div className="flex items-center gap-3 min-w-0">
-          <div className="flex items-center gap-1.5 text-xs text-[#8E8E93]">
+          {navigationAnchor && onReturnToAnchor && (
+            <button
+              onClick={onReturnToAnchor}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 transition-all cursor-pointer font-medium text-xs shadow-sm shrink-0"
+              title="Return to the album in Listen view"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Return to Listen</span>
+            </button>
+          )}
+
+          <div className="flex items-center gap-1.5 text-xs text-[#8E8E93] min-w-0">
             <span>Curate</span>
             <span>/</span>
-            <span className="font-semibold text-white truncate max-w-[260px] md:max-w-[400px]">
+            <span className="font-semibold text-white truncate max-w-[200px] md:max-w-[320px]">
               {albumItem.albumTitle}
             </span>
           </div>
 
           <span
-            className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${
+            className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium shrink-0 ${
               albumItem.defectSeverity === 'critical'
                 ? 'bg-rose-500/15 text-rose-300 border border-rose-500/20'
                 : albumItem.defectSeverity === 'high'
@@ -662,6 +875,86 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
             <span>✓ Stage & Next →</span>
             <span className="text-[10px] opacity-70 font-mono hidden lg:inline">⌘↵</span>
           </button>
+        </div>
+      </div>
+
+      {/* 1.5 Curate Unified Control Bar: Authority Pill, Quick Actions, Stacking */}
+      <div className="px-6 py-2.5 bg-[#090A0D] border-b border-white/[0.05] flex items-center justify-between gap-3 flex-wrap text-xs">
+        {/* Left: Authority Inference & Toggle */}
+        <div className="flex items-center gap-2">
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-mono text-[11px] border ${
+              authorityInference.authority === 'composer'
+                ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+            }`}
+            title={authorityInference.rationale}
+          >
+            <span>{authorityInference.authority === 'composer' ? '🎼 Composer Authority' : '🎤 Performer Authority'}</span>
+            <span className="text-[9px] opacity-75">({(authorityInference.confidence * 100).toFixed(0)}%)</span>
+            {authorityInference.isOverride && <span className="text-[9px] text-amber-300 font-sans font-medium">Locked</span>}
+          </div>
+
+          <button
+            onClick={handleToggleAuthority}
+            className="text-[10px] px-2 py-1 rounded-md bg-white/[0.04] hover:bg-white/[0.08] text-neutral-300 hover:text-white border border-white/[0.08] transition-colors cursor-pointer"
+            title="Override authority between Composer (Soundtracks) and Performer (Classical/Solo)"
+          >
+            Switch to {authorityInference.authority === 'composer' ? 'Performer' : 'Composer'}
+          </button>
+        </div>
+
+        {/* Center: Quick Clean Actions */}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleStripRipFlags}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.04] hover:bg-white/[0.08] text-neutral-300 hover:text-white border border-white/[0.08] text-[11px] transition-all cursor-pointer"
+            title="Strip CD RIP, FLAC, bitrate tags, and brackets from album title"
+          >
+            <Wand2 className="w-3 h-3 text-[#D4AF37]" />
+            <span>Strip Rip Flags</span>
+          </button>
+
+          <button
+            onClick={handleFolderToAlbum}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.04] hover:bg-white/[0.08] text-neutral-300 hover:text-white border border-white/[0.08] text-[11px] transition-all cursor-pointer"
+            title="Adopt clean folder name as album title"
+          >
+            <Folder className="w-3 h-3 text-cyan-400" />
+            <span>Folder → Album</span>
+          </button>
+
+          <button
+            onClick={handleAlbumToFolder}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.04] hover:bg-white/[0.08] text-neutral-300 hover:text-white border border-white/[0.08] text-[11px] transition-all cursor-pointer"
+            title="Sync folder descriptor to match album title"
+          >
+            <Folder className="w-3 h-3 text-emerald-400" />
+            <span>Album → Folder</span>
+          </button>
+        </div>
+
+        {/* Right: Edition Stacking Controls */}
+        <div className="flex items-center gap-2">
+          {release?.masterReleaseId && release.masterReleaseId !== release.id ? (
+            <button
+              onClick={handleUnstack}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/25 text-[11px] transition-all cursor-pointer"
+              title="Detach this edition to become an independent standalone master"
+            >
+              <Unlink className="w-3 h-3" />
+              <span>Unstack Edition</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => setIsStackPickerOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/25 text-[11px] transition-all cursor-pointer"
+              title="Link this release as a variant/edition under another master release"
+            >
+              <Link2 className="w-3 h-3" />
+              <span>Stack Edition...</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -837,16 +1130,98 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
               <Sparkles className="w-4 h-4 text-[#D4AF37]" />
               <span>4-Way Metadata Provider Reconciliation</span>
             </div>
-            {fetchError && (
-              <div className="flex items-center gap-1.5 text-xs text-amber-300">
-                <AlertCircle className="w-3.5 h-3.5" />
-                <span>{fetchError}</span>
-                <button onClick={() => fetchCandidates(true)} className="underline hover:text-white ml-1 cursor-pointer">
-                  Retry
+            <div className="flex items-center gap-2">
+              {fetchError && (
+                <div className="flex items-center gap-1.5 text-xs text-amber-300 mr-2">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  <span>{fetchError}</span>
+                  <button onClick={() => fetchCandidates(true)} className="underline hover:text-white ml-1 cursor-pointer">
+                    Retry
+                  </button>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsQueryRefineOpen((prev) => !prev)}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
+                  isQueryRefineOpen
+                    ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/40 shadow-sm'
+                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-white/80 hover:text-white border border-white/[0.08]'
+                }`}
+                title="Adjust album, artist, or year search parameters used to query online metadata databases"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>{isQueryRefineOpen ? 'Hide Query Parameters' : 'Refine Search Query'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Refine Search Query Bar (Progressive Disclosure) */}
+          {isQueryRefineOpen && (
+            <form
+              onSubmit={handleExecuteRefinedSearch}
+              className="p-3 rounded-xl bg-black/40 border border-[#D4AF37]/30 flex flex-col md:flex-row items-stretch md:items-center gap-2.5 shadow-inner transition-all"
+            >
+              <div className="flex items-center gap-1.5 text-[#D4AF37] shrink-0 text-xs font-medium px-1">
+                <Search className="w-3.5 h-3.5" />
+                <span>Search Parameters:</span>
+              </div>
+              <div className="flex-1 grid grid-cols-1 sm:grid-cols-12 gap-2">
+                <div className="sm:col-span-5 relative">
+                  <input
+                    type="text"
+                    value={queryAlbum}
+                    onChange={(e) => setQueryAlbum(e.target.value)}
+                    placeholder="Album Title (e.g. Baasha)"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
+                  />
+                  <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Album</span>
+                </div>
+                <div className="sm:col-span-4 relative">
+                  <input
+                    type="text"
+                    value={queryArtist}
+                    onChange={(e) => setQueryArtist(e.target.value)}
+                    placeholder="Artist / Composer (e.g. Deva)"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
+                  />
+                  <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Artist</span>
+                </div>
+                <div className="sm:col-span-3 relative">
+                  <input
+                    type="text"
+                    value={queryYear}
+                    onChange={(e) => setQueryYear(e.target.value)}
+                    placeholder="Year (e.g. 1995)"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
+                  />
+                  <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Year</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                <button
+                  type="submit"
+                  disabled={isLoadingCandidates || !queryAlbum.trim()}
+                  className="px-3 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#D4AF37]/90 text-black font-semibold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-[#D4AF37]/15 disabled:opacity-50 cursor-pointer"
+                >
+                  {isLoadingCandidates ? (
+                    <RotateCcw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Search className="w-3.5 h-3.5" />
+                  )}
+                  <span>Re-Search (↵)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetQuery}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] text-[#8E8E93] hover:text-white text-xs transition-all cursor-pointer"
+                  title="Reset to local container tags"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
                 </button>
               </div>
-            )}
-          </div>
+            </form>
+          )}
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
@@ -1269,6 +1644,69 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
               <span className="font-semibold">{selectedArtwork.providerLabel}</span>
               <span>·</span>
               <span className="font-mono text-[#D4AF37]">{selectedArtwork.coverResolution}</span>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Stacking Release Picker Modal */}
+      {isStackPickerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-[#12141A] border border-white/10 rounded-2xl w-full max-w-lg p-5 shadow-2xl flex flex-col max-h-[80vh]">
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <Link2 className="w-4 h-4 text-indigo-400" />
+                <h3 className="font-semibold text-white text-sm">Stack with Master Release</h3>
+              </div>
+              <button
+                onClick={() => setIsStackPickerOpen(false)}
+                className="p-1 rounded-md hover:bg-white/10 text-neutral-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-neutral-400 my-3">
+              Select another release to attach <span className="text-white font-medium">"{albumItem.albumTitle}"</span> as a pressing variant:
+            </p>
+
+            <div className="relative mb-3">
+              <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                value={stackSearchQuery}
+                onChange={(e) => setStackSearchQuery(e.target.value)}
+                placeholder="Search releases..."
+                className="w-full pl-9 pr-3 py-1.5 bg-black/40 border border-white/10 rounded-lg text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-indigo-400"
+              />
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-1.5 min-h-[200px] max-h-[360px] pr-1">
+              {allReleases
+                .filter((r) => r.id !== release?.id)
+                .filter((r) => !stackSearchQuery || r.title.toLowerCase().includes(stackSearchQuery.toLowerCase()))
+                .slice(0, 30)
+                .map((r) => (
+                  <div
+                    key={r.id}
+                    onClick={() => handleStackWith(r.id)}
+                    className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.02] hover:bg-white/[0.06] border border-white/[0.04] hover:border-indigo-500/40 transition-all cursor-pointer group"
+                  >
+                    <div className="min-w-0 pr-3">
+                      <div className="text-xs font-medium text-white truncate group-hover:text-indigo-300">
+                        {r.title}
+                      </div>
+                      <div className="text-[10px] text-neutral-400 truncate">
+                        {r.artistCredit || r.composerName || 'Unknown Artist'} • {r.releaseYear || 'Unknown Year'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="px-2.5 py-1 rounded-md bg-indigo-500/20 text-indigo-300 text-[10px] font-medium shrink-0 group-hover:bg-indigo-500 group-hover:text-white transition-all"
+                    >
+                      Attach
+                    </button>
+                  </div>
+                ))}
             </div>
           </div>
         </div>

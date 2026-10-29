@@ -303,7 +303,7 @@ export class AgentActionDispatcher {
         case 'detect_transcode_anomalies': {
           const allTracks = graphEngine.getAllTracks()
           const hiResCandidates = allTracks.filter((t) => (t.bitDepth ?? 0) >= 24 || (t.sampleRate ?? 0) >= 88200)
-          const suspiciousTracks = hiResCandidates.filter((t) => t.drScore > 0 && t.drScore <= 7)
+          const suspiciousTracks = hiResCandidates.filter((t) => t.drScore != null && t.drScore > 0 && t.drScore <= 7)
 
           return {
             success: true,
@@ -384,7 +384,7 @@ export class AgentActionDispatcher {
           const reqFormat = command.args.format
 
           const eligible = graphEngine.getAllTracks().filter((t) => {
-            if (t.drScore > 0 && t.drScore < minDr) return false
+            if (t.drScore != null && t.drScore > 0 && t.drScore < minDr) return false
             if (reqFormat && !matchesFormat(t, reqFormat)) return false
             return true
           })

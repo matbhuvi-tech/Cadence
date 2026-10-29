@@ -20,7 +20,7 @@ import {
   Smartphone,
   PanelRight,
 } from 'lucide-react'
-import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope } from './core/types'
+import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope, NavigationAnchor } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
 import { auditService } from './services/auditService'
 import { storagePersistence } from './core/storagePersistence'
@@ -37,7 +37,6 @@ import { TwoPhaseCommitModal } from './components/Modals/TwoPhaseCommitModal'
 import { BatchRuleModal } from './components/Modals/BatchRuleModal'
 import { SidecarExportModal } from './components/Modals/SidecarExportModal'
 import { ImportLibraryModal } from './components/Modals/ImportLibraryModal'
-import { CustomizeAlbumModal } from './components/Modals/CustomizeAlbumModal'
 import { BatchDiffTracksModal } from './components/Modals/BatchDiffTracksModal'
 import { CompilationProvenanceModal } from './components/Modals/CompilationProvenanceModal'
 import { GuidedTutorialModal } from './components/Tutorial/GuidedTutorialModal'
@@ -182,7 +181,8 @@ function AppContent() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false)
   const [isBatchDiffModalOpen, setIsBatchDiffModalOpen] = useState(false)
   const [compilationModalRelease, setCompilationModalRelease] = useState<Release | null>(null)
-  const [customizingRelease, setCustomizingRelease] = useState<Release | null>(null)
+  const [navigationAnchor, setNavigationAnchor] = useState<NavigationAnchor | null>(null)
+  const [curateAutoTriggerAi, setCurateAutoTriggerAi] = useState(false)
   const [sidecarTrackId, setSidecarTrackId] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
   const [isActivityPopoverOpen, setIsActivityPopoverOpen] = useState(false)
@@ -304,7 +304,13 @@ function AppContent() {
         setFocusedWorkbenchTrack(null)
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'i' || e.key === 'I')) {
         e.preventDefault()
-        toggleRightSidebar('inspector')
+        if (selectedAlbumId) {
+          handleInspectRelease(selectedAlbumId)
+        } else if (currentRelease) {
+          handleInspectRelease(currentRelease.id)
+        } else if (releases.length > 0) {
+          handleInspectRelease(releases[0].id)
+        }
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'e' || e.key === 'E')) {
         e.preventDefault()
         handleOpenCurate()
@@ -1103,13 +1109,15 @@ function AppContent() {
     showToast('Active Master Variant Updated')
   }
 
-  const handleInspectRelease = (releaseId: string) => {
-    const relTracks = tracks.filter((t) => t.releaseId === releaseId)
-    if (relTracks.length > 0) {
-      setSelectedTrackId(relTracks[0].id)
-    }
-    setIsRightSidebarOpen(true)
-    setRightSidebarTab('inspector')
+  const handleInspectRelease = (releaseId: string, autoTriggerAi = false) => {
+    setSelectedAlbumId(releaseId)
+    setNavigationAnchor({
+      returnView: 'library',
+      selectedAlbumId: releaseId,
+      scrollPosition: window.scrollY || 0,
+    })
+    setCurateAutoTriggerAi(autoTriggerAi)
+    setTopMode('curate')
   }
 
   const handleToggleTrackSelection = (trackId: string, _isMulti: boolean) => {
@@ -1296,10 +1304,10 @@ function AppContent() {
       openBatchDiffModal: () => setIsBatchDiffModalOpen(true),
       closeBatchDiffModal: () => setIsBatchDiffModalOpen(false),
       openCustomizeModal: () => {
-        if (currentRelease) setCustomizingRelease(currentRelease)
-        else if (releases.length > 0) setCustomizingRelease(releases[0])
+        const target = currentRelease || releases[0]
+        if (target) handleInspectRelease(target.id)
       },
-      closeCustomizeModal: () => setCustomizingRelease(null),
+      closeCustomizeModal: () => setTopMode('library'),
       openCommandBar: () => setIsCommandBarOpen(true),
       closeCommandBar: () => setIsCommandBarOpen(false),
       selectTrack: (trackId) => {
@@ -1334,8 +1342,8 @@ function AppContent() {
         else if (modalName === 'command_bar' || modalName === 'spotlight') setIsCommandBarOpen(true)
         else if (modalName === 'agent') setIsAgentDrawerOpen(true)
         else if (modalName === 'customize') {
-          if (payload) setCustomizingRelease(payload)
-          else if (currentRelease) setCustomizingRelease(currentRelease)
+          const target = payload || currentRelease || releases[0]
+          if (target) handleInspectRelease(target.id)
         }
       },
       openBatchProposal: (data: BatchProposalData) => setActiveBatchProposal(data),
@@ -1693,12 +1701,12 @@ function AppContent() {
             <Smartphone className="w-3.5 h-3.5" />
           </button>
 
-          {/* Contextual Inspector Toggle (⌘I) */}
+          {/* Sidecar Drawer Toggle (Queue / Playlists) */}
           <button
-            onClick={() => toggleRightSidebar('inspector')}
-            title={isRightSidebarOpen && rightSidebarTab === 'inspector' ? 'Hide Track & Album Inspector (⌘I)' : 'Show Track & Album Inspector (⌘I)'}
+            onClick={() => toggleRightSidebar()}
+            title={isRightSidebarOpen ? 'Hide Right Panel' : 'Show Right Panel (Queue & Playlists)'}
             className={`p-1.5 rounded-[7px] border transition-all cursor-pointer ${
-              isRightSidebarOpen && rightSidebarTab === 'inspector'
+              isRightSidebarOpen
                 ? 'bg-white/[0.15] border-white/[0.15] text-white'
                 : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
             }`}
@@ -1840,13 +1848,33 @@ function AppContent() {
             releases={releases}
             auditIssues={auditIssues}
             initialSelectedAlbumId={selectedAlbumId}
+            navigationAnchor={navigationAnchor}
+            autoTriggerAi={curateAutoTriggerAi}
+            onReturnToAnchor={() => {
+              if (navigationAnchor) {
+                setSelectedAlbumId(navigationAnchor.selectedAlbumId)
+                const scrollPos = navigationAnchor.scrollPosition
+                setNavigationAnchor(null)
+                setCurateAutoTriggerAi(false)
+                setTopMode('library')
+                requestAnimationFrame(() => {
+                  window.scrollTo({ top: scrollPos, behavior: 'instant' })
+                })
+              } else {
+                setTopMode('library')
+              }
+            }}
             onOpenCommitModal={() => {
               if (isPlaying) {
                 showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
               }
               setIsCommitModalOpen(true)
             }}
-            onBackToLibrary={() => setTopMode('library')}
+            onBackToLibrary={() => {
+              setNavigationAnchor(null)
+              setCurateAutoTriggerAi(false)
+              setTopMode('library')
+            }}
             showToast={showToast}
             onRefreshLibrary={() => {
               refreshFromEngine()
@@ -2028,7 +2056,7 @@ function AppContent() {
                 onSelectAllTracks={handleSelectAllTracks}
                 onSelectVariant={handleSelectVariant}
                 onInspectRelease={handleInspectRelease}
-                onCustomizeRelease={(rel) => setCustomizingRelease(rel)}
+                onCustomizeRelease={(rel) => handleInspectRelease(rel.id)}
                 onUpdateReleaseDetails={handleUpdateReleaseDetails}
                 onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
                 onApplyBatchEdits={handleApplyBatchEdits}
@@ -2072,21 +2100,9 @@ function AppContent() {
             </div>
           )}
 
-          {/* 3. Unified Right Sidebar: Queue, Playlists, and Inspector (⌘I / Q) */}
+          {/* 3. Unified Right Sidebar: Queue & Playlists */}
           {isRightSidebarOpen && (
             <UnifiedRightSidebar
-              track={currentTrack}
-              release={currentRelease}
-              allReleases={releases}
-              selectedTrackIds={selectedTrackIds}
-              activeInspectorTab={rightPanelTab}
-              onInspectorTabChange={setRightPanelTab}
-              onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
-              onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
-              onAddCredit={handleAddCredit}
-              onApplyMerge={handleApplyMerge}
-              onReverifyChecksum={handleReverifyChecksum}
-              onOpenFocusedWorkbench={(t) => setFocusedWorkbenchTrack(t)}
               onOpenCreatePlaylist={(trks) => {
                 setInitialPlaylistTracks(trks || [])
                 setIsCreatePlaylistOpen(true)
@@ -2172,15 +2188,13 @@ function AppContent() {
           }
         }}
         onInspectEntity={(entity) => {
-          // Non-destructive Sidecar Diff Inspector
           if (entity.type === 'album') {
             handleInspectRelease(entity.id)
-            setRightPanelTab('diff')
           } else if (entity.type === 'track') {
-            setSelectedTrackId(entity.id)
-            setIsRightSidebarOpen(true)
-            setRightSidebarTab('inspector')
-            setRightPanelTab('diff')
+            const trk = tracks.find((t) => t.id === entity.id)
+            if (trk) {
+              handleInspectRelease(trk.releaseId)
+            }
           } else if (entity.type === 'artist') {
             const isComposer = entity.role === 'Composer'
             if (isComposer) {
@@ -2270,14 +2284,7 @@ function AppContent() {
         />
       )}
 
-      {/* Customize Album & Folder Modal */}
-      <CustomizeAlbumModal
-        isOpen={Boolean(customizingRelease)}
-        release={customizingRelease || undefined}
-        tracksCount={tracks.filter((t) => t.releaseId === customizingRelease?.id).length}
-        onClose={() => setCustomizingRelease(null)}
-        onSave={handleSaveAlbumCustomization}
-      />
+
 
       {/* Sidecar Inspector Modal */}
       {sidecarTrackId && (

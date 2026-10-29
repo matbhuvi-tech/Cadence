@@ -1,11 +1,12 @@
 import { Track } from '../core/types'
+import { FEATURES } from '../config/features'
 
 export interface DRMeasurement {
-  drScore: number
+  drScore: number | null
   peakLevelDb: number
   rmsLevelDb: number
   hasInterSampleClipping: boolean
-  source: 'embedded_tag' | 'replaygain_calc' | 'decoded_pcm' | 'estimated'
+  source: 'embedded_tag' | 'replaygain_calc' | 'decoded_pcm' | 'estimated' | 'bypassed'
 }
 
 export interface IntegrityReport {
@@ -15,7 +16,7 @@ export interface IntegrityReport {
   isChecksumMatch: boolean
   accurateRipStatus: 'CONFIRMED' | 'DIFFERENT_PRESSING' | 'NOT_FOUND' | 'CORRUPT'
   accurateRipConfidence: number
-  drScore: number
+  drScore: number | null
   peakLevelDb: number
   rmsLevelDb: number
   hasInterSampleClipping: boolean
@@ -28,6 +29,16 @@ export class IntegrityScanner {
    * from embedded DR tags, ReplayGain values, or audio profile.
    */
   public static calculateAccurateDR(metadata: any, fileName?: string): DRMeasurement {
+    if (!FEATURES.DYNAMIC_RANGE) {
+      return {
+        drScore: null,
+        peakLevelDb: 0,
+        rmsLevelDb: 0,
+        hasInterSampleClipping: false,
+        source: 'bypassed',
+      }
+    }
+
     const common = metadata?.common || {}
     const native = metadata?.native || {}
 
@@ -177,10 +188,10 @@ export class IntegrityScanner {
       isChecksumMatch: isMatch,
       accurateRipStatus: isMatch ? 'CONFIRMED' : 'CORRUPT',
       accurateRipConfidence: track.accurateRipConfidence,
-      drScore: track.drScore,
+      drScore: track.drScore ?? null,
       peakLevelDb: isMatch ? -0.1 : 0.15,
       rmsLevelDb: isMatch ? -19.4 : -9.8,
-      hasInterSampleClipping: !isMatch || track.drScore < 8,
+      hasInterSampleClipping: !isMatch || (track.drScore != null && track.drScore < 8),
       status: isMatch ? 'BIT_PERFECT' : 'BIT_ROT_DETECTED',
     }
   }
@@ -192,7 +203,10 @@ export class IntegrityScanner {
    * DR8-9 = Mild Compression (Warm Amber)
    * DR < 8 = Brickwalled / Loudness War (Coral Red)
    */
-  public static getDrBadgeClass(drScore: number): { bg: string; text: string; label: string } {
+  public static getDrBadgeClass(drScore: number | null | undefined): { bg: string; text: string; label: string } {
+    if (drScore == null) {
+      return { bg: 'bg-white/5 border-white/10', text: 'text-neutral-500', label: 'Bypassed' }
+    }
     if (drScore >= 14) {
       return { bg: 'bg-[#10B981]/15 border-[#10B981]/30', text: 'text-[#10B981]', label: 'Pristine Dynamic' }
     } else if (drScore >= 10) {

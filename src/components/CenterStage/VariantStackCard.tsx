@@ -31,6 +31,7 @@ import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { graphEngine } from '../../core/graphEngine'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
+import { FEATURES } from '../../config/features'
 
 interface VariantStackCardProps {
   release: Release
@@ -494,7 +495,7 @@ export const VariantStackCard: React.FC<VariantStackCardProps> = ({
               composer={release.composerName}
               resolution={release.artwork?.resolution || 'HD Archival'}
               audioSpec={`${telemetry.format} ${telemetry.sampleRate}`}
-              drScore={activeVariant?.drScore}
+              drScore={FEATURES.DYNAMIC_RANGE ? (activeVariant?.drScore ?? undefined) : undefined}
               provider="local"
               providerLabel="Archival Album Cover"
               previewSize={300}

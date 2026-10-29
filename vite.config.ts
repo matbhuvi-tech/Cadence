@@ -1212,10 +1212,17 @@ function localLibraryScannerPlugin(): Plugin {
             .replace(/[\s_-]+/g, ' ')
             .trim()
 
-        const cleanArtist = cleanTerm(artist)
-        const cleanComposer = cleanTerm(composer)
-        const cleanTitle = cleanTerm(title)
-        const cleanAlbum = cleanTerm(album)
+        let cleanArtist = cleanTerm(artist)
+        let cleanComposer = cleanTerm(composer)
+        let cleanTitle = cleanTerm(title)
+        let cleanAlbum = cleanTerm(album)
+
+        if (/^(unknown|unknown\s*artist|various|various\s*artists|untitled|untagged|cd\s*rip)$/i.test(cleanArtist)) {
+          cleanArtist = ''
+        }
+        if (/^(unknown|unknown\s*composer|various|various\s*composers|untitled|untagged)$/i.test(cleanComposer)) {
+          cleanComposer = ''
+        }
 
         let foundItem: any = null
 
@@ -1313,6 +1320,26 @@ function localLibraryScannerPlugin(): Plugin {
           return
         }
 
+        let providerTracks: any[] = []
+        if (foundItem.collectionId) {
+          try {
+            const lookupUrl = `https://itunes.apple.com/lookup?id=${foundItem.collectionId}&entity=song`
+            const lookupRes = await fetch(lookupUrl, { signal: AbortSignal.timeout(4000) })
+            if (lookupRes.ok) {
+              const lookupData = (await lookupRes.json()) as any
+              if (lookupData.results && lookupData.results.length > 1) {
+                providerTracks = lookupData.results
+                  .filter((item: any) => item.wrapperType === 'track')
+                  .map((t: any) => ({
+                    trackNumber: t.trackNumber,
+                    trackName: t.trackName,
+                    artistName: t.artistName,
+                  }))
+              }
+            }
+          } catch {}
+        }
+
         const highResArt = foundItem.artworkUrl100
           ? foundItem.artworkUrl100.replace('100x100bb.jpg', '3000x3000bb.jpg')
           : ''
@@ -1334,6 +1361,7 @@ function localLibraryScannerPlugin(): Plugin {
             barcodeUpc: '',
             coverArtUrl: highResArt,
             coverResolution: '3000x3000px (Apple Music Master Scan)',
+            tracks: providerTracks,
           })
         )
       })
@@ -1577,6 +1605,12 @@ function localLibraryScannerPlugin(): Plugin {
                       const trackArtist = matchedTrack?.['artist-credit']?.map((a: any) => a.name).join(', ') || releaseArtist
                       const releaseYear = detail.date ? parseInt(detail.date.slice(0, 4), 10) : undefined
 
+                      const mbTracks = (tracks || []).map((t: any) => ({
+                        trackNumber: parseInt(t.position, 10),
+                        trackName: t.title,
+                        artistName: t['artist-credit']?.map((a: any) => a.name).join(', ') || releaseArtist,
+                      }))
+
                       res.statusCode = 200
                       res.end(
                         JSON.stringify({
@@ -1596,6 +1630,7 @@ function localLibraryScannerPlugin(): Plugin {
                           barcodeUpc: detail.barcode || '',
                           coverArtUrl: `https://coverartarchive.org/release/${topRel.id}/front-500`,
                           coverResolution: 'Archival 1000px (Cover Art Archive)',
+                          tracks: mbTracks,
                         })
                       )
                       return

@@ -38,6 +38,7 @@ import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { getCuratedAlbumArtwork } from '../../core/taxonomyUtils'
 import { backdropAnalyzer } from '../../services/backdropAnalyzer'
+import { FEATURES } from '../../config/features'
 
 const IndeterminateCheckbox: React.FC<{
   checked: boolean
@@ -937,23 +938,29 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
 
                           {/* Col 4: Inline DR Score & Spectral Meter */}
                           <div className="col-span-2 flex items-center gap-2">
-                            <div
-                              className={`px-1.5 py-0.2 rounded border font-mono font-bold text-[10px] ${drClass.bg} ${drClass.text}`}
-                            >
-                              DR{track.drScore}
-                            </div>
-                            <div className="w-16 h-2 bg-white/[0.05] rounded-full overflow-hidden flex">
-                              <div
-                                className={`h-full rounded-full ${
-                                  track.drScore >= 14
-                                    ? 'bg-[#10B981]'
-                                    : track.drScore >= 10
-                                    ? 'bg-[#00F5FF]'
-                                    : 'bg-[#F59E0B]'
-                                }`}
-                                style={{ width: `${Math.min(100, (track.drScore / 18) * 100)}%` }}
-                              />
-                            </div>
+                            {FEATURES.DYNAMIC_RANGE && track.drScore != null ? (
+                              <>
+                                <div
+                                  className={`px-1.5 py-0.2 rounded border font-mono font-bold text-[10px] ${drClass.bg} ${drClass.text}`}
+                                >
+                                  DR{track.drScore}
+                                </div>
+                                <div className="w-16 h-2 bg-white/[0.05] rounded-full overflow-hidden flex">
+                                  <div
+                                    className={`h-full rounded-full ${
+                                      track.drScore >= 14
+                                        ? 'bg-[#10B981]'
+                                        : track.drScore >= 10
+                                        ? 'bg-[#00F5FF]'
+                                        : 'bg-[#F59E0B]'
+                                    }`}
+                                    style={{ width: `${Math.min(100, (track.drScore / 18) * 100)}%` }}
+                                  />
+                                </div>
+                              </>
+                            ) : (
+                              <span className="text-[10px] text-zinc-600 font-mono">—</span>
+                            )}
                           </div>
 
                           {/* Col 5: Sample Format */}
@@ -1143,7 +1150,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                             subtitle={track.artistCredit}
                             composer={track.composerName}
                             audioSpec={track.sampleRateStr}
-                            drScore={track.drScore}
+                            drScore={FEATURES.DYNAMIC_RANGE ? (track.drScore ?? undefined) : undefined}
                             provider="local"
                             previewSize={260}
                           >
@@ -1193,23 +1200,29 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
 
                     {/* Col 4: Inline DR Score & Spectral Meter */}
                     <div className="col-span-2 flex items-center gap-2">
-                      <div
-                        className={`px-1.5 py-0.2 rounded border font-mono font-bold text-[10px] ${drClass.bg} ${drClass.text}`}
-                      >
-                        DR{track.drScore}
-                      </div>
-                      <div className="w-16 h-2 bg-white/[0.05] rounded-full overflow-hidden flex">
-                        <div
-                          className={`h-full rounded-full ${
-                            track.drScore >= 14
-                              ? 'bg-[#10B981]'
-                              : track.drScore >= 10
-                              ? 'bg-[#00F5FF]'
-                              : 'bg-[#F59E0B]'
-                          }`}
-                          style={{ width: `${Math.min(100, (track.drScore / 18) * 100)}%` }}
-                        />
-                      </div>
+                      {FEATURES.DYNAMIC_RANGE && track.drScore != null ? (
+                        <>
+                          <div
+                            className={`px-1.5 py-0.2 rounded border font-mono font-bold text-[10px] ${drClass.bg} ${drClass.text}`}
+                          >
+                            DR{track.drScore}
+                          </div>
+                          <div className="w-16 h-2 bg-white/[0.05] rounded-full overflow-hidden flex">
+                            <div
+                              className={`h-full rounded-full ${
+                                track.drScore >= 14
+                                  ? 'bg-[#10B981]'
+                                  : track.drScore >= 10
+                                  ? 'bg-[#00F5FF]'
+                                  : 'bg-[#F59E0B]'
+                              }`}
+                              style={{ width: `${Math.min(100, (track.drScore / 18) * 100)}%` }}
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <span className="text-[10px] text-zinc-600 font-mono">—</span>
+                      )}
                     </div>
 
                     {/* Col 5: Sample Format */}

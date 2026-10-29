@@ -11,7 +11,7 @@ import { Track, Release } from '../core/types'
 import { tauriBridge } from './tauriBridge'
 import { ambientCurationService } from './ambientCurationService'
 import { graphEngine } from '../core/graphEngine'
-import { stripRipNoiseAndTags } from '../core/taxonomyUtils'
+import { stripRipNoiseAndTags, isDefectiveArtistTag, isPlaceholderTag } from '../core/taxonomyUtils'
 
 export interface ProposedTrackCanonicalization {
   trackId: string
@@ -151,17 +151,43 @@ class CompilationCanonicalizerService {
           }
         }
 
+        const isSameAlbum = Boolean(
+          proposedAlbum &&
+          stripRipNoiseAndTags(proposedAlbum).toLowerCase().trim() ===
+            stripRipNoiseAndTags(release.title).toLowerCase().trim()
+        )
+
         const isCompilationTrack =
           aiMatch?.isCompilationTrack !== undefined
             ? Boolean(aiMatch.isCompilationTrack)
-            : Boolean(proposedAlbum && proposedAlbum.toLowerCase() !== release.title.toLowerCase())
+            : !isSameAlbum
 
-        // Default selected if we have a proposed original album and reasonable confidence
+        const proposedComposer = (aiMatch?.canonicalComposer || track.composerName || '').trim()
+        const proposedVocalists = (aiMatch?.primaryVocalists || track.artistCredit || '').trim()
+
+        // Check if there is genuine enrichment or change
+        const hasAlbumChange = !isSameAlbum && (
+          proposedAlbum.toLowerCase() !== (track.originalAlbum || '').toLowerCase() ||
+          Boolean(proposedYear && proposedYear !== track.originalYear)
+        )
+        const hasVocalistChange = Boolean(
+          proposedVocalists &&
+          proposedVocalists !== track.artistCredit &&
+          (isDefectiveArtistTag(track.artistCredit, release.title) || !track.artistCredit)
+        )
+        const hasComposerChange = Boolean(
+          proposedComposer &&
+          proposedComposer !== track.composerName &&
+          (!track.composerName || isPlaceholderTag(track.composerName))
+        )
+        const hasYearChange = Boolean(
+          proposedYear &&
+          proposedYear !== track.originalYear &&
+          proposedYear !== release.releaseYear
+        )
+
+        const hasChange = hasAlbumChange || hasVocalistChange || hasComposerChange || hasYearChange
         const confidence = typeof aiMatch?.confidence === 'number' ? aiMatch.confidence : 0.95
-        const hasChange =
-          proposedAlbum &&
-          (proposedAlbum.toLowerCase() !== (track.originalAlbum || '').toLowerCase() ||
-            proposedYear !== track.originalYear)
 
         return {
           trackId: track.id,
@@ -171,8 +197,8 @@ class CompilationCanonicalizerService {
           proposedOriginalAlbum: proposedAlbum,
           currentOriginalYear: track.originalYear || track.canonicalReleaseYear,
           proposedOriginalYear: proposedYear,
-          composer: aiMatch?.canonicalComposer || track.composerName,
-          primaryVocalists: aiMatch?.primaryVocalists || track.artistCredit,
+          composer: proposedComposer || track.composerName,
+          primaryVocalists: proposedVocalists || track.artistCredit,
           isCompilationTrack,
           confidence,
           notes: aiMatch?.notes,
@@ -245,13 +271,28 @@ class CompilationCanonicalizerService {
           }
 
           targetTrack.isCanonicalAlbumTrack = false
+
+          if (item.primaryVocalists && item.primaryVocalists.trim()) {
+            targetTrack.artistCredit = item.primaryVocalists.trim()
+          }
+          if (item.composer && item.composer.trim()) {
+            targetTrack.composerName = item.composer.trim()
+          }
         }
 
         // 3. Staged sidecar mutation in graphEngine
-        graphEngine.updateTrackSidecar(item.trackId, {
+        const sidecarEdits: Record<string, any> = {
           originalAlbum: item.proposedOriginalAlbum,
           originalYear: item.proposedOriginalYear,
-        })
+        }
+        if (item.primaryVocalists && item.primaryVocalists.trim()) {
+          sidecarEdits.artistCredit = item.primaryVocalists.trim()
+        }
+        if (item.composer && item.composer.trim()) {
+          sidecarEdits.composerName = item.composer.trim()
+        }
+
+        graphEngine.updateTrackSidecar(item.trackId, sidecarEdits)
 
         updatedCount++
       } catch (e) {

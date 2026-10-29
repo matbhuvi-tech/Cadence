@@ -615,6 +615,8 @@ export class SqliteLibraryService {
           },
           isCompilation: Boolean(r.isCompilation),
           physicalComboTitle: (r as any).physicalComboTitle || r.physicalComboTitle,
+          metadataAuthorityOverride: (r as any).metadataAuthorityOverride || (r as any).metadata_authority_override || undefined,
+          genre: (r as any).genre || undefined,
           variants: groupInfo?.variants || [],
           discsCount: 1,
           tracksCount: rTracks.length,
@@ -1043,6 +1045,73 @@ export class SqliteLibraryService {
   }
 
   /**
+   * Persists release authority override ('composer' | 'performer') directly into SQLite
+   */
+  public async updateReleaseAuthorityOverride(
+    releaseId: string,
+    authority: 'composer' | 'performer'
+  ): Promise<void> {
+    const rel = graphEngine.getAllReleases().find((r) => r.id === releaseId)
+    if (rel) {
+      rel.metadataAuthorityOverride = authority
+    }
+    if (tauriBridge.isTauri()) {
+      try {
+        const rawReleases = await tauriBridge.dbGetReleases()
+        const existing = rawReleases.find((r) => r.id === releaseId)
+        if (existing) {
+          const updated = {
+            ...existing,
+            metadataAuthorityOverride: authority,
+            metadata_authority_override: authority,
+          }
+          await tauriBridge.dbSaveTracksBatch([], [updated])
+          console.log(`[SqliteLibraryService] Updated authority override to "${authority}" for release "${existing.title}".`)
+        }
+      } catch (err) {
+        console.warn('[SqliteLibraryService] Failed to update release authority override in SQLite:', err)
+      }
+    }
+  }
+
+  /**
+   * Links a variant release to a canonical master release in SQLite
+   */
+  public async setMasterReleaseLink(
+    variantId: string,
+    masterId: string
+  ): Promise<void> {
+    const rel = graphEngine.getAllReleases().find((r) => r.id === variantId)
+    if (rel) {
+      rel.masterReleaseId = masterId
+    }
+    if (tauriBridge.isTauri()) {
+      try {
+        const rawReleases = await tauriBridge.dbGetReleases()
+        const existing = rawReleases.find((r) => r.id === variantId)
+        if (existing) {
+          const updated = {
+            ...existing,
+            masterReleaseId: masterId,
+            master_release_id: masterId,
+          }
+          await tauriBridge.dbSaveTracksBatch([], [updated])
+          console.log(`[SqliteLibraryService] Linked variant "${existing.title}" to master "${masterId}".`)
+        }
+      } catch (err) {
+        console.warn('[SqliteLibraryService] Failed to link master release in SQLite:', err)
+      }
+    }
+  }
+
+  /**
+   * Unlinks a variant release from its master release, making it standalone
+   */
+  public async unlinkMasterRelease(variantId: string): Promise<void> {
+    return this.setMasterReleaseLink(variantId, variantId)
+  }
+
+  /**
    * Synchronizes the full in-memory graph (tracks and releases) to native SQLite
    */
   public async persistLibraryToDb(tracks: Track[], releases: Release[]): Promise<void> {
@@ -1061,6 +1130,8 @@ export class SqliteLibraryService {
         frontCoverUrl: r.artwork?.frontCoverUrl || null,
         backdropUrl: r.artwork?.backdropUrl || r.backdropUrl || null,
         targetFolderPath: r.targetFolderPath || null,
+        metadataAuthorityOverride: r.metadataAuthorityOverride || null,
+        masterReleaseId: r.masterReleaseId || null,
         createdAt: new Date().toISOString(),
       }))
 

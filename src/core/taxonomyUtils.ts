@@ -74,6 +74,23 @@ export function stripRipNoiseAndTags(raw: string): string {
 }
 
 /**
+ * Strips format, rip noise, and year brackets from a title or folder name.
+ */
+export function cleanRipNoise(str: string): string {
+  if (!str) return ''
+  return str
+    .replace(/\s*\[[^\]]*(?:flac|dsd\d*|alac|mp3|wav|cd|vinyl|rip|24bit|16bit|hi-?res|\d{1,3}[-/]\d{1,3}|\d{2,4}khz|audio|master|web-?dl|remaster(?:ed)?)[^\]]*\]/gi, '')
+    .replace(/\s*\([^)]*(?:flac|dsd\d*|alac|mp3|wav|cd|vinyl|rip|24bit|16bit|hi-?res|\d{1,3}[-/]\d{1,3}|\d{2,4}khz|audio|master|web-?dl|remaster(?:ed)?)[^)]*\)/gi, '')
+    .replace(/\s*(-|_|\.)?\s*(?:cd|dvd|web|vinyl|cassette|sacd|flac)\s*rip\b/gi, '')
+    .replace(/\s*(-|_|\.)?\s*remaster(?:ed)?\b/gi, '')
+    .replace(/\s*(-|_|\.)?\s*web-?dl\b/gi, '')
+    .replace(/\s*\(\s*\)/g, '')
+    .replace(/\s*\[\s*\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
  * Extracts a meaningful folder descriptor from a physical folderPath and folderName,
  * preserving parent context if the leaf folder is merely an artist or disc subfolder.
  */
@@ -1216,5 +1233,122 @@ export function calculateEarliestValidYear(
   if (validFolder !== undefined) return validFolder
 
   return undefined
+}
+
+/**
+ * Evaluates whether a track's existing artist credit is defective (folder name fallback, rip tag, or placeholder)
+ * rather than an authentic vocalist/artist credit.
+ */
+export function isDefectiveArtistTag(artistCredit?: string | null, albumTitle?: string | null): boolean {
+  if (!artistCredit) return true
+  if (isPlaceholderTag(artistCredit)) return true
+  const trimmed = artistCredit.trim()
+  if (/cd\s*rip/i.test(trimmed)) return true
+  if (/^(music|audio|flac|wav|mp3|songs|master|soundtrack)$/i.test(trimmed)) return true
+  if (albumTitle) {
+    const normArtist = cleanConsensusTitle(trimmed).toLowerCase().replace(/[^a-z0-9]/g, '')
+    const normAlbum = cleanConsensusTitle(albumTitle).toLowerCase().replace(/[^a-z0-9]/g, '')
+    if (normArtist && normAlbum && (normArtist === normAlbum || normAlbum.includes(normArtist) || normArtist.includes(normAlbum))) {
+      return true
+    }
+  }
+  return false
+}
+
+export interface ProviderTrackItem {
+  trackNumber?: number
+  trackName: string
+  artistName: string
+}
+
+export interface TrackMatchResult {
+  artistName: string
+  matchedTitle: string
+  confidence: number
+}
+
+/**
+ * Matches a local track against a list of provider tracks (e.g. from Apple Music or MusicBrainz)
+ * using fuzzy title similarity, token overlap, and position fallbacks.
+ */
+export function matchTrackArtistFromProviderList(
+  localTitle: string,
+  providerTracks: ProviderTrackItem[],
+  localTrackNum?: number
+): TrackMatchResult | null {
+  if (!providerTracks || providerTracks.length === 0) return null
+
+  const sanitizeForMatch = (s: string) =>
+    (s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\b(?:folk\s*song|song|audio|track|theme|bit|remaster(?:ed)?|version)\b/gi, '')
+      .replace(/([a-z])\1+/g, '$1')
+      .trim()
+
+  const sLocal = sanitizeForMatch(localTitle)
+  const tokLocal = sLocal.split(/\s+/).filter((w) => w.length >= 2)
+
+  let bestMatch: ProviderTrackItem | null = null
+  let bestScore = 0
+
+  for (const pt of providerTracks) {
+    const sProvider = sanitizeForMatch(pt.trackName)
+    if (!sProvider) continue
+
+    // 1. Exact or Substring match
+    if (sLocal && sProvider && (sLocal === sProvider || sProvider.includes(sLocal) || sLocal.includes(sProvider))) {
+      const score = sLocal === sProvider ? 1.0 : 0.9
+      if (score > bestScore) {
+        bestScore = score
+        bestMatch = pt
+      }
+      continue
+    }
+
+    // 2. Token overlap & root matching
+    const tokProvider = sProvider.split(/\s+/).filter((w) => w.length >= 2)
+    let matchedTokens = 0
+    for (const wL of tokLocal) {
+      if (
+        tokProvider.some(
+          (wP) =>
+            wP === wL ||
+            (wL.length >= 4 && wP.startsWith(wL.slice(0, 4))) ||
+            (wP.length >= 4 && wL.startsWith(wP.slice(0, 4)))
+        )
+      ) {
+        matchedTokens++
+      }
+    }
+
+    const tokenScore = matchedTokens > 0 ? matchedTokens / Math.max(tokLocal.length, 1) : 0
+    if (tokenScore > bestScore && tokenScore >= 0.35) {
+      bestScore = tokenScore
+      bestMatch = pt
+    }
+  }
+
+  // 3. Fallback to track number if confidence is still low and track number matches
+  if (!bestMatch && localTrackNum && localTrackNum > 0) {
+    const byNum = providerTracks.find((pt) => pt.trackNumber === localTrackNum)
+    if (byNum && byNum.artistName) {
+      return {
+        artistName: byNum.artistName,
+        matchedTitle: byNum.trackName,
+        confidence: 0.7,
+      }
+    }
+  }
+
+  if (bestMatch && bestMatch.artistName) {
+    return {
+      artistName: bestMatch.artistName,
+      matchedTitle: bestMatch.trackName,
+      confidence: bestScore,
+    }
+  }
+
+  return null
 }
 

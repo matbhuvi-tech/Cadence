@@ -1,4 +1,6 @@
 import { Release } from '../core/types'
+import { cleanRipNoise } from '../core/taxonomyUtils'
+export { cleanRipNoise }
 
 export interface GroupedReleaseCard {
   masterRelease: Release
@@ -16,12 +18,64 @@ export interface DiscInfo {
 }
 
 /**
+ * Calculates Jaro-Winkler string similarity (0.0 to 1.0).
+ */
+export function jaroWinklerSimilarity(s1: string, s2: string): number {
+  if (s1 === s2) return 1.0
+  if (!s1 || !s2) return 0.0
+
+  const str1 = s1.toLowerCase().trim()
+  const str2 = s2.toLowerCase().trim()
+  if (str1 === str2) return 1.0
+
+  const len1 = str1.length
+  const len2 = str2.length
+  const matchDistance = Math.floor(Math.max(len1, len2) / 2) - 1
+
+  const s1Matches = new Array(len1).fill(false)
+  const s2Matches = new Array(len2).fill(false)
+
+  let matches = 0
+  for (let i = 0; i < len1; i++) {
+    const start = Math.max(0, i - matchDistance)
+    const end = Math.min(i + matchDistance + 1, len2)
+
+    for (let j = start; j < end; j++) {
+      if (s2Matches[j]) continue
+      if (str1[i] !== str2[j]) continue
+      s1Matches[i] = true
+      s2Matches[j] = true
+      matches++
+      break
+    }
+  }
+
+  if (matches === 0) return 0.0
+
+  let transpositions = 0
+  let k = 0
+  for (let i = 0; i < len1; i++) {
+    if (!s1Matches[i]) continue
+    while (!s2Matches[k]) k++
+    if (str1[i] !== str2[k]) transpositions++
+    k++
+  }
+
+  const jaro =
+    (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3
+
+  // Winkler prefix scale (max 4 chars)
+  let prefix = 0
+  for (let i = 0; i < Math.min(4, len1, len2); i++) {
+    if (str1[i] === str2[i]) prefix++
+    else break
+  }
+
+  return jaro + prefix * 0.1 * (1 - jaro)
+}
+
+/**
  * Extracts disc index and canonical base album title by stripping disc indicators.
- * Handles patterns such as:
- * - "Rahmania CD1", "Rahmania CD 2", "Rahmania CD03"
- * - "Signature Collection 2 - CD2", "Signature Collection 2 - CD3"
- * - "The Wall (Disc 1)", "The Wall [Disc 2 of 2]"
- * - "Live in Tokyo, CD 2", "Live in Tokyo: Disc 1"
  */
 export function extractDiscInfo(rawTitle: string): DiscInfo {
   if (!rawTitle) {
@@ -29,12 +83,7 @@ export function extractDiscInfo(rawTitle: string): DiscInfo {
   }
 
   // 1. Strip digital rip noise like [FLAC], (2013), [WAV], etc.
-  const clean = rawTitle
-    .replace(/\b(?:cd\s*rip|dvd\s*rip|web\s*rip|vinyl\s*rip|cassette\s*rip|flac\s*rip|sacd\s*rip)\b/gi, '')
-    .replace(/\[\s*(?:flac|wav|alac|dsd\d*|mp3|aac|hi-?res|24bit|16bit|\d{1,3}[-/]\d{1,3}(?:\.\d)?|\d{2,4}khz|audio|master)\s*\]/gi, '')
-    .replace(/\(\s*(?:flac|wav|alac|dsd\d*|mp3|aac|hi-?res|24bit|16bit|\d{1,3}[-/]\d{1,3}(?:\.\d)?|\d{2,4}khz|audio|master)\s*\)/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+  const clean = cleanRipNoise(rawTitle)
 
   // 2. Bracketed disc indicators: e.g. "(Disc 1)", "[CD 2]", "(Disc 1 of 2)"
   const bracketMatch = clean.match(
@@ -95,15 +144,15 @@ export function extractDiscInfo(rawTitle: string): DiscInfo {
  * Normalizes title string for structural grouping comparison.
  */
 export function normalizeTitleForGrouping(title: string): string {
-  return title
+  return cleanRipNoise(title)
     .toLowerCase()
     .trim()
+    .replace(/[^\w\s]/g, '')
     .replace(/\s+/g, ' ')
 }
 
 /**
  * Normalizes artist credit string, stripping dots, hyphens, and whitespace variance.
- * Ensures "A. R. Rahman", "A.R. Rahman", and "AR Rahman" resolve to the identical grouping key.
  */
 export function normalizeArtistForGrouping(artist: string): string {
   return artist
@@ -120,20 +169,20 @@ export function normalizeArtistForGrouping(artist: string): string {
  * Tier 2: Normalized artist credit + canonical base album title (disc suffixes stripped).
  */
 export function computeGroupingKey(release: Release): string {
-  // Tier 1: Dedicated master/group ID (e.g. from MusicBrainz)
+  // Tier 1: Dedicated master/group ID (e.g. from MusicBrainz or user override)
   if (release.masterReleaseId && release.masterReleaseId.trim() !== '' && release.masterReleaseId !== release.id) {
     return `mbid:${release.masterReleaseId.trim().toLowerCase()}`
   }
-  // Tier 2: Structural Artist + Canonical Base Album Title (disc suffixes stripped)
+  // Tier 2: Structural Artist + Canonical Base Album Title (disc suffixes and rip tags stripped)
   const discInfo = extractDiscInfo(release.title || '')
   const normTitle = normalizeTitleForGrouping(discInfo.baseTitle)
-  const normArtist = normalizeArtistForGrouping(release.artistCredit || '')
+  const normArtist = normalizeArtistForGrouping(release.composerName || release.artistCredit || '')
   return `group:${normArtist}::${normTitle}`
 }
 
 /**
  * Groups a collection of releases into unified multi-disc cards,
- * excluding releases present in splitReleaseIds.
+ * with bounded fuzzy agglomerative clustering (Jaro-Winkler >= 0.88, |Δtracks| <= 1).
  */
 export function groupAlbumReleases(
   releases: Release[],
@@ -143,7 +192,6 @@ export function groupAlbumReleases(
 
   for (const rel of releases) {
     const key = computeGroupingKey(rel)
-    // If this release key or individual release ID is in splitReleaseIds, it is kept separate
     const isSplit = splitReleaseIds.has(rel.id) || splitReleaseIds.has(key)
 
     if (isSplit) {
@@ -153,6 +201,57 @@ export function groupAlbumReleases(
         groups.set(key, [])
       }
       groups.get(key)!.push(rel)
+    }
+  }
+
+  // Bounded Pairwise Agglomerative Fuzzy Clustering for typo/rip variants
+  const groupKeys = Array.from(groups.keys()).filter((k) => !k.startsWith('split:') && !k.startsWith('mbid:'))
+  const mergedInto = new Map<string, string>()
+
+  const isUnknownArtist = (artist: string) =>
+    !artist || /^(unknown artist|unknown|various artists|various)$/i.test(artist.trim())
+
+  for (let i = 0; i < groupKeys.length; i++) {
+    const keyA = groupKeys[i]
+    const rootA = mergedInto.get(keyA) || keyA
+    const relsA = groups.get(rootA)
+    if (!relsA || relsA.length === 0) continue
+
+    const [artistA, titleA] = keyA.replace(/^group:/, '').split('::')
+
+    for (let j = i + 1; j < groupKeys.length; j++) {
+      const keyB = groupKeys[j]
+      const rootB = mergedInto.get(keyB) || keyB
+      if (rootA === rootB) continue
+
+      const relsB = groups.get(rootB)
+      if (!relsB || relsB.length === 0) continue
+
+      const [artistB, titleB] = keyB.replace(/^group:/, '').split('::')
+
+      // 1. Artist / Composer check
+      const artistsMatch =
+        artistA === artistB || isUnknownArtist(artistA) || isUnknownArtist(artistB)
+      if (!artistsMatch) continue
+
+      // 2. Jaro-Winkler Title similarity check (>= 0.88)
+      const sim = jaroWinklerSimilarity(titleA, titleB)
+      if (sim < 0.88) continue
+
+      // 3. Track count check (|Δtracks| <= 1 when track counts are known)
+      const repA = relsA[0]
+      const repB = relsB[0]
+      const tracksA = repA.tracksCount || 0
+      const tracksB = repB.tracksCount || 0
+      if (tracksA > 0 && tracksB > 0 && Math.abs(tracksA - tracksB) > 1) {
+        continue
+      }
+
+      // Merge rootB into rootA
+      relsA.push(...relsB)
+      groups.delete(rootB)
+      mergedInto.set(keyB, rootA)
+      mergedInto.set(rootB, rootA)
     }
   }
 
@@ -181,12 +280,10 @@ export function groupAlbumReleases(
     const primary = sorted[0]
     const totalTracks = constituent.reduce((sum, r) => sum + (r.tracksCount || 0), 0)
 
-    // Determine total disc count from constituent count or parsed disc numbers
     const maxDiscNum = Math.max(...constituent.map((r) => extractDiscInfo(r.title || '').discNumber))
     const totalDiscsFromMetadata = Math.max(...constituent.map((r) => extractDiscInfo(r.title || '').totalDiscs || r.discsCount || 1))
     const discCount = Math.max(constituent.length, maxDiscNum, totalDiscsFromMetadata)
 
-    // For multi-disc sets, use canonical base title without disc indicator
     const canonicalTitle = constituent.length > 1
       ? extractDiscInfo(primary.title || '').baseTitle
       : primary.title
@@ -209,3 +306,4 @@ export function groupAlbumReleases(
 
   return result
 }
+

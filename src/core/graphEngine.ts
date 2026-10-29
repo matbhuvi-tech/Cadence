@@ -1086,11 +1086,11 @@ export class RelationalGraphEngine {
     // Mastering / Dynamic Range Filter
     if (filters.masteringFilter) {
       if (filters.masteringFilter === 'audiophile_dr14') {
-        result = result.filter((t) => t.drScore >= 14)
+        result = result.filter((t) => t.drScore != null && t.drScore >= 14)
       } else if (filters.masteringFilter === 'high_dr10_13') {
-        result = result.filter((t) => t.drScore >= 10 && t.drScore <= 13)
+        result = result.filter((t) => t.drScore != null && t.drScore >= 10 && t.drScore <= 13)
       } else if (filters.masteringFilter === 'compressed_dr_low') {
-        result = result.filter((t) => t.drScore > 0 && t.drScore < 10)
+        result = result.filter((t) => t.drScore != null && t.drScore > 0 && t.drScore < 10)
       } else if (filters.masteringFilter === 'high_res_24bit') {
         result = result.filter(
           (t) =>
@@ -1184,11 +1184,11 @@ export class RelationalGraphEngine {
     ).length
     const highResPercentage = totalTracks > 0 ? Math.round((highResTracks / totalTracks) * 100) : 0
 
-    const validDrTracks = trks.filter((t) => t.drScore > 0)
+    const validDrTracks = trks.filter((t) => t.drScore != null && t.drScore > 0)
     const averageDrScore =
       validDrTracks.length > 0
         ? Math.round(
-            (validDrTracks.reduce((acc, t) => acc + t.drScore, 0) / validDrTracks.length) * 10
+            (validDrTracks.reduce((acc, t) => acc + (t.drScore ?? 0), 0) / validDrTracks.length) * 10
           ) / 10
         : 0
 

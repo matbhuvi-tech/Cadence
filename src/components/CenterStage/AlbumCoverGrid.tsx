@@ -28,13 +28,15 @@ import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { IntegrityScanner } from '../../services/integrityScanner'
 import { ArtistsView } from './ArtistsView'
 import { groupAlbumReleases, GroupedReleaseCard, extractDiscInfo } from '../../services/albumGroupingService'
+import { FEATURES } from '../../config/features'
+import { creditInferenceService } from '../../services/creditInferenceService'
 
 interface AlbumCoverGridProps {
   releases: Release[]
   tracks: Track[]
   selectedTrackId?: string
   onSelectTrack: (trackId: string) => void
-  onInspectRelease: (releaseId: string) => void
+  onInspectRelease: (releaseId: string, autoTriggerAi?: boolean) => void
   onCustomizeRelease?: (release: Release) => void
   onUpdateReleaseDetails?: (
     releaseId: string,
@@ -330,6 +332,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
         album.title.toLowerCase().includes(q) ||
         album.artistCredit.toLowerCase().includes(q) ||
         album.composerName.toLowerCase().includes(q) ||
+        album.tracks.some((t) => (t.artistCredit && t.artistCredit.toLowerCase().includes(q)) || (t.title && t.title.toLowerCase().includes(q))) ||
         album.formats.some((f) => f.toLowerCase().includes(q))
       )
     })
@@ -689,18 +692,23 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
           </span>
 
           {/* Line 2: Primary Artist / Composer */}
-          <span
-            onClick={(e) => {
-              e.stopPropagation()
-              setSelectedArtist(album.artistCredit || 'Various Artists')
-              setSelectedAlbumId(null)
-              setSelectedComposer(null)
-            }}
-            className="text-[12px] text-[#8E8E93] hover:text-white truncate mt-1 leading-tight transition-colors cursor-pointer"
-            title={`Filter by artist: ${album.artistCredit}`}
-          >
-            {album.artistCredit}
-          </span>
+          {(() => {
+            const displayArtist = creditInferenceService.resolveDisplayArtist(album.release, album.tracks)
+            return (
+              <span
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setSelectedArtist(displayArtist)
+                  setSelectedAlbumId(null)
+                  setSelectedComposer(null)
+                }}
+                className="text-[12px] text-[#8E8E93] hover:text-white truncate mt-1 leading-tight transition-colors cursor-pointer"
+                title={`Filter by artist: ${displayArtist}`}
+              >
+                {displayArtist}
+              </span>
+            )
+          })()}
 
           {/* Line 3: Monospace Micro-Telemetry (Year · Format · DR) */}
           <div className="text-[11px] font-mono text-[#636366] tabular-nums mt-1 flex items-center gap-1.5 truncate">
@@ -717,7 +725,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                 <span>{album.sampleRates[0]}</span>
               </>
             )}
-            {album.avgDr > 0 && (
+            {FEATURES.DYNAMIC_RANGE && album.avgDr > 0 && (
               <>
                 <span className="text-white/20">·</span>
                 <span className={album.avgDr >= 12 ? 'text-[#D4AF37] font-semibold' : ''}>
@@ -828,38 +836,48 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                 {album.title}
               </h1>
 
-              {/* Clickable Artist */}
-              <div className="mt-2 flex items-center gap-2 flex-wrap">
-                <button
-                  onClick={() => {
-                    setSelectedArtist(album.artistCredit || 'Various Artists')
-                    setSelectedAlbumId(null)
-                    setSelectedComposer(null)
-                  }}
-                  className="text-base sm:text-lg font-semibold text-cyan-400 hover:text-cyan-300 hover:underline cursor-pointer transition-colors"
-                  title={`Go to artist: ${album.artistCredit}`}
-                >
-                  {album.artistCredit}
-                </button>
+              {/* Clickable Primary Authority Artist / Composer */}
+              {(() => {
+                const authorityInference = creditInferenceService.inferReleaseAuthority(album.release, album.tracks)
+                const isComposer = authorityInference.authority === 'composer'
+                const primaryName = isComposer
+                  ? (album.composerName || album.artistCredit || 'Various Artists')
+                  : (album.artistCredit || 'Various Artists')
+                const secondaryName = isComposer
+                  ? (album.artistCredit && album.artistCredit !== primaryName ? album.artistCredit : null)
+                  : (album.composerName && album.composerName !== primaryName ? album.composerName : null)
 
-                {album.composerName && album.composerName !== album.artistCredit && (
-                  <>
-                    <span className="text-white/20">&bull;</span>
+                return (
+                  <div className="mt-2 flex items-center gap-2 flex-wrap">
                     <button
                       onClick={() => {
-                        setSelectedComposer(album.composerName)
+                        if (isComposer) {
+                          setSelectedComposer(primaryName)
+                          setSelectedArtist(null)
+                        } else {
+                          setSelectedArtist(primaryName)
+                          setSelectedComposer(null)
+                        }
                         setSelectedAlbumId(null)
-                        setSelectedArtist(null)
                       }}
-                      className="text-xs sm:text-sm font-medium text-[#EC4899] hover:text-[#F472B6] hover:underline cursor-pointer flex items-center gap-1 transition-colors"
-                      title={`Go to composer: ${album.composerName}`}
+                      className="text-base sm:text-lg font-semibold text-cyan-400 hover:text-cyan-300 hover:underline cursor-pointer transition-colors"
+                      title={isComposer ? `Filter by composer: ${primaryName}` : `Go to artist: ${primaryName}`}
                     >
-                      <span>🎼</span>
-                      <span>{album.composerName}</span>
+                      {isComposer && <span className="mr-1.5 text-sm text-[#EC4899]">🎼</span>}
+                      {primaryName}
                     </button>
-                  </>
-                )}
-              </div>
+
+                    {secondaryName && (
+                      <>
+                        <span className="text-white/20">&bull;</span>
+                        <span className="text-xs sm:text-sm text-[#8E8E93]">
+                          {isComposer ? `Vocals: ${secondaryName}` : `Composer: ${secondaryName}`}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )
+              })()}
 
               {/* Badges Bar */}
               <div className="mt-3 flex items-center gap-2 flex-wrap text-xs">
@@ -881,7 +899,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                   </span>
                 ))}
 
-                {effectiveAvgDr > 0 && (
+                {FEATURES.DYNAMIC_RANGE && effectiveAvgDr > 0 && (
                   <span
                     className={`px-2 py-0.5 rounded-md font-mono font-bold text-[11px] border ${drClass.bg} ${drClass.text}`}
                     title={`Average Dynamic Range: DR${effectiveAvgDr}`}
@@ -978,11 +996,9 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               <button
                 onClick={(e) => {
                   e.stopPropagation()
-                  window.dispatchEvent(
-                    new CustomEvent('cadence:open-compilation-provenance', {
-                      detail: { releaseId: activeReleaseId || album.id },
-                    })
-                  )
+                  if (onInspectRelease) {
+                    onInspectRelease(activeReleaseId || album.id, true)
+                  }
                 }}
                 className="px-4 py-2.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-cyan-200 hover:text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer shadow-sm"
                 title="Identify original movie soundtracks and release years with Gemini AI"
@@ -1072,7 +1088,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                           </span>
                         )}
                       </div>
-                      {v.drScore > 0 && (
+                      {FEATURES.DYNAMIC_RANGE && v.drScore != null && v.drScore > 0 && (
                         <span className={`px-1.5 py-0.5 rounded font-mono font-bold text-[9px] border ${vDrClass.bg} ${vDrClass.text}`}>
                           DR{v.drScore}
                         </span>
@@ -1117,9 +1133,9 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               {/* Table Header */}
               <div className="grid grid-cols-12 gap-3 px-5 py-2.5 text-[11px] font-mono text-[#64748B] border-b border-white/[0.04] uppercase tracking-wider">
                 <div className="col-span-1 text-center">#</div>
-                <div className="col-span-6 sm:col-span-7">Title</div>
+                <div className={FEATURES.DYNAMIC_RANGE ? "col-span-6 sm:col-span-7" : "col-span-7 sm:col-span-8"}>Title</div>
                 <div className="col-span-3 sm:col-span-2 text-right">Format / Spec</div>
-                <div className="col-span-1 text-center">DR</div>
+                {FEATURES.DYNAMIC_RANGE && <div className="col-span-1 text-center">DR</div>}
                 <div className="col-span-1 text-right">Time</div>
               </div>
 
@@ -1169,7 +1185,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                       </div>
 
                       {/* Title & Classical movement */}
-                      <div className="col-span-6 sm:col-span-7 min-w-0 pr-2">
+                      <div className={`${FEATURES.DYNAMIC_RANGE ? 'col-span-6 sm:col-span-7' : 'col-span-7 sm:col-span-8'} min-w-0 pr-2`}>
                         <div className="flex items-center gap-2">
                           <span
                             className={`text-xs font-semibold truncate ${
@@ -1242,17 +1258,19 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                       </div>
 
                       {/* DR */}
-                      <div className="col-span-1 text-center">
-                        {track.drScore > 0 ? (
-                          <span
-                            className={`px-1 py-0.2 rounded font-mono font-bold text-[9px] border ${trackDrClass.bg} ${trackDrClass.text}`}
-                          >
-                            DR{track.drScore}
-                          </span>
-                        ) : (
-                          <span className="text-[10px] font-mono text-white/20">-</span>
-                        )}
-                      </div>
+                      {FEATURES.DYNAMIC_RANGE && (
+                        <div className="col-span-1 text-center">
+                          {track.drScore != null && track.drScore > 0 ? (
+                            <span
+                              className={`px-1 py-0.2 rounded font-mono font-bold text-[9px] border ${trackDrClass.bg} ${trackDrClass.text}`}
+                            >
+                              DR{track.drScore}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-mono text-white/20">-</span>
+                          )}
+                        </div>
+                      )}
 
                       {/* Duration & Hover Quick Actions */}
                       <div className="col-span-1 flex items-center justify-end gap-1.5 text-right relative">

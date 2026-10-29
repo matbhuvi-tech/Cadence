@@ -58,7 +58,7 @@ export interface ArtistCreditItem {
   format: string
   sampleRate?: number
   bitDepth?: number
-  drScore?: number
+  drScore?: number | null
   durationSecs: number
   fullArtistCredit: string
   coArtists: string[]
@@ -163,7 +163,7 @@ export interface PressingVariant {
   folderName?: string
   folderPath?: string
   releaseYear: number
-  drScore: number
+  drScore?: number | null
   sampleRateStr: string
   formatStr: string
   matrixRunout: string
@@ -210,6 +210,8 @@ export interface Release {
   isFavorite?: boolean
   isMasterpiece?: boolean
   isCollected?: boolean
+  metadataAuthorityOverride?: 'composer' | 'performer'
+  genre?: string
 }
 
 export interface ActiveEntityScope {
@@ -240,7 +242,7 @@ export interface FacetSelections {
   reviewStatus?: 'staged' | 'all'
 }
 
-export type DRSource = 'embedded_tag' | 'replaygain_calc' | 'measured' | 'decoded_pcm' | 'estimated'
+export type DRSource = 'embedded_tag' | 'replaygain_calc' | 'measured' | 'decoded_pcm' | 'estimated' | 'bypassed'
 
 export type SidecarStatus = 'synced' | 'uncommitted_sidecar' | 'committed'
 
@@ -271,7 +273,7 @@ export interface Track {
   modifiedTimestamp: string
   checksumValid: boolean
   accurateRipConfidence: number // 0 = no match, >0 = verified rips
-  drScore: number
+  drScore?: number | null
   drSource?: DRSource
   sampleRateStr: string
   format: AudioFormat
@@ -547,4 +549,12 @@ export interface ReleaseConsensusResult {
   }>
   requiresAiFallback?: boolean
 }
+
+export interface NavigationAnchor {
+  returnView: 'listen' | 'library' | 'album_detail'
+  selectedAlbumId: string
+  scrollPosition: number
+  filterState?: Record<string, any>
+}
+
 

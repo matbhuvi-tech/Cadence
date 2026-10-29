@@ -1,80 +1,66 @@
-# Federated Album & Artist Metadata Recommendation Engine
+# Unified Metadata Management & Catalog Coherence Architecture
 
 * **Author:** Mathan
-* **Date:** 2026-10-28
-* **Status:** Refined RFC Concepts Brief (Ready for Formal Design Drafting)
+* **Date:** 2026-10-29
+* **Status:** Synthesized RFC Concepts Brief (Multi-Lens Goldfish Review Complete)
 
 ## Overview
 
-Cadence resolves album-level and artist-level metadata by orchestrating Apple Music, MusicBrainz, and Gemini AI through a deterministic **Pre-Sanitized 2-of-3 Consensus Model**, a **Lookahead Queue Prefetcher (Depth = 2)**, and a **Directory-Tree Context Parser**. The system prioritizes Apple Music and MusicBrainz for rapid, unthrottled resolution while shielding Gemini AI behind a strict 15 RPM quota guard. Physical audio file headers receive verified album and track tags via atomic two-phase commit, while rich editorial profiles (biography, active eras, origin, primary musical role) populate the pre-existing SQLite `canonical_artists` table.
+Cadence metadata management currently suffers from fragmented editing surfaces (`CustomizeAlbumModal`, playback drawer `Details` tab, standalone `Identify Soundtracks` modal, and `Curate` workbench), inverted credit attributions in South Asian and soundtrack catalogs (playback singers mistakenly assigned as Album Artist), brittle version stacking (minor typos or rip tags causing duplicate album cards), isolated automation runs (fetching artwork without fixing dirty titles or credits), and unverified dynamic range (DR) metrics.
 
-## Analysis & Architectural Decisions
+This initiative establishes a single, consolidated metadata system:
+1. **Single Unified Surface in Curate (⌘2)**: Eliminates competing modals and sidecar tabs. The right drawer in **Listen (⌘1)** is strictly restricted to **Queue** and **Playlists**. Any "Edit Metadata" or "Identify Soundtracks" trigger immediately loads the album into **Curate (⌘2)** with a clean "← Return to Album" breadcrumb.
+2. **Confidence-Scored Role Inference & Authority Taxonomy**: Automatically infers whether `Composer = Album Artist` (soundtracks / film releases) or `Performer = Album Artist` (classical, ghazal, devotional) using multi-signal scoring (release type, genre, track-credit distributions). User manual overrides in Curate are permanently persisted so automated refreshes never silently undo them.
+3. **Resilient Fuzzy Stacking with Curate Override**: Normalizes rip noise from both titles and artists, applies bounded fuzzy title clustering (catching *Captain* vs *Captian* with track count validation), and provides a manual "Stack / Unstack Edition" control in Curate.
+4. **Source-Specific Authority with Configurable Transliteration**: Designates Apple Music as the authority for commercial display titles and artwork, MusicBrainz for structured credits and release relationships, and Gemini AI strictly as a fallback for transliteration and conflict resolution. Preserves original script tags and provides clear review, parameter adjustment, and atomic two-phase commit.
+5. **Complete DR Bypass**: Disables dynamic range calculations entirely during file ingestion and scanning, hiding all DR filters and badges via `FEATURE_DYNAMIC_RANGE = false`.
 
-### 1. Pre-Consensus Sanitization & Garbage Disqualification
-* **The "Dirty Local Tag" Trap:** Local file tags often contain rip noise (e.g., `"Anjali CD RIP"`) or placeholder credits (`"Unknown Artist"`). Comparing raw strings prevents consensus or causes bad local tags to outvote true release metadata (e.g., a 2015 rip year + a 2015 Apple reissue year outvoting MusicBrainz's true 1990 original year).
-* **Sanitization Layer:**
-  - Before evaluating string equality across Local, Apple Music, and MusicBrainz, run strings through `stripRipNoiseAndTags` (stripping `CD RIP`, `[FLAC]`, `(Original Motion Picture Soundtrack)`, `- Single`, bitrate tags, and brackets).
-  - Use `disambiguateComboTitle` to handle multi-movie combo CD pressings (e.g., `"Agni Natchathiram-Ninaivoam N..."`).
-* **Garbage Disqualification:**
-  - Disqualify generic placeholder values (`"Unknown Artist"`, `"Various Artists"`, `"Track 01"`, `"0000"`, `"None"`) from voting in the 2-of-3 consensus pool.
-  - When the local tag is disqualified, consensus shifts to 2-of-2 external agreement (Apple + MusicBrainz) or a high-confidence single-provider match ($\ge 80\%$ track count and title duration alignment).
-* **Earliest Release Year Invariant (`ORIGINALYEAR`):**
-  - Instead of majority vote, calculate `min(Apple.year, MB.firstReleaseDate.year)` across verified release-group matches. A 2018 digital remaster reissue will never overwrite a 1990 soundtrack master date.
+---
 
-### 2. Multi-Movie / Anthology Rips & Album Signature Matching
-* **Signature Query Strategy:**
-  - Build an Album Signature consisting of Sanitized Album Title + Track Count + Total Duration + Leading Track Fingerprints.
-  - Single-pass lookup queries `/api/itunes-album` and `/api/musicbrainz-release?inc=recordings+artists+release-groups+labels`.
-* **Combo CD & Custom Anthology Fallback:**
-  - If the primary album query returns 0 matches or the track count diverges by $> 30\%$:
-    1. Split album title on delimiters (`/`, `-`, `;`) using `disambiguateComboTitle`.
-    2. Fall back to querying the top 2 distinct track titles + durations against MusicBrainz recordings to resolve parent release groups.
-* **Gemini AI Quota Shield & Full Tracklist Hand-Off:**
-  - When Local, Apple, and MusicBrainz fail to reach consensus (0-consensus), hand off to Gemini AI.
-  - Pass Gemini the full tracklist array (`trackNumber`, `title`, `artist`, `duration`) together with the physical directory path.
-  - In a single prompt (~400 tokens), Gemini resolves both the album-level `COMPOSER` / `ALBUMARTIST` and the per-track playback singer credits.
-  - **Hard Guardrail:** Gemini AI is strictly forbidden from generating or guessing barcodes, catalog numbers, or MusicBrainz UUIDs.
+## Analysis & Multi-Lens Review Findings
 
-### 3. Lookahead Queue Prefetcher for MusicBrainz 1 Req/Sec Policy
-* **The Bottleneck:** MusicBrainz strictly limits requests to 1 req/sec. Querying providers synchronously on every `⌘↵` step adds a 1.2–1.5s delay to each album transition.
-* **Prefetcher Architecture:**
-  - Implement a **Lookahead Queue Prefetcher (Depth = 2)** within `curationQueueService`.
-  - While the user reviews Album $N$, the prefetcher resolves and caches Album $N+1$ and Album $N+2$ in SQLite and in-memory caches.
-  - **Audiophile Guard:** The prefetcher queries `tauriBridge.getPlaybackStatus()` and remains completely dormant whenever WASAPI Exclusive or UPnP playback is active or in cooldown.
+### 1. Contrarian & YAGNI Lens (Code Minimization & Simplicity)
+* **Elimination over Addition:** Retiring `CustomizeAlbumModal` (974 lines) and stripping the "Details" inspector from `UnifiedRightSidebar` (removing `SideBySideDiff` and `GranularCreditMatrix` from the playback drawer) eliminates over 1,500 lines of redundant UI code and prevents state drift between competing editors.
+* **Avoid Heuristic Bloat:** Rather than building an opaque machine-learning classifier for credit roles, use a deterministic 3-rule confidence scoring system based on existing file metadata: genre tag presence, release type keywords (`OST`, `Soundtrack`), and track composer uniformity ($\ge 80\%$). If confidence is below threshold, defer to a single two-state button in Curate (`Composer Authority` vs `Performer Authority`) rather than guessing.
 
-### 4. Hydration Strategy for `canonical_artists`
-* **Schema Reuse:** The SQLite `canonical_artists` table already contains unpopulated columns: `bio_summary`, `era_active`, `primary_role`, `mbid`, `apple_artist_id`, and `portrait_url`.
-* **Field-Specific Provenance Sources:**
-  - `mbid`, `era_active` (`life-span.begin` / `end`), and `primary_role` (derived from artist type, disambiguation, and relations): Sourced from MusicBrainz Artist Lookup (`/ws/2/artist/{mbid}?inc=url-rels+tags`).
-  - `apple_artist_id` and high-resolution portrait URLs: Sourced from Apple iTunes Artist Lookup.
-  - `bio_summary`: Sourced from the Wikipedia REST Summary API via MusicBrainz Wikidata/Wikipedia URL relations (free, unthrottled, clean plain-text extract). If no Wikipedia link exists, synthesize on-demand via the Gemini AI button in `ArtistsView`.
+### 2. Codebase Details & Architecture Lens
+* **Right Panel Separation of Concerns:** `UnifiedRightSidebar.tsx` currently conflates playback controls (`queue`, `playlists`) with metadata auditing (`inspector`). Removing `inspector` from the drawer ensures the playback thread and sidecar stay quiet during listening sessions.
+* **Card Subtitle & Filter Binding:** In `AlbumCoverGrid.tsx` (lines 683–703) and `renderAlbumDetail` (lines 830–860), display logic currently relies on `album.artistCredit`. When an album is classified under Composer Authority, the card subtitle, hero header, and artist grouping must bind to `effectiveAlbumArtist = album.composerName || album.artistCredit`.
+* **Search Indexing Integrity:** Inverting the album artist to the Composer must not break searchability for vocalists. The local search engine (`searchEngine.ts` and SQLite full-text search) must index `releases.composer`, `releases.artist_credit`, and `tracks.artist` concurrently so typing "Yesudas" still surfaces *Agni Natchathiram*.
+* **Scanner Ingestion Speedup:** In `integrityScanner.ts` (lines 88–111) and `libraryImporter.ts`, skipping peak/RMS and DR calculations completely avoids opening and decoding audio packets during initial file import, significantly reducing CPU usage and library scanning time.
 
-### 5. Separation of Concerns: File Tags vs SQLite Profiles
-* **Physical Audio File Headers (Two-Phase Commit Staging):**
-  - Album Level: `ALBUM`, `ALBUMARTIST`, `COMPOSER`, `DISCNUMBER`, `DATE`/`YEAR`, `ORIGINALYEAR`, `GENRE`, `METADATA_BLOCK_PICTURE`.
-  - Track Level: `TITLE`, `ARTIST`, `TRACKNUMBER`.
-* **Local SQLite Database (`canonical_artists` table):**
-  - `bio_summary`, `era_active`, `primary_role`, `mbid`, `apple_artist_id`, `portrait_url`.
-  - Encyclopedic descriptions are never written to physical audio files, preventing header bloat and corruption of legacy media players.
+### 3. UX & Workflow Ergonomics Lens
+* **Context Preservation on Mode Switch:** Navigating from **Listen (⌘1)** to **Curate (⌘2)** via "Edit Metadata" must not be a disruptive dead end. The application state must record the return anchor (`previousViewMode`, `selectedAlbumId`, scroll position). Curate must provide a prominent top-left button: `← Back to Album in Listen` so users can return directly to their listening session after staging edits.
+* **Ergonomics of Manual Stacking:** Automated fuzzy matching must remain conservative (similarity $\ge 0.88$, track count within $\pm 1$, duration within $\pm 5\%$) to prevent false merges of distinct albums. When fuzzy logic misses (e.g. *Nilavae Oru Sangeetham* variants with completely different titles), Curate's album header must offer an intuitive action: "Stack with another Album...", opening a simple picker to merge release IDs under a single `masterReleaseId`.
+* **Two-Phase Review Clarity:** Staging output in Curate must present changes as an unambiguous diff table with green additions, red deletions, and single-click revert buttons per field. Users must never feel uncertain about what will write to physical file tags upon commit.
+
+### 4. Migration & Backward Compatibility Lens
+* **Non-Destructive Tag Staging:** All inferred role corrections, title cleanups, and transliterations remain strictly inside `pendingSidecarEdits` and SQLite until the user explicitly confirms the Two-Phase Commit modal. Existing physical tags on disk are never altered without user approval.
+* **Persistent Authority Flags:** To prevent future library rescans from reverting user corrections, SQLite stores `metadata_authority_override` (`'composer' | 'performer'`) on the `releases` table. If set, automated scanners must respect this override.
+* **Feature Flag Rollout:** Setting `FEATURE_DYNAMIC_RANGE = false` immediately suppresses DR badges, cards, and filters in the frontend without requiring database migrations or dropping existing database columns.
+
+---
 
 ## Goals vs. Non-Goals
 
 ### In-Scope Goals
-* **G1: Pre-Sanitized Release-Group Queries:** Fetch complete release group metadata via `/api/musicbrainz-release` and `/api/itunes-album` using sanitized album signatures and combo CD splitters.
-* **G2: 2-of-3 Consensus Engine with Garbage Disqualification:** Automated field-level voting with placeholder disqualification and `min(Apple.year, MB.firstReleaseDate.year)` original year calculation.
-* **G3: Lookahead Queue Prefetcher (Depth = 2):** Asynchronous prefetching for Albums $N+1$ and $N+2$ to eliminate MusicBrainz 1 req/sec stepper latency while respecting audio transport quietness.
-* **G4: Gemini AI Quota Shield with Full-Tracklist Context:** 15 RPM protection triggering Gemini AI only on 0-consensus or manual button click, supplying full tracklist and directory path context.
-* **G5: Multi-Source `canonical_artists` Hydration:** Populate SQLite artist profiles (`bio_summary` via Wikipedia REST, `era_active`/`primary_role` via MusicBrainz, portraits via Apple).
-* **G6: Curate & ArtistsView Surface Integration:** Display consensus badges (`[Local+MB]`, `[Apple+MB]`, `[AI]`) in `CurationReconciliationStage` with single-click cell overrides and an editorial profile drawer in `ArtistsView`.
+* **G1: Unified Surface Navigation**: Eliminate `CustomizeAlbumModal` and remove "Details" from `UnifiedRightSidebar`. Route all album metadata editing into **Curate (⌘2)** with a state-preserving "← Return to Album" action.
+* **G2: Confidence-Scored Credit Engine**: Automatic inference for `Composer = Album Artist` on soundtracks vs `Performer = Album Artist` on classical/ghazal/devotional, backed by persistent SQLite override flags and joint search indexing.
+* **G3: Resilient & Manual Version Stacking**: Pre-sanitized Jaro-Winkler fuzzy matching combined with track count/duration bounds, plus an explicit Curate stack/unstack picker.
+* **G4: Federated Source Authority**: Apple Music for titles/art, MusicBrainz for credits/relationships, Gemini AI strictly for fallback disambiguation and transliteration.
+* **G5: Complete DR Bypass**: Zero CPU/disk time spent on fake DR calculations during file ingestion; all DR indicators hidden across the UI behind `FEATURE_DYNAMIC_RANGE = false`.
 
 ### Out-of-Scope Non-Goals
-* **NG1: Automatic Full-Library Gemini Ingestion:** No unattended background crawling that depletes the 15 RPM quota.
-* **NG2: Writing Biographies into File Tags:** Prose summaries remain strictly in SQLite.
-* **NG3: Guessing Barcodes/Cat Numbers:** No synthetic fabrication of physical manufacturing identifiers without exact database confirmation.
+* **NG1: Building a Custom Offline TT-DR Audio Meter**: Deferred until a bit-perfect native Rust WASAPI/FFmpeg implementation is prioritized.
+* **NG2: Direct Disk Modification Without Review**: Zero uncommitted writes; all changes stage through sidecar buffers and require user confirmation in the Two-Phase Commit modal.
+* **NG3: Unconstrained Fuzzy Merging**: Albums with mismatched track counts ($> 1$ track difference) or diverging durations ($> 5\%$) will not auto-stack without user confirmation.
+
+---
 
 ## Key Decisions & Staging for Next Steps
 
-* **Decision 1:** Pre-consensus sanitization strips rip tags and disqualifies placeholder values (`"Unknown Artist"`) before running 2-of-3 consensus.
-* **Decision 2:** Release Year defaults to the minimum valid year across verified release groups (`min(Apple.year, MB.firstReleaseDate.year)`), preserving historical original release dates.
-* **Decision 3:** MusicBrainz 1 req/sec pacing is masked using a Lookahead Queue Prefetcher (Depth = 2) gated by audio transport silence.
-* **Decision 4:** Artist biographies are fetched deterministically from Wikipedia REST API via MusicBrainz Wikidata URL relations, falling back to Gemini AI on-demand.
+* **Decision 1 (Navigation):** `UnifiedRightSidebar` is strictly playback context (Queue/Playlists). All editing operations transition directly to `Curate (⌘2)`, which preserves return navigation state to Listen mode.
+* **Decision 2 (Credit Taxonomy):** Multi-signal confidence engine assigns Composer as Album Artist for soundtracks and Performer for classical/vocal genres, with permanent user override retention and joint search indexing across singers and composers.
+* **Decision 3 (Grouping):** Stacking pairs sanitized fuzzy matching with manual Curate controls to permanently fix variant fragmentation.
+* **Decision 4 (Data Provenance):** Strict role division between Apple (presentation/art), MusicBrainz (structure/credits), and Gemini (fallback/transliteration).
+* **Decision 5 (Audio Metrics):** Complete removal and scanner bypass of DR metrics until native TT-DR analysis is developed.

@@ -128,7 +128,7 @@ export const IntegrityCard: React.FC<IntegrityCardProps> = ({
             Dynamic Range (DR) Metrics
           </span>
           <span className={`px-2 py-0.5 rounded border font-mono font-bold ${drClass.bg} ${drClass.text}`}>
-            DR{track.drScore}
+            {track.drScore != null ? `DR${track.drScore}` : 'DR —'}
           </span>
         </div>
 
@@ -137,13 +137,17 @@ export const IntegrityCard: React.FC<IntegrityCardProps> = ({
           <div className="w-full bg-white/[0.05] rounded-full h-1.5 overflow-hidden flex">
             <div
               className={`h-full rounded-full transition-all ${
-                track.drScore >= 14 ? 'bg-[#10B981]' : track.drScore >= 10 ? 'bg-[#D4AF37]' : 'bg-[#F43F5E]'
+                track.drScore != null && track.drScore >= 14
+                  ? 'bg-[#10B981]'
+                  : track.drScore != null && track.drScore >= 10
+                  ? 'bg-[#D4AF37]'
+                  : 'bg-[#F43F5E]'
               }`}
-              style={{ width: `${Math.min(100, (track.drScore / 20) * 100)}%` }}
+              style={{ width: `${track.drScore != null ? Math.min(100, (track.drScore / 20) * 100) : 0}%` }}
             />
           </div>
           <div className="flex justify-between text-[10px] font-mono text-[#8E8E93]">
-            <span>DR4 (Compressed)</span>
+            <span>{track.drScore != null ? 'DR4 (Compressed)' : 'Pending Offline Analysis'}</span>
             <span>DR14+ (Audiophile Dynamic)</span>
           </div>
         </div>

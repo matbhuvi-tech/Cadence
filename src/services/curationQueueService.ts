@@ -132,6 +132,18 @@ export function computeCurationQueue(
       relTracks.some((t) => /\(from\s+['"][^'"]+['"]\)/i.test(t.title))
 
     if (!issueInfo && !isStaged && !hasMissingArt && !isCompilationConflict) {
+      queueItems.push({
+        albumId: release.id,
+        albumTitle: release.title,
+        artistCredit: release.artistCredit || 'Various Artists',
+        coverArtUrl: release.artwork?.frontCoverUrl || release.coverArtUrl,
+        primaryIssueType: 'untagged',
+        issueBadgeLabel: 'Catalog Album',
+        defectSeverity: 'info',
+        affectedTrackCount: 0,
+        totalTracks: relTracks.length || release.tracksCount || 1,
+        isStaged: false,
+      })
       continue
     }
 

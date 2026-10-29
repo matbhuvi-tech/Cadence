@@ -546,7 +546,7 @@ export class LibraryImporter {
           releaseName: effectiveAlbumTitle,
           variantName: `${archivalYear} Archival 24-bit/96kHz Studio Master Remaster`,
           releaseYear: archivalYear,
-          drScore: Math.min(18, drScore + 2),
+          drScore: drScore != null ? Math.min(18, drScore + 2) : null,
           sampleRateStr: '24-bit / 96kHz High-Res',
           formatStr: 'FLAC',
           matrixRunout: `${albumTitle.slice(0, 4).toUpperCase()}-HD-${archivalYear}`,

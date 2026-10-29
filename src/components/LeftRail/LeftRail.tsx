@@ -17,6 +17,7 @@ import {
 import { AuditIssue, StorageMount, Track, Release, WatchedFolder, CanvasViewMode, Playlist } from '../../core/types'
 import { FacetSelections } from './FacetedFilters'
 import { AmbientCurationCapsule } from './AmbientCurationCapsule'
+import { FEATURES } from '../../config/features'
 
 interface LeftRailProps {
   auditIssues?: AuditIssue[]
@@ -300,21 +301,23 @@ export const LeftRail: React.FC<LeftRailProps> = ({
             {!isIconOnly && <span className="text-[10px] font-mono text-[#F59E0B]">24/96+</span>}
           </button>
 
-          <button
-            onClick={() => handleSmartTierClick('dr')}
-            title="High Dynamic Range (DR12+)"
-            className={`rounded-lg flex items-center transition-all cursor-pointer ${
-              isIconOnly
-                ? `w-10 h-10 justify-center ${activeSmartTier === 'dr' ? 'bg-white/[0.12] text-white' : 'text-[#8E8E93] hover:text-[#F5F5F7] hover:bg-white/[0.04]'}`
-                : `w-full px-2.5 py-1.5 justify-between ${activeSmartTier === 'dr' ? 'bg-white/[0.1] text-white font-medium shadow-sm' : 'text-[#8E8E93] hover:text-[#F5F5F7] hover:bg-white/[0.04]'}`
-            }`}
-          >
-            <div className={`flex items-center ${isIconOnly ? 'justify-center' : 'gap-2'}`}>
-              <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] shadow-sm shadow-[#10B981]/40" />
-              {!isIconOnly && <span>High Dynamic Range</span>}
-            </div>
-            {!isIconOnly && <span className="text-[10px] font-mono text-[#10B981]">DR12+</span>}
-          </button>
+          {FEATURES.DYNAMIC_RANGE && (
+            <button
+              onClick={() => handleSmartTierClick('dr')}
+              title="High Dynamic Range (DR12+)"
+              className={`rounded-lg flex items-center transition-all cursor-pointer ${
+                isIconOnly
+                  ? `w-10 h-10 justify-center ${activeSmartTier === 'dr' ? 'bg-white/[0.12] text-white' : 'text-[#8E8E93] hover:text-[#F5F5F7] hover:bg-white/[0.04]'}`
+                  : `w-full px-2.5 py-1.5 justify-between ${activeSmartTier === 'dr' ? 'bg-white/[0.1] text-white font-medium shadow-sm' : 'text-[#8E8E93] hover:text-[#F5F5F7] hover:bg-white/[0.04]'}`
+              }`}
+            >
+              <div className={`flex items-center ${isIconOnly ? 'justify-center' : 'gap-2'}`}>
+                <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] shadow-sm shadow-[#10B981]/40" />
+                {!isIconOnly && <span>High Dynamic Range</span>}
+              </div>
+              {!isIconOnly && <span className="text-[10px] font-mono text-[#10B981]">DR12+</span>}
+            </button>
+          )}
         </div>
 
         {/* 3. Source List: Storage Mounts & Staged Status */}

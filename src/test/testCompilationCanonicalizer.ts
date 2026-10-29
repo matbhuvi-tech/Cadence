@@ -198,12 +198,16 @@ async function runTests() {
   assert(t1.canonicalAlbumTitle === 'Rang De Basanti', 'Track 1 canonicalAlbumTitle updated')
   assert(t1.canonicalReleaseId === 'rel-rdb-local', 'Track 1 canonicalReleaseId linked to local release')
   assert(t1.isCanonicalAlbumTrack === false, 'Track 1 marked as provenance track')
+  assert(t1.artistCredit === 'A. R. Rahman, Mohammed Aslam, Nacim', 'Track 1 in-memory artistCredit updated')
+  assert(t1.composerName === 'A. R. Rahman', 'Track 1 in-memory composerName updated')
 
   const t2 = dummyTracks[1]
   assert(t2.originalAlbum === 'Roja', 'Track 2 in-memory originalAlbum updated')
   assert(t2.originalYear === 1992, 'Track 2 in-memory originalYear updated')
   assert(t2.canonicalAlbumTitle === 'Roja', 'Track 2 canonicalAlbumTitle updated')
   assert(!t2.canonicalReleaseId, 'Track 2 canonicalReleaseId undefined for external master')
+  assert(t2.artistCredit === 'Minmini', 'Track 2 in-memory artistCredit updated')
+  assert(t2.composerName === 'A. R. Rahman', 'Track 2 in-memory composerName updated')
 
   console.log('✓ Batch application to SQLite and in-memory models verified successfully.\n')
 
