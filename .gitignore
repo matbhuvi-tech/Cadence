@@ -40,6 +40,24 @@ playwright-report/
 blob-report/
 .agents/
 
+# Elephant-Goldfish Model (EGM) specifications & review reports
+concepts_brief.md
+design_draft.md
+discussion_summary.md
+goldfish_review_report.md
+consolidated_review_report.md
+comprehension_report.md
+critic_report.md
+implementation_readiness_report.md
+intermediate_zoom_out_report.md
+zoom_out_report.md
+*_report.md
+*_REPORT.md
+*DRIFT_REPORT*.md
+.egm/
+.egmignore
+EGM.md
+
 # SQLite and local database files
 *.db
 *.db-shm
