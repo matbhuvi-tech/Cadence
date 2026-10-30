@@ -33,7 +33,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let db_path = app_data_dir.join("cadence.db");
             println!("[Cadence Core] Initializing SQLite database at: {:?}", db_path);
-            let app_db = AppDb::new(db_path).expect("Failed to initialize SQLite database");
+            let app_db = AppDb::new(db_path.clone()).expect("Failed to initialize SQLite database");
 
             let artwork_cache_dir = app_data_dir.join("cache").join("artwork");
             let token_path = app_data_dir.join("remote_token.txt");
@@ -61,10 +61,7 @@ pub fn run() {
             maintenance_worker.set_app_handle(app.handle().clone());
             maintenance_worker.start();
 
-            let commit_worker = crate::maintenance::CommitQueueWorker::new(
-                engine_for_commit,
-                app_db.clone(),
-            );
+            let commit_worker = crate::maintenance::CommitQueueWorker::from_db_path(engine_for_commit, db_path.clone()).expect("Failed to initialize CommitQueueWorker dedicated DB connection");
             commit_worker.set_app_handle(app.handle().clone());
             commit_worker.start();
 

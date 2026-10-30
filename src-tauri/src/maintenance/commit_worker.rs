@@ -55,6 +55,8 @@ pub struct CommitQueueWorker {
     mount_failure_counts: Arc<Mutex<HashMap<String, u32>>>,
     active_item_info: Arc<Mutex<Option<(String, String, String)>>>, // (track_id, title, file_path)
     processed_in_window: Arc<Mutex<Vec<std::time::Instant>>>,
+    written_artwork_dirs: Arc<Mutex<HashSet<std::path::PathBuf>>>,
+    current_active_batch_id: Arc<Mutex<Option<String>>>,
 }
 
 impl CommitQueueWorker {
@@ -72,7 +74,16 @@ impl CommitQueueWorker {
             mount_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             active_item_info: Arc::new(Mutex::new(None)),
             processed_in_window: Arc::new(Mutex::new(Vec::new())),
+            written_artwork_dirs: Arc::new(Mutex::new(HashSet::new())),
+            current_active_batch_id: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Creates a CommitQueueWorker with its own dedicated SQLite connection,
+    /// isolating worker writes and SQLite locks from the UI thread's read connection.
+    pub fn from_db_path(engine: AudioEngine, db_path: std::path::PathBuf) -> Result<Self, String> {
+        let db = AppDb::open_dedicated(&db_path)?;
+        Ok(Self::new(engine, db))
     }
 
     /// Performs startup crash recovery: sweeps `in_flight` items in SQLite and deletes orphaned temp files.
@@ -256,6 +267,15 @@ impl CommitQueueWorker {
                     continue;
                 }
             };
+
+            // Reset artwork deduplication cache if batch changes
+            {
+                let mut current_batch = self.current_active_batch_id.lock();
+                if current_batch.as_deref() != Some(&item.batch_id) {
+                    *current_batch = Some(item.batch_id.clone());
+                    self.written_artwork_dirs.lock().clear();
+                }
+            }
 
             // 5. Mark item as in_flight
             {
@@ -453,17 +473,23 @@ impl CommitQueueWorker {
             return Err(e);
         }
 
-        // Write cover.jpg to album directory if staged artwork data URL is provided
+        // Write cover.jpg to album directory if staged artwork data URL is provided (deduplicated per batch)
         if let Some(cover_data) = payload.get("coverArtUrl").and_then(|s| s.as_str()) {
             if cover_data.starts_with("data:image/") {
-                if let Some(idx) = cover_data.find(";base64,") {
-                    let b64 = &cover_data[idx + 8..];
-                    if let Ok(bytes) = BASE64_STANDARD.decode(b64) {
-                        let cover_file = parent_dir.join("cover.jpg");
-                        if !cover_file.exists() {
-                            let temp_cover = parent_dir.join(format!("cover.jpg.cadence-tmp-{}", Uuid::new_v4()));
+                let parent_dir_buf = parent_dir.to_path_buf();
+                let already_written = self.written_artwork_dirs.lock().contains(&parent_dir_buf);
+                if !already_written {
+                    if let Some(idx) = cover_data.find(";base64,") {
+                        let b64 = &cover_data[idx + 8..];
+                        if let Ok(bytes) = BASE64_STANDARD.decode(b64) {
+                            let cover_file = parent_dir.join("cover.jpg");
+                            let temp_cover = parent_dir.join(format!("cover.cadence-tmp-{}.jpg", Uuid::new_v4()));
                             if fs::write(&temp_cover, &bytes).is_ok() {
-                                let _ = Self::atomic_replace_file(&temp_cover, &cover_file);
+                                if Self::atomic_replace_file(&temp_cover, &cover_file).is_ok() {
+                                    self.written_artwork_dirs.lock().insert(parent_dir_buf);
+                                } else {
+                                    let _ = fs::remove_file(&temp_cover);
+                                }
                             }
                         }
                     }

@@ -92,7 +92,7 @@ flowchart TD
 ```
 
 #### Thread Isolation & Priority
-*   The worker thread runs with `THREAD_PRIORITY_BELOW_NORMAL` and `THREAD_MODE_BACKGROUND_BEGIN` (low I/O priority).
+*   The worker thread runs with `THREAD_PRIORITY_BELOW_NORMAL` (without `THREAD_MODE_BACKGROUND_BEGIN` to prevent Windows MemoryPriorityVeryLow paging and I/O priority inversion deadlocks on shared SQLite/file resources).
 *   The worker is affinity-masked away from Core 0 and Core 1 (Windows NDIS/DPC network cores) and away from the real-time audio thread (`cadence-paced-stream`).
 *   Zero heap allocations or vector resizes occur across the IPC telemetry broadcast loop.
 
@@ -164,7 +164,7 @@ The `CommitQueueWorker` executes an event-driven loop with startup crash recover
 ```text
 Startup Sweep:
   1. Find items WHERE status = 'in_flight'.
-  2. For each, scan directory for matching "[filePath].cadence-tmp-*" files and delete them.
+  2. For each, scan directory for files where `file_name.contains(".cadence-tmp-")` and delete them.
   3. Increment retry_count, reset status = 'pending'.
 
 Processing Loop:
@@ -186,7 +186,7 @@ Processing Loop:
   5. Verify source file mtime and size have not drifted since preflight. If drifted, abort track with error.
   6. Transition item status = 'in_flight'.
   7. Execute Atomic Write:
-     - Stream tag payload to temporary file: [filePath].cadence-tmp-[uuid].
+     - Stream tag payload to temporary file: {stem}.cadence-tmp-{uuid}.{ext} (preserving audio container extension for format detection).
      - Verify audio stream CRC matches pre-commit hash.
      - Execute atomic Win32 replacement: MoveFileExW(temp, target, MOVEFILE_REPLACE_EXISTING).
   8. Transition item status = 'completed'. Release Mount Lock.
@@ -299,7 +299,7 @@ Tauri's `on_window_event` listener traps `WindowEvent::CloseRequested`:
 *   **Queue Durability**: SQLite WAL persistence guarantees that queued edits survive application termination and automatically resume upon next launch.
 
 ### 3. Thread & Process Safety
-*   **Audio Core Isolation**: Background commit thread runs at `THREAD_PRIORITY_BELOW_NORMAL` and `THREAD_MODE_BACKGROUND_BEGIN`, with CPU affinity locked away from Core 0/1 and the audio streaming core.
+*   **Audio Core Isolation**: Background commit thread runs at `THREAD_PRIORITY_BELOW_NORMAL` (avoiding `THREAD_MODE_BACKGROUND_BEGIN` to prevent priority inversion), with a dedicated SQLite connection with WAL mode and `PRAGMA busy_timeout = 5000` to eliminate UI thread contention, and with CPU affinity locked away from Core 0/1 and the audio streaming core.
 
 --------------------------------------------------------------------------------
 
@@ -329,7 +329,7 @@ Tauri's `on_window_event` listener traps `WindowEvent::CloseRequested`:
 #### 3. `src-tauri/src/maintenance/commit_worker.rs` (Create)
 *   **Type / Scope**: Native Background Service Thread (Rust)
 *   **Proposed Changes**: Implement `CommitQueueWorker`:
-    *   Thread initialization with `THREAD_PRIORITY_BELOW_NORMAL`, `THREAD_MODE_BACKGROUND_BEGIN`, and disjoint CPU affinity mask away from Core 0/1.
+    *   Thread initialization with `THREAD_PRIORITY_BELOW_NORMAL` (without background mode to prevent starvation/priority inversion), dedicated SQLite connection under WAL, and disjoint CPU affinity mask away from Core 0/1.
     *   Startup sweep deleting orphaned `*.cadence-tmp-*` files and resetting in-flight items.
     *   Preemption loop checking `AudioEngine::is_playing()` and calculating the 30-second silent cooldown.
     *   Atomic write pipeline: verify source `mtime`/size -> stream to temp file -> verify CRC -> `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)`.
