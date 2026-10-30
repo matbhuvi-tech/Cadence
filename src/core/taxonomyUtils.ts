@@ -893,6 +893,12 @@ export function matchesEra(year: number | undefined, eraBucket: string): boolean
   if (!eraBucket) return true
   if (!year || year <= 0) return eraBucket === 'unknown'
 
+  const decadeMatch = eraBucket.match(/^(\d{4})s$/i)
+  if (decadeMatch) {
+    const decadeStart = parseInt(decadeMatch[1], 10)
+    return year >= decadeStart && year <= decadeStart + 9
+  }
+
   switch (eraBucket) {
     case 'earlier-1970':
       return year <= 1970
@@ -938,6 +944,30 @@ export function matchesFormat(track: Track, formatSelection: string): boolean {
     sRate.includes('5644') ||
     sRate.includes('2822') ||
     sRate.includes('22579')
+
+  if (
+    sel === '24-BIT HI-RES' ||
+    sel === 'HIGH_RES_24BIT' ||
+    sel === '24-BIT' ||
+    sel === '24BIT' ||
+    sel === 'HI-RES' ||
+    sel === 'HI_RES'
+  ) {
+    return (
+      track.bitDepth === 24 ||
+      track.bitDepth === 32 ||
+      (Boolean(track.sampleRateStr) && (
+        track.sampleRateStr.includes('24/') ||
+        track.sampleRateStr.includes('32/') ||
+        track.sampleRateStr.includes('24-bit') ||
+        track.sampleRateStr.includes('32-bit') ||
+        track.sampleRateStr.toUpperCase().includes('HIGH-RES') ||
+        track.sampleRateStr.toUpperCase().includes('HI-RES')
+      )) ||
+      Boolean(track.isHighRes) ||
+      isDsd
+    )
+  }
 
   if (sel === 'DSD' || sel === 'NATIVE DSD' || sel === 'NATIVE_DSD') {
     return isDsd

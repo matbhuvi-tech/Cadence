@@ -55,6 +55,7 @@ export function isComposerRole(role?: string): boolean {
 interface ArtistsViewProps {
   releases: Release[]
   tracks: Track[]
+  splitReleaseIds?: Set<string>
   onSelectTrack: (trackId: string) => void
   selectedTrackId?: string
   playbackState?: PlaybackStatePayload
@@ -82,6 +83,7 @@ function resolvePortraitUrl(url?: string): string {
 export const ArtistsView: React.FC<ArtistsViewProps> = ({
   releases,
   tracks,
+  splitReleaseIds,
   onSelectTrack,
   selectedTrackId,
   playbackState,
@@ -92,7 +94,6 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
 }) => {
   const [artists, setArtists] = useState<ArtistSummary[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [searchQuery, setSearchQuery] = useState('')
   const [roleFilter, setRoleFilter] = useState<RoleFilter>('all')
   const [sortBy, setSortBy] = useState<SortBy>('albums_desc')
   const [internalCardSize, setInternalCardSize] = useState<CardSize>('standard')
@@ -157,16 +158,16 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
   const loadArtists = useCallback(async () => {
     setIsLoading(true)
     try {
-      const data = await sqliteLibraryService.getCanonicalArtists(releases, tracks)
+      const data = await sqliteLibraryService.getCanonicalArtists(releases, tracks, splitReleaseIds)
       setArtists(data)
     } catch (err) {
       console.error('[ArtistsView] Error loading canonical artists:', err)
-      const fallback = sqliteLibraryService.deriveCanonicalArtistsFromState(releases, tracks)
+      const fallback = sqliteLibraryService.deriveCanonicalArtistsFromState(releases, tracks, splitReleaseIds)
       setArtists(fallback)
     } finally {
       setIsLoading(false)
     }
-  }, [releases, tracks])
+  }, [releases, tracks, splitReleaseIds])
 
   useEffect(() => {
     loadArtists()
@@ -184,7 +185,7 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
     setDetailRoleTab('all')
 
     sqliteLibraryService
-      .getCanonicalArtistDetail(selectedArtistId, releases, tracks)
+      .getCanonicalArtistDetail(selectedArtistId, releases, tracks, splitReleaseIds)
       .then((detail) => {
         if (isMounted) {
           setArtistDetail(detail)
@@ -199,20 +200,20 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
     return () => {
       isMounted = false
     }
-  }, [selectedArtistId, releases, tracks])
+  }, [selectedArtistId, releases, tracks, splitReleaseIds])
+
+  // Zero-match drilldown guard: auto-reset selectedArtistId if 0 tracks match under active filter
+  useEffect(() => {
+    if (selectedArtistId && artistDetail && !isLoadingDetail) {
+      if (artistDetail.appearingTracks.length === 0 && artistDetail.discography.length === 0) {
+        setSelectedArtistId(null)
+      }
+    }
+  }, [selectedArtistId, artistDetail, isLoadingDetail])
 
   // Filtered & Sorted Artists Grid
   const filteredArtists = useMemo(() => {
     let result = artists
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim()
-      result = result.filter(
-        (a) =>
-          a.name.toLowerCase().includes(q) ||
-          (a.sortName && a.sortName.toLowerCase().includes(q))
-      )
-    }
 
     if (roleFilter === 'composer') {
       result = result.filter(
@@ -233,7 +234,7 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
       }
       return a.name.localeCompare(b.name)
     })
-  }, [artists, searchQuery, roleFilter, sortBy])
+  }, [artists, roleFilter, sortBy])
 
   // Open Portrait Picker Modal
   const handleOpenPortraitModal = async () => {
@@ -846,17 +847,6 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
     <div className="flex-1 flex flex-col min-h-0 bg-[#0D0E11] text-[#F5F5F7] overflow-hidden">
       {/* Top Filter and Search Control Bar */}
       <div className="px-8 py-4 border-b border-white/[0.06] flex flex-wrap items-center justify-between gap-4 shrink-0 bg-[#0D0E11]/90 backdrop-blur-md sticky top-0 z-10">
-        {/* Search Field */}
-        <div className="relative w-64">
-          <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#8E8E93]" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search artists..."
-            className="w-full bg-white/[0.04] border border-white/[0.08] focus:border-white/20 rounded-xl pl-9 pr-3 py-1.5 text-xs text-white placeholder-[#8E8E93] focus:outline-none transition-colors"
-          />
-        </div>
 
         {/* Role Filters */}
         <div className="flex items-center gap-1.5 p-0.5 rounded-xl bg-white/[0.04] border border-white/[0.08]">
@@ -1047,7 +1037,7 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
             <Search className="w-8 h-8 text-white/20 mb-2" />
             <span className="text-sm font-medium text-white/60">No artists found</span>
             <span className="text-xs">
-              {searchQuery ? `No matches for "${searchQuery}"` : 'Your library has no indexed artists yet.'}
+              {roleFilter !== 'all' ? 'No matches for the selected role filter.' : 'Your library has no indexed artists under the active filter.'}
             </span>
           </div>
         )}

@@ -25,7 +25,9 @@ import { VirtualDataTable } from './VirtualDataTable'
 import { SpreadsheetMultiEdit } from './SpreadsheetMultiEdit'
 import { FolderTreeExplorer } from './FolderTreeExplorer'
 import { FacetSelections } from '../LeftRail/FacetedFilters'
-import { splitMultiArtistCredits } from '../../core/taxonomyUtils'
+import { splitMultiArtistCredits, detectLanguage } from '../../core/taxonomyUtils'
+import { groupAlbumReleases } from '../../services/albumGroupingService'
+import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 
 export type { CanvasViewMode }
 
@@ -40,6 +42,7 @@ interface DataCanvasProps {
   works: Work[]
   releases: Release[]
   tracks: Track[]
+  mountAndFolderScopedTracks?: Track[]
 
   selectedTrackId?: string
   onSelectTrack: (trackId: string) => void
@@ -102,6 +105,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   works,
   releases,
   tracks,
+  mountAndFolderScopedTracks,
   selectedTrackId,
   onSelectTrack,
   selectedTrackIds,
@@ -148,30 +152,54 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   const [coverCardSize, setCoverCardSize] = useState<CardSize>('standard')
   const inlineSearchInputRef = useRef<HTMLInputElement>(null)
 
-  // Derive distinct canonical artist and composer counts
+  // Derive distinct canonical albums, artist, and composer counts with 1:1 parity
+  const albumsCount = useMemo(() => {
+    return groupAlbumReleases(releases, splitReleaseIds).length
+  }, [releases, splitReleaseIds])
+
   const artistCount = useMemo(() => {
-    const set = new Set<string>()
-    releases.forEach((r) => {
-      if (r.composerName) set.add(r.composerName.trim().toLowerCase())
-      if (r.artistCredit) {
-        splitMultiArtistCredits(r.artistCredit).forEach((c) => set.add(c.name.trim().toLowerCase()))
-      }
-    })
-    tracks.forEach((t) => {
-      if (t.composerName) set.add(t.composerName.trim().toLowerCase())
-      if (t.artistCredit) {
-        splitMultiArtistCredits(t.artistCredit).forEach((c) => set.add(c.name.trim().toLowerCase()))
-      }
-    })
-    return set.size
-  }, [releases, tracks])
+    return sqliteLibraryService.deriveCanonicalArtistsFromState(releases, tracks, splitReleaseIds).length
+  }, [releases, tracks, splitReleaseIds])
 
   const composerCount = useMemo(() => {
     const set = new Set<string>()
-    releases.forEach((r) => r.composerName && set.add(r.composerName))
-    tracks.forEach((t) => t.composerName && set.add(t.composerName))
+    releases.forEach((r) => r.composerName && set.add(r.composerName.trim().toLowerCase()))
+    tracks.forEach((t) => t.composerName && set.add(t.composerName.trim().toLowerCase()))
     return set.size
   }, [releases, tracks])
+
+  // Dynamically detect non-zero languages across the mount/folder catalog scope
+  const availableLanguages = useMemo(() => {
+    const sourceTracks = mountAndFolderScopedTracks && mountAndFolderScopedTracks.length > 0 ? mountAndFolderScopedTracks : tracks
+    const langCounts = new Map<string, number>()
+    const releaseMap = new Map<string, Release>()
+    releases.forEach((r) => releaseMap.set(r.id, r))
+
+    sourceTracks.forEach((t) => {
+      const rel = releaseMap.get(t.releaseId)
+      const detected = (
+        t.language ||
+        detectLanguage({
+          language: t.language,
+          title: t.title,
+          artistCredit: t.artistCredit,
+          composerName: t.composerName,
+          albumTitle: rel?.title,
+          genreTags: rel?.genreTags,
+          folderName: t.folderName || rel?.folderName,
+          filePath: t.filePath,
+        })
+      )
+      if (detected && detected.trim() && detected.toLowerCase() !== 'unknown') {
+        const norm = detected.trim()
+        langCounts.set(norm, (langCounts.get(norm) || 0) + 1)
+      }
+    })
+
+    return Array.from(langCounts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([lang]) => lang)
+  }, [mountAndFolderScopedTracks, tracks, releases])
 
   const isAllExpanded = releases.length > 0 && releases.every((r) => expandedReleaseIds.has(r.id))
 
@@ -317,7 +345,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                         : 'text-[#8E8E93] hover:text-[#F5F5F7]'
                     }`}
                   >
-                    Albums ({releases.length})
+                    Albums ({albumsCount})
                   </button>
                   <button
                     onClick={() => {
@@ -383,7 +411,15 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
-              placeholder="Filter in-place (⌘F)..."
+              placeholder={
+  viewMode === 'virtual_table'
+    ? 'Filter tracks (⌘F)...'
+    : activeCoverTab === 'artists'
+    ? 'Filter artists (⌘F)...'
+    : activeCoverTab === 'composers'
+    ? 'Filter composers (⌘F)...'
+    : 'Filter in-place (⌘F)...'
+}
               className="pl-8 pr-7 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.08] focus:border-[#D4AF37]/50 text-xs text-white placeholder:text-[#636366] focus:outline-none w-36 sm:w-44 transition-all font-sans"
             />
             {searchQuery && (
@@ -467,7 +503,6 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                     <option value="year_asc">Year (Oldest First)</option>
                     <option value="artist_asc">Artist (A-Z)</option>
                     <option value="title_asc">Album Title (A-Z)</option>
-                    <option value="dr_desc">Dynamic Range (Avg DR)</option>
                   </select>
                 </div>
 
@@ -574,6 +609,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
             </span>
             <div className="flex items-center gap-1 flex-wrap">
               {[
+                { label: '24-bit Hi-Res', val: '24-bit Hi-Res', color: 'text-amber-300' },
                 { label: 'Native DSD', val: 'DSD', color: 'text-[#818CF8]' },
                 { label: 'WAV', val: 'WAV', color: 'text-[#38BDF8]' },
                 { label: 'FLAC', val: 'FLAC', color: 'text-[#F59E0B]' },
@@ -582,7 +618,8 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
               ].map((f) => {
                 const isFormatActive =
                   facets.format === f.val ||
-                  (f.val === 'DSD' && (facets.format === 'DSD256' || facets.format === 'Native DSD'))
+                  (f.val === 'DSD' && (facets.format === 'DSD256' || facets.format === 'Native DSD')) ||
+                  (f.val === '24-bit Hi-Res' && (facets.format === 'high_res_24bit' || facets.format === '24-bit Hi-Res'))
                 return (
                   <button
                     key={f.val}
@@ -600,32 +637,32 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
             </div>
           </div>
 
-          {/* Audiophile Dynamic Range Tier Row */}
-          <div className="flex items-center gap-2 overflow-x-auto">
-            <span className="w-16 font-mono text-[10px] uppercase text-[#8E8E93] font-semibold shrink-0">
-              Dynamics:
-            </span>
-            <div className="flex items-center gap-1 flex-wrap">
-              {[
-                { label: '24-bit Hi-Res', val: 'high_res_24bit' },
-                { label: 'DR14+ (Reference Grade)', val: 'audiophile_dr14' },
-                { label: 'DR12+ (Audiophile)', val: 'audiophile_dr12' },
-                { label: 'DR10+ (Standard)', val: 'standard_dr10' },
-              ].map((dr) => (
-                <button
-                  key={dr.val}
-                  onClick={() => onFacetChange?.({ ...facets, mastering: facets.mastering === dr.val ? undefined : dr.val })}
-                  className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${
-                    facets.mastering === dr.val
-                      ? 'bg-[#10B981] text-black font-semibold shadow-sm'
-                      : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
-                  }`}
-                >
-                  {dr.label}
-                </button>
-              ))}
+          {/* Dynamic Language Row */}
+          {availableLanguages.length > 0 && (
+            <div className="flex items-center gap-2 overflow-x-auto">
+              <span className="w-16 font-mono text-[10px] uppercase text-[#8E8E93] font-semibold shrink-0">
+                Language:
+              </span>
+              <div className="flex items-center gap-1 flex-wrap">
+                {availableLanguages.map((lang) => {
+                  const isLangActive = facets.language?.toLowerCase() === lang.toLowerCase()
+                  return (
+                    <button
+                      key={lang}
+                      onClick={() => onFacetChange?.({ ...facets, language: isLangActive ? undefined : lang })}
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${
+                        isLangActive
+                          ? 'bg-[#10B981] text-black font-semibold shadow-sm'
+                          : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                      }`}
+                    >
+                      {lang}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Review Status Row */}
           <div className="flex items-center gap-2 overflow-x-auto">

@@ -1,4 +1,5 @@
 import { tauriBridge } from './tauriBridge'
+import { groupAlbumReleases } from './albumGroupingService'
 import { storagePersistence } from '../core/storagePersistence'
 import { graphEngine } from '../core/graphEngine'
 import {
@@ -177,6 +178,7 @@ export function parseAudioSpecsFromString(
 }
 
 export class SqliteLibraryService {
+  private canonicalArtistsMetadataCache = new Map<string, { portraitUrl?: string; portraitStatus?: any; eraActive?: string }>()
   private unlistenProgress: UnlistenFn | null = null
   private unlistenChunk: UnlistenFn | null = null
   private unlistenComplete: UnlistenFn | null = null
@@ -1206,8 +1208,45 @@ export class SqliteLibraryService {
    */
   public async getCanonicalArtists(
     fallbackReleases?: Release[],
-    fallbackTracks?: Track[]
+    fallbackTracks?: Track[],
+    splitReleaseIds?: Set<string>
   ): Promise<ArtistSummary[]> {
+    if (tauriBridge.isTauri() && this.canonicalArtistsMetadataCache.size === 0) {
+      try {
+        const raw = await tauriBridge.dbGetCanonicalArtists()
+        if (raw && raw.length > 0) {
+          raw.forEach((a: any) => {
+            const key = (a.name || '').trim().toLowerCase()
+            if (key) {
+              this.canonicalArtistsMetadataCache.set(key, {
+                portraitUrl: a.portraitUrl || a.portrait_url,
+                portraitStatus: (a.portraitStatus || a.portrait_status || 'pending') as any,
+                eraActive: a.eraActive || a.era_active,
+              })
+            }
+          })
+        }
+      } catch (err) {
+        console.warn('[SqliteLibraryService] Failed to seed canonical artists cache from SQLite:', err)
+      }
+    }
+
+    if (fallbackReleases && fallbackTracks) {
+      const derived = this.deriveCanonicalArtistsFromState(fallbackReleases, fallbackTracks, splitReleaseIds)
+      return derived.map((summary) => {
+        const cached = this.canonicalArtistsMetadataCache.get(summary.name.trim().toLowerCase())
+        if (cached) {
+          return {
+            ...summary,
+            portraitUrl: cached.portraitUrl || summary.portraitUrl,
+            portraitStatus: (cached.portraitStatus || summary.portraitStatus) as any,
+            eraActive: cached.eraActive || summary.eraActive,
+          }
+        }
+        return summary
+      })
+    }
+
     if (tauriBridge.isTauri()) {
       try {
         const raw = await tauriBridge.dbGetCanonicalArtists()
@@ -1242,9 +1281,6 @@ export class SqliteLibraryService {
       }
     }
 
-    if (fallbackReleases && fallbackTracks) {
-      return this.deriveCanonicalArtistsFromState(fallbackReleases, fallbackTracks)
-    }
     return []
   }
 
@@ -1254,8 +1290,70 @@ export class SqliteLibraryService {
   public async getCanonicalArtistDetail(
     artistId: string,
     fallbackReleases: Release[] = [],
-    fallbackTracks: Track[] = []
+    fallbackTracks: Track[] = [],
+    splitReleaseIds?: Set<string>
   ): Promise<ArtistDetail | null> {
+    if (fallbackReleases.length > 0 && fallbackTracks.length > 0) {
+      const summaries = this.deriveCanonicalArtistsFromState(fallbackReleases, fallbackTracks, splitReleaseIds)
+      const summary = summaries.find((s) => s.id === artistId || s.name.toLowerCase() === artistId.toLowerCase())
+      if (!summary) return null
+
+      const normName = summary.name.toLowerCase()
+      const matchingReleases = fallbackReleases.filter(
+        (r) =>
+          (r.composerName && r.composerName.toLowerCase().includes(normName)) ||
+          (r.artistCredit && r.artistCredit.toLowerCase().includes(normName))
+      )
+
+      const appearingTracks: ArtistCreditItem[] = []
+      for (const t of fallbackTracks) {
+        const isComposer = Boolean(t.composerName?.toLowerCase().includes(normName))
+        const isPerformer = Boolean(t.artistCredit?.toLowerCase().includes(normName))
+        if (isComposer || isPerformer) {
+          const splits = splitMultiArtistCredits(t.artistCredit || '')
+          const coArtists = splits.map((s) => s.name).filter((n) => n.toLowerCase() !== normName)
+          const rel = fallbackReleases.find((r) => r.id === t.releaseId)
+
+          appearingTracks.push({
+            trackId: t.id,
+            trackTitle: t.title,
+            trackNumber: t.trackNumber,
+            releaseId: t.releaseId,
+            releaseTitle: rel?.title || (t as any).albumTitle || 'Unknown Release',
+            releaseYear: rel?.releaseYear ?? (t as any).releaseYear,
+            role: isComposer ? 'Composer' : 'Performer',
+            format: t.format,
+            sampleRate: t.sampleRate,
+            bitDepth: t.bitDepth,
+            drScore: t.drScore,
+            durationSecs: t.durationSeconds || 0,
+            fullArtistCredit: t.artistCredit || summary.name,
+            coArtists,
+          })
+        }
+      }
+
+      const cached = this.canonicalArtistsMetadataCache.get(normName)
+      const groupedMatching = groupAlbumReleases(matchingReleases, splitReleaseIds || new Set())
+
+      return {
+        artist: {
+          id: summary.id,
+          name: summary.name,
+          portraitUrl: cached?.portraitUrl || summary.portraitUrl,
+          portraitStatus: (cached?.portraitStatus || summary.portraitStatus) as any,
+          primaryRole: summary.primaryRole,
+          eraActive: cached?.eraActive || summary.eraActive,
+          createdAt: new Date().toISOString(),
+        },
+        albumsCount: groupedMatching.length,
+        tracksCount: appearingTracks.length,
+        roles: summary.roles,
+        discography: matchingReleases,
+        appearingTracks,
+      }
+    }
+
     if (tauriBridge.isTauri()) {
       try {
         const res = await tauriBridge.dbGetCanonicalArtistDetail(artistId)
@@ -1353,71 +1451,18 @@ export class SqliteLibraryService {
       }
     }
 
-    // In-memory fallback
-    const summaries = this.deriveCanonicalArtistsFromState(fallbackReleases, fallbackTracks)
-    const summary = summaries.find((s) => s.id === artistId || s.name.toLowerCase() === artistId.toLowerCase())
-    if (!summary) return null
-
-    const normName = summary.name.toLowerCase()
-    const matchingReleases = fallbackReleases.filter(
-      (r) =>
-        (r.composerName && r.composerName.toLowerCase().includes(normName)) ||
-        (r.artistCredit && r.artistCredit.toLowerCase().includes(normName))
-    )
-
-    const appearingTracks: ArtistCreditItem[] = []
-    for (const t of fallbackTracks) {
-      const isComposer = Boolean(t.composerName?.toLowerCase().includes(normName))
-      const isPerformer = Boolean(t.artistCredit?.toLowerCase().includes(normName))
-      if (isComposer || isPerformer) {
-        const splits = splitMultiArtistCredits(t.artistCredit || '')
-        const coArtists = splits.map((s) => s.name).filter((n) => n.toLowerCase() !== normName)
-        const rel = fallbackReleases.find((r) => r.id === t.releaseId)
-
-        appearingTracks.push({
-          trackId: t.id,
-          trackTitle: t.title,
-          trackNumber: t.trackNumber,
-          releaseId: t.releaseId,
-          releaseTitle: rel?.title || (t as any).albumTitle || 'Unknown Release',
-          releaseYear: rel?.releaseYear ?? (t as any).releaseYear,
-          role: isComposer ? 'Composer' : 'Performer',
-          format: t.format,
-          sampleRate: t.sampleRate,
-          bitDepth: t.bitDepth,
-          drScore: t.drScore,
-          durationSecs: t.durationSeconds || 0,
-          fullArtistCredit: t.artistCredit || summary.name,
-          coArtists,
-        })
-      }
-    }
-
-    return {
-      artist: {
-        id: summary.id,
-        name: summary.name,
-        portraitUrl: summary.portraitUrl,
-        portraitStatus: summary.portraitStatus,
-        primaryRole: summary.primaryRole,
-        createdAt: new Date().toISOString(),
-      },
-      albumsCount: matchingReleases.length,
-      tracksCount: appearingTracks.length,
-      roles: summary.roles,
-      discography: matchingReleases,
-      appearingTracks,
-    }
+    return null
   }
 
-  /**
-   * Persists an artist's chosen photographic portrait.
-   */
+
   public async setArtistPortrait(
     artistId: string,
     portraitUrl: string,
     status: string = 'enriched'
   ): Promise<void> {
+    const key = artistId.toLowerCase()
+    const existing = this.canonicalArtistsMetadataCache.get(key) || {}
+    this.canonicalArtistsMetadataCache.set(key, { ...existing, portraitUrl, portraitStatus: status as any })
     if (tauriBridge.isTauri()) {
       await tauriBridge.dbSetArtistPortrait(artistId, portraitUrl, status)
     }
@@ -1427,7 +1472,19 @@ export class SqliteLibraryService {
    * Derives a full relational canonical artist collection from in-memory state,
    * splitting compound strings while protecting compound band/duo entities.
    */
-  public deriveCanonicalArtistsFromState(releases: Release[], tracks: Track[]): ArtistSummary[] {
+  public deriveCanonicalArtistsFromState(
+    releases: Release[],
+    tracks: Track[],
+    splitReleaseIds?: Set<string>
+  ): ArtistSummary[] {
+    const grouped = groupAlbumReleases(releases, splitReleaseIds || new Set())
+    const releaseToMasterId = new Map<string, string>()
+    for (const grc of grouped) {
+      const masterId = grc.masterRelease.id
+      for (const cr of grc.constituentReleases) {
+        releaseToMasterId.set(cr.id, masterId)
+      }
+    }
     const artistMap = new Map<
       string,
       {
@@ -1441,6 +1498,7 @@ export class SqliteLibraryService {
 
     // 1. Process Releases
     for (const r of releases) {
+      const masterReleaseId = releaseToMasterId.get(r.id) || r.id
       if (r.composerName) {
         const key = r.composerName.trim().toLowerCase()
         if (!artistMap.has(key)) {
@@ -1453,7 +1511,7 @@ export class SqliteLibraryService {
           })
         }
         const entry = artistMap.get(key)!
-        entry.albums.add(r.id)
+        entry.albums.add(masterReleaseId)
         entry.roles.add('Composer')
       }
 
@@ -1471,7 +1529,7 @@ export class SqliteLibraryService {
             })
           }
           const entry = artistMap.get(key)!
-          entry.albums.add(r.id)
+          entry.albums.add(masterReleaseId)
           entry.roles.add(s.role)
         }
       }
@@ -1479,6 +1537,7 @@ export class SqliteLibraryService {
 
     // 2. Process Tracks
     for (const t of tracks) {
+      const masterReleaseId = (t.releaseId && releaseToMasterId.get(t.releaseId)) || t.releaseId
       if (t.composerName) {
         const key = t.composerName.trim().toLowerCase()
         if (!artistMap.has(key)) {
@@ -1491,7 +1550,7 @@ export class SqliteLibraryService {
           })
         }
         const entry = artistMap.get(key)!
-        if (t.releaseId) entry.albums.add(t.releaseId)
+        if (masterReleaseId) entry.albums.add(masterReleaseId)
         entry.tracks.add(t.id)
         entry.roles.add('Composer')
       }
@@ -1510,7 +1569,7 @@ export class SqliteLibraryService {
             })
           }
           const entry = artistMap.get(key)!
-          if (t.releaseId) entry.albums.add(t.releaseId)
+          if (masterReleaseId) entry.albums.add(masterReleaseId)
           entry.tracks.add(t.id)
           entry.roles.add(s.role)
         }

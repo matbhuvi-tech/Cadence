@@ -72,7 +72,7 @@ interface AlbumCoverGridProps {
 }
 
 export type EntityTab = 'albums' | 'artists' | 'composers'
-export type SortBy = 'year_desc' | 'year_asc' | 'artist_asc' | 'title_asc' | 'dr_desc'
+export type SortBy = 'year_desc' | 'year_asc' | 'artist_asc' | 'title_asc'
 export type CardSize = 'compact' | 'standard' | 'large'
 
 interface AlbumCardData {
@@ -348,8 +348,6 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
           return a.artistCredit.localeCompare(b.artistCredit)
         case 'title_asc':
           return a.title.localeCompare(b.title)
-        case 'dr_desc':
-          return b.avgDr - a.avgDr
         default:
           return 0
       }
@@ -378,6 +376,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     )
   }, [unfilteredCards, selectedArtist])
 
+
   // Drilldown Filtered Albums for Selected Composer
   const composerFilteredAlbums = useMemo(() => {
     if (!selectedComposer) return []
@@ -389,6 +388,19 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
       )
     })
   }, [unfilteredCards, selectedComposer])
+
+  // Zero-match drilldown guards: collapse back to grid if active filter leaves 0 matching albums
+  useEffect(() => {
+    if (selectedComposer && composerFilteredAlbums.length === 0) {
+      setSelectedComposer(null)
+    }
+  }, [selectedComposer, composerFilteredAlbums.length, setSelectedComposer])
+
+  useEffect(() => {
+    if (selectedArtist && artistFilteredAlbums.length === 0) {
+      setSelectedArtist(null)
+    }
+  }, [selectedArtist, artistFilteredAlbums.length, setSelectedArtist])
 
   // Group by Artists
   const artistGroups = useMemo(() => {
@@ -1791,7 +1803,6 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                   <option value="year_asc">Year (Oldest First)</option>
                   <option value="artist_asc">Artist (A-Z)</option>
                   <option value="title_asc">Album Title (A-Z)</option>
-                  <option value="dr_desc">Dynamic Range (Avg DR)</option>
                 </select>
               </div>
 
@@ -1849,6 +1860,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                 <ArtistsView
                   releases={releases}
                   tracks={tracks}
+                  splitReleaseIds={splitReleaseIds}
                   onSelectTrack={onSelectTrack}
                   selectedTrackId={selectedTrackId}
                   playbackState={{

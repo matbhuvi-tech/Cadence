@@ -979,15 +979,32 @@ function AppContent() {
     })
   }, [gridScopedTracks, activeTriageFilter, scopedAuditIssues])
 
-  // 3b. Derived displayed releases: scoped when filtering by staged review status
+  // 3b. Mount and folder scoped tracks (invariant to shelf facet toggles)
+  const mountAndFolderScopedTracks = useMemo(() => {
+    let result = tracks
+    if (selectedMountId) {
+      result = result.filter((t) => t.storageMountId === selectedMountId)
+    }
+    if (selectedFolderFilter) {
+      result = result.filter((t) => (t.filePath || '').replace(/\\/g, '/').startsWith(selectedFolderFilter))
+    }
+    return result
+  }, [tracks, selectedMountId, selectedFolderFilter])
+
+  // 3c. Derived displayed releases: scoped when any catalog filter or staged review status is active
   const displayedReleases = useMemo(() => {
-    if (facets.reviewStatus === 'staged') {
+    if (isGridFilterActive || Boolean(activeTriageFilter)) {
+      const activeReleaseIds = new Set<string>()
+      filteredTracks.forEach((t) => {
+        if (t.releaseId) activeReleaseIds.add(t.releaseId)
+        if (t.folderName) activeReleaseIds.add(t.folderName)
+      })
       return releases.filter(
-        (r) => stagedReleaseIds.has(r.id) || (r.folderName && stagedReleaseIds.has(r.folderName))
+        (r) => activeReleaseIds.has(r.id) || (r.folderName && activeReleaseIds.has(r.folderName))
       )
     }
     return releases
-  }, [releases, facets.reviewStatus, stagedReleaseIds])
+  }, [releases, isGridFilterActive, activeTriageFilter, filteredTracks])
 
   // 4. Currently active triage anomaly details (if any)
   const activeTriageIssue = useMemo(() => {
@@ -2054,6 +2071,7 @@ function AppContent() {
                 works={works}
                 releases={displayedReleases}
                 tracks={filteredTracks}
+                mountAndFolderScopedTracks={mountAndFolderScopedTracks}
                 facets={facets}
                 onFacetChange={setFacets}
                 selectedTrackId={selectedTrackId}

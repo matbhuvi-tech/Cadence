@@ -1016,6 +1016,8 @@ export class RelationalGraphEngine {
           (t.movementTitle && t.movementTitle.toLowerCase().includes(q)) ||
           (t.folderName && t.folderName.toLowerCase().includes(q)) ||
           (rel && rel.title.toLowerCase().includes(q)) ||
+          (rel && rel.artistCredit && rel.artistCredit.toLowerCase().includes(q)) ||
+          (rel && rel.composerName && rel.composerName.toLowerCase().includes(q)) ||
           (rel && rel.folderName && rel.folderName.toLowerCase().includes(q))
         )
       })
@@ -1030,7 +1032,7 @@ export class RelationalGraphEngine {
     if (filters.eraFilter) {
       result = result.filter((t) => {
         const rel = this.releases.get(t.releaseId)
-        const y = rel?.releaseYear || rel?.originalYear
+        const y = t.pendingSidecarEdits?.year || rel?.releaseYear || rel?.originalYear
         return matchesEra(y, filters.eraFilter!)
       })
     }
