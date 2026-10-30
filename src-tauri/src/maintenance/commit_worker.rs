@@ -14,6 +14,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 use crate::audio::AudioEngine;
 use crate::db::{AppDb, DbOperations};
@@ -138,14 +140,13 @@ impl CommitQueueWorker {
                 unsafe {
                     use windows_sys::Win32::System::Threading::{
                         GetCurrentProcess, GetCurrentThread, GetProcessAffinityMask,
-                        SetThreadAffinityMask, SetThreadPriority,
-                        THREAD_MODE_BACKGROUND_BEGIN, THREAD_PRIORITY_BELOW_NORMAL,
+                        SetThreadAffinityMask, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
                     };
 
-                    let res = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
-                    if res == 0 {
-                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-                    }
+                    // Set thread priority below normal to prevent starving foreground or audio threads,
+                    // while avoiding THREAD_MODE_BACKGROUND_BEGIN to prevent Windows MemoryPriorityVeryLow
+                    // and I/O priority inversion deadlocks on shared SQLite mutexes.
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 
                     let mut process_mask: usize = 0;
                     let mut system_mask: usize = 0;
@@ -378,11 +379,13 @@ impl CommitQueueWorker {
 
         // Embedded tags write
         let parent_dir = target_path.parent().ok_or("Invalid parent directory")?;
-        let temp_filename = format!(
-            "{}.cadence-tmp-{}",
-            target_path.file_name().unwrap_or_default().to_string_lossy(),
-            Uuid::new_v4()
-        );
+        let stem = target_path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = target_path.extension().unwrap_or_default().to_string_lossy();
+        let temp_filename = if ext.is_empty() {
+            format!("{}.cadence-tmp-{}", stem, Uuid::new_v4())
+        } else {
+            format!("{}.cadence-tmp-{}.{}", stem, Uuid::new_v4(), ext)
+        };
         let temp_path = parent_dir.join(temp_filename);
 
         // Copy source file to temporary file in the same directory (same filesystem ensures atomic swap)
@@ -401,7 +404,10 @@ impl CommitQueueWorker {
                 Some(t) => t,
                 None => {
                     tagged_file.insert_tag(Tag::new(tag_type));
-                    tagged_file.tag_mut(tag_type).unwrap()
+                    match tagged_file.tag_mut(tag_type) {
+                        Some(t) => t,
+                        None => tagged_file.first_tag_mut().ok_or("Failed to access or create audio tag")?,
+                    }
                 }
             };
 
@@ -445,6 +451,24 @@ impl CommitQueueWorker {
         if let Err(e) = Self::atomic_replace_file(&temp_path, target_path) {
             let _ = fs::remove_file(&temp_path);
             return Err(e);
+        }
+
+        // Write cover.jpg to album directory if staged artwork data URL is provided
+        if let Some(cover_data) = payload.get("coverArtUrl").and_then(|s| s.as_str()) {
+            if cover_data.starts_with("data:image/") {
+                if let Some(idx) = cover_data.find(";base64,") {
+                    let b64 = &cover_data[idx + 8..];
+                    if let Ok(bytes) = BASE64_STANDARD.decode(b64) {
+                        let cover_file = parent_dir.join("cover.jpg");
+                        if !cover_file.exists() {
+                            let temp_cover = parent_dir.join(format!("cover.jpg.cadence-tmp-{}", Uuid::new_v4()));
+                            if fs::write(&temp_cover, &bytes).is_ok() {
+                                let _ = Self::atomic_replace_file(&temp_cover, &cover_file);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Update SQLite track cache so UI reflects tags immediately

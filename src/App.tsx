@@ -2239,8 +2239,21 @@ function AppContent() {
           onClose={() => setIsCommitModalOpen(false)}
           onSuccess={() => {
             refreshFromEngine()
-            persistCurrentLibrary()
-            showToast('Staged changes committed bit-perfectly to audio headers, sidecars & local database')
+            // Asynchronous queue architecture: native CommitQueueWorker writes files and syncs
+            // SQLite track-by-track in the background. We only persist in-memory state to IndexedDB
+            // asynchronously without blocking the UI thread with synchronous SQLite batch transactions.
+            storagePersistence
+              .saveLibrary({
+                tracks: graphEngine.getAllTracks(),
+                releases: graphEngine.getAllReleases(),
+                works: graphEngine.getAllWorks(),
+                storageMounts: graphEngine.getAllStorageMounts(),
+                auditIssues: graphEngine.getAllAuditIssues(),
+                isCustomLibrary: graphEngine.isUsingCustomLibrary(),
+                lastImportedTimestamp: new Date().toISOString(),
+              })
+              .catch((err) => console.warn('Failed to persist library snapshot:', err))
+            showToast('Changes queued for saving. Writing to disk in background.')
           }}
           onDiscardAll={() => {
             const count = graphEngine.discardAllUncommittedEdits()

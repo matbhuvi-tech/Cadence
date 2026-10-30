@@ -6,6 +6,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
         PRAGMA foreign_keys = ON;
+        PRAGMA busy_timeout = 5000;
 
         CREATE TABLE IF NOT EXISTS storage_mounts (
             id TEXT PRIMARY KEY,
