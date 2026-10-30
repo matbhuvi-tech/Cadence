@@ -1315,26 +1315,31 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                                 </div>
                               </div>
 
-                              {/* Album Artwork Thumbnail */}
-                              <div className="w-10 h-10 rounded-lg bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                              {/* Album Artwork Thumbnail (3x Size: 120px x 120px) */}
+                              <div className="w-[120px] h-[120px] rounded-xl bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0 relative group/art shadow-lg">
                                 {stagedCoverArt || currentCoverArt ? (
                                   <img
                                     src={stagedCoverArt || currentCoverArt}
                                     alt="Cover"
-                                    className="w-full h-full object-cover"
+                                    className="w-full h-full object-cover transition-transform duration-300 group-hover/art:scale-105"
                                     onError={(e) => {
                                       ;(e.target as HTMLElement).style.display = 'none'
                                     }}
                                   />
                                 ) : (
-                                  <Disc3 className="w-5 h-5 text-cyan-400" />
+                                  <Disc3 className="w-10 h-10 text-cyan-400 stroke-[1.5]" />
+                                )}
+                                {stagedCoverArt && (
+                                  <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded text-[9px] font-mono font-medium bg-purple-950/85 text-purple-200 border border-purple-500/40 backdrop-blur-md shadow">
+                                    Staged
+                                  </div>
                                 )}
                               </div>
 
                               {/* Album Meta */}
-                              <div className="flex flex-col min-w-0 text-left">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-bold text-white truncate">
+                              <div className="flex flex-col min-w-0 text-left justify-center py-1 gap-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-sm font-bold text-white truncate" title={albumTitle}>
                                     {albumTitle}
                                   </span>
                                   {folderName && folderName.toLowerCase().trim() !== albumTitle.toLowerCase().trim() && (
