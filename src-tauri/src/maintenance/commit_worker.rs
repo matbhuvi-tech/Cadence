@@ -300,37 +300,44 @@ impl CommitQueueWorker {
             // 7. Update status based on result
             match write_result {
                 Ok(bytes) => {
-                    let conn = self.db.conn.lock();
-                    let _ = DbOperations::update_commit_item_status(&conn, &item.id, "completed", None, bytes);
+                    {
+                        let conn = self.db.conn.lock();
+                        let _ = DbOperations::update_commit_item_status(&conn, &item.id, "completed", None, bytes);
+                    }
 
                     // Clear any failure count for this mount
-                    let mut failures = self.mount_failure_counts.lock();
-                    failures.remove(&item.mount_id);
+                    self.mount_failure_counts.lock().remove(&item.mount_id);
 
                     // Record throughput timestamp
-                    let mut history = self.processed_in_window.lock();
-                    let now = std::time::Instant::now();
-                    history.push(now);
-                    history.retain(|t| now.duration_since(*t) <= Duration::from_secs(5));
+                    {
+                        let mut history = self.processed_in_window.lock();
+                        let now = std::time::Instant::now();
+                        history.push(now);
+                        history.retain(|t| now.duration_since(*t) <= Duration::from_secs(5));
+                    }
 
                     self.emit_telemetry(false);
                 }
                 Err(err_msg) => {
                     eprintln!("[CommitQueueWorker] Failed to write track {}: {}", item.file_path, err_msg);
-                    let conn = self.db.conn.lock();
-                    let _ = DbOperations::update_commit_item_status(&conn, &item.id, "failed", Some(&err_msg), 0);
+                    {
+                        let conn = self.db.conn.lock();
+                        let _ = DbOperations::update_commit_item_status(&conn, &item.id, "failed", Some(&err_msg), 0);
+                    }
 
                     // Track consecutive mount failures
-                    let mut failures = self.mount_failure_counts.lock();
-                    let count = failures.entry(item.mount_id.clone()).or_insert(0);
-                    *count += 1;
-                    if *count >= 3 {
-                        let mut off = self.offline_mounts.lock();
-                        off.insert(item.mount_id.clone());
-                        eprintln!(
-                            "[CommitQueueWorker] Mount {} failed 3 consecutive writes. Isolating mount.",
-                            item.mount_id
-                        );
+                    {
+                        let mut failures = self.mount_failure_counts.lock();
+                        let count = failures.entry(item.mount_id.clone()).or_insert(0);
+                        *count += 1;
+                        if *count >= 3 {
+                            let mut off = self.offline_mounts.lock();
+                            off.insert(item.mount_id.clone());
+                            eprintln!(
+                                "[CommitQueueWorker] Mount {} failed 3 consecutive writes. Isolating mount.",
+                                item.mount_id
+                            );
+                        }
                     }
 
                     self.emit_state_telemetry("writing", None, Some(err_msg));
