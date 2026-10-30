@@ -11,13 +11,14 @@ use crate::remote::{
 pub struct RemoteServerStatus {
     pub enabled: bool,
     pub port: u16,
-    pub primary_ip: String,
+    pub primary_ip: Option<String>,
+    pub has_verified_lan: bool,
     pub computer_name: String,
     pub m_dns_host: String,
     pub pairing_token: String,
     pub interfaces: Vec<LanInterfaceInfo>,
     pub connected_clients: usize,
-    pub qr_url: String,
+    pub qr_url: Option<String>,
 }
 
 #[tauri::command]
@@ -28,12 +29,16 @@ pub fn get_remote_server_info(
     let port = 4040; // Default or configured port
     let discovery = discover_lan_interfaces(port, &token);
     let connected = get_connected_client_count();
-    let qr_url = format!("http://{}:{}/?token={}", discovery.primary_ip, port, token);
+    let qr_url = discovery
+        .primary_ip
+        .as_ref()
+        .map(|ip| format!("http://{}:{}/?token={}", ip, port, token));
 
     RemoteServerStatus {
         enabled: true,
         port,
         primary_ip: discovery.primary_ip,
+        has_verified_lan: discovery.has_verified_lan,
         computer_name: discovery.computer_name,
         m_dns_host: discovery.m_dns_host,
         pairing_token: token,

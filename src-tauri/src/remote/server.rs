@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 
-use super::pwa_assets::{APPLE_TOUCH_ICON_PNG, ICON_192_PNG, ICON_512_PNG, ICON_SVG, MANIFEST_JSON, MOBILE_PWA_HTML};
+use super::pwa_assets::PwaAssets;
 use super::state::RemoteState;
 use super::ws::ws_handler;
 use crate::db::DbOperations;
@@ -55,13 +55,13 @@ pub async fn start_remote_server(
 
     // 2. Main API & PWA Router
     let app = Router::new()
-        .route("/", get(serve_pwa))
-        .route("/manifest.json", get(serve_manifest))
-        .route("/icon.svg", get(serve_icon_svg))
-        .route("/favicon.svg", get(serve_icon_svg))
-        .route("/icon-192.png", get(serve_icon_192))
-        .route("/icon-512.png", get(serve_icon_512))
-        .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
+        .fallback(serve_embedded_pwa)
+
+
+
+
+
+
         .route("/api/remote/status", get(get_status))
         .route("/api/remote/playback/:action", post(handle_playback))
         .route("/api/remote/devices", get(list_devices).post(set_device))
@@ -133,45 +133,45 @@ fn resolve_token(headers: &HeaderMap, explicit_token: Option<&str>) -> Option<St
     None
 }
 
-async fn serve_pwa() -> Html<&'static str> {
-    Html(MOBILE_PWA_HTML)
-}
+async fn serve_embedded_pwa(uri: Uri) -> impl IntoResponse {
+    let raw_path = uri.path().trim_start_matches('/');
+    let path = if raw_path.is_empty() {
+        "index.html"
+    } else {
+        raw_path
+    };
 
-async fn serve_manifest() -> impl IntoResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "application/manifest+json".parse().unwrap(),
-    );
-    (headers, MANIFEST_JSON)
-}
-
-async fn serve_icon_svg() -> impl IntoResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "image/svg+xml".parse().unwrap());
-    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
-    (headers, ICON_SVG)
-}
-
-async fn serve_icon_192() -> impl IntoResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
-    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
-    (headers, ICON_192_PNG)
-}
-
-async fn serve_icon_512() -> impl IntoResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
-    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
-    (headers, ICON_512_PNG)
-}
-
-async fn serve_apple_touch_icon() -> impl IntoResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
-    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
-    (headers, APPLE_TOUCH_ICON_PNG)
+    if let Some(file) = PwaAssets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        let cache = if path.starts_with("assets/") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache, must-revalidate"
+        };
+        (
+            [
+                (header::CONTENT_TYPE, mime.as_ref()),
+                (header::CACHE_CONTROL, cache),
+            ],
+            file.data,
+        )
+            .into_response()
+    } else if !path.starts_with("api/") && !path.starts_with("assets/") {
+        if let Some(index) = PwaAssets::get("index.html") {
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html"),
+                    (header::CACHE_CONTROL, "no-cache, must-revalidate"),
+                ],
+                index.data,
+            )
+                .into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        }
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 

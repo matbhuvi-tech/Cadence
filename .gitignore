@@ -14,7 +14,9 @@ lerna-debug.log*
 # Node dependencies and build outputs
 node_modules/
 dist/
+!src-tauri/src/remote/dist/
 dist-ssr/
+*.tsbuildinfo
 *.local
 
 # Rust & Tauri build outputs

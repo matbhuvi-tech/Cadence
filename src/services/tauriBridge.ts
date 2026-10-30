@@ -751,13 +751,14 @@ class TauriBridgeService {
     return {
       enabled: true,
       port: 4040,
-      primaryIp: '127.0.0.1',
+      primaryIp: '192.168.1.100',
+      hasVerifiedLan: true,
       computerName: 'CADENCE-DEV',
       mDnsHost: 'cadence-dev.local',
       pairingToken: '4242',
-      interfaces: [{ name: 'Wi-Fi', ip: '127.0.0.1', isRecommended: true }],
+      interfaces: [{ name: 'Wi-Fi', ip: '192.168.1.100', isRecommended: true }],
       connectedClients: 0,
-      qrUrl: 'http://127.0.0.1:4040/?token=4242',
+      qrUrl: 'http://192.168.1.100:4040/?token=4242',
     }
   }
 
@@ -1304,13 +1305,14 @@ export interface LanInterfaceInfo {
 export interface RemoteServerStatus {
   enabled: boolean
   port: number
-  primaryIp: string
+  primaryIp: string | null
+  hasVerifiedLan: boolean
   computerName: string
   mDnsHost: string
   pairingToken: string
   interfaces: LanInterfaceInfo[]
   connectedClients: number
-  qrUrl: string
+  qrUrl: string | null
 }
 
 export const tauriBridge = new TauriBridgeService()

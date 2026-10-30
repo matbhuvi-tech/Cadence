@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev:pwa": "npm run --prefix pwa dev",
+    "build:pwa": "npm run --prefix pwa build",
+    "build": "npm run build:pwa && tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
     "test:engine": "tsx src/test/verifyEngine.ts",
