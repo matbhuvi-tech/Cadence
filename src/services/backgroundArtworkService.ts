@@ -33,6 +33,10 @@ export interface BackgroundArtworkState {
   lastResolvedUrl?: string
   lastProviderLabel?: string
   updatedCount: number
+  notFoundCount: number
+  notFoundReleaseIds: string[]
+  resolvedReleaseIds: string[]
+  queuedReleaseIds: string[]
 }
 
 interface PendingAlbumJob {
@@ -51,6 +55,9 @@ class BackgroundArtworkService {
   private totalInBatch: number = 0
   private completedInBatch: number = 0
   private updatedCount: number = 0
+  private notFoundCount: number = 0
+  private notFoundReleaseIds: Set<string> = new Set()
+  private resolvedReleaseIds: Set<string> = new Set()
   private currentJob: PendingAlbumJob | null = null
   private currentAbortController: AbortController | null = null
 
@@ -113,6 +120,9 @@ class BackgroundArtworkService {
   }
 
   public getState(): BackgroundArtworkState {
+    const queuedIds = this.queue.map((j) => j.releaseId)
+    if (this.currentJob) queuedIds.unshift(this.currentJob.releaseId)
+
     return {
       status: this.status,
       completed: this.completedInBatch,
@@ -125,6 +135,10 @@ class BackgroundArtworkService {
       lastResolvedUrl: this.lastResolvedUrl,
       lastProviderLabel: this.lastProviderLabel,
       updatedCount: this.updatedCount,
+      notFoundCount: this.notFoundCount,
+      notFoundReleaseIds: Array.from(this.notFoundReleaseIds),
+      resolvedReleaseIds: Array.from(this.resolvedReleaseIds),
+      queuedReleaseIds: queuedIds,
     }
   }
 
@@ -274,6 +288,9 @@ class BackgroundArtworkService {
     for (const rel of targetReleases) {
       if (existingQueueIds.has(rel.id)) continue
 
+      // Clear previous not-found marker when user explicitly re-queues this release
+      this.notFoundReleaseIds.delete(rel.id)
+
       const relTracks = graphEngine.getAllTracks().filter((t) => t.releaseId === rel.id)
       const sample = relTracks[0]
       const title = rel.title || sample?.folderName || sample?.title || ''
@@ -297,6 +314,8 @@ class BackgroundArtworkService {
 
     if (this.status === 'idle' || this.status === 'complete') {
       this.completedInBatch = 0
+      this.updatedCount = 0
+      this.notFoundCount = 0
     }
 
     this.queue.push(...newJobs)
@@ -395,6 +414,10 @@ class BackgroundArtworkService {
     this.status = 'idle'
     this.completedInBatch = 0
     this.totalInBatch = 0
+    this.updatedCount = 0
+    this.notFoundCount = 0
+    this.notFoundReleaseIds.clear()
+    this.resolvedReleaseIds.clear()
     this.uncheckpointedCount = 0
     this.queue = []
     this.currentJob = null
@@ -530,10 +553,15 @@ class BackgroundArtworkService {
 
               this.updatedCount++
               this.uncheckpointedCount++
+              this.resolvedReleaseIds.add(job.releaseId)
+              this.notFoundReleaseIds.delete(job.releaseId)
               this.lastResolvedTitle = job.albumTitle
               this.lastResolvedUrl = candidate.coverArtUrl
               this.lastProviderLabel = candidate.providerLabel
             }
+          } else {
+            this.notFoundCount++
+            this.notFoundReleaseIds.add(job.releaseId)
           }
 
           this.completedInBatch++
@@ -561,6 +589,8 @@ class BackgroundArtworkService {
             break
           }
           console.warn(`[BackgroundArtwork] Resolution error for "${job.albumTitle}":`, err)
+          this.notFoundCount++
+          this.notFoundReleaseIds.add(job.releaseId)
           this.completedInBatch++
           this.currentJob = null
           this.currentAbortController = null

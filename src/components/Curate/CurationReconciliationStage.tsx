@@ -3,7 +3,8 @@
  * Center-Right Pane of Master-Detail Curation Workbench
  *
  * Implements 4-way provider reconciliation (Local Tag, MusicBrainz, Apple Music, AI Provenance),
- * Case A (Uniform Album Defect) track checklist, Case B (Multi-Film Compilation) clusters,
+ * 33%/67% side-by-side top split deck, Case A (Uniform Album / Single-Film Soundtrack) and
+ * Case B (Multi-Film Compilation, clusters.length > 1) unified single-column editable track table,
  * high-res artwork inspection, queue completion screen, and transport quietness guards.
  */
 
@@ -14,13 +15,10 @@ import {
   ChevronRight,
   Disc,
   Sparkles,
-  ExternalLink,
   RotateCcw,
-  Loader2,
   ZoomIn,
   ShieldCheck,
   Check,
-  Layers,
   Film,
   Music,
   AlertCircle,
@@ -100,6 +98,9 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [isPlaybackQuietNotice, setIsPlaybackQuietNotice] = useState(false)
 
+  // Broken cover art URL tracking for graceful <Disc /> fallback
+  const [failedArtUrls, setFailedArtUrls] = useState<Set<string>>(new Set())
+
   // Stacking modal state
   const [isStackPickerOpen, setIsStackPickerOpen] = useState(false)
   const [stackSearchQuery, setStackSearchQuery] = useState('')
@@ -116,15 +117,126 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     showToast(`Locked authority to ${nextAuth === 'composer' ? 'Composer (Soundtrack mode)' : 'Performer (Solo/Classical mode)'}`)
   }
 
-  // Quick Action: Strip Rip Flags
+  // Provenance Badge Helper (compact microcopy for Column 1 Field)
+  const renderProvenanceBadge = (source?: ConsensusFieldSource) => {
+    if (!source) return null
+    if (source.startsWith('consensus_')) {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 w-fit">
+          <ShieldCheck className="w-3 h-3 shrink-0" />
+          <span>2/3 Match</span>
+        </span>
+      )
+    }
+    if (source === 'earliest_year_rule') {
+      return (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/25 w-fit">
+          Master Yr
+        </span>
+      )
+    }
+    if (source === 'single_provider_match') {
+      return (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-500/15 text-blue-300 border border-blue-500/25 w-fit">
+          Provider
+        </span>
+      )
+    }
+    if (source === 'local_fallback') {
+      return (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-500/15 text-zinc-300 border border-zinc-500/25 w-fit">
+          Local
+        </span>
+      )
+    }
+    return (
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/25 w-fit">
+        {source}
+      </span>
+    )
+  }
+
+  // Field selection state for 4-Way Reconciliation Table
+  const [selectedFields, setSelectedFields] = useState<{
+    title: string
+    artistCredit: string
+    composerName: string
+    releaseYear: string
+    genre: string
+  }>({
+    title: '',
+    artistCredit: '',
+    composerName: '',
+    releaseYear: '',
+    genre: '',
+  })
+
+  // Selected artwork candidate
+  const [selectedArtwork, setSelectedArtwork] = useState<CoverArtCandidate | null>(null)
+  const [isZoomingArt, setIsZoomingArt] = useState(false)
+
+  // Track selection (track IDs to stage)
+  const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set())
+
+  // Artist scope policy: 'album_only' sets Album Artist while preserving track vocalists; 'all_tracks' overwrites both
+  const [artistPolicy, setArtistPolicy] = useState<'album_only' | 'all_tracks'>('album_only')
+  // Track-level editable titles & artists (keyed by trackId)
+  const [trackTitles, setTrackTitles] = useState<Record<string, string>>({})
+  const [trackArtists, setTrackArtists] = useState<Record<string, string>>({})
+
+  // User query parameter steering for external providers
+  const [queryAlbum, setQueryAlbum] = useState('')
+  const [queryArtist, setQueryArtist] = useState('')
+  const [queryYear, setQueryYear] = useState('')
+  const [isQueryRefineOpen, setIsQueryRefineOpen] = useState(false)
+
+  // Case B compilation resolution state
+  const [compilationClusters, setCompilationClusters] = useState<{
+    soundtrackTitle: string
+    year?: number
+    composer?: string
+    tracks: Track[]
+  }[]>([])
+  const [isLoadingClusters, setIsLoadingClusters] = useState(false)
+
+  // AbortController for active remote queries
+  const abortControllerRef = useRef<AbortController | null>(null)
+
+  // Raw compilation signal detector (triggers cluster analysis)
+  const hasCompilationSignals = useMemo(() => {
+    if (!albumItem) return false
+    return (
+      albumItem.primaryIssueType === 'compilation_conflict' ||
+      Boolean(release?.isCompilation) ||
+      tracks.some((t) => t.isCompilation || /\(from\s+['"][^'"]+['"]\)/i.test(t.title))
+    )
+  }, [albumItem, release, tracks])
+
+  // Effective Case B gate: only activate multi-soundtrack cluster UI when 2+ distinct film clusters exist
+  const isCaseB = useMemo(() => {
+    return hasCompilationSignals && compilationClusters.length > 1
+  }, [hasCompilationSignals, compilationClusters.length])
+
+  // Quick Action: Strip Rip Flags (cleans both Album Title and Track Titles)
   const handleStripRipFlags = () => {
     const rawTitle = selectedFields.title || albumItem?.albumTitle || ''
     const cleaned = cleanRipNoise(rawTitle)
     if (cleaned) {
       setSelectedFields((prev) => ({ ...prev, title: cleaned }))
       setQueryAlbum(cleaned)
-      showToast(`Stripped rip flags from title: "${cleaned}"`)
     }
+    setTrackTitles((prev) => {
+      const next = { ...prev }
+      tracks.forEach((t) => {
+        const rawTrkTitle = prev[t.id] ?? t.title ?? ''
+        const cleanedTrk = cleanRipNoise(rawTrkTitle)
+        if (cleanedTrk) {
+          next[t.id] = cleanedTrk
+        }
+      })
+      return next
+    })
+    showToast(`Stripped rip flags from album and track titles.`)
   }
 
   // Quick Action: Folder -> Album
@@ -163,99 +275,6 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     showToast(`Stacked edition under master release.`)
   }
 
-  // Provenance Badge Helper
-  const renderProvenanceBadge = (source?: ConsensusFieldSource, confidence?: number) => {
-    if (!source) return null
-    if (source.startsWith('consensus_')) {
-      return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
-          <ShieldCheck className="w-3 h-3" />
-          <span>2-of-3 Consensus</span>
-        </span>
-      )
-    }
-    if (source === 'earliest_year_rule') {
-      return (
-        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">
-          Earliest Year Master
-        </span>
-      )
-    }
-    if (source === 'single_provider_match') {
-      return (
-        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-500/15 text-blue-300 border border-blue-500/25">
-          Provider Match
-        </span>
-      )
-    }
-    if (source === 'local_fallback') {
-      return (
-        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-500/15 text-zinc-300 border border-zinc-500/25">
-          Local Container
-        </span>
-      )
-    }
-    return (
-      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/25">
-        {source}
-      </span>
-    )
-  }
-
-  // Field selection state for Case A
-  const [selectedFields, setSelectedFields] = useState<{
-    title: string
-    artistCredit: string
-    composerName: string
-    releaseYear: string
-    genre: string
-  }>({
-    title: '',
-    artistCredit: '',
-    composerName: '',
-    releaseYear: '',
-    genre: '',
-  })
-
-  // Selected artwork candidate
-  const [selectedArtwork, setSelectedArtwork] = useState<CoverArtCandidate | null>(null)
-  const [isZoomingArt, setIsZoomingArt] = useState(false)
-
-  // Track selection for Case A (track IDs to stage)
-  const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set())
-
-  // Artist scope policy: 'album_only' sets Album Artist while preserving track vocalists; 'all_tracks' overwrites both
-  const [artistPolicy, setArtistPolicy] = useState<'album_only' | 'all_tracks'>('album_only')
-  // Track-level editable artists (keyed by trackId)
-  const [trackArtists, setTrackArtists] = useState<Record<string, string>>({})
-
-  // User query parameter steering for external providers
-  const [queryAlbum, setQueryAlbum] = useState('')
-  const [queryArtist, setQueryArtist] = useState('')
-  const [queryYear, setQueryYear] = useState('')
-  const [isQueryRefineOpen, setIsQueryRefineOpen] = useState(false)
-
-  // Case B compilation resolution state
-  const [compilationClusters, setCompilationClusters] = useState<{
-    soundtrackTitle: string
-    year?: number
-    composer?: string
-    tracks: Track[]
-  }[]>([])
-  const [isLoadingClusters, setIsLoadingClusters] = useState(false)
-
-  // AbortController for active remote queries
-  const abortControllerRef = useRef<AbortController | null>(null)
-
-  const isCaseB = useMemo(() => {
-    if (!albumItem) return false
-    return (
-      albumItem.primaryIssueType === 'compilation_conflict' ||
-      Boolean(release?.isCompilation) ||
-      tracks.some((t) => t.isCompilation || /\(from\s+['"][^'"]+['"]\)/i.test(t.title))
-    )
-  }, [albumItem, release, tracks])
-
   // Initialize selected tracks & default field values whenever albumItem / release changes
   useEffect(() => {
     if (!albumItem) return
@@ -290,14 +309,17 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
       setIsQueryRefineOpen(false)
     }
 
+    const initialTrackTitles: Record<string, string> = {}
     const initialTrackArtists: Record<string, string> = {}
     tracks.forEach((t) => {
+      initialTrackTitles[t.id] = t.title || ''
       if (isDefectiveArtistTag(t.artistCredit, albumItem.albumTitle)) {
         initialTrackArtists[t.id] = isPlaceholderTag(initialArtist) ? '' : initialArtist
       } else {
         initialTrackArtists[t.id] = t.artistCredit || ''
       }
     })
+    setTrackTitles(initialTrackTitles)
     setTrackArtists(initialTrackArtists)
 
     setSelectedArtwork(null)
@@ -412,6 +434,19 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
             genre: consensus?.genre?.value || prev.genre,
           }))
 
+          setTrackTitles((prev) => {
+            const next = { ...prev }
+            tracks.forEach((t) => {
+              const tc = consensus?.trackConsensus?.[t.id]
+              if (tc?.title?.value) {
+                next[t.id] = tc.title.value
+              } else if (!next[t.id]) {
+                next[t.id] = t.title || ''
+              }
+            })
+            return next
+          })
+
           setTrackArtists((prev) => {
             const next = { ...prev }
             tracks.forEach((t) => {
@@ -478,9 +513,9 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     }
   }, [albumItem?.albumId, fetchCandidates])
 
-  // Compute Case B Compilation Clusters
+  // Compute Compilation Clusters when hasCompilationSignals is true
   useEffect(() => {
-    if (!isCaseB || !release || tracks.length === 0) {
+    if (!hasCompilationSignals || !release || tracks.length === 0) {
       setCompilationClusters([])
       return
     }
@@ -552,7 +587,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     return () => {
       isCancelled = true
     }
-  }, [isCaseB, release, tracks, allReleases])
+  }, [hasCompilationSignals, release, tracks, allReleases])
 
   // Auto-trigger AI soundtrack canonicalization if requested
   useEffect(() => {
@@ -588,7 +623,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     }
   }, [autoTriggerAi, release, tracks, allReleases])
 
-  // Toggle track selection in Case A
+  // Toggle track selection
   const toggleTrack = (trackId: string) => {
     setSelectedTrackIds((prev) => {
       const next = new Set(prev)
@@ -609,8 +644,50 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     }
   }
 
-  // Handle "Stage & Next" for Case A
-  const handleStageCaseA = () => {
+  // Two-state smart per-row reset (Manual Edit -> Consensus -> Local File Tag)
+  const handleResetTrackRow = (trk: Track) => {
+    const localTitle = trk.title || ''
+    const consensusTitle = consensusResult?.trackConsensus?.[trk.id]?.title?.value || localTitle
+    const localArtist = trk.artistCredit || ''
+    const fallbackMasterArtist =
+      isDefectiveArtistTag(localArtist, albumItem?.albumTitle) && !isPlaceholderTag(selectedFields.artistCredit)
+        ? selectedFields.artistCredit
+        : localArtist
+    const consensusArtist = consensusResult?.trackConsensus?.[trk.id]?.artists?.value || fallbackMasterArtist
+
+    const currTitle = trackTitles[trk.id] ?? localTitle
+    const currArtist = trackArtists[trk.id] ?? localArtist
+
+    const isManualTitle = currTitle !== consensusTitle && currTitle !== localTitle
+    const isManualArtist = currArtist !== consensusArtist && currArtist !== localArtist
+
+    if (isManualTitle || isManualArtist) {
+      setTrackTitles((prev) => ({ ...prev, [trk.id]: consensusTitle }))
+      setTrackArtists((prev) => ({ ...prev, [trk.id]: consensusArtist }))
+    } else if (currTitle !== localTitle || currArtist !== localArtist) {
+      setTrackTitles((prev) => ({ ...prev, [trk.id]: localTitle }))
+      setTrackArtists((prev) => ({ ...prev, [trk.id]: localArtist }))
+    } else {
+      setTrackTitles((prev) => ({ ...prev, [trk.id]: consensusTitle }))
+      setTrackArtists((prev) => ({ ...prev, [trk.id]: consensusArtist }))
+    }
+  }
+
+  // Bulk Reset All Tracks
+  const handleResetAllTracks = () => {
+    const resetTitles: Record<string, string> = {}
+    const resetArtists: Record<string, string> = {}
+    tracks.forEach((t) => {
+      resetTitles[t.id] = t.title || ''
+      resetArtists[t.id] = t.artistCredit || ''
+    })
+    setTrackTitles(resetTitles)
+    setTrackArtists(resetArtists)
+    showToast('Reset all track titles and artists to local file tags.')
+  }
+
+  // Handle "Stage & Next" for Case A (Standard Album or Single-Film Soundtrack)
+  const handleStageCaseA = useCallback(() => {
     if (!albumItem || selectedTrackIds.size === 0) return
 
     const editsMap = new Map<string, Partial<Track>>()
@@ -619,8 +696,16 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
       if (selectedTrackIds.has(trk.id)) {
         const edits: Record<string, any> = {}
 
-        if (selectedFields.title && selectedFields.title !== release?.title) {
-          edits.album = selectedFields.title
+        const trimmedAlbumTitle = selectedFields.title.trim()
+        const existingAlbumTitle = trk.albumTitle || release?.title || albumItem.albumTitle
+        if (trimmedAlbumTitle && trimmedAlbumTitle !== existingAlbumTitle) {
+          edits.album = trimmedAlbumTitle
+        }
+
+        // Track Title inline edit
+        const editedTitle = trackTitles[trk.id]?.trim()
+        if (editedTitle && editedTitle !== trk.title) {
+          edits.title = editedTitle
         }
 
         // 1. Album Artist: Always stage to albumArtist tag
@@ -634,15 +719,12 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
             edits.artistCredit = selectedFields.artistCredit
           }
         } else {
-          // In album_only mode, stage artistCredit if track has a populated artist different from local
-          // or if local tag was defective
-          const editedArtist = trackArtists[trk.id]
+          const editedArtist = trackArtists[trk.id]?.trim()
           if (
-            editedArtist !== undefined &&
-            editedArtist.trim().length > 0 &&
+            editedArtist &&
             (editedArtist !== trk.artistCredit || isDefectiveArtistTag(trk.artistCredit, release?.title || albumItem?.albumTitle))
           ) {
-            edits.artistCredit = editedArtist.trim()
+            edits.artistCredit = editedArtist
           }
         }
 
@@ -668,33 +750,109 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
     onStageAndNext(editsMap)
     showToast(`Staged metadata for ${selectedTrackIds.size} track(s) in "${albumItem.albumTitle}".`)
-  }
+  }, [
+    albumItem,
+    selectedTrackIds,
+    tracks,
+    selectedFields,
+    release,
+    trackTitles,
+    artistPolicy,
+    trackArtists,
+    selectedArtwork,
+    onStageAndNext,
+    showToast,
+  ])
+
+  // Build 3-tier merged track edits for a compilation cluster in Case B
+  const buildClusterTrackEdits = useCallback(
+    (cluster: { soundtrackTitle: string; year?: number; composer?: string; tracks: Track[] }) => {
+      const editsMap = new Map<string, Partial<Track>>()
+
+      cluster.tracks.forEach((trk) => {
+        if (!selectedTrackIds.has(trk.id)) return
+
+        // Tier 1: Cluster-specific provenance wins per cluster
+        const edits: Record<string, any> = {
+          originalAlbum: cluster.soundtrackTitle,
+          canonicalAlbumTitle: cluster.soundtrackTitle,
+        }
+        const parsedSharedYear = Number(selectedFields.releaseYear)
+        const effectiveYear = cluster.year || (!isNaN(parsedSharedYear) && parsedSharedYear > 0 ? parsedSharedYear : undefined)
+        if (effectiveYear) {
+          edits.originalYear = effectiveYear
+          edits.year = effectiveYear
+        }
+
+        // Tier 2: 4-Way Table shared release fields merge across all clusters
+        if (selectedFields.artistCredit && selectedFields.artistCredit !== (trk.albumArtist || release?.artistCredit)) {
+          edits.albumArtist = selectedFields.artistCredit
+        }
+        const effectiveComposer = cluster.composer || selectedFields.composerName
+        if (effectiveComposer && effectiveComposer !== trk.composerName) {
+          edits.composerName = effectiveComposer
+        }
+        if (selectedFields.genre) {
+          edits.genre = selectedFields.genre
+        }
+        if (selectedArtwork?.coverArtUrl) {
+          edits.coverArtUrl = selectedArtwork.coverArtUrl
+        }
+
+        // Tier 3: Track-level inline edits always win per track
+        const editedTitle = trackTitles[trk.id]?.trim()
+        if (editedTitle && editedTitle !== trk.title) {
+          edits.title = editedTitle
+        }
+        if (artistPolicy === 'all_tracks') {
+          if (selectedFields.artistCredit && selectedFields.artistCredit !== trk.artistCredit) {
+            edits.artistCredit = selectedFields.artistCredit
+          }
+        } else {
+          const editedArtist = trackArtists[trk.id]?.trim()
+          if (
+            editedArtist &&
+            (editedArtist !== trk.artistCredit || isDefectiveArtistTag(trk.artistCredit, release?.title || albumItem?.albumTitle))
+          ) {
+            edits.artistCredit = editedArtist
+          }
+        }
+
+        editsMap.set(trk.id, edits)
+      })
+
+      return editsMap
+    },
+    [selectedTrackIds, selectedFields, release, selectedArtwork, trackTitles, artistPolicy, trackArtists, albumItem]
+  )
 
   // Handle Staging a specific cluster in Case B
-  const handleStageCluster = (cluster: { soundtrackTitle: string; year?: number; composer?: string; tracks: Track[] }) => {
-    const editsMap = new Map<string, Partial<Track>>()
+  const handleStageCluster = useCallback(
+    (cluster: { soundtrackTitle: string; year?: number; composer?: string; tracks: Track[] }) => {
+      const editsMap = buildClusterTrackEdits(cluster)
+      if (editsMap.size === 0) return
+      onStageAndNext(editsMap)
+      showToast(`Staged soundtrack provenance "${cluster.soundtrackTitle}" for ${editsMap.size} track(s).`)
+    },
+    [buildClusterTrackEdits, onStageAndNext, showToast]
+  )
 
-    cluster.tracks.forEach((trk) => {
-      const edits: Record<string, any> = {
-        originalAlbum: cluster.soundtrackTitle,
-        canonicalAlbumTitle: cluster.soundtrackTitle,
-      }
-      if (cluster.year) {
-        edits.originalYear = cluster.year
-        edits.year = cluster.year
-      }
-      if (cluster.composer) {
-        edits.composerName = cluster.composer
-      }
-      if (selectedArtwork?.coverArtUrl) {
-        edits.coverArtUrl = selectedArtwork.coverArtUrl
-      }
-      editsMap.set(trk.id, edits)
+  // Handle Staging all clusters + 4-Way table + inline track edits in Case B
+  const handleStageAllClusters = useCallback(() => {
+    if (!albumItem || compilationClusters.length === 0) return
+    const combinedEditsMap = new Map<string, Partial<Track>>()
+    compilationClusters.forEach((cluster) => {
+      const clusterMap = buildClusterTrackEdits(cluster)
+      clusterMap.forEach((edits, trackId) => {
+        combinedEditsMap.set(trackId, edits)
+      })
     })
-
-    onStageAndNext(editsMap)
-    showToast(`Staged soundtrack provenance "${cluster.soundtrackTitle}" for ${cluster.tracks.length} track(s).`)
-  }
+    if (combinedEditsMap.size === 0) return
+    onStageAndNext(combinedEditsMap)
+    showToast(
+      `Staged ${compilationClusters.length} soundtracks (${combinedEditsMap.size} tracks) in "${albumItem.albumTitle}".`
+    )
+  }, [albumItem, compilationClusters, buildClusterTrackEdits, onStageAndNext, showToast])
 
   // Handle Splitting a Combo Release into Virtual Albums
   const handleSplitVirtualAlbums = () => {
@@ -762,8 +920,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault()
-        if (isCaseB && compilationClusters.length > 0) {
-          handleStageCluster(compilationClusters[0])
+        if (isCaseB) {
+          handleStageAllClusters()
         } else {
           handleStageCaseA()
         }
@@ -771,7 +929,118 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleStageCaseA, isCaseB, compilationClusters])
+  }, [handleStageCaseA, handleStageAllClusters, isCaseB])
+
+  // Unified Single-Column Editable Track Table Renderer (shared by Case A and Case B)
+  const renderTrackTable = (tracksToRender: Track[]) => (
+    <div className="overflow-x-auto">
+      <table className="w-full table-fixed text-left text-xs border-collapse">
+        <thead>
+          <tr className="border-b border-white/[0.08] text-[#8E8E93] text-[11px] font-mono">
+            <th className="py-2 px-2 w-12 font-medium">#</th>
+            <th className="py-2 px-2 w-[42%] font-medium">Track Title</th>
+            <th className="py-2 px-2 w-[44%] font-medium">Track Vocalists / Artists</th>
+            <th className="py-2 px-2 w-28 font-medium text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/[0.04]">
+          {tracksToRender.map((t) => {
+            const isChecked = selectedTrackIds.has(t.id)
+            const currentTitle = trackTitles[t.id] ?? t.title ?? ''
+            const currentArtist = artistPolicy === 'all_tracks' ? selectedFields.artistCredit : (trackArtists[t.id] ?? t.artistCredit ?? '')
+            const isTitleModified = currentTitle.trim() !== (t.title || '').trim()
+            const isArtistModified =
+              artistPolicy !== 'all_tracks' && currentArtist.trim() !== (t.artistCredit || '').trim()
+            const isRowModified = isTitleModified || isArtistModified
+
+            return (
+              <tr
+                key={t.id}
+                className={`hover:bg-white/[0.02] transition-colors ${!isChecked ? 'opacity-50' : ''}`}
+              >
+                {/* Column 1: Checkbox & Track Number (48px / w-12) */}
+                <td className="py-2 px-2 align-middle">
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      tabIndex={-1}
+                      checked={isChecked}
+                      onChange={() => toggleTrack(t.id)}
+                      className="rounded border-white/20 text-[#D4AF37] focus:ring-0 cursor-pointer shrink-0"
+                    />
+                    <span className="text-[11px] font-mono text-[#636366]">
+                      #{t.trackNumber || 1}
+                    </span>
+                  </div>
+                </td>
+
+                {/* Column 2: Inline-Editable Track Title (42%) */}
+                <td className="py-2 px-2 align-middle">
+                  <input
+                    type="text"
+                    value={currentTitle}
+                    title={currentTitle}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      setTrackTitles((prev) => ({ ...prev, [t.id]: val }))
+                    }}
+                    placeholder="Track Title"
+                    className={`w-full px-2.5 py-1 rounded bg-black/40 border text-xs font-medium transition-colors focus:outline-none ${
+                      isTitleModified
+                        ? 'border-emerald-500/50 text-emerald-300'
+                        : 'border-white/10 text-white hover:border-white/20 focus:border-[#D4AF37]'
+                    }`}
+                  />
+                </td>
+
+                {/* Column 3: Inline-Editable Track Vocalists / Artists (44%) */}
+                <td className="py-2 px-2 align-middle">
+                  <input
+                    type="text"
+                    value={currentArtist}
+                    title={currentArtist}
+                    disabled={artistPolicy === 'all_tracks'}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      setTrackArtists((prev) => ({ ...prev, [t.id]: val }))
+                    }}
+                    placeholder="Vocalist(s) / Performer"
+                    className={`w-full px-2.5 py-1 rounded bg-black/40 border text-xs font-medium transition-colors focus:outline-none ${
+                      artistPolicy === 'all_tracks'
+                        ? 'border-white/[0.04] text-[#636366] cursor-not-allowed bg-black/20'
+                        : isArtistModified
+                        ? 'border-emerald-500/50 text-emerald-300'
+                        : 'border-white/10 text-white/90 hover:border-white/20 focus:border-[#D4AF37]'
+                    }`}
+                  />
+                </td>
+
+                {/* Column 4: Status & Smart Per-Row Reset (112px / w-28) */}
+                <td className="py-2 px-2 align-middle text-right">
+                  <div className="inline-flex items-center justify-end gap-1.5">
+                    {isRowModified && (
+                      <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded">
+                        Edited
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      onClick={() => handleResetTrackRow(t)}
+                      title="Reset track row (cycles Manual Edit → Consensus → Local File Tag)"
+                      className="p-1 rounded bg-white/[0.04] hover:bg-white/[0.1] text-[#8E8E93] hover:text-white border border-white/[0.06] transition-colors cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
 
   // 1. Queue Cleared / Empty Screen
   if (isQueueCleared || !albumItem) {
@@ -807,6 +1076,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
   const itunesCandidate = candidatesResult?.metadataCandidates?.itunes
   const mbCandidate = candidatesResult?.metadataCandidates?.musicbrainz
+  const hasValidLocalArt = Boolean(albumItem.coverArtUrl && !failedArtUrls.has(albumItem.coverArtUrl))
 
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0B0D13] overflow-y-auto select-none">
@@ -827,7 +1097,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
           <div className="flex items-center gap-1.5 text-xs text-[#8E8E93] min-w-0">
             <span>Curate</span>
             <span>/</span>
-            <span className="font-semibold text-white truncate max-w-[200px] md:max-w-[320px]">
+            <span className="font-semibold text-white truncate max-w-[260px] md:max-w-[420px]" title={albumItem.albumTitle}>
               {albumItem.albumTitle}
             </span>
           </div>
@@ -870,7 +1140,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
           </div>
 
           <button
-            onClick={isCaseB && compilationClusters.length > 0 ? () => handleStageCluster(compilationClusters[0]) : handleStageCaseA}
+            onClick={isCaseB ? handleStageAllClusters : handleStageCaseA}
             disabled={selectedTrackIds.size === 0}
             title="Stage Edits to Non-Destructive Sidecar & Advance (⌘↵)"
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#E5C158] text-black font-semibold text-xs transition-all shadow-md shadow-[#D4AF37]/20 disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
@@ -913,7 +1183,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
           <button
             onClick={handleStripRipFlags}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.04] hover:bg-white/[0.08] text-neutral-300 hover:text-white border border-white/[0.08] text-[11px] transition-all cursor-pointer"
-            title="Strip CD RIP, FLAC, bitrate tags, and brackets from album title"
+            title="Strip CD RIP, FLAC, bitrate tags, and brackets from album and track titles"
           >
             <Wand2 className="w-3 h-3 text-[#D4AF37]" />
             <span>Strip Rip Flags</span>
@@ -981,119 +1251,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
         </div>
       )}
 
-      {/* 3. Main Stage Content */}
-      <div className="p-6 space-y-6 flex-1">
-        {/* High-Resolution Artwork Inspector */}
-        <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/[0.06] space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 font-medium text-xs text-white">
-              <Eye className="w-4 h-4 text-[#D4AF37]" />
-              <span>High-Resolution Artwork Inspector</span>
-            </div>
-            {selectedArtwork && (
-              <span className="text-[11px] font-mono text-[#D4AF37]">
-                Selected: {selectedArtwork.coverResolution} ({selectedArtwork.providerLabel})
-              </span>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {/* 1. Local Tag Embedded */}
-            <div
-              onClick={() =>
-                setSelectedArtwork({
-                  provider: 'local',
-                  providerLabel: 'Local Container',
-                  albumTitle: albumItem.albumTitle,
-                  artistCredit: albumItem.artistCredit,
-                  coverArtUrl: albumItem.coverArtUrl || '',
-                  thumbnailUrl: albumItem.coverArtUrl || '',
-                  coverResolution: albumItem.coverArtUrl ? 'Embedded' : 'Missing',
-                  confidenceScore: 1.0,
-                })
-              }
-              className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col items-center gap-2 relative ${
-                selectedArtwork?.provider === 'local'
-                  ? 'bg-white/[0.08] border-[#D4AF37] ring-1 ring-[#D4AF37]/30'
-                  : 'bg-black/30 border-white/[0.06] hover:border-white/[0.12]'
-              }`}
-            >
-              <div className="w-24 h-24 rounded-lg bg-neutral-900 overflow-hidden relative border border-white/10 flex items-center justify-center">
-                {albumItem.coverArtUrl ? (
-                  <img src={albumItem.coverArtUrl} alt="Local" className="w-full h-full object-cover" />
-                ) : (
-                  <Disc className="w-8 h-8 text-[#636366]" />
-                )}
-                {albumItem.coverArtUrl && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setIsZoomingArt(true)
-                    }}
-                    className="absolute bottom-1 right-1 p-1 rounded bg-black/60 text-white/80 hover:text-white"
-                  >
-                    <ZoomIn className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-              <div className="text-center">
-                <span className="text-[11px] font-medium text-white block">Local File</span>
-                <span className="text-[10px] font-mono text-[#8E8E93]">
-                  {albumItem.coverArtUrl ? 'Embedded Binary' : 'No Cover Art'}
-                </span>
-              </div>
-            </div>
-
-            {/* 2. External Candidates */}
-            {candidatesResult?.artworkCandidates && candidatesResult.artworkCandidates.length > 0 ? (
-              candidatesResult.artworkCandidates.map((art, idx) => (
-                <div
-                  key={idx}
-                  onClick={() => setSelectedArtwork(art)}
-                  className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col items-center gap-2 relative ${
-                    selectedArtwork?.coverArtUrl === art.coverArtUrl
-                      ? 'bg-white/[0.08] border-[#D4AF37] ring-1 ring-[#D4AF37]/30'
-                      : 'bg-black/30 border-white/[0.06] hover:border-white/[0.12]'
-                  }`}
-                >
-                  <div className="w-24 h-24 rounded-lg bg-neutral-900 overflow-hidden relative border border-white/10 flex items-center justify-center">
-                    <img src={art.coverArtUrl} alt={art.providerLabel} className="w-full h-full object-cover" />
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setSelectedArtwork(art)
-                        setIsZoomingArt(true)
-                      }}
-                      className="absolute bottom-1 right-1 p-1 rounded bg-black/60 text-white/80 hover:text-white"
-                    >
-                      <ZoomIn className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                  <div className="text-center">
-                    <span className="text-[11px] font-medium text-white block">{art.providerLabel}</span>
-                    <span className="text-[10px] font-mono text-[#D4AF37]">{art.coverResolution}</span>
-                  </div>
-                </div>
-              ))
-            ) : isLoadingCandidates ? (
-              <div className="col-span-2 sm:col-span-3 flex items-center justify-center p-6 text-xs text-[#8E8E93]">
-                <RotateCcw className="w-4 h-4 animate-spin text-[#D4AF37] mr-2" />
-                <span>Resolving high-resolution cover artwork candidates...</span>
-              </div>
-            ) : (
-              <div className="col-span-2 sm:col-span-3 flex items-center justify-between p-4 rounded-xl bg-white/[0.02] border border-white/[0.04] text-xs text-[#8E8E93]">
-                <span>No high-resolution artwork candidates returned from online providers.</span>
-                <button
-                  onClick={() => fetchCandidates(true)}
-                  className="px-2.5 py-1 rounded bg-white/[0.06] hover:bg-white/[0.1] text-white text-[11px] transition-all cursor-pointer"
-                >
-                  Retry Lookup
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
+      {/* 3. Main Stage Content (pb-24 clears NowPlayingBar) */}
+      <div className="p-6 pb-24 space-y-5 flex-1">
         {/* Combo CD Virtual Release Split Banner */}
         {consensusResult?.isComboRelease && consensusResult?.subReleaseGroupings && consensusResult.subReleaseGroupings.length > 0 && (
           <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-amber-500/5">
@@ -1127,367 +1286,562 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
           </div>
         )}
 
-        {/* 4-Way Reconciliation Table */}
-        <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/[0.06] space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 font-medium text-xs text-white">
-              <Sparkles className="w-4 h-4 text-[#D4AF37]" />
-              <span>4-Way Metadata Provider Reconciliation</span>
+        {/* Top Side-by-Side Split Deck: Artwork Inspector (xl:col-span-4) + 4-Way Reconciliation Matrix (xl:col-span-8) */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-stretch">
+          {/* Left Pane (33%): High-Resolution Artwork Inspector */}
+          <div className="xl:col-span-4 p-4 rounded-2xl bg-white/[0.02] border border-white/[0.06] flex flex-col justify-between space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-medium text-xs text-white">
+                <Eye className="w-4 h-4 text-[#D4AF37] shrink-0" />
+                <span>Artwork Inspector</span>
+              </div>
+              {selectedArtwork && (
+                <span className="text-[10px] font-mono text-[#D4AF37] truncate" title={`${selectedArtwork.coverResolution} (${selectedArtwork.providerLabel})`}>
+                  {selectedArtwork.coverResolution} · {selectedArtwork.providerLabel}
+                </span>
+              )}
             </div>
-            <div className="flex items-center gap-2">
-              {fetchError && (
-                <div className="flex items-center gap-1.5 text-xs text-amber-300 mr-2">
-                  <AlertCircle className="w-3.5 h-3.5" />
-                  <span>{fetchError}</span>
-                  <button onClick={() => fetchCandidates(true)} className="underline hover:text-white ml-1 cursor-pointer">
-                    Retry
+
+            <div className="grid grid-cols-2 gap-2.5 flex-1 items-center">
+              {/* 1. Local Tag Embedded */}
+              <div
+                onClick={() =>
+                  setSelectedArtwork({
+                    provider: 'local',
+                    providerLabel: 'Local Container',
+                    albumTitle: albumItem.albumTitle,
+                    artistCredit: albumItem.artistCredit,
+                    coverArtUrl: hasValidLocalArt ? (albumItem.coverArtUrl || '') : '',
+                    thumbnailUrl: hasValidLocalArt ? (albumItem.coverArtUrl || '') : '',
+                    coverResolution: hasValidLocalArt ? 'Embedded' : 'Missing',
+                    confidenceScore: 1.0,
+                  })
+                }
+                className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col items-center justify-center gap-1.5 relative h-full ${
+                  selectedArtwork?.provider === 'local'
+                    ? 'bg-white/[0.08] border-[#D4AF37] ring-1 ring-[#D4AF37]/30'
+                    : 'bg-black/30 border-white/[0.06] hover:border-white/[0.12]'
+                }`}
+              >
+                <div className="w-20 h-20 rounded-lg bg-neutral-900 overflow-hidden relative border border-white/10 flex items-center justify-center shrink-0">
+                  {hasValidLocalArt ? (
+                    <img
+                      src={albumItem.coverArtUrl}
+                      alt={albumItem.albumTitle}
+                      className="w-full h-full object-cover"
+                      onError={() => {
+                        if (albumItem.coverArtUrl) {
+                          setFailedArtUrls((prev) => {
+                            const next = new Set(prev)
+                            next.add(albumItem.coverArtUrl!)
+                            return next
+                          })
+                        }
+                      }}
+                    />
+                  ) : (
+                    <Disc className="w-7 h-7 text-[#636366]" />
+                  )}
+                  {hasValidLocalArt && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setSelectedArtwork({
+                          provider: 'local',
+                          providerLabel: 'Local Container',
+                          albumTitle: albumItem.albumTitle,
+                          artistCredit: albumItem.artistCredit,
+                          coverArtUrl: albumItem.coverArtUrl || '',
+                          thumbnailUrl: albumItem.coverArtUrl || '',
+                          coverResolution: 'Embedded',
+                          confidenceScore: 1.0,
+                        })
+                        setIsZoomingArt(true)
+                      }}
+                      className="absolute bottom-1 right-1 p-1 rounded bg-black/60 text-white/80 hover:text-white"
+                    >
+                      <ZoomIn className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+                <div className="text-center min-w-0 w-full">
+                  <span className="text-[11px] font-medium text-white truncate block">Local File</span>
+                  <span className="text-[10px] font-mono text-[#8E8E93] truncate block">
+                    {hasValidLocalArt ? 'Embedded Binary' : 'No Cover Art'}
+                  </span>
+                </div>
+              </div>
+
+              {/* 2. External Candidates */}
+              {candidatesResult?.artworkCandidates && candidatesResult.artworkCandidates.length > 0 ? (
+                candidatesResult.artworkCandidates.slice(0, 3).map((art, idx) => {
+                  const isArtValid = Boolean(art.coverArtUrl && !failedArtUrls.has(art.coverArtUrl))
+                  return (
+                    <div
+                      key={idx}
+                      onClick={() => setSelectedArtwork(art)}
+                      className={`p-2.5 rounded-xl border transition-all cursor-pointer flex flex-col items-center justify-center gap-1.5 relative h-full ${
+                        selectedArtwork?.coverArtUrl === art.coverArtUrl
+                          ? 'bg-white/[0.08] border-[#D4AF37] ring-1 ring-[#D4AF37]/30'
+                          : 'bg-black/30 border-white/[0.06] hover:border-white/[0.12]'
+                      }`}
+                    >
+                      <div className="w-20 h-20 rounded-lg bg-neutral-900 overflow-hidden relative border border-white/10 flex items-center justify-center shrink-0">
+                        {isArtValid ? (
+                          <img
+                            src={art.coverArtUrl}
+                            alt={art.providerLabel}
+                            className="w-full h-full object-cover"
+                            onError={() => {
+                              setFailedArtUrls((prev) => {
+                                const next = new Set(prev)
+                                next.add(art.coverArtUrl)
+                                return next
+                              })
+                            }}
+                          />
+                        ) : (
+                          <Disc className="w-7 h-7 text-[#636366]" />
+                        )}
+                        {isArtValid && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setSelectedArtwork(art)
+                              setIsZoomingArt(true)
+                            }}
+                            className="absolute bottom-1 right-1 p-1 rounded bg-black/60 text-white/80 hover:text-white"
+                          >
+                            <ZoomIn className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                      <div className="text-center min-w-0 w-full">
+                        <span className="text-[11px] font-medium text-white truncate block" title={art.providerLabel}>
+                          {art.providerLabel}
+                        </span>
+                        <span className="text-[10px] font-mono text-[#D4AF37] truncate block">
+                          {art.coverResolution}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })
+              ) : isLoadingCandidates ? (
+                <div className="col-span-1 flex flex-col items-center justify-center p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] text-center text-xs text-[#8E8E93] h-full gap-2">
+                  <RotateCcw className="w-4 h-4 animate-spin text-[#D4AF37]" />
+                  <span className="text-[11px] leading-snug">Resolving high-res cover art...</span>
+                </div>
+              ) : (
+                <div className="col-span-1 flex flex-col items-center justify-center p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] text-center text-xs text-[#8E8E93] h-full gap-2">
+                  <span className="text-[11px] leading-snug">No online artwork candidates found.</span>
+                  <button
+                    onClick={() => fetchCandidates(true)}
+                    className="px-2.5 py-1 rounded bg-white/[0.06] hover:bg-white/[0.1] text-white text-[10px] transition-all cursor-pointer"
+                  >
+                    Retry Lookup
                   </button>
                 </div>
               )}
-              <button
-                type="button"
-                onClick={() => setIsQueryRefineOpen((prev) => !prev)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
-                  isQueryRefineOpen
-                    ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/40 shadow-sm'
-                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-white/80 hover:text-white border border-white/[0.08]'
-                }`}
-                title="Adjust album, artist, or year search parameters used to query online metadata databases"
-              >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                <span>{isQueryRefineOpen ? 'Hide Query Parameters' : 'Refine Search Query'}</span>
-              </button>
             </div>
           </div>
 
-          {/* Refine Search Query Bar (Progressive Disclosure) */}
-          {isQueryRefineOpen && (
-            <form
-              onSubmit={handleExecuteRefinedSearch}
-              className="p-3 rounded-xl bg-black/40 border border-[#D4AF37]/30 flex flex-col md:flex-row items-stretch md:items-center gap-2.5 shadow-inner transition-all"
-            >
-              <div className="flex items-center gap-1.5 text-[#D4AF37] shrink-0 text-xs font-medium px-1">
-                <Search className="w-3.5 h-3.5" />
-                <span>Search Parameters:</span>
-              </div>
-              <div className="flex-1 grid grid-cols-1 sm:grid-cols-12 gap-2">
-                <div className="sm:col-span-5 relative">
-                  <input
-                    type="text"
-                    value={queryAlbum}
-                    onChange={(e) => setQueryAlbum(e.target.value)}
-                    placeholder="Album Title (e.g. Baasha)"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
-                  />
-                  <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Album</span>
+          {/* Right Pane (67%): 4-Way Metadata Provider Reconciliation Table */}
+          <div className="xl:col-span-8 p-4 rounded-2xl bg-white/[0.02] border border-white/[0.06] flex flex-col justify-between space-y-3">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 font-medium text-xs text-white">
+                  <Sparkles className="w-4 h-4 text-[#D4AF37]" />
+                  <span>4-Way Metadata Provider Reconciliation</span>
                 </div>
-                <div className="sm:col-span-4 relative">
-                  <input
-                    type="text"
-                    value={queryArtist}
-                    onChange={(e) => setQueryArtist(e.target.value)}
-                    placeholder="Artist / Composer (e.g. Deva)"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
-                  />
-                  <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Artist</span>
-                </div>
-                <div className="sm:col-span-3 relative">
-                  <input
-                    type="text"
-                    value={queryYear}
-                    onChange={(e) => setQueryYear(e.target.value)}
-                    placeholder="Year (e.g. 1995)"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
-                  />
-                  <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Year</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0 justify-end">
-                <button
-                  type="submit"
-                  disabled={isLoadingCandidates || !queryAlbum.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#D4AF37]/90 text-black font-semibold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-[#D4AF37]/15 disabled:opacity-50 cursor-pointer"
-                >
-                  {isLoadingCandidates ? (
-                    <RotateCcw className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Search className="w-3.5 h-3.5" />
+                <div className="flex items-center gap-2">
+                  {fetchError && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-300 mr-2">
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      <span>{fetchError}</span>
+                      <button onClick={() => fetchCandidates(true)} className="underline hover:text-white ml-1 cursor-pointer">
+                        Retry
+                      </button>
+                    </div>
                   )}
-                  <span>Re-Search (↵)</span>
+                  <button
+                    type="button"
+                    onClick={() => setIsQueryRefineOpen((prev) => !prev)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
+                      isQueryRefineOpen
+                        ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/40 shadow-sm'
+                        : 'bg-white/[0.04] hover:bg-white/[0.08] text-white/80 hover:text-white border border-white/[0.08]'
+                    }`}
+                    title="Adjust album, artist, or year search parameters used to query online metadata databases"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>{isQueryRefineOpen ? 'Hide Query Parameters' : 'Refine Search Query'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Refine Search Query Bar (Progressive Disclosure) */}
+              {isQueryRefineOpen && (
+                <form
+                  onSubmit={handleExecuteRefinedSearch}
+                  className="p-3 rounded-xl bg-black/40 border border-[#D4AF37]/30 flex flex-col md:flex-row items-stretch md:items-center gap-2.5 shadow-inner transition-all"
+                >
+                  <div className="flex items-center gap-1.5 text-[#D4AF37] shrink-0 text-xs font-medium px-1">
+                    <Search className="w-3.5 h-3.5" />
+                    <span>Search Parameters:</span>
+                  </div>
+                  <div className="flex-1 grid grid-cols-1 sm:grid-cols-12 gap-2">
+                    <div className="sm:col-span-5 relative">
+                      <input
+                        type="text"
+                        value={queryAlbum}
+                        onChange={(e) => setQueryAlbum(e.target.value)}
+                        placeholder="Album Title (e.g. Baasha)"
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
+                      />
+                      <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Album</span>
+                    </div>
+                    <div className="sm:col-span-4 relative">
+                      <input
+                        type="text"
+                        value={queryArtist}
+                        onChange={(e) => setQueryArtist(e.target.value)}
+                        placeholder="Artist / Composer (e.g. Deva)"
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
+                      />
+                      <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Artist</span>
+                    </div>
+                    <div className="sm:col-span-3 relative">
+                      <input
+                        type="text"
+                        value={queryYear}
+                        onChange={(e) => setQueryYear(e.target.value)}
+                        placeholder="Year (e.g. 1995)"
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.05] border border-white/10 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-[#D4AF37]/60 focus:ring-1 focus:ring-[#D4AF37]/30 transition-all"
+                      />
+                      <span className="absolute right-2 top-2 text-[9px] font-mono text-zinc-500 uppercase pointer-events-none">Year</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                    <button
+                      type="submit"
+                      disabled={isLoadingCandidates || !queryAlbum.trim()}
+                      className="px-3 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#D4AF37]/90 text-black font-semibold text-xs flex items-center gap-1.5 transition-all shadow-md shadow-[#D4AF37]/15 disabled:opacity-50 cursor-pointer"
+                    >
+                      {isLoadingCandidates ? (
+                        <RotateCcw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Search className="w-3.5 h-3.5" />
+                      )}
+                      <span>Re-Search (↵)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetQuery}
+                      className="px-2.5 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] text-[#8E8E93] hover:text-white text-xs transition-all cursor-pointer"
+                      title="Reset to local container tags"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              <div className="overflow-x-auto">
+                <table className="w-full table-fixed text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/[0.08] text-[#8E8E93] text-[11px] font-mono">
+                      <th className="py-2 px-3 w-[18%] font-medium">Field</th>
+                      <th className="py-2 px-3 w-[18%] font-medium">Local File Tag</th>
+                      <th className="py-2 px-3 w-[18%] font-medium">Apple Music Master</th>
+                      <th className="py-2 px-3 w-[18%] font-medium">MusicBrainz Archive</th>
+                      <th className="py-2 px-3 w-[28%] font-medium text-emerald-400">Staged Output</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/[0.04]">
+                    {/* Album Title */}
+                    <tr>
+                      <td className="py-2 px-3 align-middle">
+                        <div className="flex flex-col items-start gap-1">
+                          <span className="font-medium text-white/80">Album Title</span>
+                          {renderProvenanceBadge(consensusResult?.albumTitle?.source)}
+                        </div>
+                      </td>
+                      <td
+                        onClick={() => setSelectedFields((prev) => ({ ...prev, title: albumItem.albumTitle }))}
+                        title={albumItem.albumTitle}
+                        className="py-2 px-3 align-middle text-[#A1A1AA] hover:text-white cursor-pointer transition-colors truncate"
+                      >
+                        {albumItem.albumTitle}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (itunesCandidate?.releaseTitle) {
+                            setSelectedFields((prev) => ({ ...prev, title: itunesCandidate.releaseTitle }))
+                          }
+                        }}
+                        title={itunesCandidate?.releaseTitle || ''}
+                        className={`py-2 px-3 align-middle truncate transition-colors ${
+                          itunesCandidate?.releaseTitle ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {itunesCandidate?.releaseTitle || '—'}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (mbCandidate?.releaseTitle) {
+                            setSelectedFields((prev) => ({ ...prev, title: mbCandidate.releaseTitle }))
+                          }
+                        }}
+                        title={mbCandidate?.releaseTitle || ''}
+                        className={`py-2 px-3 align-middle truncate transition-colors ${
+                          mbCandidate?.releaseTitle ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {mbCandidate?.releaseTitle || '—'}
+                      </td>
+                      <td className="py-2 px-3 align-middle">
+                        <input
+                          type="text"
+                          value={selectedFields.title}
+                          title={selectedFields.title}
+                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, title: e.target.value }))}
+                          className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
+                        />
+                      </td>
+                    </tr>
+
+                    {/* Album Artist */}
+                    <tr>
+                      <td className="py-2 px-3 align-middle">
+                        <div className="flex flex-col items-start gap-1">
+                          <span className="font-medium text-white/80">Album Artist</span>
+                          {renderProvenanceBadge(consensusResult?.albumArtist?.source)}
+                        </div>
+                      </td>
+                      <td
+                        onClick={() => setSelectedFields((prev) => ({ ...prev, artistCredit: albumItem.artistCredit }))}
+                        title={albumItem.artistCredit}
+                        className="py-2 px-3 align-middle text-[#A1A1AA] hover:text-white cursor-pointer transition-colors truncate"
+                      >
+                        {albumItem.artistCredit}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (itunesCandidate?.artistCredit) {
+                            setSelectedFields((prev) => ({ ...prev, artistCredit: itunesCandidate.artistCredit }))
+                          }
+                        }}
+                        title={itunesCandidate?.artistCredit || ''}
+                        className={`py-2 px-3 align-middle truncate transition-colors ${
+                          itunesCandidate?.artistCredit ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {itunesCandidate?.artistCredit || '—'}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (mbCandidate?.artistCredit) {
+                            setSelectedFields((prev) => ({ ...prev, artistCredit: mbCandidate.artistCredit }))
+                          }
+                        }}
+                        title={mbCandidate?.artistCredit || ''}
+                        className={`py-2 px-3 align-middle truncate transition-colors ${
+                          mbCandidate?.artistCredit ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {mbCandidate?.artistCredit || '—'}
+                      </td>
+                      <td className="py-2 px-3 align-middle">
+                        <input
+                          type="text"
+                          value={selectedFields.artistCredit}
+                          title={selectedFields.artistCredit}
+                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, artistCredit: e.target.value }))}
+                          className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
+                        />
+                      </td>
+                    </tr>
+
+                    {/* Composer */}
+                    <tr>
+                      <td className="py-2 px-3 align-middle">
+                        <div className="flex flex-col items-start gap-1">
+                          <span className="font-medium text-white/80">Composer</span>
+                          {renderProvenanceBadge(consensusResult?.composer?.source)}
+                        </div>
+                      </td>
+                      <td
+                        onClick={() =>
+                          setSelectedFields((prev) => ({
+                            ...prev,
+                            composerName: release?.composerName || tracks[0]?.composerName || '',
+                          }))
+                        }
+                        title={release?.composerName || tracks[0]?.composerName || ''}
+                        className="py-2 px-3 align-middle text-[#A1A1AA] hover:text-white cursor-pointer transition-colors truncate"
+                      >
+                        {release?.composerName || tracks[0]?.composerName || '—'}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (itunesCandidate?.composer) {
+                            setSelectedFields((prev) => ({ ...prev, composerName: itunesCandidate.composer! }))
+                          }
+                        }}
+                        title={itunesCandidate?.composer || ''}
+                        className={`py-2 px-3 align-middle truncate transition-colors ${
+                          itunesCandidate?.composer ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {itunesCandidate?.composer || '—'}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (mbCandidate?.composer) {
+                            setSelectedFields((prev) => ({ ...prev, composerName: mbCandidate.composer! }))
+                          }
+                        }}
+                        title={mbCandidate?.composer || ''}
+                        className={`py-2 px-3 align-middle truncate transition-colors ${
+                          mbCandidate?.composer ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {mbCandidate?.composer || '—'}
+                      </td>
+                      <td className="py-2 px-3 align-middle">
+                        <input
+                          type="text"
+                          value={selectedFields.composerName}
+                          title={selectedFields.composerName}
+                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, composerName: e.target.value }))}
+                          className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
+                        />
+                      </td>
+                    </tr>
+
+                    {/* Release Year */}
+                    <tr>
+                      <td className="py-2 px-3 align-middle">
+                        <div className="flex flex-col items-start gap-1">
+                          <span className="font-medium text-white/80">Release Year</span>
+                          {renderProvenanceBadge(consensusResult?.releaseYear?.source)}
+                        </div>
+                      </td>
+                      <td
+                        onClick={() =>
+                          setSelectedFields((prev) => ({
+                            ...prev,
+                            releaseYear: String(release?.releaseYear || tracks[0]?.canonicalReleaseYear || ''),
+                          }))
+                        }
+                        className="py-2 px-3 align-middle text-[#A1A1AA] hover:text-white cursor-pointer transition-colors font-mono truncate"
+                      >
+                        {release?.releaseYear || tracks[0]?.canonicalReleaseYear || '—'}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (itunesCandidate?.releaseYear) {
+                            setSelectedFields((prev) => ({ ...prev, releaseYear: String(itunesCandidate.releaseYear) }))
+                          }
+                        }}
+                        className={`py-2 px-3 align-middle font-mono truncate transition-colors ${
+                          itunesCandidate?.releaseYear ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {itunesCandidate?.releaseYear || '—'}
+                      </td>
+                      <td
+                        onClick={() => {
+                          if (mbCandidate?.releaseYear) {
+                            setSelectedFields((prev) => ({ ...prev, releaseYear: String(mbCandidate.releaseYear) }))
+                          }
+                        }}
+                        className={`py-2 px-3 align-middle font-mono truncate transition-colors ${
+                          mbCandidate?.releaseYear ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
+                        }`}
+                      >
+                        {mbCandidate?.releaseYear || '—'}
+                      </td>
+                      <td className="py-2 px-3 align-middle font-mono">
+                        <input
+                          type="text"
+                          value={selectedFields.releaseYear}
+                          title={selectedFields.releaseYear}
+                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, releaseYear: e.target.value }))}
+                          className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs font-mono"
+                        />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Artist Scope Policy Selector */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-white/[0.04] text-xs">
+              <div className="flex items-center gap-1.5 text-[#8E8E93]">
+                <span className="font-medium text-white/80">Artist Scope Policy:</span>
+                <span>How should the reconciled artist apply to tracks?</span>
+              </div>
+              <div className="inline-flex rounded-lg p-0.5 bg-black/50 border border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setArtistPolicy('album_only')}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                    artistPolicy === 'album_only'
+                      ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/30 shadow-sm'
+                      : 'text-[#8E8E93] hover:text-white'
+                  }`}
+                >
+                  Set as Album Artist only (Preserve track singers)
                 </button>
                 <button
                   type="button"
-                  onClick={handleResetQuery}
-                  className="px-2.5 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] text-[#8E8E93] hover:text-white text-xs transition-all cursor-pointer"
-                  title="Reset to local container tags"
+                  onClick={() => setArtistPolicy('all_tracks')}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                    artistPolicy === 'all_tracks'
+                      ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/30 shadow-sm'
+                      : 'text-[#8E8E93] hover:text-white'
+                  }`}
                 >
-                  <RotateCcw className="w-3.5 h-3.5" />
+                  Apply to all tracks (Uniform single artist)
                 </button>
               </div>
-            </form>
-          )}
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead>
-                <tr className="border-b border-white/[0.08] text-[#8E8E93] text-[11px] font-mono">
-                  <th className="py-2.5 px-3 font-medium">Field</th>
-                  <th className="py-2.5 px-3 font-medium">Local File Tag</th>
-                  <th className="py-2.5 px-3 font-medium">Apple Music Master</th>
-                  <th className="py-2.5 px-3 font-medium">MusicBrainz Archive</th>
-                  <th className="py-2.5 px-3 font-medium text-emerald-400">Staged Output</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/[0.04]">
-                {/* Album Title */}
-                <tr>
-                  <td className="py-2.5 px-3 font-medium text-white/80">Album Title</td>
-                  <td
-                    onClick={() => setSelectedFields((prev) => ({ ...prev, title: albumItem.albumTitle }))}
-                    className="py-2.5 px-3 text-[#A1A1AA] hover:text-white cursor-pointer transition-colors"
-                  >
-                    {albumItem.albumTitle}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (itunesCandidate?.releaseTitle) {
-                        setSelectedFields((prev) => ({ ...prev, title: itunesCandidate.releaseTitle }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 transition-colors ${
-                      itunesCandidate?.releaseTitle ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {itunesCandidate?.releaseTitle || '—'}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (mbCandidate?.releaseTitle) {
-                        setSelectedFields((prev) => ({ ...prev, title: mbCandidate.releaseTitle }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 transition-colors ${
-                      mbCandidate?.releaseTitle ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {mbCandidate?.releaseTitle || '—'}
-                  </td>
-                  <td className="py-2.5 px-3">
-                    <div className="flex flex-col gap-1.5">
-                      {renderProvenanceBadge(consensusResult?.albumTitle?.source, consensusResult?.albumTitle?.confidence)}
-                      <input
-                        type="text"
-                        value={selectedFields.title}
-                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, title: e.target.value }))}
-                        className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
-                      />
-                    </div>
-                  </td>
-                </tr>
-
-                {/* Album Artist */}
-                <tr>
-                  <td className="py-2.5 px-3 font-medium text-white/80">
-                    <div className="flex flex-col">
-                      <span>Album Artist</span>
-                      <span className="text-[10px] text-[#8E8E93] font-mono">ALBUMARTIST</span>
-                    </div>
-                  </td>
-                  <td
-                    onClick={() => setSelectedFields((prev) => ({ ...prev, artistCredit: albumItem.artistCredit }))}
-                    className="py-2.5 px-3 text-[#A1A1AA] hover:text-white cursor-pointer transition-colors"
-                  >
-                    {albumItem.artistCredit}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (itunesCandidate?.artistCredit) {
-                        setSelectedFields((prev) => ({ ...prev, artistCredit: itunesCandidate.artistCredit }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 transition-colors ${
-                      itunesCandidate?.artistCredit ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {itunesCandidate?.artistCredit || '—'}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (mbCandidate?.artistCredit) {
-                        setSelectedFields((prev) => ({ ...prev, artistCredit: mbCandidate.artistCredit }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 transition-colors ${
-                      mbCandidate?.artistCredit ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {mbCandidate?.artistCredit || '—'}
-                  </td>
-                  <td className="py-2.5 px-3">
-                    <div className="flex flex-col gap-1.5">
-                      {renderProvenanceBadge(consensusResult?.albumArtist?.source, consensusResult?.albumArtist?.confidence)}
-                      <input
-                        type="text"
-                        value={selectedFields.artistCredit}
-                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, artistCredit: e.target.value }))}
-                        className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
-                      />
-                    </div>
-                  </td>
-                </tr>
-
-                {/* Composer */}
-                <tr>
-                  <td className="py-2.5 px-3 font-medium text-white/80">Composer</td>
-                  <td
-                    onClick={() =>
-                      setSelectedFields((prev) => ({
-                        ...prev,
-                        composerName: release?.composerName || tracks[0]?.composerName || '',
-                      }))
-                    }
-                    className="py-2.5 px-3 text-[#A1A1AA] hover:text-white cursor-pointer transition-colors"
-                  >
-                    {release?.composerName || tracks[0]?.composerName || '—'}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (itunesCandidate?.composer) {
-                        setSelectedFields((prev) => ({ ...prev, composerName: itunesCandidate.composer! }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 transition-colors ${
-                      itunesCandidate?.composer ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {itunesCandidate?.composer || '—'}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (mbCandidate?.composer) {
-                        setSelectedFields((prev) => ({ ...prev, composerName: mbCandidate.composer! }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 transition-colors ${
-                      mbCandidate?.composer ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {mbCandidate?.composer || '—'}
-                  </td>
-                  <td className="py-2.5 px-3">
-                    <div className="flex flex-col gap-1.5">
-                      {renderProvenanceBadge(consensusResult?.composer?.source, consensusResult?.composer?.confidence)}
-                      <input
-                        type="text"
-                        value={selectedFields.composerName}
-                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, composerName: e.target.value }))}
-                        className="w-full px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
-                      />
-                    </div>
-                  </td>
-                </tr>
-
-                {/* Release Year */}
-                <tr>
-                  <td className="py-2.5 px-3 font-medium text-white/80">Release Year</td>
-                  <td
-                    onClick={() =>
-                      setSelectedFields((prev) => ({
-                        ...prev,
-                        releaseYear: String(release?.releaseYear || tracks[0]?.canonicalReleaseYear || ''),
-                      }))
-                    }
-                    className="py-2.5 px-3 text-[#A1A1AA] hover:text-white cursor-pointer transition-colors font-mono"
-                  >
-                    {release?.releaseYear || tracks[0]?.canonicalReleaseYear || '—'}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (itunesCandidate?.releaseYear) {
-                        setSelectedFields((prev) => ({ ...prev, releaseYear: String(itunesCandidate.releaseYear) }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 font-mono transition-colors ${
-                      itunesCandidate?.releaseYear ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {itunesCandidate?.releaseYear || '—'}
-                  </td>
-                  <td
-                    onClick={() => {
-                      if (mbCandidate?.releaseYear) {
-                        setSelectedFields((prev) => ({ ...prev, releaseYear: String(mbCandidate.releaseYear) }))
-                      }
-                    }}
-                    className={`py-2.5 px-3 font-mono transition-colors ${
-                      mbCandidate?.releaseYear ? 'text-white hover:text-[#D4AF37] cursor-pointer' : 'text-[#636366]'
-                    }`}
-                  >
-                    {mbCandidate?.releaseYear || '—'}
-                  </td>
-                  <td className="py-2.5 px-3 font-mono">
-                    <div className="flex flex-col gap-1.5">
-                      {renderProvenanceBadge(consensusResult?.releaseYear?.source, consensusResult?.releaseYear?.confidence)}
-                      <input
-                        type="text"
-                        value={selectedFields.releaseYear}
-                        onChange={(e) => setSelectedFields((prev) => ({ ...prev, releaseYear: e.target.value }))}
-                        className="w-24 px-2 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs font-mono"
-                      />
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          {/* Artist Scope Policy Selector */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-white/[0.04] text-xs">
-            <div className="flex items-center gap-1.5 text-[#8E8E93]">
-              <span className="font-medium text-white/80">Artist Scope Policy:</span>
-              <span>How should the reconciled artist apply to tracks?</span>
-            </div>
-            <div className="inline-flex rounded-lg p-0.5 bg-black/50 border border-white/10">
-              <button
-                type="button"
-                onClick={() => setArtistPolicy('album_only')}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
-                  artistPolicy === 'album_only'
-                    ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/30 shadow-sm'
-                    : 'text-[#8E8E93] hover:text-white'
-                }`}
-              >
-                Set as Album Artist only (Preserve track singers)
-              </button>
-              <button
-                type="button"
-                onClick={() => setArtistPolicy('all_tracks')}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
-                  artistPolicy === 'all_tracks'
-                    ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/30 shadow-sm'
-                    : 'text-[#8E8E93] hover:text-white'
-                }`}
-              >
-                Apply to all tracks (Uniform single artist)
-              </button>
             </div>
           </div>
         </div>
 
-        {/* Case B: Multi-Film Compilation Box Set Clusters OR Case A: Track Checklist */}
-        {isCaseB && compilationClusters.length > 0 ? (
+        {/* Case B: Multi-Film Compilation Box Set Clusters (Strictly >1 Film Soundtracks) OR Case A: Standard Album Track Table */}
+        {isCaseB ? (
           <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/[0.06] space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2 font-medium text-xs text-white">
                 <Film className="w-4 h-4 text-[#D4AF37]" />
                 <span>Multi-Soundtrack Compilation Clusters ({compilationClusters.length} Film Soundtracks)</span>
               </div>
-              {isLoadingClusters && (
-                <div className="flex items-center gap-1.5 text-xs text-[#8E8E93]">
-                  <RotateCcw className="w-3.5 h-3.5 animate-spin text-[#D4AF37]" />
-                  <span>AI resolving soundtrack origins...</span>
-                </div>
-              )}
+              <div className="flex items-center gap-3">
+                {isLoadingClusters && (
+                  <div className="flex items-center gap-1.5 text-xs text-[#8E8E93]">
+                    <RotateCcw className="w-3.5 h-3.5 animate-spin text-[#D4AF37]" />
+                    <span>AI resolving soundtrack origins...</span>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={handleResetAllTracks}
+                  className="text-[11px] text-[#8E8E93] hover:text-white cursor-pointer"
+                >
+                  Reset All Tracks
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleAllTracks}
+                  className="text-[11px] text-[#D4AF37] hover:underline cursor-pointer font-medium"
+                >
+                  {selectedTrackIds.size === tracks.length ? 'Deselect All' : 'Select All'}
+                </button>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -1522,53 +1876,36 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5 pt-1 border-t border-white/[0.04]">
-                    {cluster.tracks.map((t) => (
-                      <div
-                        key={t.id}
-                        className="flex items-center gap-2 px-2 py-1 rounded bg-white/[0.02] text-[11px] text-[#A1A1AA]"
-                      >
-                        <span className="font-mono text-[#636366] w-5">#{t.trackNumber || 1}</span>
-                        <span className="text-white truncate flex-1">{t.title}</span>
-                        <span className="text-[10px] text-[#8E8E93] truncate max-w-[120px]">
-                          {t.artistCredit}
-                        </span>
-                      </div>
-                    ))}
+                  <div className="pt-1 border-t border-white/[0.04]">
+                    {renderTrackTable(cluster.tracks)}
                   </div>
                 </div>
               ))}
             </div>
           </div>
         ) : (
-          /* Case A: Track Checklist */
+          /* Case A: Standard Album / Single-Film Soundtrack Track Table */
           <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/[0.06] space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2 font-medium text-xs text-white">
                 <Music className="w-4 h-4 text-[#D4AF37]" />
                 <span>Affected Tracks to Stage ({selectedTrackIds.size}/{tracks.length} Selected)</span>
                 <span className="text-[10px] text-[#8E8E93] font-mono ml-2">
                   {artistPolicy === 'album_only'
-                    ? '• Individual track singers preserved / editable'
+                    ? '• Individual track titles & singers preserved / editable'
                     : '• Album Artist will apply to all tracks'}
                 </span>
               </div>
               <div className="flex items-center gap-3">
-                {artistPolicy === 'album_only' && (
-                  <button
-                    onClick={() => {
-                      const reset: Record<string, string> = {}
-                      tracks.forEach((t) => {
-                        reset[t.id] = t.artistCredit || ''
-                      })
-                      setTrackArtists(reset)
-                    }}
-                    className="text-[11px] text-[#8E8E93] hover:text-white cursor-pointer"
-                  >
-                    Reset Track Artists
-                  </button>
-                )}
                 <button
+                  type="button"
+                  onClick={handleResetAllTracks}
+                  className="text-[11px] text-[#8E8E93] hover:text-white cursor-pointer"
+                >
+                  Reset All Tracks
+                </button>
+                <button
+                  type="button"
                   onClick={toggleAllTracks}
                   className="text-[11px] text-[#D4AF37] hover:underline cursor-pointer font-medium"
                 >
@@ -1577,57 +1914,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
               </div>
             </div>
 
-            <div className="divide-y divide-white/[0.04] max-h-64 overflow-y-auto pr-1">
-              {tracks.map((t) => {
-                const isChecked = selectedTrackIds.has(t.id)
-                const currentVal = trackArtists[t.id] ?? t.artistCredit ?? ''
-                const isModified = currentVal !== t.artistCredit
-                return (
-                  <div
-                    key={t.id}
-                    onClick={() => toggleTrack(t.id)}
-                    className="py-2 px-2 flex items-center justify-between hover:bg-white/[0.02] rounded cursor-pointer transition-colors gap-3"
-                  >
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => toggleTrack(t.id)}
-                        className="rounded border-white/20 text-[#D4AF37] focus:ring-0 cursor-pointer"
-                      />
-                      <span className="text-xs font-mono text-[#636366] w-6">#{t.trackNumber || 1}</span>
-                      <span className="text-xs text-white truncate max-w-[200px] md:max-w-[280px]">
-                        {t.title}
-                      </span>
-                    </div>
-
-                    <div
-                      className="flex items-center gap-2 shrink-0"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <span className="text-[10px] text-[#8E8E93] font-mono">Track Artist:</span>
-                      <input
-                        type="text"
-                        value={artistPolicy === 'all_tracks' ? selectedFields.artistCredit : currentVal}
-                        disabled={artistPolicy === 'all_tracks'}
-                        onChange={(e) => {
-                          const val = e.target.value
-                          setTrackArtists((prev) => ({ ...prev, [t.id]: val }))
-                        }}
-                        placeholder="Vocalist(s) / Performer"
-                        className={`px-2 py-1 rounded bg-black/40 border text-xs w-48 md:w-64 font-medium transition-colors focus:outline-none ${
-                          artistPolicy === 'all_tracks'
-                            ? 'border-white/[0.04] text-[#636366] cursor-not-allowed bg-black/20'
-                            : isModified
-                            ? 'border-emerald-500/50 text-emerald-300'
-                            : 'border-white/10 text-white/90 hover:border-white/20 focus:border-[#D4AF37]'
-                        }`}
-                      />
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
+            {renderTrackTable(tracks)}
           </div>
         )}
       </div>
@@ -1652,6 +1939,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
           </div>
         </div>
       )}
+
       {/* Stacking Release Picker Modal */}
       {isStackPickerOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">

@@ -6,7 +6,7 @@
  * active steppers, and keyboard shortcut navigation.
  */
 
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import {
   CheckCircle2,
   Disc,
@@ -32,6 +32,8 @@ export const CurationQueueRail: React.FC<CurationQueueRailProps> = ({
   activeFilter,
   onFilterChange,
 }) => {
+  const [failedCoverUrls, setFailedCoverUrls] = useState<Set<string>>(new Set())
+
   // Filter queue
   const filteredQueue = useMemo(() => {
     switch (activeFilter) {
@@ -105,7 +107,7 @@ export const CurationQueueRail: React.FC<CurationQueueRailProps> = ({
         </div>
 
         {/* 2. Filter Pills */}
-        <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar text-[10px]">
+        <div className="flex flex-wrap items-center gap-1 text-[10px]">
           {(
             [
               { id: 'all', label: `All (${counts.all})` },
@@ -117,7 +119,7 @@ export const CurationQueueRail: React.FC<CurationQueueRailProps> = ({
             <button
               key={tab.id}
               onClick={() => onFilterChange(tab.id)}
-              className={`px-2 py-0.5 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
+              className={`px-1.5 py-0.5 rounded-full font-medium transition-all shrink-0 cursor-pointer ${
                 activeFilter === tab.id
                   ? 'bg-white/[0.16] text-white shadow-sm'
                   : 'bg-white/[0.04] text-[#8E8E93] hover:text-white hover:bg-white/[0.08]'
@@ -130,7 +132,7 @@ export const CurationQueueRail: React.FC<CurationQueueRailProps> = ({
       </div>
 
       {/* 3. Queue Item Cards List */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+      <div className="flex-1 overflow-y-auto p-2 pb-24 space-y-1.5">
         {filteredQueue.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center p-6 text-center text-[#8E8E93]">
             <CheckCircle2 className="w-8 h-8 text-[#10B981] mb-2 opacity-80" />
@@ -142,6 +144,7 @@ export const CurationQueueRail: React.FC<CurationQueueRailProps> = ({
         ) : (
           filteredQueue.map((item) => {
             const isSelected = selectedAlbumId === item.albumId
+            const hasValidCover = Boolean(item.coverArtUrl && !failedCoverUrls.has(item.coverArtUrl))
 
             return (
               <button
@@ -155,12 +158,21 @@ export const CurationQueueRail: React.FC<CurationQueueRailProps> = ({
               >
                 {/* Thumbnail / Fallback */}
                 <div className="w-10 h-10 rounded-lg overflow-hidden shrink-0 bg-neutral-900 border border-white/10 relative">
-                  {item.coverArtUrl ? (
+                  {hasValidCover ? (
                     <img
                       src={item.coverArtUrl}
                       alt={item.albumTitle}
                       className="w-full h-full object-cover"
                       loading="lazy"
+                      onError={() => {
+                        if (item.coverArtUrl) {
+                          setFailedCoverUrls((prev) => {
+                            const next = new Set(prev)
+                            next.add(item.coverArtUrl!)
+                            return next
+                          })
+                        }
+                      }}
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-[#636366]">
@@ -177,12 +189,12 @@ export const CurationQueueRail: React.FC<CurationQueueRailProps> = ({
                 {/* Details */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-1">
-                    <span className="font-medium text-xs truncate leading-snug">
+                    <span className="font-medium text-xs truncate leading-snug" title={item.albumTitle}>
                       {item.albumTitle}
                     </span>
                   </div>
 
-                  <span className="text-[11px] text-[#8E8E93] truncate block mt-0.5">
+                  <span className="text-[11px] text-[#8E8E93] truncate block mt-0.5" title={item.artistCredit}>
                     {item.artistCredit}
                   </span>
 

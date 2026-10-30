@@ -4,13 +4,14 @@
 Hosts the audiophile playback interface controls, including the persistent bottom Now Playing transport bar, the full-screen Sanctuary Listening Lounge visualization, and the output device selection modal (supporting WASAPI Exclusive and UPnP renderers).
 
 ## Interface
-- `NowPlayingBar`: Persistent playback control bar rendering play/pause, seek scrub, volume, bitrate/sample-rate telemetry tags, purity indicators, and device routing triggers.
+- `NowPlayingBar`: Persistent playback control bar rendering play/pause, seek scrub, volume, bitrate/sample-rate telemetry tags, purity indicators, and device routing triggers. Accepts `topMode?: 'library' | 'curate' | 'maintain'` and automatically hides when idle (`!currentTrack`) inside the `curate` or `maintain` workbenches unless the device modal or signal path popover is open.
 - `AudioDeviceSelectorModal`: Modal allowing selection between WASAPI Exclusive devices and discovered UPnP/DLNA network renderers.
 - `SanctuaryListeningLounge`: Full-screen immersive listening view displaying album artwork, bit-perfect transport metrics, and minimalist controls.
 
 ## Invariants
 - Playback state changes and seeks must invoke methods provided by `AudioPlayerContext` to ensure synchronization with the backend audio engine.
 - Volume attenuation controls must visually reflect bypassed status when Bit-Perfect / Purity Mode is engaged.
+- When `!currentTrack && (topMode === 'curate' || topMode === 'maintain') && !isDeviceModalOpen && !isSignalPopoverOpen`, `NowPlayingBar` returns `null` so bottom track rows in data-dense workbenches are never occluded by an idle transport dock.
 
 ## Side Effects
 - Dispatches playback commands to Rust backend via `AudioPlayerContext` (WASAPI audio thread or UPnP pacing stream).

@@ -1,30 +1,20 @@
-# Initial Zoom Out Review Report
+# Stage 5: Initial Zoom Out Review Report (`zoom_out_report.md`)
 
-**Target:** `docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md` (Lines 1–511)
-**Reviewer Lens:** `egm-zoom-out`
-**Standard:** `resources/document_standards/zoom-out-standard.md`
+* **Target:** [`docs/designs/CURATE_EXPERIENCE_AND_LAYOUT_OVERHAUL.md`](file:///e:/Mathan/Code/Music%20Agent/docs/designs/CURATE_EXPERIENCE_AND_LAYOUT_OVERHAUL.md) (`1..325`)
+* **Reviewer Lens:** `egm-zoom-out` (High-Altitude Simplicity, Root-Cause Alignment & Codebase Reuse)
 
-## Executive Summary
-The design document directly targets the root problems identified by the user: fragmented editing workflows, inverted Indian music credit attribution, pressing edition splitting, uncoordinated cover art automation, and inaccurate dynamic range metrics. The architecture achieves strong simplification by decommissioning `CustomizeAlbumModal.tsx` (~1,000 lines) and stripping non-playback inspection tools from `UnifiedRightSidebar.tsx`. However, several implementation details introduce abstraction leaks or reference non-existent services that must be grounded in the active codebase.
+## 1. Executive Summary
+The design directly solves the root layout and state-machine defects of the Curate workbench: replacing the vertically stacked top section with a 33%/67% split deck (`xl:col-span-4` / `xl:col-span-8`), unifying the track list into a single-column editable table (`48px | 42% | 44% | 112px`), separating `hasCompilationSignals` from `isCaseB = hasCompilationSignals && compilationClusters.length > 1`, and adding `pb-24` clearance plus `NowPlayingBar` idle auto-hide.
 
----
+However, cross-referencing the design against the uploaded full-screen Curate screenshot (`media_1793350151559_4f517bd9.png`) exposes **1 Blocker** where two visual defects visible in the screenshot were omitted from the design scope.
 
-## Prioritized Findings
+## 2. Findings
 
-### Issue 1: Phantom File Reference for Catalog Search - Severity: Major
-* **Reviewer Lens:** `egm-zoom-out` / `egm-codebase-details`
-* **Affected Scope:** Lines 433, 487–489
-* **Discrepancy Description:** The design specifies creating/modifying `src/services/searchEngine.ts` to index composer and track artists. In the actual Cadence codebase, `src/services/searchEngine.ts` does not exist. Catalog search is divided between client-side in-memory filtering in `src/components/CenterStage/AlbumCoverGrid.tsx` (`filtered = cards.filter(...)`) and SQLite FTS queries in `src/services/sqliteLibraryService.ts` / `tauriBridge.ts` (`db_search_catalog`).
-* **Rationale & Recommendation:** Eliminate the speculative `searchEngine.ts` entry. Explicitly target `AlbumCoverGrid.tsx` (to include `album.tracks.some(t => t.artistCredit.includes(q))` in the filter loop) and `sqliteLibraryService.ts` (`searchCatalog`).
-
-### Issue 2: Algorithmic Incongruity in `computeGroupingKey` - Severity: Major
-* **Reviewer Lens:** `egm-zoom-out`
-* **Affected Scope:** Lines 272–285, 432, 491–495
-* **Discrepancy Description:** The plan states that `computeGroupingKey(release: Release)` will compute Jaro-Winkler similarity ($\ge 0.88$) against candidate titles. However, `computeGroupingKey` is a unary, pure hashing function ($Release \to string$). A unary function cannot calculate pairwise similarity between two releases in isolation unless it generates a canonical stem or operates within the grouping reduction loop in `groupAlbumReleases`.
-* **Rationale & Recommendation:** Update the architecture: `computeGroupingKey` should generate a sanitized base stem (stripping rip flags, disc markers, and punctuation). The fuzzy Jaro-Winkler clustering loop ($\ge 0.88$) with track count and duration guards must execute inside `groupAlbumReleases(releases: Release[])` as an agglomerative clustering pass across candidate groups.
-
-### Issue 3: Dangling Inspector Triggers Across the Shell - Severity: Nit
-* **Reviewer Lens:** `egm-zoom-out`
-* **Affected Scope:** Lines 144–151, 426, 453–458
-* **Discrepancy Description:** Stripping the `inspector` tab from `UnifiedRightSidebar` leaves orphaned triggers in `App.tsx` (e.g., keyboard shortcut `⌘I` and `handleInspectRelease`) and `AlbumCoverGrid.tsx` line 575 (`onInspectRelease`).
-* **Rationale & Recommendation:** Specify in Step 2 of the implementation plan that `⌘I` and `onInspectRelease` are either repurposed to trigger Curate navigation (`navigateToCurate`) or cleanly unmounted to prevent dead keybindings.
+### [ZO-01] 🔴 Blocker: Unaddressed Visual Defects from Full-Screen Curate Screenshot (`CurationQueueRail` Clipped `Staged` Pill & Broken `<img alt="Local">` Fallback)
+* **Location:** `The Problem` (lines 15–24), `Technical Plan §1 & §4`, [`CurationQueueRail.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationQueueRail.tsx#L108-L169), [`CurationReconciliationStage.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1021-L1044)
+* **Observation:**
+  In `media_1793350151559_4f517bd9.png` (`Anbin Mugavari CD RIP`):
+  1. In [`CurationQueueRail.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationQueueRail.tsx#L108-L129), the 4 filter tabs (`All (280)`, `Soundtracks (41)`, `Artwork (22)`, `Staged (...)`) overflow the `256px` inner width of the `280px` rail, clipping the 4th tab to `"Sta"` at the right edge with no scrollbar.
+  2. When `albumItem.coverArtUrl` is a non-empty string whose image fails to load at runtime, `<img src={albumItem.coverArtUrl} alt="Local" />` in [`CurationReconciliationStage.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1023) and `<img src={item.coverArtUrl} alt={item.albumTitle} />` in [`CurationQueueRail.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationQueueRail.tsx#L159) display broken-image icons and raw alt text instead of falling back to the `<Disc />` vector placeholder.
+* **Recommendation:**
+  Include `CurationQueueRail` filter pill fitting (`flex-wrap` or compact `grid-cols-4` pills) and `onError` broken-image fallback state in both `CurationQueueRail.tsx` and `CurationReconciliationStage.tsx`.

@@ -315,6 +315,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   onToggleMountStatus,
   onTriggerScan,
   onRefreshLibrary,
+  onSelectRelease,
   showToast,
   onSwitchToLibrary,
   activeSubTab: controlledTab,
@@ -370,12 +371,37 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
 
   // Background Artwork Enrichment State & Reactive Subscription
   const [bgArtState, setBgArtState] = useState<BackgroundArtworkState>(() => backgroundArtworkService.getState())
+  const prevBgStatusRef = React.useRef<BackgroundArtworkState['status']>(bgArtState.status)
+  const prevUpdatedCountRef = React.useRef<number>(bgArtState.updatedCount)
 
   useEffect(() => {
     return backgroundArtworkService.subscribe((s) => {
+      const wasActive =
+        prevBgStatusRef.current === 'active' ||
+        prevBgStatusRef.current === 'cooldown' ||
+        prevBgStatusRef.current === 'suspended_playback'
+      const justCompleted = wasActive && s.status === 'complete'
+      const newlyUpdated = s.updatedCount > prevUpdatedCountRef.current
+
+      prevBgStatusRef.current = s.status
+      prevUpdatedCountRef.current = s.updatedCount
       setBgArtState(s)
-      if (s.updatedCount > 0) {
+
+      if (newlyUpdated || justCompleted) {
         onRefreshAudit()
+      }
+      if (justCompleted) {
+        if (s.updatedCount > 0 && s.notFoundCount > 0) {
+          showToast(
+            `Archival Art Fetch complete: staged artwork for ${s.updatedCount} album(s). ${s.notFoundCount} album(s) had no online match.`
+          )
+        } else if (s.updatedCount > 0) {
+          showToast(`Archival Art Fetch complete: staged high-res artwork for ${s.updatedCount} album(s). Ready in Review & Save.`)
+        } else if (s.notFoundCount > 0) {
+          showToast(
+            `Archival Art Fetch complete: no online artwork found for ${s.notFoundCount} album(s). Use Curate to upload or select art manually.`
+          )
+        }
       }
     })
   }, [onRefreshAudit])
@@ -478,54 +504,14 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   const allRawClusters: IssueCluster[] = React.useMemo(() => {
     const map = new Map<string, IssueCluster>()
 
-    scopedIssues.forEach((issue) => {
-      let key = ''
-      let title = ''
-      let subtitle = ''
-      let albumArtist: string | undefined
-      let artworkUrl: string | undefined
-
-      if (groupByMode === 'artist') {
-        const canonical = getIssueCanonicalTarget(issue, tracks, releases)
-        key = canonical
-        title = canonical
-        if (canonical === 'Artwork & Media Integrity') {
-          subtitle = 'Visual standards & high-resolution artwork rules'
-        } else if (canonical === 'Sequential Track Indexing') {
-          subtitle = 'Track numbering & disc sequence rules'
-        } else if (canonical === 'Bitstream & Checksum Integrity') {
-          subtitle = 'FLAC MD5 checksum & stream payload verification'
-        } else if (canonical === 'Untagged Audio Standards') {
-          subtitle = 'Missing artist tags and folder extraction rules'
-        } else if (canonical === 'Pending Metadata Changes' || canonical === 'Pending Library Changes') {
-          subtitle = 'Staged in-memory changes awaiting review and save'
-        } else {
-          subtitle = `Canonical Authority: ALBUMARTIST = "${canonical}"`
-        }
-      } else if (groupByMode === 'album') {
-        const firstTrack = issue.sampleTrackIds.length > 0 ? tracks.find((t) => t.id === issue.sampleTrackIds[0]) : null
-        const rel = releases.find((r) => r.id === firstTrack?.releaseId)
-        key = rel?.id || 'unknown_album'
-        title = rel?.title ? `${rel.title} (${rel.releaseYear || 'Unknown Year'})` : 'Non-Album / Standalone Tracks'
-        albumArtist = rel?.artistCredit || rel?.composerName || 'Various Artists'
-        subtitle = rel ? `Album Artist: ${albumArtist} • ${rel.tracksCount || issue.sampleTrackIds.length} Tracks` : 'Tracks without verified album wrapper'
-        artworkUrl = rel?.artwork?.frontCoverUrl || rel?.coverArtUrl
-      } else {
-        key = issue.category
-        title = issue.category === 'inconsistent_name'
-          ? 'Inconsistent Artist Name Variants'
-          : issue.category === 'compilation_conflict'
-          ? 'Performer vs. Composer Role Conflicts'
-          : issue.category === 'low_res_art'
-          ? 'Cover Artwork Resolution & Missing Artwork'
-          : issue.category === 'missing_track_num'
-          ? 'Missing Sequential Track Indexes'
-          : issue.category === 'unformatted_backdrop'
-          ? 'Unformatted Panoramic Backdrops'
-          : issue.category.replace(/_/g, ' ').toUpperCase()
-        subtitle = `Rules governing ${title.toLowerCase()}`
-      }
-
+    const addIssueToCluster = (
+      key: string,
+      title: string,
+      subtitle: string,
+      albumArtist: string | undefined,
+      artworkUrl: string | undefined,
+      issue: AuditIssue
+    ) => {
       if (!map.has(key)) {
         map.set(key, {
           key,
@@ -552,6 +538,88 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
         }
       } else {
         cluster.hasRoleConflicts = true
+      }
+    }
+
+    scopedIssues.forEach((issue) => {
+      if (groupByMode === 'artist') {
+        const canonical = getIssueCanonicalTarget(issue, tracks, releases)
+        const key = canonical
+        const title = canonical
+        let subtitle = ''
+        if (canonical === 'Artwork & Media Integrity') {
+          subtitle = 'Visual standards & high-resolution artwork rules'
+        } else if (canonical === 'Sequential Track Indexing') {
+          subtitle = 'Track numbering & disc sequence rules'
+        } else if (canonical === 'Bitstream & Checksum Integrity') {
+          subtitle = 'FLAC MD5 checksum & stream payload verification'
+        } else if (canonical === 'Untagged Audio Standards') {
+          subtitle = 'Missing artist tags and folder extraction rules'
+        } else if (canonical === 'Pending Metadata Changes' || canonical === 'Pending Library Changes') {
+          subtitle = 'Staged in-memory changes awaiting review and save'
+        } else {
+          subtitle = `Canonical Authority: ALBUMARTIST = "${canonical}"`
+        }
+        addIssueToCluster(key, title, subtitle, undefined, undefined, issue)
+      } else if (groupByMode === 'album') {
+        // Partition multi-album issues per release so each album card only receives its own affected tracks
+        const tracksByRelease = new Map<string, string[]>()
+        if (issue.sampleTrackIds && issue.sampleTrackIds.length > 0) {
+          issue.sampleTrackIds.forEach((tid) => {
+            const trk = tracks.find((t) => t.id === tid)
+            const relId = trk?.releaseId || 'unknown_album'
+            const list = tracksByRelease.get(relId) || []
+            list.push(tid)
+            tracksByRelease.set(relId, list)
+          })
+        } else {
+          tracksByRelease.set('unknown_album', [])
+        }
+
+        tracksByRelease.forEach((relTrackIds, relId) => {
+          const rel = releases.find((r) => r.id === relId)
+          const key = rel?.id || 'unknown_album'
+          const title = rel?.title ? `${rel.title} (${rel.releaseYear || 'Unknown Year'})` : 'Non-Album / Standalone Tracks'
+          const albumArtist = rel?.artistCredit || rel?.composerName || 'Various Artists'
+          const subtitle = rel
+            ? `Album Artist: ${albumArtist} • ${rel.tracksCount || relTrackIds.length} Tracks`
+            : 'Tracks without verified album wrapper'
+          const artworkUrl = rel?.artwork?.frontCoverUrl || rel?.coverArtUrl
+
+          let scopedIssue = issue
+          if (tracksByRelease.size > 1 || issue.category === 'low_res_art') {
+            const isMissingArt = !rel?.artwork?.frontCoverUrl || !rel.artwork.frontCoverUrl.trim()
+            scopedIssue = {
+              ...issue,
+              id: tracksByRelease.size > 1 ? `${issue.id}:::${key}` : issue.id,
+              sampleTrackIds: relTrackIds,
+              affectedCount: relTrackIds.length || issue.affectedCount,
+              ...(issue.category === 'low_res_art' && rel
+                ? {
+                    detectedValue: isMissingArt ? 'Missing Cover Artwork' : 'Low-Res Cover Art (< 800px)',
+                    currentValue: isMissingArt ? 'No Cover Art' : rel.artwork?.resolution || '< 800px',
+                  }
+                : {}),
+            }
+          }
+
+          addIssueToCluster(key, title, subtitle, albumArtist, artworkUrl, scopedIssue)
+        })
+      } else {
+        const key = issue.category
+        const title = issue.category === 'inconsistent_name'
+          ? 'Inconsistent Artist Name Variants'
+          : issue.category === 'compilation_conflict'
+          ? 'Performer vs. Composer Role Conflicts'
+          : issue.category === 'low_res_art'
+          ? 'Cover Artwork Resolution & Missing Artwork'
+          : issue.category === 'missing_track_num'
+          ? 'Missing Sequential Track Indexes'
+          : issue.category === 'unformatted_backdrop'
+          ? 'Unformatted Panoramic Backdrops'
+          : issue.category.replace(/_/g, ' ').toUpperCase()
+        const subtitle = `Rules governing ${title.toLowerCase()}`
+        addIssueToCluster(key, title, subtitle, undefined, undefined, issue)
       }
     })
 
@@ -583,6 +651,15 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   const triageClustersCount = allRawClusters.filter((c) => c.primaryIssuesCount > 0).length
   const performerClustersCount = allRawClusters.filter((c) => c.hasRoleConflicts).length
 
+  const findIssueById = (issueId: string): AuditIssue | undefined => {
+    for (const c of allRawClusters) {
+      const found = c.issues.find((i) => i.id === issueId)
+      if (found) return found
+    }
+    const baseId = issueId.split(':::')[0]
+    return scopedIssues.find((i) => i.id === issueId || i.id === baseId)
+  }
+
   const handleStageSelected = async () => {
     const idsToStage = selectedIssueIds.size > 0
       ? Array.from(selectedIssueIds)
@@ -591,10 +668,22 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
     if (idsToStage.length === 0) return
 
     let stagedCount = 0
+    const artReleaseIds = new Set<string>()
+
     for (const id of idsToStage) {
+      const targetIssue = findIssueById(id)
+      if (targetIssue?.category === 'low_res_art' || targetIssue?.autoFixAction === 'FETCH_HIRES_ART') {
+        targetIssue.sampleTrackIds?.forEach((tid) => {
+          const trk = tracks.find((t) => t.id === tid)
+          if (trk?.releaseId) artReleaseIds.add(trk.releaseId)
+        })
+        continue
+      }
+
+      const baseId = id.split(':::')[0]
       setRemediatingIssueId(id)
       setRemediationProgress(null)
-      await auditService.remediateIssue(id, {
+      await auditService.remediateIssue(baseId, {
         onProgress: (p: { current: number; total: number; title: string }) => {
           setRemediationProgress(p)
         },
@@ -604,12 +693,26 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
     setRemediatingIssueId(null)
     setRemediationProgress(null)
     setSelectedIssueIds(new Set())
+
+    if (artReleaseIds.size > 0) {
+      backgroundArtworkService.start({
+        releaseIds: Array.from(artReleaseIds),
+        preferredProvider: 'apple',
+      })
+    }
+
     onRefreshAudit()
-    showToast(`Staged ${stagedCount} audit fix(es) in non-destructive sidecars. Ready in Review & Save.`)
+    if (stagedCount > 0 && artReleaseIds.size > 0) {
+      showToast(`Staged ${stagedCount} fix(es) and started background artwork fetch for ${artReleaseIds.size} album(s).`)
+    } else if (artReleaseIds.size > 0) {
+      showToast(`Started background archival artwork fetch for ${artReleaseIds.size} album(s).`)
+    } else {
+      showToast(`Staged ${stagedCount} audit fix(es) in non-destructive sidecars. Ready in Review & Save.`)
+    }
   }
 
-  const handleRemediateSingle = async (issueId: string) => {
-    const issue = scopedIssues.find((i) => i.id === issueId)
+  const handleRemediateSingle = async (issueId: string, providerOverride?: 'apple' | 'musicbrainz' | 'ai') => {
+    const issue = findIssueById(issueId)
     if (issue?.category === 'low_res_art' || issue?.autoFixAction === 'FETCH_HIRES_ART') {
       const targetReleaseIds = new Set<string>()
       if (issue.sampleTrackIds && issue.sampleTrackIds.length > 0) {
@@ -618,18 +721,24 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
           if (trk?.releaseId) targetReleaseIds.add(trk.releaseId)
         })
       }
+      const relCount = targetReleaseIds.size
       backgroundArtworkService.start({
-        releaseIds: targetReleaseIds.size > 0 ? Array.from(targetReleaseIds) : undefined,
-        preferredProvider: 'apple',
+        releaseIds: relCount > 0 ? Array.from(targetReleaseIds) : undefined,
+        preferredProvider: providerOverride || 'apple',
       })
-      showToast('Started background archival artwork fetch. Runs safely during audio-idle.')
+      showToast(
+        relCount === 1
+          ? 'Searching Apple Music, MusicBrainz & AI for album cover art...'
+          : `Started background archival artwork fetch for ${relCount || 'all'} albums.`
+      )
       return
     }
 
+    const baseId = issueId.split(':::')[0]
     setRemediatingIssueId(issueId)
     setRemediationProgress(null)
     try {
-      const res = await auditService.remediateIssue(issueId, {
+      const res = await auditService.remediateIssue(baseId, {
         onProgress: (p: { current: number; total: number; title: string }) => {
           setRemediationProgress(p)
         },
@@ -651,20 +760,46 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
       return
     }
 
-    const ids = cluster.issues.filter((i) => !i.isRoleConflict && i.isAutoFixable).map((i) => i.id)
-    for (const id of ids) {
-      setRemediatingIssueId(id)
+    const issuesToFix = cluster.issues.filter((i) => !i.isRoleConflict && i.isAutoFixable)
+    const artReleaseIds = new Set<string>()
+    let stagedCount = 0
+
+    for (const iss of issuesToFix) {
+      if (iss.category === 'low_res_art' || iss.autoFixAction === 'FETCH_HIRES_ART') {
+        iss.sampleTrackIds?.forEach((tid) => {
+          const trk = tracks.find((t) => t.id === tid)
+          if (trk?.releaseId) artReleaseIds.add(trk.releaseId)
+        })
+        continue
+      }
+      const baseId = iss.id.split(':::')[0]
+      setRemediatingIssueId(iss.id)
       setRemediationProgress(null)
-      await auditService.remediateIssue(id, {
+      await auditService.remediateIssue(baseId, {
         onProgress: (p: { current: number; total: number; title: string }) => {
           setRemediationProgress(p)
         },
       })
+      stagedCount++
     }
     setRemediatingIssueId(null)
     setRemediationProgress(null)
+
+    if (artReleaseIds.size > 0) {
+      backgroundArtworkService.start({
+        releaseIds: Array.from(artReleaseIds),
+        preferredProvider: 'apple',
+      })
+    }
+
     onRefreshAudit()
-    showToast(`Staged all safe fixes for "${cluster.title}". Ready in Review & Save.`)
+    if (stagedCount > 0 && artReleaseIds.size > 0) {
+      showToast(`Staged ${stagedCount} fix(es) & started artwork fetch for "${cluster.title}".`)
+    } else if (artReleaseIds.size > 0) {
+      showToast(`Searching online archival artwork for "${cluster.title}"...`)
+    } else {
+      showToast(`Staged all safe fixes for "${cluster.title}". Ready in Review & Save.`)
+    }
   }
 
   // Library format composition breakdown (macOS Storage Management style)
@@ -936,7 +1071,13 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                       <Sparkles className="w-2.5 h-2.5 text-amber-400" />
                       Archival Art Fetch
                     </span>
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                    <span
+                      className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full ${
+                        bgArtState.status === 'complete' && bgArtState.updatedCount > 0
+                          ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                          : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                      }`}
+                    >
                       {bgArtState.status === 'suspended_playback'
                         ? 'Suspended (Playing)'
                         : bgArtState.status === 'cooldown'
@@ -950,7 +1091,11 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                   </div>
                   <div className="w-full bg-white/5 rounded-full h-1 overflow-hidden">
                     <div
-                      className="h-1 rounded-full bg-amber-400 transition-all duration-300"
+                      className={`h-1 rounded-full transition-all duration-300 ${
+                        bgArtState.status === 'complete' && bgArtState.updatedCount > 0
+                          ? 'bg-emerald-400'
+                          : 'bg-amber-400'
+                      }`}
                       style={{
                         width: `${
                           bgArtState.total > 0
@@ -961,8 +1106,17 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                     />
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                    <span className="truncate max-w-[130px]" title={bgArtState.currentAlbumTitle || 'Idle'}>
-                      {bgArtState.currentAlbumTitle || 'Idle'}
+                    <span
+                      className="truncate max-w-[140px]"
+                      title={
+                        bgArtState.status === 'complete'
+                          ? `${bgArtState.updatedCount} staged, ${bgArtState.notFoundCount} not found`
+                          : bgArtState.currentAlbumTitle || 'Idle'
+                      }
+                    >
+                      {bgArtState.status === 'complete'
+                        ? `${bgArtState.updatedCount} staged · ${bgArtState.notFoundCount} not found`
+                        : bgArtState.currentAlbumTitle || 'Idle'}
                     </span>
                     <div className="flex items-center gap-1">
                       {bgArtState.status === 'user_paused' ? (
@@ -987,7 +1141,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                         onClick={() => backgroundArtworkService.cancel()}
                         className="text-[10px] text-rose-400/80 hover:text-rose-300 underline cursor-pointer ml-1"
                       >
-                        Cancel
+                        {bgArtState.status === 'complete' ? 'Dismiss' : 'Cancel'}
                       </button>
                     </div>
                   </div>
@@ -1433,6 +1587,32 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                           const proposedAction = getIssueProposedAction(issue, cluster.title)
                           const tagBadge = getIssueTagBadge(issue)
 
+                          // Resolve release IDs specifically scoped to this issue row
+                          const rowReleaseIds = Array.from(
+                            new Set(
+                              (issue.sampleTrackIds || [])
+                                .map((tid) => tracks.find((t) => t.id === tid)?.releaseId)
+                                .filter((rid): rid is string => Boolean(rid))
+                            )
+                          )
+
+                          const isRowQueuedInArtBg =
+                            issue.category === 'low_res_art' &&
+                            isArtBgBusy &&
+                            (rowReleaseIds.length === 0 ||
+                              rowReleaseIds.some((rid) => bgArtState.queuedReleaseIds.includes(rid)))
+
+                          const isRowAllNotFound =
+                            issue.category === 'low_res_art' &&
+                            !isRowQueuedInArtBg &&
+                            rowReleaseIds.length > 0 &&
+                            rowReleaseIds.every((rid) => bgArtState.notFoundReleaseIds.includes(rid))
+
+                          const notFoundInRowCount =
+                            issue.category === 'low_res_art'
+                              ? rowReleaseIds.filter((rid) => bgArtState.notFoundReleaseIds.includes(rid)).length
+                              : 0
+
                           return (
                             <div
                               key={issue.id}
@@ -1483,10 +1663,18 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                 <div className="min-w-0">
                                   <span
                                     className={`text-xs font-mono font-medium truncate block ${
-                                      issue.isRoleConflict ? 'text-purple-300' : 'text-emerald-400/90'
+                                      issue.isRoleConflict
+                                        ? 'text-purple-300'
+                                        : isRowAllNotFound
+                                        ? 'text-amber-300/90'
+                                        : 'text-emerald-400/90'
                                     }`}
                                   >
-                                    {proposedAction}
+                                    {isRowAllNotFound
+                                      ? 'No Online Match Found (Apple Music / MusicBrainz / AI)'
+                                      : notFoundInRowCount > 0 && bgArtState.status === 'complete'
+                                      ? `${proposedAction} · (${notFoundInRowCount} unmatched online)`
+                                      : proposedAction}
                                   </span>
                                   {issue.isRoleConflict && (
                                     <span className="text-[10px] text-amber-400/80 font-sans block mt-0.5">
@@ -1496,8 +1684,8 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                 </div>
                               </div>
 
-                              {/* AFFECTED / ACTION: w-52 fixed right-aligned */}
-                              <div className="w-52 shrink-0 flex items-center justify-end gap-2.5">
+                              {/* AFFECTED / ACTION: w-64 fixed right-aligned */}
+                              <div className="w-64 shrink-0 flex items-center justify-end gap-2">
                                 <span className="text-[11px] font-mono text-zinc-400 shrink-0">
                                   {issue.affectedCount} trks
                                 </span>
@@ -1506,7 +1694,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                   <div className="flex items-center gap-1.5 shrink-0">
                                     <button
                                       type="button"
-                                      onClick={() => onRemediateAudit(issue.id)}
+                                      onClick={() => onRemediateAudit(issue.id.split(':::')[0])}
                                       className="px-2.5 py-1 text-xs font-mono font-medium rounded-lg border border-zinc-700 hover:border-amber-500/50 text-zinc-300 hover:text-white bg-zinc-900/60 hover:bg-zinc-800/80 transition-all cursor-pointer"
                                       title="Whitelist this playback singer under the album authority"
                                     >
@@ -1515,7 +1703,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                     <button
                                       type="button"
                                       onClick={async () => {
-                                        await auditService.remediateIssue(issue.id, { action: 'STANDARDIZE_COMPOSER_ONLY' })
+                                        await auditService.remediateIssue(issue.id.split(':::')[0], { action: 'STANDARDIZE_COMPOSER_ONLY' })
                                         onRefreshAudit()
                                         showToast(`Standardized composer to "${issue.parentEntity}" while keeping singer intact.`)
                                       }}
@@ -1548,7 +1736,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                       Discard
                                     </button>
                                   </div>
-                                ) : issue.category === 'low_res_art' && isArtBgBusy ? (
+                                ) : isRowQueuedInArtBg ? (
                                   <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-mono font-medium rounded-lg border border-amber-500/40 bg-amber-500/15 text-amber-300 shrink-0">
                                     {bgArtState.status === 'suspended_playback' ? (
                                       <span className="flex items-center gap-1 text-[11px]">
@@ -1600,6 +1788,33 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                         <StopCircle className="w-3 h-3" />
                                       </button>
                                     </div>
+                                  </div>
+                                ) : isRowAllNotFound ? (
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <span
+                                      className="px-2 py-1 text-[10px] font-mono rounded-lg bg-zinc-800/80 text-zinc-400 border border-zinc-700/60"
+                                      title="Apple Music, MusicBrainz CAA, and AI returned no artwork for this album"
+                                    >
+                                      Not Found
+                                    </span>
+                                    {rowReleaseIds.length === 1 && onSelectRelease && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onSelectRelease(rowReleaseIds[0])}
+                                        className="px-2 py-1 text-[11px] font-mono font-medium rounded-lg border border-cyan-500/40 hover:border-cyan-400 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 transition-all cursor-pointer"
+                                        title="Open album in Curate to upload or select custom cover art"
+                                      >
+                                        Curate Art
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemediateSingle(issue.id, 'ai')}
+                                      className="px-2 py-1 text-[11px] font-mono font-medium rounded-lg border border-amber-500/30 hover:border-amber-400 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 transition-all cursor-pointer"
+                                      title="Retry online artwork lookup"
+                                    >
+                                      Retry
+                                    </button>
                                   </div>
                                 ) : remediatingIssueId === issue.id ? (
                                   <div className="flex items-center gap-2 px-3 py-1 text-xs font-mono font-medium rounded-lg border border-amber-500/40 bg-amber-500/15 text-amber-300 shrink-0">
@@ -1667,7 +1882,7 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
                                 <div className="w-36 shrink-0">TAG FIELD</div>
                                 <div className="w-[320px] shrink-0">DETECTED VALUE</div>
                                 <div className="flex-1 min-w-[240px]">PROPOSED ACTION</div>
-                                <div className="w-52 shrink-0 text-right">AFFECTED / ACTION</div>
+                                <div className="w-64 shrink-0 text-right">AFFECTED / ACTION</div>
                               </div>
                             )}
 

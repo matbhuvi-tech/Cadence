@@ -8,6 +8,7 @@
  * 4. User controls: Pause, Resume, Cancel
  * 5. Incremental sidecar staging in graphEngine
  * 6. Debounced checkpoint flushing (every 10 albums + on pause/cancel)
+ * 7. Unmatched / Not-Found release tracking and re-queue clearing
  */
 
 import assert from 'node:assert'
@@ -165,6 +166,8 @@ async function runTestSuite() {
     const finalState = backgroundArtworkService.getState()
     assert.strictEqual(finalState.status, 'complete', 'Batch must complete')
     assert.strictEqual(finalState.completed, 12, '12 albums must be completed')
+    assert.strictEqual(finalState.updatedCount, 12, '12 albums must be marked updated')
+    assert.strictEqual(finalState.notFoundCount, 0, '0 albums must be marked not found')
     assert(checkpointFlushedCount >= 2, `Checkpoints must flush debounced (at 10 and at completion), actual: ${checkpointFlushedCount}`)
 
     // Verify albums staged in graphEngine
@@ -191,6 +194,49 @@ async function runTestSuite() {
     )
     backgroundArtworkService.cancel()
     console.log('✓ Pause, Resume, and Cancel user controls verified.')
+
+    // ----------------------------------------------------
+    // Test 6: Unmatched / Not-Found Release Tracking
+    // ----------------------------------------------------
+    console.log('\n[Test 6] Testing Unmatched / Not-Found Release Tracking...')
+    backgroundArtworkService.resetTransportStateForTesting()
+    backgroundArtworkService.setPacingDelayForTesting(5)
+
+    // Mock resolver to return null (no online match) for Test Album 20
+    federatedResolversService.fetchAlbumArtworkCandidate = async (query: any) => {
+      if (query.albumTitle === 'Test Album 20') {
+        return null
+      }
+      return {
+        provider: query.provider,
+        providerLabel: 'Apple Music HD',
+        albumTitle: query.albumTitle,
+        artistCredit: query.artistCredit,
+        coverArtUrl: `https://mock.artwork.com/${encodeURIComponent(query.albumTitle)}.jpg`,
+        thumbnailUrl: `https://mock.artwork.com/${encodeURIComponent(query.albumTitle)}.jpg`,
+        coverResolution: '3000×3000px',
+        confidenceScore: 0.95,
+      }
+    }
+
+    await backgroundArtworkService.start({ releaseIds: ['rel-test-19', 'rel-test-20'] })
+    await new Promise((resolve) => {
+      const unsub = backgroundArtworkService.subscribe((s) => {
+        if (s.status === 'complete') {
+          unsub()
+          resolve(true)
+        }
+      })
+    })
+
+    const partialState = backgroundArtworkService.getState()
+    assert.strictEqual(partialState.status, 'complete', 'Status must be complete')
+    assert.strictEqual(partialState.completed, 2, '2 albums processed')
+    assert.strictEqual(partialState.updatedCount, 1, '1 album updated')
+    assert.strictEqual(partialState.notFoundCount, 1, '1 album not found')
+    assert(partialState.notFoundReleaseIds.includes('rel-test-20'), 'rel-test-20 must be in notFoundReleaseIds')
+    assert(partialState.resolvedReleaseIds.includes('rel-test-19'), 'rel-test-19 must be in resolvedReleaseIds')
+    console.log('✓ Unmatched releases accurately tracked in notFoundReleaseIds & notFoundCount.')
 
     console.log('\n========================================================')
     console.log('🎉 ALL BACKGROUND ARTWORK SERVICE TESTS PASSED!')

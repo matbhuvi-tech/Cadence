@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import QRCode from 'qrcode'
 import { tauriBridge, RemoteServerStatus, MaintenanceStats } from '../../services/tauriBridge'
+import { CadenceLogo } from '../common/CadenceLogo'
 
 interface MobileRemoteModalProps {
   isOpen: boolean
@@ -101,8 +102,8 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06] bg-white/[0.02]">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/30 text-[#D4AF37]">
-              <Smartphone className="w-5 h-5" />
+            <div className="p-2 rounded-xl bg-[#0C0D10] border border-[#D4AF37]/35 text-[#D4AF37] shadow-[0_2px_10px_rgba(212,175,55,0.18)]">
+              <CadenceLogo variant="gold" className="w-5 h-5" />
             </div>
             <div className="text-left">
               <h2 className="text-sm font-semibold text-[#EDEDED] flex items-center gap-2">

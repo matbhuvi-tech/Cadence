@@ -1,20 +1,14 @@
-# Intermediate Zoom Out Review Report
+# Stage 8: Intermediate Zoom Out Report (`intermediate_zoom_out_report.md`)
 
-**Target:** `docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md` (Lines 1–511)
-**Reviewer Lens:** `egm-zoom-out`
-**Standard:** `resources/document_standards/zoom-out-standard.md`
+* **Target:** [`docs/designs/CURATE_EXPERIENCE_AND_LAYOUT_OVERHAUL.md`](file:///e:/Mathan/Code/Music%20Agent/docs/designs/CURATE_EXPERIENCE_AND_LAYOUT_OVERHAUL.md) (`1..325`)
+* **Reviewer Lens:** `egm-zoom-out`
 
-## Executive Summary
-The intermediate zoom-out audit confirms that the design remains strictly anchored to the user's core requirements. The recommended mitigations from the Comprehension and Design Critic stages (composer normalization, division-by-zero guards, and clarification of pending sidecar buffers) enhance technical precision without expanding scope or introducing premature abstractions.
+## 1. Findings
 
----
-
-## Evaluation Against Zoom Out Standard
-
-1. **Root Problem Alignment**: Verified. The design directly solves the 5 issues presented by the user without deviating into unrelated library management tasks.
-2. **Minimal Code footprint (YAGNI)**: Verified. Decommissioning `CustomizeAlbumModal.tsx` nets a negative line-count delta across the codebase. Re-homing quick actions to Curate reuses the existing `CurationReconciliationStage` component tree.
-3. **No Speculative Abstractions**: The scoring engine is bounded to 3 straightforward rules. No deep-learning or external classifier is introduced.
-4. **Codebase Reuse**: Reuses existing SQLite schema columns (`master_release_id`), sidecar data structures, and existing audio player contexts.
-
-## Recommendations
-Advance directly to the Implementation Readiness Review. Incorporate the file path correction (`AlbumCoverGrid.tsx` instead of `searchEngine.ts`) into the final implementation ledger.
+### [IZO-01] 🔴 Blocker: Top `Stage & Next (⌘↵)` Disabled State & Closure Dependencies Across Case A and Case B
+* **Location:** `Technical Plan §3` (lines 173–189), `Detailed Implementation Plan §1.5` (lines 258–266), [`CurationReconciliationStage.tsx:761-775`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L761-L775), [`CurationReconciliationStage.tsx:874`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L874)
+* **Observation:**
+  1. The top `✓ Stage & Next →` button has `disabled={selectedTrackIds.size === 0}`. When `renderTrackTable` is unified across Case A and Case B, `buildClusterTrackEdits` must filter by `selectedTrackIds.has(trk.id)` so unchecking a track in a compilation cluster excludes it consistently.
+  2. The `⌘↵` `keydown` `useEffect` ([line 761](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L761)) must include `handleStageAllClusters` and `handleStageCaseA` in its dependencies so keyboard staging never fires with stale `selectedFields`, `trackTitles`, or `trackArtists` closures.
+* **Recommendation:**
+  Filter `buildClusterTrackEdits` by `selectedTrackIds.has(trk.id)` and include `handleStageAllClusters` in the `⌘↵` `useEffect` dependency array.

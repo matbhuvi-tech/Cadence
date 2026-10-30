@@ -1,62 +1,69 @@
-# Asynchronous Background Commit Queue with Playback Preemption
+# Curate Experience & Layout Overhaul
 
-* **Author:** EGM Swarm Synthesizer & Elephant Partner
-* **Date:** 2026-10-29
-* **Target System:** Cadence Audio Engine & Desktop Core Architecture
+* **Author:** Mathan
+* **Date:** 2026-10-30
 
 ## Overview
 
-Cadence currently locks all application interactions behind a blocking full-screen modal (`TwoPhaseCommitModal.tsx`) while writing metadata changes to storage. In large batch curation sessions (such as 489 tracks across multiple boxed sets), this lock lasts up to an hour. During this window, the user cannot browse the library, edit other albums, or listen to music without aborting the pending transaction.
+The Curate workbench (`⌘2`) helps users inspect metadata defects, compare local file tags against Apple Music, MusicBrainz, and AI consensus, and stage non-destructive sidecar edits before committing them to disk. Currently, the interface stacks three full-width panels vertically (Artwork Inspector, 4-Way Reconciliation Table, and Track List), pushing the track list below the fold on standard desktop screens. It also suffers from a flawed compilation heuristic (`isCaseB`) that treats single-film soundtracks with multiple playback singers (such as *Blue*, composed by A. R. Rahman) as multi-film compilation box sets. This locks track credits into a truncated 120px read-only 2-column sub-grid and causes the top `Stage & Next` action to ignore edits made in the 4-Way Reconciliation table. Finally, the floating `NowPlayingBar` overlaps the bottom of both the left queue rail and the track list, even when no track is loaded.
 
-This feature decouples the review process from the physical disk write. When the user approves staged edits in the commit screen, preflight checks complete in under one second, the modal dismisses immediately, and the transaction is handed off to an asynchronous native Rust background worker backed by SQLite persistence. Disk operations execute only when audio playback has been silent for at least 30 seconds (satisfying the Global Storage Bus Silence invariant). If playback begins, writes yield at the current track boundary. Progress, throughput, and transport diagnostics surface via an Apple HIG-compliant status pill in the top header.
+This redesign converts the top of the Curate stage into a side-by-side split layout, enforces fixed column geometry and unobstructed input widths in the 4-Way table, replaces the cramped track grid with a full-width inline-editable track table, restricts multi-soundtrack clustering strictly to albums with two or more resolved films (`compilationClusters.length > 1`), defines strict field merge precedence for multi-film compilations, and eliminates bottom player dock occlusion.
 
 ## Analysis
 
-### 1. Audiophile Transport & Invariant Conflicts (ISSUE-01: Blocker)
-* **The Conflict:** Global Invariant 1 dictates zero disk I/O on library drives while playback is active or within a 30-second cooldown window. Offering an unconstrained user toggle to "force commit during playback" introduces storage controller and bus contention, DPC latency jitter, and cache eviction risks while WASAPI Exclusive streaming is active.
-* **The Resolution (Purity Mode Interlock):** 
-  * In **Purity Mode** (WASAPI Exclusive, memory-pinned buffers): Force-commit is strictly locked. The background worker halts writes whenever audio is playing and enforces the 30-second cooldown without exception.
-  * In **Shared/Standard Mode**: The user may manually override the queue to write during playback, but must first accept an explicit warning modal detailing possible audio dropouts.
+### 1. Viewport Budget & 4-Way Table Geometry (`egm-structural`, `egm-design`, `egm-comprehension`)
+* **Vertical Stacking Bottleneck:** [`CurationReconciliationStage.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L985-L1476) stacks the High-Resolution Artwork Inspector (~210px tall) above the 4-Way Reconciliation Table (~340px tall). Combined with the two top header bars, the Track List starts ~720px down the page, forcing vertical scrolling on every album.
+* **Jagged Row Heights & Ragged Inputs:** Inside the 4-Way table ([lines 1275-1439](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1275-L1439)), each `Staged Output` cell stacks `renderProvenanceBadge(...)` vertically above the `<input>` (`flex-col gap-1.5`), doubling each row's height from ~36px to ~68px and misaligning the text baselines of the left three provider columns against the right input column. Furthermore, the table uses auto-layout without `table-fixed` proportions, and the Release Year input ([line 1435](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1435)) is hardcoded to `w-24` (`96px`) while the inputs above it use `w-full`.
+* **Provenance Badge Width Contention in `xl:col-span-8`:** Because the 4-Way Reconciliation Table sits inside `xl:col-span-8` (~67% of the main stage, or ~720px–800px total width on a 1440p screen), a 29% `Staged Output` column is roughly 210px–230px wide. Placing a ~115px provenance badge inside or beside the `<input>` in Column 5 would leave only ~95px–110px for text, clipping strings like `"Blue (Original Motion Picture Soundtrack)"`.
+* **Resolution:**
+  * Place the Artwork Inspector (`xl:col-span-4`, ~33% width, using a 2x2 candidate grid with `w-20 h-20` thumbnails) side-by-side with the 4-Way Reconciliation Matrix (`xl:col-span-8`, ~67% width).
+  * Apply `table-fixed` with explicit column widths: `Field` (`18%`), `Local File Tag` (`18%`), `Apple Music Master` (`18%`), `MusicBrainz Archive` (`18%`), and `Staged Output` (`28%`).
+  * **Move Provenance Badges to Column 1 (`Field`)**: Render compact provenance pills (`2/3 Match`, `Provider`, `Master Yr`, `Local`) in Column 1 alongside/below the static field label (`Album Title`, `Album Artist`, `Composer`, `Release Year`). This cuts row height in half while giving the `Staged Output` `<input>` in Column 5 100% unobstructed horizontal width across all rows (including making `Release Year` `w-full`).
 
-### 2. Execution Ownership & Process Durability (ISSUE-02: Blocker)
-* **The Risk:** Running a 56-minute background batch inside the React renderer layer (`transactionEngine.ts`) is structurally unsound. If the user navigates views, triggers a webview reload, or minimizes the client, the JavaScript promise chain can terminate abruptly mid-write, creating orphaned sidecars or corrupt file headers.
-* **The Resolution:** All queue orchestration, file locks, atomic renames, and tag encoders are moved to native Rust (`src-tauri/src/maintenance/commit_worker.rs`). The queue is persisted in SQLite with WAL logging (`commit_queue_batches` and `commit_queue_items`). Telemetry updates emit to the frontend at 4 Hz to avoid React re-render thrashing.
+### 2. Track List Truncation, Column Proportions & Inline Editing (`egm-codebase-details`, `egm-implementation-readiness`)
+* **120px Truncation in Case B & Static Titles in Case A:** In Case B ([lines 1525-1538](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1525-L1538)), tracks render in a `grid-cols-1 md:grid-cols-2` grid where `t.artistCredit` is clamped to `truncate max-w-[120px]` and is read-only. Multi-singer soundtrack credits (`"Kylie Minogue, Sonu Nigam & Suzanne"`) are cut off and cannot be inspected or edited. In Case A ([lines 1580-1630](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1580-L1630)), `t.title` is static read-only text (`truncate max-w-[200px] md:max-w-[280px]`) and cannot be edited inline to strip rip noise or `(From "...")` suffixes.
+* **Resolution:**
+  * Add a `trackTitles: Record<string, string>` state map alongside `trackArtists: Record<string, string>`, initialized from `consensus?.trackConsensus?.[t.id]?.title?.value || t.title`.
+  * Replace the 2-column sub-grid with a unified full-width single-column `table-fixed` track list across both Case A and Case B with explicit column proportions:
+    1. **`#` (`w-12` / `48px`):** Selection checkbox + monospace track number (`#1`).
+    2. **`Track Title` (`w-[42%]`):** Full-width inline-editable `<input type="text">` bound to `trackTitles[t.id]`.
+    3. **`Track Vocalists / Artists` (`w-[44%]`):** Full-width inline-editable `<input type="text">` bound to `trackArtists[t.id]` (or `selectedFields.artistCredit` when `artistPolicy === 'all_tracks'`).
+    4. **`Actions` (`w-28` / `112px`):** Per-row reset / toggle action buttons with `tabIndex={-1}` so keyboard users can `Tab` directly from `Track Title` to `Track Vocalists` down the track list without stopping on action buttons.
+  * **Two-State Diff Highlighting & Smart Per-Row Reset:** Inputs highlight in emerald (`border-emerald-500/50 text-emerald-300`) when their current value differs from the raw local file tag (`t.title` or `t.artistCredit`). If a consensus suggestion exists (`consensusTitle` or `consensusArtist`) that differs from the local tag, clicking the per-row Reset button cycles cleanly: if the user manually typed a custom value, Reset first reverts to the recommended **Consensus Value**; if already at the Consensus Value (or no distinct consensus exists), Reset reverts to the **Local File Tag** (`t.title` / `t.artistCredit`).
 
-### 3. Concurrent Storage Operations (ISSUE-03: Major)
-* **The Risk:** If the background library scanner (`ScannerController`) runs a folder rescan while the commit worker is rewriting audio files on the same drive, race conditions occur: files are scanned with partial headers, `mtime` clocks desynchronize, and false corruption alerts are triggered.
-* **The Resolution:** Establish an inter-thread mutual exclusion lock. The library scanner pauses directory sweeps on any mount currently being modified by the commit worker.
+### 3. Case A vs. Case B Heuristic & Field Merge Precedence (`egm-zoom-out`, `egm-codebase-details`)
+* **Single-Film Soundtracks Misclassified as Multi-Film Compilations:** At [lines 250-257](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L250-L257), `isCaseB` evaluates to `true` whenever `albumItem.primaryIssueType === 'compilation_conflict'`, `release?.isCompilation` is truthy, or a track has `isCompilation` set. Because rippers and iTunes frequently set compilation flags on single-film soundtracks with multiple vocalists, albums like *Blue* resolve to `compilationClusters.length === 1` (`"Multi-Soundtrack Compilation Clusters (1 Film Soundtracks)"`).
+* **Silent Data Loss on `Stage & Next`:** When `isCaseB` is true, the top `✓ Stage & Next →` button ([line 873](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L873)) and `⌘↵` shortcut ([line 765](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L765)) invoke `handleStageCluster(compilationClusters[0])` instead of `handleStageCaseA()`. `handleStageCluster` ([lines 674-697](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L674-L697)) only stages `originalAlbum`, `originalYear`, `composerName`, and `coverArtUrl` from the cluster object—discarding edits made in the 4-Way Reconciliation Table and any per-track artist/title edits, while dropping `compilationClusters[1..n]`.
+* **Resolution:**
+  * Separate raw compilation detection (`hasCompilationSignals`) from multi-soundtrack cluster UI activation (`isCaseB = hasCompilationSignals && compilationClusters.length > 1`). While `isLoadingClusters` is running, render Case A optimistically and only switch to Case B if the resolved clusters count is `> 1`.
+  * When `compilationClusters.length <= 1`, render Case A (standard single album with `artistPolicy = 'album_only'` preserving track vocalists) and route `Stage & Next` through `handleStageCaseA`.
+  * **Explicit Field Merge Precedence in `handleStageCluster` & `handleStageAllClusters` (`isCaseB` when `compilationClusters.length > 1`):**
+    1. **Cluster-specific provenance fields win per cluster:** `originalAlbum = cluster.soundtrackTitle`, `canonicalAlbumTitle = cluster.soundtrackTitle`, `originalYear = cluster.year`, `year = cluster.year || Number(selectedFields.releaseYear)`, and `coverArtUrl = selectedArtwork?.coverArtUrl` (never overwritten by the parent compilation's `selectedFields.title` or `selectedFields.releaseYear`).
+    2. **4-Way Table shared release fields merge across all clusters:** `albumArtist = selectedFields.artistCredit`, `composerName = cluster.composer || selectedFields.composerName`, and `genre = selectedFields.genre`.
+    3. **Track-level inline states always win:** `title = trackTitles[trk.id]` (when modified from `trk.title`) and `artistCredit = artistPolicy === 'all_tracks' ? selectedFields.artistCredit : trackArtists[trk.id]`.
 
-### 4. Application Exit & Crash Recovery (ISSUE-04: Major)
-* **The Risk:** If the application terminates while writes are in flight or pending, files could be corrupted and queued work lost.
-* **The Resolution:**
-  * Intercept window close (`CloseRequested` in Tauri). If items remain in the queue, present an Apple HIG confirmation sheet offering to *Quit & Resume Later* (preserving SQLite queue state) or *Wait for Queue to Finish*.
-  * Employ an atomic file replace pattern: write to `.cadence-tmp-[uuid]`, verify stream CRC, and replace the destination via Win32 `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)`. On launch, any orphaned temporary files are cleaned up and `in_flight` items reset to `pending`.
-
-### 5. Catalog Truth & Apple HIG Presentation (ISSUE-05 & ISSUE-06: Major / Nit)
-* **The Risk:** Showing queued edits as "Staged" creates user confusion over whether edits were actually approved. Conversely, displaying unmodified disk tags makes the save appear to have failed.
-* **The Resolution:**
-  * Adopt a 4-state lifecycle: `Staged` (draft/mutable) -> `Queued` (approved, persisted in SQLite, awaiting silence) -> `In-Flight` (writing) -> `Committed` (finalized on disk).
-  * CenterStage and virtual table rows reflect newly approved metadata optimistically, decorated with a discrete "Queued for Storage" status badge.
-  * A persistent status pill in the top header indicates queue state (active, paused for playback, or completed) and expands on hover to display throughput, in-flight track details, and manual controls.
-  * Re-editing a queued item updates the queued payload in-place if pending, or stages a follow-up item if the track is actively in-flight.
+### 4. Transport Bar Occlusion & Idle Visibility (`egm-design`, `egm-implementation-readiness`)
+* **Missing Scroll Clearance & Idle Clutter:** [`NowPlayingBar.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/AudioPlayer/NowPlayingBar.tsx#L97) is positioned at `fixed bottom-3 ... h-[56px] z-50` (~68px total height from viewport bottom), whereas [`CurationQueueRail.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationQueueRail.tsx#L133) uses `p-2` (8px) and [`CurationReconciliationStage.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L985) uses `p-6` (24px). In addition, when no track is loaded (`!currentTrack`) while working in `curate` or `maintain` mode, the floating bar remains visible showing `"No Track Selected"`, blocking the bottom of the workbench.
+* **Resolution:**
+  * Add `pb-24` (`96px`) bottom padding to the scrollable containers in both [`CurationReconciliationStage.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx) and [`CurationQueueRail.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationQueueRail.tsx).
+  * Pass `topMode` from [`App.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/App.tsx) into [`NowPlayingBar.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/AudioPlayer/NowPlayingBar.tsx) and hide the floating dock when `!currentTrack && (topMode === 'curate' || topMode === 'maintain')`.
 
 ## Goals vs. Non-Goals
 
-### In-Scope Goals
-* **G1: Native SQLite-Persisted Queue:** Complete persistence for batch metadata jobs surviving application restarts, window closures, and crashes.
-* **G2: Deterministic Preemption with 30s Cooldown:** Zero disk I/O on music storage while playback is active plus 30 seconds of cooldown, pausing cleanly at atomic track boundaries.
-* **G3: Purity-Aware Force Commit Interlock:** Enforced lock preventing disk writes during WASAPI Exclusive playback, with an optional override restricted to shared audio mode.
-* **G4: Optimistic Catalog Presentation:** Immediate reflection of approved metadata across the catalog with clear "Queued for Storage" indicators.
-* **G5: Apple HIG Status Pill & Diagnostics:** Compact top bar status pill displaying throughput, countdown timers, hover diagnostics, and safe window exit prompts.
-
-### Out-of-Scope Non-Goals
-* **NG1: Loading Full Audio Streams into RAM:** Metadata writes stream directly through temp files on the target storage mount; files are not pinned into RAM.
-* **NG2: Read-Only Storage Queueing:** Storage mounts marked read-only fail fast in preflight checks and cannot be queued.
-* **NG3: Parallel Concurrent Writers per Mount:** Disk writes execute sequentially per physical mount to prevent storage head thrashing and acoustic drive chatter.
+* **In-Scope Goals:**
+  * Restructure the top section of [`CurationReconciliationStage.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx) into a responsive side-by-side split (`xl:col-span-4` Artwork Inspector on the left, `xl:col-span-8` 4-Way Reconciliation Matrix on the right).
+  * Enforce `table-fixed` column proportions (`18% | 18% | 18% | 18% | 28%`), place provenance badges in the `Field` column so `Staged Output` inputs remain 100% unobstructed, and make `Release Year` inputs `w-full`.
+  * Replace the 2-column track grid with a full-width single-column tabular track list (`48px | 42% | 44% | 112px`) with inline-editable titles and artists, `tabIndex={-1}` on row action buttons, and two-state smart reset in both Case A and Case B.
+  * Restrict `isCaseB` to `hasCompilationSignals && compilationClusters.length > 1`, and enforce strict field merge precedence in `handleStageCluster` and `handleStageAllClusters`.
+  * Add `pb-24` bottom scroll clearance to [`CurationReconciliationStage.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx) and [`CurationQueueRail.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationQueueRail.tsx), and hide [`NowPlayingBar.tsx`](file:///e:/Mathan/Code/Music%20Agent/src/components/AudioPlayer/NowPlayingBar.tsx) in `curate` and `maintain` modes when no track is loaded.
+* **Out-of-Scope Non-Goals:**
+  * Modifying native Rust audio engine threads, SQLite schema definitions, or two-phase commit worker disk-writing logic.
+  * Altering external metadata provider query protocols or playback quietness guards (`Audiophile Invariant 1-6`).
 
 ## Key Decisions & Staging for Next Steps
 
-1. **Move Execution from Frontend to Native Rust:** Deprecate the in-renderer batch write loop in `transactionEngine.ts`. Implement `CommitQueueWorker` in `src-tauri` running on a dedicated thread with `THREAD_PRIORITY_BELOW_NORMAL` and `THREAD_MODE_BACKGROUND_BEGIN`.
-2. **Purity Mode Enforcement:** Prohibit force-commit overrides when Purity Mode is active to preserve the storage bus silence invariant.
-3. **Database Schema:** Add `commit_queue_batches` and `commit_queue_items` tables with state tracking for crash recovery.
-4. **Header Status Integration:** Build `CommitStatusPill.tsx` for the top navigation bar to replace modal-bound execution monitoring.
+1. **Top Section Split Proportions:** Use `grid-cols-1 xl:grid-cols-12 gap-4 items-stretch` with `xl:col-span-4` (~33%) for the Artwork Inspector (2x2 candidate grid) and `xl:col-span-8` (~67%) for the 4-Way Reconciliation Table.
+2. **4-Way Table Geometry & Provenance Placement:** `Field` (`18%`, housing the field name + compact provenance badge), `Local File Tag` (`18%`), `Apple Music Master` (`18%`), `MusicBrainz Archive` (`18%`), and `Staged Output` (`28%`, housing 100% full-width unobstructed inputs across all 4 rows).
+3. **Unified Editable Track Table & Keyboard Ergonomics:** Fixed column proportions (`48px` `#` | `42%` `Track Title` | `44%` `Track Vocalists / Artists` | `112px` `Actions`), `tabIndex={-1}` on row action buttons, and smart Reset cycling (`Manual Edit → Consensus → Local File Tag`).
+4. **Compilation Gate & Precedence Rules:** `isCaseB` requires `compilationClusters.length > 1`. In `handleStageCluster` and `handleStageAllClusters`, cluster provenance (`soundtrackTitle`, `year`) wins per cluster, 4-Way shared fields (`albumArtist`, `composerName`, `genre`, `coverArtUrl`) merge across clusters, and inline `trackTitles` / `trackArtists` always win per track.
+5. **Transport Dock Clearance & Auto-Hide:** Apply `pb-24` to Curate scroll containers and hide `NowPlayingBar` when `!currentTrack && (topMode === 'curate' || topMode === 'maintain')`.

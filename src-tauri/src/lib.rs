@@ -13,6 +13,8 @@ use commands::remote::*;
 use commands::scanner::*;
 use db::AppDb;
 use scanner::ScannerController;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -66,9 +68,123 @@ pub fn run() {
             commit_worker.start();
 
             app.manage(app_db);
-            app.manage(remote_state);
+            app.manage(remote_state.clone());
             app.manage(maintenance_worker);
             app.manage(commit_worker);
+
+            // Configure Windows System Tray Icon & Audiophile Transport Menu
+            let show_i = MenuItem::with_id(app, "tray_show", "Show Cadence Core", true, None::<&str>)?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let play_pause_i = MenuItem::with_id(app, "tray_play_pause", "Play / Pause", true, None::<&str>)?;
+            let next_i = MenuItem::with_id(app, "tray_next", "Next Track", true, None::<&str>)?;
+            let prev_i = MenuItem::with_id(app, "tray_prev", "Previous Track", true, None::<&str>)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let quit_i = MenuItem::with_id(app, "tray_quit", "Quit Cadence", true, None::<&str>)?;
+
+            let tray_menu = Menu::with_items(
+                app,
+                &[&show_i, &sep1, &play_pause_i, &next_i, &prev_i, &sep2, &quit_i],
+            )?;
+
+            let remote_for_tray = std::sync::Arc::clone(&remote_state);
+            let mut tray_builder = TrayIconBuilder::with_id("cadence-tray")
+                .tooltip("Cadence Core — Relational Audiophile Engine")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(move |app_handle, event| {
+                    match event.id.as_ref() {
+                        "tray_show" => {
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "tray_play_pause" => {
+                            let status = remote_for_tray.engine.get_status();
+                            if status.is_playing && !status.is_paused {
+                                let _ = remote_for_tray.engine.pause();
+                            } else {
+                                let _ = remote_for_tray.engine.resume();
+                            }
+                            let updated = remote_for_tray.engine.get_status();
+                            remote_for_tray.broadcast_state_change(&updated);
+                        }
+                        "tray_next" => {
+                            let next_file = {
+                                let mut q = remote_for_tray.queue.lock();
+                                if q.items.is_empty() {
+                                    None
+                                } else {
+                                    let mut next_idx = q.current_index + 1;
+                                    if next_idx >= q.items.len() as isize {
+                                        if q.repeat_mode == "all" {
+                                            next_idx = 0;
+                                        } else {
+                                            next_idx = -1;
+                                        }
+                                    }
+                                    if next_idx >= 0 {
+                                        q.current_index = next_idx;
+                                        q.items.get(next_idx as usize).map(|t| t.file_path.clone())
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            if let Some(path) = next_file {
+                                let _ = remote_for_tray.engine.play_track(&path);
+                                let updated = remote_for_tray.engine.get_status();
+                                remote_for_tray.broadcast_state_change(&updated);
+                                remote_for_tray.broadcast_queue_update();
+                            }
+                        }
+                        "tray_prev" => {
+                            let prev_file = {
+                                let mut q = remote_for_tray.queue.lock();
+                                if q.items.is_empty() {
+                                    None
+                                } else {
+                                    let next_idx = (q.current_index - 1).max(0);
+                                    q.current_index = next_idx;
+                                    q.items.get(next_idx as usize).map(|t| t.file_path.clone())
+                                }
+                            };
+                            if let Some(path) = prev_file {
+                                let _ = remote_for_tray.engine.play_track(&path);
+                                let updated = remote_for_tray.engine.get_status();
+                                remote_for_tray.broadcast_state_change(&updated);
+                                remote_for_tray.broadcast_queue_update();
+                            }
+                        }
+                        "tray_quit" => {
+                            let _ = remote_for_tray.engine.stop();
+                            app_handle.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app_handle = tray.app_handle();
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                });
+
+            if let Some(default_icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(default_icon.clone());
+            }
+
+            let _tray = tray_builder.build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

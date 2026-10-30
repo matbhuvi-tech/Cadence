@@ -30,11 +30,13 @@ import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
   onOpenRemoteModal?: () => void
+  topMode?: 'library' | 'curate' | 'maintain'
 }
 
 export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   onOpenSanctuary,
   onOpenRemoteModal,
+  topMode,
 }) => {
   const {
     currentTrack,
@@ -90,6 +92,10 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   const isHiRes = streamTelemetry?.isHighRes || currentTrack?.isHighRes
 
   const ledColor = isDsd ? '#818CF8' : isHiRes ? '#F59E0B' : '#10B981'
+
+  if (!currentTrack && (topMode === 'curate' || topMode === 'maintain') && !isDeviceModalOpen && !isSignalPopoverOpen) {
+    return null
+  }
 
   return (
     <>

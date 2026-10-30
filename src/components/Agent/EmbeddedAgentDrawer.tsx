@@ -33,6 +33,7 @@ import { BatchProposalDiffRow } from './BatchProposalSheet'
 import { MarkdownText } from './MarkdownText'
 import { CatalogPulseCard } from './CatalogPulseCard'
 import { MicroDiffCard } from './MicroDiffCard'
+import { CadenceLogo } from '../common/CadenceLogo'
 
 export interface AgentChatMessage {
   id: string
@@ -465,8 +466,8 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
       {/* 1. Header */}
       <div className="p-3.5 px-4 border-b border-white/[0.08] bg-white/[0.02] flex items-center justify-between select-none">
         <div className="flex items-center gap-2.5">
-          <div className="relative p-2 rounded-xl bg-gradient-to-tr from-[#00F5FF]/20 to-[#ADFF2F]/20 border border-[#00F5FF]/40 text-[#00F5FF]">
-            <Bot className="w-5 h-5" />
+          <div className="relative p-2 rounded-xl bg-[#0C0D10] border border-[#D4AF37]/40 text-[#D4AF37] shadow-[0_2px_10px_rgba(212,175,55,0.15)]">
+            <CadenceLogo variant="gold" className="w-5 h-5" />
             <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#10B981] animate-pulse" />
           </div>
           <div className="flex flex-col">

@@ -5,6 +5,7 @@ Houses shared visual and presentation utility components used throughout the Cad
 
 ## Interface
 - `ArtworkHoverPreview`: High-resolution floating image hover tooltip for previewing album artwork over table rows and grid cells.
+- `CadenceLogo`: Scalable concentric-C geometric vector logo component supporting `gold`, `white`, and `currentColor` variants.
 - `PanoramicAtmosphericBackdrop`: Canvas/CSS background component that analyzes current album artwork palette to generate immersive, subtle ambient gradients.
 
 ## Invariants

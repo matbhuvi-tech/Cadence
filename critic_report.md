@@ -1,30 +1,27 @@
-# Design Critic Review Report
+# Stage 7: Critic Review Report (`critic_report.md`)
 
-**Target:** `docs/designs/UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md` (Lines 1–413, Feature Specification)
-**Reviewer Lenses:** `egm-design`, `egm-structural`, `egm-style`
-**Standards:** `feature-spec-standard.md`, `heilmeier-standard.md`
+* **Target:** [`docs/designs/CURATE_EXPERIENCE_AND_LAYOUT_OVERHAUL.md`](file:///e:/Mathan/Code/Music%20Agent/docs/designs/CURATE_EXPERIENCE_AND_LAYOUT_OVERHAUL.md) (`FeatureRange: 1..227`)
+* **Reviewer Lenses:** `egm-design`, `egm-structural`, `egm-style`
 
-## Executive Summary
-The feature specification delivers a coherent architecture that directly eliminates user cognitive friction. The separation of concerns between playback context (Queue/Playlists) and catalog editing (Curate) is architecturally sound. However, the critic lens identified two algorithmic edge cases in the inference and grouping formulas, and one stylistic violation of the plain-English standard.
+## 1. Findings
 
----
+### [CRIT-01] 🟡 Major: Artwork Inspector 2x2 Grid Loading/Empty State Col-Span Mismatch (`col-span-2 sm:col-span-3` inside `grid-cols-2`)
+* **Location:** `Technical Plan §1` (lines 112–115), [`CurationReconciliationStage.tsx:1000-1094`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1000-L1094)
+* **Observation:**
+  Changing the Artwork Inspector grid from `grid-cols-2 sm:grid-cols-4` to `grid-cols-2 gap-2.5` inside `xl:col-span-4` leaves the `isLoadingCandidates` and empty-candidate fallback divs at lines 1079 and 1084 with `col-span-2 sm:col-span-3`. In a 2-column CSS grid, `sm:col-span-3` forces an implicit 3rd column track, breaking the 2x2 geometry inside the 33% left pane.
+* **Recommendation:**
+  Specify changing the loading and empty-state divs inside the Artwork Inspector's `grid-cols-2` container from `col-span-2 sm:col-span-3` to `col-span-1` (occupying the cell adjacent to `Local File`).
 
-## Prioritized Findings
+### [CRIT-02] 🟡 Major: Bulk "Reset All Tracks" Header Action Parity
+* **Location:** `Technical Plan §2` (lines 138–151), [`CurationReconciliationStage.tsx:1557-1570`](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1557-L1570)
+* **Observation:**
+  The existing Case A header has a `Reset Track Artists` button that only resets `trackArtists`. Now that both `trackTitles` and `trackArtists` are inline-editable, the header button should be `Reset All Tracks` and reset both `trackTitles` and `trackArtists`.
+* **Recommendation:**
+  Update the header reset action to reset both `trackTitles` and `trackArtists` across all tracks.
 
-### Issue 1: Missing Normalization in Composer Uniformity Check - Severity: Major
-* **Reviewer Lens:** `egm-design`
-* **Affected Scope:** Lines 223–235 (Subsystem 2.1)
-* **Discrepancy Description:** In `inferReleaseAuthority`, Signal 3 checks if `uniqueComposers.size === 1`. In real-world audio collections, physical CD rips often have slight typographical or spacing variances across tracks (e.g., `"Ilaiyaraaja"` on tracks 1–3 and `"Ilayaraja"` or `"Ilaiyaraja"` on tracks 4–6). Raw string equality will calculate `uniqueComposers.size = 2`, causing Signal 3 to award 0 points despite being the identical composer.
-* **Rationale & Recommendation:** Apply `normalizeArtistForGrouping` or a phonetic alias resolver (e.g., stripping dots, spaces, and normalizing vowels) to composer strings before populating the `uniqueComposers` set.
-
-### Issue 2: Zero-Duration Guard in Fuzzy Grouping Guard - Severity: Major
-* **Reviewer Lens:** `egm-design`
-* **Affected Scope:** Lines 280–283, 388–390
-* **Discrepancy Description:** The invariant `|durationA - durationB| / max(durationA, durationB) <= 0.05` produces `0 / 0 = NaN` if either release contains tracks whose durations have not yet been extracted (total duration = 0). A `NaN` result causes the comparison to evaluate to `false`, silently breaking variant stacking for unmeasured or corrupted audio files.
-* **Rationale & Recommendation:** Add an explicit fallback guard: `max(durationA, durationB) > 0 ? (|durationA - durationB| / max(durationA, durationB) <= 0.05) : true`.
-
-### Issue 3: Plain-English Style Violation ("seamless") - Severity: Nit
-* **Reviewer Lens:** `egm-style`
-* **Affected Scope:** Line 368 (Alternative 1)
-* **Discrepancy Description:** Line 368 uses the prohibited promotional adjective `"seamless"`: *"gives a seamless experience without cognitive fragmentation"*. The EGM plain-English standard strictly bans ungrounded buzzwords and promotional adjectives (*seamless*, *robust*, *blazingly fast*).
-* **Rationale & Recommendation:** Replace `"gives a seamless experience"` with `"provides single-surface continuity"`.
+### [CRIT-03] 🟢 Nit: Redundant `ALBUMARTIST` Subtitle in Row 2 of Column 1 (`Field`) & Input `title` Tooltips
+* **Location:** `Technical Plan §1 & §2` (lines 124–150)
+* **Observation:**
+  Row 2 (`Album Artist`) in Column 1 currently has a secondary `ALBUMARTIST` subtitle ([line 1293](file:///e:/Mathan/Code/Music%20Agent/src/components/Curate/CurationReconciliationStage.tsx#L1293)). Replacing that redundant subtitle with the relocated provenance badge keeps all 4 rows in Column 1 at an identical 2-line height (`Field Name` + `Provenance Pill`). Additionally, binding `title={value}` on `Staged Output`, `Track Title`, and `Track Vocalists` `<input>` elements ensures full-text hover inspection.
+* **Recommendation:**
+  Remove the `ALBUMARTIST` subtitle in Row 2 so all 4 rows in Column 1 stack `Field Name` + `Provenance Badge` uniformly, and add `title` tooltips to all `<input>` fields.

@@ -66,6 +66,7 @@ import { EditPlaylistModal } from './components/Modals/EditPlaylistModal'
 import { AddTracksToPlaylistModal } from './components/Modals/AddTracksToPlaylistModal'
 import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
 import { backgroundArtworkService } from './services/backgroundArtworkService'
+import { CadenceLogo } from './components/common/CadenceLogo'
 import { useStagedChanges } from './hooks/useStagedChanges'
 
 function AppContent() {
@@ -247,6 +248,7 @@ function AppContent() {
   useEffect(() => {
     backgroundArtworkService.init()
     backgroundArtworkService.setCheckpointHandler(async () => {
+      auditService.runFullCatalogAudit()
       await persistCurrentLibrary()
       refreshFromEngine()
     })
@@ -1546,8 +1548,8 @@ function AppContent() {
         {/* Left: Brand Lockup & Telemetry Monospace */}
         <div className="flex items-center gap-3">
           <div data-tutorial-id="header-brand" className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-[7px] bg-gradient-to-b from-[#2A2B32] to-[#16171B] border border-white/10 flex items-center justify-center text-[#D4AF37] shadow-sm">
-              <Music4 className="w-3.5 h-3.5" />
+            <div className="w-7 h-7 rounded-[7px] bg-gradient-to-b from-[#1E2026] to-[#0C0D10] border border-[#D4AF37]/30 flex items-center justify-center text-[#D4AF37] shadow-[0_2px_8px_rgba(212,175,55,0.18)]">
+              <CadenceLogo variant="gold" className="w-4 h-4" />
             </div>
             <div className="flex flex-col text-left">
               <div className="flex items-center gap-1.5">
@@ -1837,6 +1839,7 @@ function AppContent() {
               }
             }}
             onRefreshLibrary={handleRefreshLibrary}
+            onSelectRelease={(releaseId: string) => handleInspectRelease(releaseId)}
             showToast={showToast}
             onSwitchToLibrary={() => setTopMode('library')}
             activeEntityScope={activeEntityScope}
@@ -2410,6 +2413,7 @@ function AppContent() {
       <NowPlayingBar
         onOpenSanctuary={() => setIsSanctuaryOpen(true)}
         onOpenRemoteModal={() => setIsRemoteModalOpen(true)}
+        topMode={topMode}
       />
 
       {/* Cadence Mobile Remote QR Pairing Modal */}

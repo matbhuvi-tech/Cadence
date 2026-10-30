@@ -7,6 +7,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Cadence">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.json">
   <title>Cadence Remote | Audiophile Transport</title>
   <style>
@@ -165,15 +167,16 @@
       cursor: pointer;
     }
     .brand-logo-crest {
-      width: 24px;
-      height: 24px;
-      border-radius: 6px;
-      background: linear-gradient(135deg, var(--accent-gold) 0%, rgba(212, 175, 55, 0.6) 100%);
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+      background: linear-gradient(180deg, #1E2026 0%, #0C0D10 100%);
+      border: 1px solid var(--border-accent);
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #0C0D10;
-      box-shadow: 0 2px 8px var(--accent-gold-glow);
+      color: var(--accent-gold);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 8px var(--accent-gold-glow);
     }
     .brand-title {
       font-size: 0.95rem;
@@ -1054,7 +1057,9 @@
     <header class="top-bar">
       <div class="brand-group" id="brandGroup">
         <div class="brand-logo-crest">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+          <svg width="16" height="16" viewBox="0 0 512 512" fill="none">
+            <path fill="currentColor" d="M 356.57 320.78 L 336.73 300.93 A 78.79 78.79 0 1 1 336.73 211.07 L 389.72 158.07 A 153.13 153.13 0 1 0 370.26 373.45 L 383.64 386.83 A 171.99 171.99 0 1 1 403.11 144.69 L 422.97 124.82 A 200.0 200.0 0 1 0 422.97 387.18 L 370.01 334.21 A 125.39 125.39 0 1 1 350.55 158.26 L 337.12 171.69 A 106.53 106.53 0 1 0 356.57 320.78 Z"/>
+          </svg>
         </div>
         <div class="brand-title">
           <span>Cadence</span>

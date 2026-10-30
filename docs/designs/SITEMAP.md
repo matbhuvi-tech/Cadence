@@ -2,6 +2,7 @@
 
 | Design Document | Date | Author | Core Subsystems | Summary |
 | :--- | :--- | :--- | :--- | :--- |
+| [Curate Experience & Layout Overhaul](./CURATE_EXPERIENCE_AND_LAYOUT_OVERHAUL.md) | 2026-10-30 | Mathan | Curate, AudioPlayer, App Layout | Restructures Curate into a 33%/67% above-the-fold split deck, relocates provenance badges to the Field column, introduces a full-width inline-editable track table, gates Case B on >1 clusters with 3-tier merge precedence, and eliminates NowPlayingBar occlusion. |
 | [Asynchronous Background Commit Queue with Playback Preemption](./ASYNCHRONOUS_BACKGROUND_COMMIT_QUEUE_ARCHITECTURE.md) | 2026-10-30 | Cadence Core Engineering | Rust Backend, SQLite WAL, Storage Bus Silence, App Top Header, UI Staging | Decouples the 50-minute commit modal into an asynchronous SQLite background worker yielding during playback, with partial unique index edit coalescing and Apple HIG telemetry. |
 | [Unified Metadata Management & Catalog Coherence Architecture](./UNIFIED_METADATA_MANAGEMENT_AND_CATALOG_COHERENCE.md) | 2026-10-29 | Mathan | UI, Curate, Grouping, Scanner, Intelligence | Surface consolidation into Curate, Soundtrack composer authority taxonomy, bounded fuzzy version stacking, federated authority, and DR bypass. |
 | [Federated Album & Artist Metadata Recommendation Engine](./FEDERATED_ALBUM_AND_ARTIST_METADATA_RECOMMENDATION_ENGINE.md) | 2026-10-28 | Mathan | Resolvers, Curation Queue, ArtistsView | Multi-provider consensus (Apple + MusicBrainz + Gemini), lookahead prefetching, and canonical artist hydration. |

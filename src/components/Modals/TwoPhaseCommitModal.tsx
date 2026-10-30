@@ -684,8 +684,14 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
         return getTrackRealEdits(t, rel).length > 0
       })
     } else if (filterCategory === 'artwork') {
-      // "With Artwork Updates": includes any tracks that have staged cover art
-      list = list.filter((t) => Boolean(t.pendingSidecarEdits?.coverArtUrl))
+      // "With Artwork Updates": includes any tracks that have staged cover art on the track or release
+      list = list.filter((t) => {
+        const rel = releaseMap.get(t.releaseId)
+        return (
+          Boolean(t.pendingSidecarEdits?.coverArtUrl) ||
+          Boolean(rel?.artwork?.originalFrontCoverUrl && rel.artwork.frontCoverUrl)
+        )
+      })
     }
 
     if (!searchQuery.trim()) return list
@@ -741,8 +747,8 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
     const folderName = release?.folderName || relTracks[0]?.folderName
     const artistCredit = release?.artistCredit || relTracks[0]?.artistCredit || 'Various Artists'
     const stagedCoverArt =
-      release?.artwork?.frontCoverUrl ||
-      relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)?.pendingSidecarEdits?.coverArtUrl
+      relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)?.pendingSidecarEdits?.coverArtUrl ||
+      (release?.artwork?.originalFrontCoverUrl ? release.artwork.frontCoverUrl : undefined)
     const currentCoverArt =
       release?.artwork?.originalFrontCoverUrl ||
       (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt
@@ -787,7 +793,10 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
       const rel = releaseMap.get(t.releaseId)
       relSet.add(t.releaseId || t.folderName || 'unknown')
       tagEdits += getTrackRealEdits(t, rel).length
-      if (t.pendingSidecarEdits?.coverArtUrl) {
+      if (
+        t.pendingSidecarEdits?.coverArtUrl ||
+        Boolean(rel?.artwork?.originalFrontCoverUrl && rel.artwork.frontCoverUrl)
+      ) {
         artAlbums.add(t.releaseId || t.folderName || 'unknown')
       }
     })
@@ -815,7 +824,10 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
       const rel = releaseMap.get(t.releaseId)
       relSet.add(t.releaseId || t.folderName || 'unknown')
       tagEdits += getTrackRealEdits(t, rel).length
-      if (t.pendingSidecarEdits?.coverArtUrl) {
+      if (
+        t.pendingSidecarEdits?.coverArtUrl ||
+        Boolean(rel?.artwork?.originalFrontCoverUrl && rel.artwork.frontCoverUrl)
+      ) {
         artAlbums.add(t.releaseId || t.folderName || 'unknown')
       }
     })
@@ -839,7 +851,10 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
   const artworkTracksCount = useMemo(() => {
     return uncommittedTracks.filter((t) => {
       const rel = releaseMap.get(t.releaseId)
-      return Boolean(t.pendingSidecarEdits?.coverArtUrl) || Boolean(rel?.artwork?.frontCoverUrl && rel.artwork.frontCoverUrl !== (rel as any)?.originalCoverArtUrl)
+      return (
+        Boolean(t.pendingSidecarEdits?.coverArtUrl) ||
+        Boolean(rel?.artwork?.originalFrontCoverUrl && rel.artwork.frontCoverUrl)
+      )
     }).length
   }, [uncommittedTracks, releaseMap])
 
@@ -1250,8 +1265,9 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                         relTracks[0]?.folderName ||
                         'Album Release'
                       const folderName = release?.folderName || relTracks[0]?.folderName
-                      const stagedCoverArt = relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)
-                        ?.pendingSidecarEdits?.coverArtUrl
+                      const stagedCoverArt =
+                        relTracks.find((t) => t.pendingSidecarEdits?.coverArtUrl)?.pendingSidecarEdits?.coverArtUrl ||
+                        (release?.artwork?.originalFrontCoverUrl ? release.artwork.frontCoverUrl : undefined)
                       const currentCoverArt =
                         release?.artwork?.originalFrontCoverUrl ||
                         (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt

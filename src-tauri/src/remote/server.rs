@@ -8,7 +8,7 @@ use serde::Deserialize;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 
-use super::pwa_assets::{MANIFEST_JSON, MOBILE_PWA_HTML};
+use super::pwa_assets::{APPLE_TOUCH_ICON_PNG, ICON_192_PNG, ICON_512_PNG, ICON_SVG, MANIFEST_JSON, MOBILE_PWA_HTML};
 use super::state::RemoteState;
 use super::ws::ws_handler;
 use crate::db::DbOperations;
@@ -57,6 +57,11 @@ pub async fn start_remote_server(
     let app = Router::new()
         .route("/", get(serve_pwa))
         .route("/manifest.json", get(serve_manifest))
+        .route("/icon.svg", get(serve_icon_svg))
+        .route("/favicon.svg", get(serve_icon_svg))
+        .route("/icon-192.png", get(serve_icon_192))
+        .route("/icon-512.png", get(serve_icon_512))
+        .route("/apple-touch-icon.png", get(serve_apple_touch_icon))
         .route("/api/remote/status", get(get_status))
         .route("/api/remote/playback/:action", post(handle_playback))
         .route("/api/remote/devices", get(list_devices).post(set_device))
@@ -140,6 +145,35 @@ async fn serve_manifest() -> impl IntoResponse {
     );
     (headers, MANIFEST_JSON)
 }
+
+async fn serve_icon_svg() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "image/svg+xml".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
+    (headers, ICON_SVG)
+}
+
+async fn serve_icon_192() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
+    (headers, ICON_192_PNG)
+}
+
+async fn serve_icon_512() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
+    (headers, ICON_512_PNG)
+}
+
+async fn serve_apple_touch_icon() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "public, max-age=604800, immutable".parse().unwrap());
+    (headers, APPLE_TOUCH_ICON_PNG)
+}
+
 
 async fn get_status(
     headers: HeaderMap,
