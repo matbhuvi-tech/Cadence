@@ -86,24 +86,42 @@ impl CommitQueueWorker {
         Ok(Self::new(engine, db))
     }
 
+    /// Safely acquires the worker's dedicated SQLite connection with a 5-second timeout guard.
+    /// Panics immediately with a clear diagnostic if an accidental re-entrant call or deadlock occurs.
+    fn lock_db(&self) -> parking_lot::MutexGuard<'_, rusqlite::Connection> {
+        self.db.conn
+            .try_lock_for(Duration::from_secs(5))
+            .expect("[CommitQueueWorker] Deadlock detected: DB Mutex lock timed out after 5 seconds")
+    }
+
     /// Performs startup crash recovery: sweeps `in_flight` items in SQLite and deletes orphaned temp files.
     pub fn perform_startup_recovery(&self) {
-        let conn = self.db.conn.lock();
-        if let Ok(requeued) = DbOperations::requeue_inflight_commit_items_sweep(&conn) {
-            drop(conn);
-            for item in requeued {
-                let path = Path::new(&item.file_path);
-                if let Some(parent) = path.parent() {
-                    if let Ok(entries) = fs::read_dir(parent) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            let fname = entry.file_name().to_string_lossy().to_string();
-                            if fname.contains(".cadence-tmp-") {
-                                let _ = fs::remove_file(entry.path());
-                                eprintln!("[CommitQueueWorker] Cleaned orphaned temp file: {:?}", entry.path());
+        let requeued_res = {
+            let conn = self.lock_db();
+            DbOperations::requeue_inflight_commit_items_sweep(&conn)
+        };
+        match requeued_res {
+            Ok(requeued) => {
+                for item in requeued {
+                    let path = Path::new(&item.file_path);
+                    if let Some(parent) = path.parent() {
+                        if let Ok(entries) = fs::read_dir(parent) {
+                            for entry in entries.filter_map(|e| e.ok()) {
+                                let fname = entry.file_name().to_string_lossy().to_string();
+                                if fname.contains(".cadence-tmp-") {
+                                    if let Err(e) = fs::remove_file(entry.path()) {
+                                        eprintln!("[CommitQueueWorker] Failed to clean orphaned temp file {:?}: {}", entry.path(), e);
+                                    } else {
+                                        eprintln!("[CommitQueueWorker] Cleaned orphaned temp file: {:?}", entry.path());
+                                    }
+                                }
                             }
                         }
                     }
                 }
+            }
+            Err(e) => {
+                eprintln!("[CommitQueueWorker] Failed to sweep in_flight items on startup: {}", e);
             }
         }
     }
@@ -205,7 +223,7 @@ impl CommitQueueWorker {
 
             // Fetch summary to check if there is work to do
             let summary = {
-                let conn = self.db.conn.lock();
+                let conn = self.lock_db();
                 DbOperations::get_commit_queue_summary(&conn).ok()
             };
 
@@ -220,7 +238,7 @@ impl CommitQueueWorker {
             // Check if active batch allows force override
             let active_batch_id = summary.as_ref().and_then(|s| s.active_batch_id.clone());
             let is_override_allowed = if let Some(ref bid) = active_batch_id {
-                let conn = self.db.conn.lock();
+                let conn = self.lock_db();
                 DbOperations::is_batch_override_allowed(&conn, bid).unwrap_or(false)
             } else {
                 false
@@ -250,7 +268,7 @@ impl CommitQueueWorker {
 
             // 4. Fetch next pending item
             let next_item = {
-                let conn = self.db.conn.lock();
+                let conn = self.lock_db();
                 DbOperations::fetch_next_pending_commit_item(&conn, &excluded).ok().flatten()
             };
 
@@ -277,11 +295,11 @@ impl CommitQueueWorker {
                 }
             }
 
-            // 5. Mark item as in_flight
-            {
-                let conn = self.db.conn.lock();
-                let _ = DbOperations::update_commit_item_status(&conn, &item.id, "in_flight", None, 0);
-            }
+            // 5. Mark item as in_flight and query updated summary atomically in single lock
+            let inflight_summary_res = {
+                let conn = self.lock_db();
+                DbOperations::mark_commit_item_in_flight_and_get_summary(&conn, &item.id)
+            };
 
             // Parse payload for track info
             let payload: serde_json::Value = serde_json::from_str(&item.payload_json).unwrap_or_default();
@@ -292,18 +310,27 @@ impl CommitQueueWorker {
                 .to_string();
 
             *self.active_item_info.lock() = Some((item.track_id.clone(), track_title.clone(), item.file_path.clone()));
-            self.emit_state_telemetry("writing", None, None);
+
+            match inflight_summary_res {
+                Ok(summary) => {
+                    self.emit_telemetry_with_summary(&summary, "writing", None, None, true);
+                }
+                Err(e) => {
+                    eprintln!("[CommitQueueWorker] Critical: Failed to mark item {} in_flight: {}", item.id, e);
+                    self.emit_state_telemetry("writing", None, None);
+                }
+            }
 
             // 6. Execute atomic write
             let write_result = self.process_commit_item(&item, &payload);
 
-            // 7. Update status based on result
+            // 7. Update status based on result using single atomic lock acquisition
             match write_result {
                 Ok(bytes) => {
-                    {
-                        let conn = self.db.conn.lock();
-                        let _ = DbOperations::update_commit_item_status(&conn, &item.id, "completed", None, bytes);
-                    }
+                    let summary_res = {
+                        let conn = self.lock_db();
+                        DbOperations::complete_commit_item_and_get_summary(&conn, &item.id, bytes)
+                    };
 
                     // Clear any failure count for this mount
                     self.mount_failure_counts.lock().remove(&item.mount_id);
@@ -316,14 +343,21 @@ impl CommitQueueWorker {
                         history.retain(|t| now.duration_since(*t) <= Duration::from_secs(5));
                     }
 
-                    self.emit_telemetry(false);
+                    match summary_res {
+                        Ok(summary) => {
+                            self.emit_telemetry_with_summary(&summary, "writing", None, None, false);
+                        }
+                        Err(e) => {
+                            eprintln!("[CommitQueueWorker] Critical: Failed to mark item {} completed: {}", item.id, e);
+                        }
+                    }
                 }
                 Err(err_msg) => {
                     eprintln!("[CommitQueueWorker] Failed to write track {}: {}", item.file_path, err_msg);
-                    {
-                        let conn = self.db.conn.lock();
-                        let _ = DbOperations::update_commit_item_status(&conn, &item.id, "failed", Some(&err_msg), 0);
-                    }
+                    let summary_res = {
+                        let conn = self.lock_db();
+                        DbOperations::fail_commit_item_and_get_summary(&conn, &item.id, &err_msg)
+                    };
 
                     // Track consecutive mount failures
                     {
@@ -340,7 +374,14 @@ impl CommitQueueWorker {
                         }
                     }
 
-                    self.emit_state_telemetry("writing", None, Some(err_msg));
+                    match summary_res {
+                        Ok(summary) => {
+                            self.emit_telemetry_with_summary(&summary, "writing", None, Some(err_msg), true);
+                        }
+                        Err(e) => {
+                            eprintln!("[CommitQueueWorker] Critical: Failed to mark item {} failed: {}", item.id, e);
+                        }
+                    }
                 }
             }
 
@@ -394,11 +435,15 @@ impl CommitQueueWorker {
             Self::atomic_replace_file(&temp_sidecar, &sidecar_path)?;
 
             // Update SQLite track status
-            let conn = self.db.conn.lock();
-            let _ = conn.execute(
-                "UPDATE tracks SET sidecar_status = 'synced' WHERE id = ?1",
-                rusqlite::params![item.track_id],
-            );
+            {
+                let conn = self.lock_db();
+                if let Err(e) = conn.execute(
+                    "UPDATE tracks SET sidecar_status = 'synced' WHERE id = ?1",
+                    rusqlite::params![item.track_id],
+                ) {
+                    eprintln!("[CommitQueueWorker] Warning: Failed to update sidecar sync status for track {}: {}", item.track_id, e);
+                }
+            }
 
             let bytes = fs::metadata(&sidecar_path).map(|m| m.len() as i64).unwrap_or(0);
             return Ok(bytes);
@@ -506,8 +551,8 @@ impl CommitQueueWorker {
 
         // Update SQLite track cache so UI reflects tags immediately
         {
-            let conn = self.db.conn.lock();
-            let _ = conn.execute(
+            let conn = self.lock_db();
+            if let Err(e) = conn.execute(
                 "UPDATE tracks SET
                     title = COALESCE(?1, title),
                     artist_credit = COALESCE(?2, artist_credit),
@@ -530,7 +575,9 @@ impl CommitQueueWorker {
                     payload.get("genre").and_then(|s| s.as_str()),
                     item.track_id,
                 ],
-            );
+            ) {
+                eprintln!("[CommitQueueWorker] Warning: Failed to update track cache for {}: {}", item.track_id, e);
+            }
         }
 
         let written_bytes = fs::metadata(target_path).map(|m| m.len() as i64).unwrap_or(0);
@@ -602,8 +649,9 @@ impl CommitQueueWorker {
         self.emit_telemetry_with_state(state, cooldown, None, force);
     }
 
-    fn emit_telemetry_with_state(
+    fn emit_telemetry_with_summary(
         &self,
+        summary: &crate::db::CommitQueueSummary,
         state: &str,
         cooldown_remaining: Option<u64>,
         error_message: Option<String>,
@@ -622,15 +670,10 @@ impl CommitQueueWorker {
             None => return,
         };
 
-        let summary = {
-            let conn = self.db.conn.lock();
-            DbOperations::get_commit_queue_summary(&conn).ok()
-        };
-
-        let pending_items = summary.as_ref().map(|s| s.pending_items).unwrap_or(0);
-        let inflight_items = summary.as_ref().map(|s| s.inflight_items).unwrap_or(0);
-        let completed_items = summary.as_ref().map(|s| s.completed_items).unwrap_or(0);
-        let failed_items = summary.as_ref().map(|s| s.failed_items).unwrap_or(0);
+        let pending_items = summary.pending_items;
+        let inflight_items = summary.inflight_items;
+        let completed_items = summary.completed_items;
+        let failed_items = summary.failed_items;
         let total_items = pending_items + inflight_items + completed_items + failed_items;
 
         let percent = if total_items > 0 {
@@ -659,8 +702,8 @@ impl CommitQueueWorker {
 
         let payload = CommitTelemetryPayload {
             state: resolved_state,
-            active_batch_id: summary.as_ref().and_then(|s| s.active_batch_id.clone()),
-            active_batch_description: summary.as_ref().and_then(|s| s.active_batch_description.clone()),
+            active_batch_id: summary.active_batch_id.clone(),
+            active_batch_description: summary.active_batch_description.clone(),
             current_track_id,
             current_track_title,
             current_track_file_path,
@@ -679,9 +722,26 @@ impl CommitQueueWorker {
         let _ = app.emit("commit://telemetry", &payload);
     }
 
+    fn emit_telemetry_with_state(
+        &self,
+        state: &str,
+        cooldown_remaining: Option<u64>,
+        error_message: Option<String>,
+        force: bool,
+    ) {
+        let summary_opt = {
+            let conn = self.lock_db();
+            DbOperations::get_commit_queue_summary(&conn).ok()
+        };
+
+        if let Some(summary) = summary_opt {
+            self.emit_telemetry_with_summary(&summary, state, cooldown_remaining, error_message, force);
+        }
+    }
+
     pub fn get_telemetry(&self) -> CommitTelemetryPayload {
         let summary = {
-            let conn = self.db.conn.lock();
+            let conn = self.lock_db();
             DbOperations::get_commit_queue_summary(&conn).ok()
         };
 

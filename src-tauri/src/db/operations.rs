@@ -2712,6 +2712,38 @@ impl DbOperations {
         Ok(ids)
     }
 
+    /// Atomically updates a commit item to 'completed' and returns the updated queue summary
+    /// in a single SQLite connection lock acquisition.
+    pub fn complete_commit_item_and_get_summary(
+        conn: &Connection,
+        item_id: &str,
+        written_bytes: i64,
+    ) -> Result<CommitQueueSummary> {
+        Self::update_commit_item_status(conn, item_id, "completed", None, written_bytes)?;
+        Self::get_commit_queue_summary(conn)
+    }
+
+    /// Atomically updates a commit item to 'failed' and returns the updated queue summary
+    /// in a single SQLite connection lock acquisition.
+    pub fn fail_commit_item_and_get_summary(
+        conn: &Connection,
+        item_id: &str,
+        error_msg: &str,
+    ) -> Result<CommitQueueSummary> {
+        Self::update_commit_item_status(conn, item_id, "failed", Some(error_msg), 0)?;
+        Self::get_commit_queue_summary(conn)
+    }
+
+    /// Atomically updates a commit item to 'in_flight' and returns the updated queue summary
+    /// in a single SQLite connection lock acquisition.
+    pub fn mark_commit_item_in_flight_and_get_summary(
+        conn: &Connection,
+        item_id: &str,
+    ) -> Result<CommitQueueSummary> {
+        Self::update_commit_item_status(conn, item_id, "in_flight", None, 0)?;
+        Self::get_commit_queue_summary(conn)
+    }
+
 }
 
 
