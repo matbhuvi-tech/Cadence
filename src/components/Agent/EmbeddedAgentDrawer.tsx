@@ -34,6 +34,7 @@ import { MarkdownText } from './MarkdownText'
 import { CatalogPulseCard } from './CatalogPulseCard'
 import { MicroDiffCard } from './MicroDiffCard'
 import { CadenceLogo } from '../common/CadenceLogo'
+import { resolveGemini } from '../../services/geminiClient'
 
 export interface AgentChatMessage {
   id: string
@@ -364,19 +365,14 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
     const catalogSummary = agentSnapshotService.getCatalogSummaryText()
 
     try {
-      const chatRes = await fetch('/api/agent-chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: abortCtrl.signal,
-        body: JSON.stringify({
+      const data = await resolveGemini('agent-chat', {
           prompt: textToSend,
           catalogSummary,
           history: messages.slice(-5).map((m) => ({ role: m.role, text: m.text })),
-        }),
-      })
+        }, abortCtrl.signal)
+      if (abortCtrl.signal.aborted) return
 
-      if (chatRes.ok) {
-        const data = (await chatRes.json()) as any
+      if (data) {
         setActiveEngine('gemini')
         // If data.command is provided, use it; if data returned null/fallback but local intent recognized an action, execute localCmd
         const effectiveCommand = data.command || localCmd
@@ -405,15 +401,10 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
         }
 
         setMessages((prev) => [...prev, agentMsg])
-      } else {
-        if (chatRes.status === 429) {
-          setIsThrottled429(true)
-        }
-        setActiveEngine('local')
-        throw new Error(`Server returned HTTP ${chatRes.status}`)
       }
-    } catch {
+    } catch (error) {
       // Offline / network failure fallback: use deterministic local intent
+      if (String(error).includes('429')) setIsThrottled429(true)
       setActiveEngine('local')
       let fallbackText = 'I am connected to your live catalog database via local engine.'
       let cmdResult = undefined

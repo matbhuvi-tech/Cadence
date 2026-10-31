@@ -40,3 +40,4 @@ export const FacetShelf: React.FC<FacetShelfProps> = ({
     </div>
   );
 };
+

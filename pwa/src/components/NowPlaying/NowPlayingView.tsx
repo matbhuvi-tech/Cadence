@@ -199,3 +199,4 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
     </div>
   );
 };
+

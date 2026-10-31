@@ -1,100 +1,72 @@
-# Cadence Core - Relational Audiophile Engine
+<div align="center">
 
-Cadence Core is a high-performance, relational audiophile music manager and playback engine built with **React 19**, **TypeScript**, **Tailwind CSS v4**, and **Tauri v2** (Rust audio engine & SQLite database).
+# 🎵 Cadence
 
----
+### A quiet, bit-perfect music player for serious listening
 
-## 🚀 How to Start the App
+![Windows](https://img.shields.io/badge/Platform-Windows-0078D4?style=flat-square&logo=windows)
+![Rust](https://img.shields.io/badge/Audio_Core-Rust-000000?style=flat-square&logo=rust)
+![Tauri v2](https://img.shields.io/badge/Desktop-Tauri_v2-FFC131?style=flat-square&logo=tauri&logoColor=black)
 
-### 1. Prerequisites
+**Your music. Your DAC. Your library. No developer setup required.**
 
-Ensure you have the following installed on your machine:
-- **Node.js**: v18+ (v20+ recommended)
-- **npm** (or pnpm / yarn)
-- **Rust & Cargo** *(required for desktop mode)*: Install via [rustup.rs](https://rustup.rs) (`rustc --version` and `cargo --version`)
+[Listening approach](#built-around-the-listening-session) • [Audio formats](#made-for-local-audio-collections) • [Download and install](#download-and-install) • [Privacy](#your-library-stays-yours)
 
-### 2. Initial Setup
-
-1. **Clone the repository and install dependencies**:
-   ```bash
-   npm install
-   ```
-
-2. **Configure Environment Variables**:
-   Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-   *(On Windows PowerShell: `Copy-Item .env.example .env`)*
-
-   Add your Google Gemini API key if you plan to use AI metadata enrichment, cover art fetching, and the Cadence Agent:
-   ```env
-   GEMINI_API_KEY=your_gemini_api_key_here
-   ```
+</div>
 
 ---
 
-### 3. Starting the Application
+Cadence is a Windows desktop music player and library organizer for listeners who care about how their system handles audio. Its playback path is designed for direct hardware output, while background library work is kept away from active listening.
 
-You can run Cadence Core in two modes:
+Download the Cadence installer, install it, and open the app. You do not need Node.js, Rust, a terminal, or a developer environment to use Cadence.
 
-#### Option A: Desktop App (Recommended for Audiophile Playback)
-Runs the full native desktop application with bit-perfect Rust audio output, local SQLite database storage, native folder selection, and direct disk scanning.
+> **First release:** Installer downloads and release notes will be published here when the first version is ready.
 
-```bash
-npm run tauri:dev
-```
+## Built Around the Listening Session
 
-#### Option B: Web Browser Dev Mode
-Runs the frontend in your web browser via the Vite dev server with HTML5 Web Audio fallback and Vite-based mock/local scanning endpoints.
+### Direct playback to your audio device
 
-```bash
-npm run dev
-```
-Then open your browser to **`http://localhost:5173`**.
+Cadence's native Windows audio engine is designed to use WASAPI Exclusive output when available. In Purity Mode, the goal is to send the decoded audio to the selected device without operating-system mixing, resampling, or software volume adjustment. Device support and the source format determine the available output modes; the app should report the active format and playback path so you can confirm what is in use.
 
----
+### Keep library activity out of playback
 
-## 📦 Building for Production
+Scanning, metadata writes, and other library work are scheduled around listening. Metadata commits wait until playback is stopped and the quiet period has elapsed; queued work yields at track boundaries when playback resumes. Network discovery and remote-control updates are designed to use restrained, event-driven activity.
 
-- **Desktop Application (Native installer / executable)**:
-  ```bash
-  npm run tauri:build
-  ```
-  The compiled installer will be located in `src-tauri/target/release/bundle/`.
+### A collection organized by musical relationships
 
-- **Web Frontend Static Bundle**:
-  ```bash
-  npm run build
-  ```
-  The production build will be emitted to `dist/`. You can preview it with:
-  ```bash
-  npm run preview
-  ```
+Cadence treats an album as more than a folder and an artist string. Browse relationships among composers, lyricists, vocalists, directors, releases, and tracks, and curate inconsistent credits into a coherent local catalog.
 
----
+### Curation with review before writes
 
-## 🛠️ Available Scripts
+Metadata changes are staged for review before they are applied. Cadence shows proposed changes so you can approve them before files are modified. Audio playback and catalog curation are separate concerns: review commits carefully, and the playback engine does not silently change your source files.
 
-| Command | Description |
-| :--- | :--- |
-| `npm run tauri:dev` | Launch Cadence Core in native desktop mode (Tauri v2 + Vite) |
-| `npm run dev` | Start the local Vite development server (`http://localhost:5173`) |
-| `npm run tauri:build` | Build the native desktop release bundle (.exe / installer) |
-| `npm run build` | Typecheck (`tsc -b`) and build the web bundle with Vite |
-| `npm run preview` | Locally preview the built web application |
-| `npm run lint` | Fast linting using [oxlint](https://oxc.rs) |
-| `npm run test:norm` | Run normalization & enrichment precedence tests |
-| `npm run test:engine` | Verify the relational graph engine |
-| `npm run test:pilot` | Run Cadence Copilot matrix tests |
+## Made for Local Audio Collections
 
----
+Cadence is built for local PCM and DSD libraries, including common formats such as:
 
-## 🧩 Architecture
+- FLAC, WAV, and ALAC
+- DSF and DFF
+- Other formats supported by the current release
 
-- **Frontend**: React 19, TypeScript, Tailwind CSS v4, Lucide Icons
-- **Desktop Runtime**: Tauri v2, Rust
-- **Audio Engine**: Native bit-perfect multi-format stream decoder (FLAC, DSF/DFF, ALAC, WAV, MP3, etc.)
-- **Database**: Embedded SQLite for persistent relational metadata & storage mounts
-- **AI & Enrichment**: Gemini API integration for artist taxonomy, fuzzy title resolution, and artwork enrichment
-- **Tagging & Sidecars**: Non-destructive 2-phase commit sidecar metadata system (`cadence-album.sidecar.json`)
+The app reads sample-rate and bit-depth information from supported audio containers and presents library details alongside playback. Actual output depends on the file, selected device, Windows driver, and the device's supported formats.
+
+Cadence also includes tools for organizing large collections, resolving artwork and credits, and searching local music alongside connected services. Optional AI-assisted enrichment requires configuring a provider key; ordinary playback does not require it.
+
+## Download and Install
+
+1. Download the latest Windows installer from the project's **Releases** page.
+2. Run the installer and follow the prompts.
+3. Open Cadence and choose your music folders when prompted.
+4. Select your audio device and review its available playback modes in the app.
+
+> **Release status:** This repository is preparing its first release. Until an installer is published on the Releases page, there is no end-user download yet.
+
+## Your Library Stays Yours
+
+Cadence keeps its catalog database on your computer. It does not upload your music library for playback. If you choose AI or online metadata features, those features may send the specific queries or metadata needed to the service you select. Review that provider's terms and configure its credentials only if you want to use those features.
+
+Tag and metadata writes require your approval through the review-and-commit flow. Back up important libraries before applying large batches of changes.
+
+## For Developers
+
+Developer setup, architecture, build commands, and repository invariants are documented in [DEVELOPER.md](DEVELOPER.md). They are not required to install or use the Windows app.

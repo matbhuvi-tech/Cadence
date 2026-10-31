@@ -7,6 +7,7 @@ pub mod scanner;
 
 use audio::AudioEngine;
 use commands::audio::*;
+use commands::gemini_config::*;
 use commands::library::*;
 use commands::maintenance::*;
 use commands::remote::*;
@@ -191,6 +192,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_gemini_config,
+            save_gemini_api_key,
+            save_gemini_model,
+            remove_gemini_api_key,
+            gemini_resolve,
+            get_gemini_quota,
             play_track,
             pause_audio,
             resume_audio,

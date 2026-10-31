@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import {
   FolderPlus,
   Folder,
@@ -19,6 +20,7 @@ import {
   Server,
   Smartphone,
   PanelRight,
+  KeyRound,
 } from 'lucide-react'
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope, NavigationAnchor } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
@@ -68,6 +70,7 @@ import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
 import { backgroundArtworkService } from './services/backgroundArtworkService'
 import { CadenceLogo } from './components/common/CadenceLogo'
 import { useStagedChanges } from './hooks/useStagedChanges'
+import { GeminiSetupScreen } from './components/GeminiSetupScreen'
 
 function AppContent() {
   // Primary Graph State
@@ -2520,9 +2523,35 @@ function AppContent() {
 }
 
 export function App() {
+  const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null)
+  const [showGeminiConfig, setShowGeminiConfig] = useState(false)
+
+  useEffect(() => {
+    if (!tauriBridge.isTauri()) {
+      setGeminiConfigured(true)
+      return
+    }
+    invoke<{ configured: boolean }>('get_gemini_config')
+      .then((config) => setGeminiConfigured(config.configured))
+      .catch((error) => {
+        console.error('[App] Failed to load Gemini configuration:', error)
+        setGeminiConfigured(false)
+      })
+  }, [])
+
+  if (geminiConfigured === null) {
+    return <div className="min-h-screen bg-[#090b10]" aria-label="Loading configuration" />
+  }
+
+  if (!geminiConfigured) {
+    return <GeminiSetupScreen onConfigured={() => setGeminiConfigured(true)} />
+  }
+
   return (
     <AudioPlayerProvider>
       <AppContent />
+      {tauriBridge.isTauri() && <button type="button" onClick={() => setShowGeminiConfig(true)} title="Gemini configuration" aria-label="Gemini configuration" className="fixed bottom-24 right-5 z-40 rounded-full border border-white/10 bg-[#141922] p-3 text-cyan-300 shadow-lg hover:bg-[#202936]"><KeyRound size={18} /></button>}
+      {showGeminiConfig && <div className="fixed inset-0 z-50 overflow-y-auto bg-black/80"><GeminiSetupScreen isConfigured onConfigured={() => setShowGeminiConfig(false)} onRemoved={() => { setGeminiConfigured(false); setShowGeminiConfig(false) }} onClose={() => setShowGeminiConfig(false)} /></div>}
     </AudioPlayerProvider>
   )
 }

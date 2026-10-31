@@ -164,3 +164,4 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
     </div>
   );
 };
+

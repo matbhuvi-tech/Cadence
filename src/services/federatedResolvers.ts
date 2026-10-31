@@ -21,6 +21,7 @@ import {
 } from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
 import { tauriBridge } from './tauriBridge'
+import { getGeminiQuota, resolveGemini } from './geminiClient'
 
 // --- Singleton Preemptive Rate Limiter ---
 
@@ -311,19 +312,7 @@ export class FederatedResolversService {
 
     const batch = items.slice(0, 25)
     try {
-      const url = `${this.getBaseUrl()}/api/ai-metadata-resolver`
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: batch }),
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || `AI resolution failed with HTTP ${res.status}`)
-      }
-
-      const data = await res.json()
+      const data = await resolveGemini('metadata', { items: batch })
       if (data.results && Array.isArray(data.results)) {
         for (const r of data.results) {
           const providerRes: ProviderResult = normalizationService.applyToCandidate({
@@ -372,8 +361,7 @@ export class FederatedResolversService {
     lastCallTimestamp: number
   }> {
     try {
-      const res = await fetch(`${this.getBaseUrl()}/api/ai-quota-telemetry`)
-      if (res.ok) return await res.json()
+      return await getGeminiQuota()
     } catch {}
     return {
       rateLimitRpm: 15,
@@ -1024,24 +1012,18 @@ export class FederatedResolversService {
         }
 
         // 2. Query Gemini AI model or /api/ai-cover-art endpoint
-        const localAiUrl = `${this.getBaseUrl()}/api/ai-cover-art`
-        const localAiRes = await fetch(localAiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const aiData = await resolveGemini('cover-art', {
             albumTitle: cleanAlbum,
             artistCredit: cleanArtist,
             composerName: cleanComposer,
             releaseYear: query.releaseYear,
-          }),
-          signal: combineSignal(8000),
-        }).catch((err) => {
-          if (query.signal?.aborted) throw err
-          return null
-        })
+          }).catch((err) => {
+            if (query.signal?.aborted) throw err
+            return null
+          })
+        if (query.signal?.aborted) throw new DOMException('Artwork lookup cancelled', 'AbortError')
 
-        if (localAiRes && localAiRes.ok) {
-          const aiData = await localAiRes.json()
+        if (aiData) {
           if (aiData.success && aiData.coverArtUrl) {
             return {
               provider: 'ai',

@@ -167,3 +167,4 @@ export function useMediaSession({
     };
   }, [status, token, onPlayPause, onNextTrack, onPrevTrack, onSeek]);
 }
+

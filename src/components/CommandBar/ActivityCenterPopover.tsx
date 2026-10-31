@@ -18,6 +18,7 @@ import { ScanProgressPayload } from '../../core/types'
 import { tauriBridge } from '../../services/tauriBridge'
 import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
 import { backgroundArtworkService, BackgroundArtworkState } from '../../services/backgroundArtworkService'
+import { getGeminiQuota } from '../../services/geminiClient'
 
 interface ActivityCenterPopoverProps {
   isOpen: boolean
@@ -64,11 +65,8 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
     let isMounted = true
     const checkQuota = async () => {
       try {
-        const res = await fetch('/api/ai-quota-telemetry')
-        if (res.ok && isMounted) {
-          const data = await res.json()
-          setAiQuota(data)
-        }
+        const data = await getGeminiQuota()
+        if (isMounted) setAiQuota(data)
       } catch {}
     }
     checkQuota()

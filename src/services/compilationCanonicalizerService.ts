@@ -9,6 +9,7 @@
 
 import { Track, Release } from '../core/types'
 import { tauriBridge } from './tauriBridge'
+import { resolveGemini } from './geminiClient'
 import { ambientCurationService } from './ambientCurationService'
 import { graphEngine } from '../core/graphEngine'
 import { stripRipNoiseAndTags, isDefectiveArtistTag, isPlaceholderTag } from '../core/taxonomyUtils'
@@ -110,23 +111,7 @@ class CompilationCanonicalizerService {
         })),
       }
 
-      const res = await fetch('/api/ai-compilation-resolver', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}))
-        return {
-          success: false,
-          albumTitle: release.title,
-          tracks: [],
-          error: errJson.error || `HTTP ${res.status} from AI Compilation Resolver`,
-        }
-      }
-
-      const json = await res.json()
+      const json = await resolveGemini('compilation', payload)
       const rawResults: any[] = Array.isArray(json.results) ? json.results : []
 
       // 4. Map results and cross-reference with local library

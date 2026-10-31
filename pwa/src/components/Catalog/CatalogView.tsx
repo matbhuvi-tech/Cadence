@@ -170,3 +170,4 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
     </div>
   );
 };
+

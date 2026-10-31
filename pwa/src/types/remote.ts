@@ -119,3 +119,4 @@ export interface DbTrack {
   has_embedded_art: boolean;
   is_online: boolean;
 }
+
