@@ -4,7 +4,7 @@ import { ExternalLink, KeyRound, Music2, ShieldCheck } from 'lucide-react'
 
 export function GeminiSetupScreen({ onConfigured, onRemoved, isConfigured = false, onClose }: { onConfigured: () => void; onRemoved?: () => void; isConfigured?: boolean; onClose?: () => void }) {
   const [apiKey, setApiKey] = useState('')
-  const [model, setModel] = useState('gemini-flash-lite-latest')
+  const [model, setModel] = useState('gemini-3.5-flash-lite')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 

@@ -7,7 +7,7 @@ use std::sync::{
 use tauri::AppHandle;
 use tauri::Manager;
 
-const DEFAULT_MODEL: &str = "gemini-flash-lite-latest";
+const DEFAULT_MODEL: &str = "gemini-3.5-flash-lite";
 const PACING_MS: u64 = 4_000;
 static LAST_GEMINI_CALL: OnceLock<tokio::sync::Mutex<std::time::Instant>> = OnceLock::new();
 static LAST_GEMINI_CALL_MS: AtomicI64 = AtomicI64::new(0);
@@ -80,14 +80,10 @@ async fn generate(
     let candidates = [
         settings.model.as_str(),
         DEFAULT_MODEL,
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash-lite",
-        "gemini-flash-latest",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
         "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-pro-latest",
+        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest",
     ];
     let mut last_error = String::from("Gemini models are temporarily unavailable");
     for (index, model) in candidates.iter().enumerate() {
@@ -114,12 +110,19 @@ async fn generate(
                         .await;
                     }
                 }
+                Ok(r) if r.status().as_u16() == 404 => {
+                    last_error = format!(
+                        "Gemini model {model} is unavailable: {}",
+                        r.text().await.unwrap_or_default()
+                    );
+                    break;
+                }
                 Ok(r) => {
                     return Err(format!(
                         "Gemini request failed ({}): {}",
                         r.status(),
                         r.text().await.unwrap_or_default()
-                    ))
+                    ));
                 }
                 Err(e) => {
                     last_error = e.to_string();
