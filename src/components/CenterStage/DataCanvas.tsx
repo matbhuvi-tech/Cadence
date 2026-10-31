@@ -329,9 +329,9 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   return (
     <main ref={containerRef} className="flex-1 min-h-0 flex flex-col h-full overflow-hidden bg-[#0C0D10] select-none">
       {/* 1. Sleek macOS Sub-Toolbar */}
-      <header className="px-6 py-2.5 border-b border-white/[0.05] bg-[#121316]/70 backdrop-blur-2xl flex items-center justify-between gap-4 shrink-0 z-20">
+      <header className="px-6 py-2.5 border-b border-white/[0.05] bg-[#121316]/70 backdrop-blur-2xl flex items-center justify-between gap-4 flex-nowrap shrink-0 z-20">
         {/* Left: View Title or Translucent Entity Switcher & Active Filter Tokens */}
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-3 min-w-0 flex-1 overflow-hidden">
           {(viewMode === 'cover_grid' || viewMode === 'virtual_table') ? (
             !selectedAlbumId ? (
               <CatalogScopeBar
@@ -360,7 +360,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
           )}
 
           {/* Decoupled In-Place Filter Input (⌘F) */}
-          <div className="relative flex items-center shrink-0">
+          <div className="relative flex items-center min-w-0 shrink">
             <Search className="w-3.5 h-3.5 text-[#8E8E93] absolute left-2.5 pointer-events-none" />
             <input
               ref={inlineSearchInputRef}
@@ -376,7 +376,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
     ? 'Filter composers (⌘F)...'
     : 'Filter in-place (⌘F)...'
 }
-              className="pl-8 pr-7 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.08] focus:border-[#D4AF37]/50 text-xs text-white placeholder:text-[#636366] focus:outline-none w-36 sm:w-44 transition-all font-sans"
+              className={`pl-8 pr-7 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.08] focus:border-[#D4AF37]/50 text-xs text-white placeholder:text-[#636366] focus:outline-none min-w-0 transition-all font-sans truncate ${tier === 'wide' ? 'w-44' : tier === 'compact' ? 'w-32' : 'w-24 focus:w-40'}`}
             />
             {searchQuery && (
               <button

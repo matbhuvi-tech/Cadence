@@ -359,7 +359,7 @@ export const LeftRail: React.FC<LeftRailProps> = ({
       </div>
 
       {/* Footer Stats: Apple minimalist style */}
-      <div className={`pt-2 border-t border-white/[0.05] text-[10px] font-mono text-[#636366] flex items-center ${isIconOnly ? 'justify-center' : 'justify-between px-1'}`}>
+      <div className={`pt-2 pb-16 border-t border-white/[0.05] text-[10px] font-mono text-[#636366] flex items-center ${isIconOnly ? 'justify-center' : 'justify-between px-1'}`}>
         {!isIconOnly ? (
           <>
             <span>{releases.length} Albums</span>
