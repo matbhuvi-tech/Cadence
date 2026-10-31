@@ -15,6 +15,26 @@ export function getArtworkUrl(id: string, token: string): string {
   return `/api/remote/library/artwork/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
 }
 
+export async function fetchOutputDevices(token: string): Promise<string[]> {
+  const res = await fetch(`/api/remote/devices?token=${encodeURIComponent(token)}`, {
+    headers: { 'x-cadence-token': token },
+  });
+  if (!res.ok) throw new Error(`Failed to load output devices: ${res.statusText}`);
+  return res.json();
+}
+
+export async function selectOutputDevice(token: string, deviceName: string): Promise<void> {
+  const res = await fetch('/api/remote/devices', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-cadence-token': token,
+    },
+    body: JSON.stringify({ token, deviceName }),
+  });
+  if (!res.ok) throw new Error(`Failed to select output device: ${res.statusText}`);
+}
+
 export async function fetchReleases(token: string, limit = 150, offset = 0): Promise<DbRelease[]> {
   const res = await fetch(`/api/remote/library/releases?limit=${limit}&offset=${offset}&token=${encodeURIComponent(token)}`, {
     headers: {

@@ -89,34 +89,37 @@ type f64_or_number = number;
 export interface DbRelease {
   id: string;
   title: string;
-  folder_path: string;
-  folder_name: string;
-  artist_credit: string;
-  composer_name?: string | null;
-  release_year?: number | null;
-  genre_tags?: string | null;
-  front_cover_url?: string | null;
-  backdrop_url?: string | null;
-  is_compilation: boolean;
+  folderPath: string;
+  folderName: string;
+  artistCredit: string;
+  composerName?: string | null;
+  releaseYear?: number | null;
+  genreTags?: string | null;
+  frontCoverUrl?: string | null;
+  backdropUrl?: string | null;
+  isCompilation: boolean;
+  hasDsd: boolean;
+  hasHighRes: boolean;
+  hasFlac: boolean;
 }
 
 export interface DbTrack {
   id: string;
-  release_id?: string | null;
-  file_path: string;
-  file_name: string;
+  releaseId?: string | null;
+  filePath: string;
+  fileName: string;
   title: string;
-  artist_credit: string;
-  album_title: string;
-  release_year?: number | null;
-  track_number?: number | null;
-  duration_secs: number;
+  artistCredit: string;
+  albumTitle: string;
+  releaseYear?: number | null;
+  trackNumber?: number | null;
+  durationSecs: number;
   format: string;
-  sample_rate?: number | null;
-  bit_depth?: number | null;
+  sampleRate?: number | null;
+  bitDepth?: number | null;
   channels?: number | null;
-  dr_score?: number | null;
-  has_embedded_art: boolean;
-  is_online: boolean;
+  drScore?: number | null;
+  hasEmbeddedArt: boolean;
+  isOnline: boolean;
 }
 

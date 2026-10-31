@@ -71,7 +71,7 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
             </div>
             <div className="truncate">
               <h3 className="font-semibold text-zinc-100 text-sm truncate">{release.title}</h3>
-              <p className="text-xs text-zinc-400 truncate">{release.artist_credit}</p>
+              <p className="text-xs text-zinc-400 truncate">{release.artistCredit}</p>
             </div>
           </div>
           <button
@@ -129,27 +129,27 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
               >
                 <div
                   onClick={() => {
-                    onPlayTrack(track.file_path);
+                    onPlayTrack(track.filePath);
                     onClose();
                   }}
                   className="flex items-center space-x-3 flex-1 min-w-0 cursor-pointer"
                 >
                   <span className="text-xs font-mono text-zinc-500 w-5 text-center">
-                    {track.track_number ?? idx + 1}
+                    {track.trackNumber ?? idx + 1}
                   </span>
                   <div className="truncate flex-1">
                     <p className="text-xs font-medium text-zinc-200 truncate">{track.title}</p>
-                    <p className="text-[10px] text-zinc-500 truncate">{track.artist_credit}</p>
+                    <p className="text-[10px] text-zinc-500 truncate">{track.artistCredit}</p>
                   </div>
                 </div>
 
                 <div className="flex items-center space-x-2 pl-2">
                   <span className="text-[11px] font-mono text-zinc-500 flex items-center space-x-1">
                     <Clock className="w-3 h-3 text-zinc-600" />
-                    <span>{formatDuration(track.duration_secs)}</span>
+                    <span>{formatDuration(track.durationSecs)}</span>
                   </span>
                   <button
-                    onClick={() => onQueueTrack(track.file_path, false)}
+                    onClick={() => onQueueTrack(track.filePath, false)}
                     className="p-1.5 rounded-lg text-zinc-400 hover:text-[#D4AF37] hover:bg-zinc-800 active:scale-95"
                     title="Add to Queue"
                   >

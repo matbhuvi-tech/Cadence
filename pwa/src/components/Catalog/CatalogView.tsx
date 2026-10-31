@@ -5,6 +5,8 @@ import { fetchReleases, getArtworkUrl } from '../../services/api';
 import { FacetShelf, CatalogFilter } from './FacetShelf';
 import { AlbumModal } from './AlbumModal';
 
+const releaseCache = new Map<string, DbRelease[]>();
+
 interface CatalogViewProps {
   token: string;
   onPlayRelease: (releaseId: string) => void;
@@ -20,21 +22,31 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   onPlayTrack,
   onQueueTrack,
 }) => {
-  const [releases, setReleases] = useState<DbRelease[]>([]);
+  const [releases, setReleases] = useState<DbRelease[]>(() => releaseCache.get(token) ?? []);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filter, setFilter] = useState<CatalogFilter>('all');
   const [selectedRelease, setSelectedRelease] = useState<DbRelease | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const loadData = () => {
+  const loadData = (force = false) => {
+    const cached = releaseCache.get(token);
+    if (!force && cached) {
+      setReleases(cached);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
-    fetchReleases(token, 200, 0)
+    setLoadError(null);
+    fetchReleases(token, 2000, 0)
       .then((data) => {
+        releaseCache.set(token, data);
         setReleases(data);
         setLoading(false);
       })
       .catch((err) => {
         console.error('Failed to load catalog:', err);
+        setLoadError('The catalog could not be loaded. Check the connection and try again.');
         setLoading(false);
       });
   };
@@ -50,23 +62,24 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchesTitle = rel.title.toLowerCase().includes(q);
-        const matchesArtist = rel.artist_credit.toLowerCase().includes(q);
+        const matchesArtist = rel.artistCredit.toLowerCase().includes(q);
         if (!matchesTitle && !matchesArtist) return false;
       }
 
       // Filter chips
       if (filter === 'compilations') {
-        return rel.is_compilation;
+        return rel.isCompilation;
       } else if (filter === 'dsd') {
-        return rel.folder_name?.toLowerCase().includes('dsd') || rel.title.toLowerCase().includes('dsd');
+        return rel.hasDsd || rel.folderName?.toLowerCase().includes('dsd') || false;
       } else if (filter === 'hires') {
-        return (
-          rel.folder_name?.toLowerCase().includes('hi-res') ||
-          rel.folder_name?.toLowerCase().includes('24bit') ||
-          rel.folder_name?.toLowerCase().includes('flac 24')
+        return rel.hasHighRes || (
+          rel.folderName?.toLowerCase().includes('hi-res') ||
+          rel.folderName?.toLowerCase().includes('24bit') ||
+          rel.folderName?.toLowerCase().includes('flac 24') ||
+          false
         );
       } else if (filter === 'flac') {
-        return rel.folder_name?.toLowerCase().includes('flac') || !rel.folder_name?.toLowerCase().includes('mp3');
+        return rel.hasFlac || rel.folderName?.toLowerCase().includes('flac') || false;
       }
 
       return true;
@@ -74,26 +87,39 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   }, [releases, searchQuery, filter]);
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-[#0D0E11]">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#0D0E11]">
       {/* Search Input */}
       <div className="p-3 pb-1 shrink-0">
         <div className="relative flex items-center">
           <Search className="w-4 h-4 text-zinc-500 absolute left-3 pointer-events-none" />
           <input
-            type="text"
+            type="search"
             placeholder="Search albums or artists..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl pl-9 pr-9 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-[#D4AF37]/60"
           />
-          {searchQuery && (
+          <div className="absolute right-2 flex items-center gap-1">
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                aria-label="Clear search"
+                className="px-1 text-sm text-zinc-500 hover:text-zinc-300"
+              >
+                ×
+              </button>
+            )}
             <button
-              onClick={() => setSearchQuery('')}
-              className="absolute right-3 text-xs text-zinc-500 hover:text-zinc-300"
+              type="button"
+              onClick={() => loadData(true)}
+              disabled={loading}
+              aria-label="Refresh catalog"
+              className="rounded-lg p-1.5 text-zinc-500 hover:text-zinc-200 disabled:opacity-50"
             >
-              ×
+              <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
             </button>
-          )}
+          </div>
         </div>
       </div>
 
@@ -101,11 +127,16 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
       <FacetShelf activeFilter={filter} onSelectFilter={setFilter} />
 
       {/* Album Grid */}
-      <div className="flex-1 overflow-y-auto px-3 pb-6">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-6">
         {loading ? (
           <div className="flex flex-col items-center justify-center py-24 text-zinc-500">
             <RefreshCw className="w-8 h-8 animate-spin text-[#D4AF37]" />
             <span className="text-xs mt-3">Loading Audiophile Catalog...</span>
+          </div>
+        ) : loadError ? (
+          <div className="flex flex-col items-center justify-center py-20 text-center px-4">
+            <p role="alert" className="text-sm text-rose-300">{loadError}</p>
+            <button type="button" onClick={() => loadData(true)} className="mt-3 rounded-xl border border-zinc-700 px-4 py-2 text-xs text-zinc-200 hover:bg-zinc-800">Try again</button>
           </div>
         ) : filteredReleases.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center px-4">
@@ -142,11 +173,11 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
                       {release.title}
                     </h4>
                     <p className="text-[11px] text-zinc-400 truncate mt-0.5">
-                      {release.artist_credit}
+                      {release.artistCredit}
                     </p>
-                    {release.release_year ? (
+                    {release.releaseYear ? (
                       <span className="text-[10px] font-mono text-zinc-600 mt-1">
-                        {release.release_year}
+                        {release.releaseYear}
                       </span>
                     ) : null}
                   </div>

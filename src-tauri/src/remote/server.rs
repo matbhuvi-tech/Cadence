@@ -1,4 +1,7 @@
+use std::net::IpAddr;
+use std::path::Path as FsPath;
 use std::sync::Arc;
+use std::collections::HashMap;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -41,6 +44,16 @@ pub struct LibraryQuery {
     pub offset: Option<usize>,
     #[serde(rename = "releaseId")]
     pub release_id: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteRelease {
+    #[serde(flatten)]
+    release: crate::db::DbRelease,
+    has_dsd: bool,
+    has_high_res: bool,
+    has_flac: bool,
 }
 
 pub async fn start_remote_server(
@@ -97,18 +110,64 @@ pub async fn start_remote_server(
         )
     })?;
 
+    let (cert_path, key_path) = ensure_tls_certificate(&state.token_file)?;
+
+    // Playback status checks stay local to the host. A track boundary produces
+    // one event-driven broadcast; this does not increase WebSocket traffic.
+    tokio::spawn(super::ws::monitor_queue_completion(Arc::clone(&state)));
+
     eprintln!(
-        "[Cadence Remote] Embedded Audiophile PWA server listening on http://0.0.0.0:{}",
+        "[Cadence Remote] Embedded Audiophile PWA server listening on https://0.0.0.0:{}",
         bound_port
     );
 
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(tcp_listener, app).await {
+        if let Err(e) = axum_server::from_tcp_rustls(
+            tcp_listener.into_std().expect("Tokio listener conversion failed"),
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .expect("Cadence Remote TLS certificate could not be loaded"),
+        )
+        .serve(app.into_make_service())
+        .await
+        {
             eprintln!("[Cadence Remote] Server error: {}", e);
         }
     });
 
     Ok(bound_port)
+}
+
+fn ensure_tls_certificate(
+    token_path: &FsPath,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error + Send + Sync>> {
+    let cert_path = token_path.with_file_name("remote_tls_cert.pem");
+    let key_path = token_path.with_file_name("remote_tls_key.pem");
+    if cert_path.is_file() && key_path.is_file() {
+        return Ok((cert_path, key_path));
+    }
+
+    let discovery = super::net_discovery::discover_lan_interfaces(0, "");
+    let mut params = rcgen::CertificateParams::new(
+        discovery
+            .interfaces
+            .iter()
+            .map(|iface| iface.ip.clone())
+            .chain(std::iter::once(discovery.m_dns_host))
+            .collect::<Vec<_>>(),
+    )?;
+    params.subject_alt_names.extend(
+        discovery
+            .interfaces
+            .iter()
+            .filter_map(|iface| iface.ip.parse::<IpAddr>().ok())
+            .map(rcgen::SanType::IpAddress),
+    );
+    let key_pair = rcgen::KeyPair::generate()?;
+    let certificate = params.self_signed(&key_pair)?;
+    std::fs::write(&cert_path, certificate.pem())?;
+    std::fs::write(&key_path, key_pair.serialize_pem())?;
+    Ok((cert_path, key_path))
 }
 
 fn resolve_token(headers: &HeaderMap, explicit_token: Option<&str>) -> Option<String> {
@@ -259,7 +318,10 @@ async fn set_device(
     if !state.validate_token(token.as_deref()) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let _ = state.engine.set_audio_device(&payload.device_name);
+    state
+        .engine
+        .set_audio_device(&payload.device_name)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let status = state.engine.get_status();
     state.broadcast_state_change(&status);
     Ok(StatusCode::OK)
@@ -282,16 +344,56 @@ async fn get_releases(
     headers: HeaderMap,
     Query(q): Query<LibraryQuery>,
     State(state): State<Arc<RemoteState>>,
-) -> Result<Json<Vec<crate::db::DbRelease>>, StatusCode> {
+) -> Result<Json<Vec<RemoteRelease>>, StatusCode> {
     let token = resolve_token(&headers, q.token.as_deref());
     if !state.validate_token(token.as_deref()) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     let conn = state.db.conn.lock();
-    let releases = DbOperations::get_releases(&conn, Some(true)).unwrap_or_default();
+    let releases = DbOperations::get_releases(&conn, Some(true))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT release_id,
+                    MAX(CASE WHEN upper(format) IN ('DSF', 'DFF', 'DSDIFF') THEN 1 ELSE 0 END),
+                    MAX(CASE WHEN COALESCE(sample_rate, 0) > 48000 OR COALESCE(bit_depth, 0) > 16 THEN 1 ELSE 0 END),
+                    MAX(CASE WHEN upper(format) = 'FLAC' THEN 1 ELSE 0 END)
+             FROM tracks WHERE is_online = 1 GROUP BY release_id",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let facet_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)? != 0,
+                row.get::<_, i32>(2)? != 0,
+                row.get::<_, i32>(3)? != 0,
+            ))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut facets = HashMap::new();
+    for row in facet_rows {
+        let (release_id, has_dsd, has_high_res, has_flac) =
+            row.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        facets.insert(release_id, (has_dsd, has_high_res, has_flac));
+    }
     let limit = q.limit.unwrap_or(100);
     let offset = q.offset.unwrap_or(0);
-    let sliced = releases.into_iter().skip(offset).take(limit).collect();
+    let sliced = releases
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|release| {
+            let (has_dsd, has_high_res, has_flac) =
+                facets.get(&release.id).copied().unwrap_or_default();
+            RemoteRelease {
+                release,
+                has_dsd,
+                has_high_res,
+                has_flac,
+            }
+        })
+        .collect();
     Ok(Json(sliced))
 }
 

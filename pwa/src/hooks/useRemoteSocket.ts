@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { PlaybackStatus, RemoteQueue, RemoteEvent } from '../types/remote';
-import { getStoredToken, sendPlaybackAction } from '../services/api';
+import { fetchOutputDevices, getStoredToken, selectOutputDevice, sendPlaybackAction } from '../services/api';
 
 const INITIAL_STATUS: PlaybackStatus = {
   isPlaying: false,
@@ -29,6 +29,41 @@ export function useRemoteSocket() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [outputDevices, setOutputDevices] = useState<string[]>([]);
+  const [isLoadingDevices, setIsLoadingDevices] = useState(false);
+  const [isChangingDevice, setIsChangingDevice] = useState(false);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
+
+  const refreshOutputDevices = useCallback(async () => {
+    if (!token) return;
+    setIsLoadingDevices(true);
+    setDeviceError(null);
+    try {
+      setOutputDevices(await fetchOutputDevices(token));
+    } catch (err) {
+      setDeviceError(err instanceof Error ? err.message : 'Could not load output devices.');
+    } finally {
+      setIsLoadingDevices(false);
+    }
+  }, [token]);
+
+  const changeOutputDevice = useCallback(async (deviceName: string) => {
+    if (!token || !deviceName) return;
+    setIsChangingDevice(true);
+    setDeviceError(null);
+    try {
+      await selectOutputDevice(token, deviceName);
+    } catch (err) {
+      setDeviceError(err instanceof Error ? err.message : 'Could not change output device.');
+      await refreshOutputDevices();
+    } finally {
+      setIsChangingDevice(false);
+    }
+  }, [token, refreshOutputDevices]);
+
+  useEffect(() => {
+    void refreshOutputDevices();
+  }, [refreshOutputDevices]);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -95,6 +130,7 @@ export function useRemoteSocket() {
             setStatus((prev) => ({
               ...prev,
               isPlaying: data.is_playing,
+              isPaused: false,
               positionSecs: data.position_secs,
               durationSecs: data.duration_secs,
             }));
@@ -270,6 +306,12 @@ export function useRemoteSocket() {
     isConnected,
     isConnecting,
     error,
+    outputDevices,
+    isLoadingDevices,
+    isChangingDevice,
+    deviceError,
+    refreshOutputDevices,
+    changeOutputDevice,
     connect,
     disconnect,
     sendCommand,

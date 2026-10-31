@@ -17,6 +17,60 @@ pub fn get_connected_client_count() -> usize {
     CONNECTED_CLIENTS.load(Ordering::Relaxed)
 }
 
+pub async fn monitor_queue_completion(state: Arc<RemoteState>) {
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    let mut advanced_file: Option<String> = None;
+
+    loop {
+        timer.tick().await;
+        let engine = Arc::clone(&state);
+        let status = match tokio::task::spawn_blocking(move || engine.engine.get_status()).await {
+            Ok(status) => status,
+            Err(_) => continue,
+        };
+
+        let Some(current_file) = status.current_file.as_ref() else {
+            advanced_file = None;
+            continue;
+        };
+        if advanced_file.as_deref() != Some(current_file.as_str()) {
+            advanced_file = None;
+        } else if status.position_secs < status.duration_secs - 0.75 {
+            // A duplicate queue entry can have the same path; re-arm after the
+            // new instance has started from its beginning.
+            advanced_file = None;
+        }
+
+        let near_end = status.duration_secs > 1.0
+            && status.position_secs >= status.duration_secs - 0.25;
+        let renderer_reports_progress = status
+            .active_device
+            .as_deref()
+            .map(|name| name.starts_with("[UPnP]"))
+            .unwrap_or(false);
+        let track_finished = near_end
+            && !status.is_paused
+            && (renderer_reports_progress || (!status.is_playing && !status.is_paused));
+        if !track_finished || advanced_file.as_deref() == Some(current_file.as_str()) {
+            continue;
+        }
+
+        let is_current_queue_item = {
+            let queue = state.queue.lock();
+            queue.current_index >= 0
+                && queue
+                    .items
+                    .get(queue.current_index as usize)
+                    .map(|item| item.file_path == *current_file)
+                    .unwrap_or(false)
+        };
+        if is_current_queue_item {
+            advanced_file = Some(current_file.clone());
+            advance_queue(&state, 1).await;
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WsAuthQuery {
     pub token: Option<String>,

@@ -20,7 +20,7 @@ export const FacetShelf: React.FC<FacetShelfProps> = ({
   ];
 
   return (
-    <div className="flex items-center space-x-2 overflow-x-auto no-scrollbar py-2 px-4 shrink-0">
+    <div role="group" aria-label="Filter releases" className="flex shrink-0 items-center space-x-2 overflow-x-auto no-scrollbar py-2 px-4">
       {filters.map((f) => {
         const isActive = activeFilter === f.id;
         return (

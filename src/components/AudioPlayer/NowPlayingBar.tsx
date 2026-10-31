@@ -100,8 +100,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   return (
     <>
       {/* Floating Frosted Signal-Chain Transport Bar Dock */}
-      <footer className="fixed bottom-3 left-3 right-3 md:left-1/2 md:-translate-x-1/2 md:w-[92%] max-w-6xl z-50">
-        <div className="glass-dropdown border border-white/[0.08] rounded-2xl h-[56px] px-4 flex items-center justify-between gap-4 shadow-2xl relative select-none">
+      <footer className="transport-bar-container fixed bottom-3 left-1/2 z-50 w-[calc(100%-1.5rem)] max-w-[2560px] -translate-x-1/2">
+        <div className="glass-dropdown border border-white/[0.08] rounded-2xl h-[56px] px-4 grid grid-cols-[minmax(180px,0.85fr)_minmax(300px,auto)_minmax(0,1.4fr)] items-center gap-x-4 shadow-2xl relative select-none">
           {/* Subtle Top Specular Scrubber Highlight */}
           <div
             className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-all duration-150 group/scrub ${
@@ -122,7 +122,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
           </div>
 
           {/* LEFT SECTION: TRACK CREDITS & SANCTUARY TRIGGER */}
-          <div className="flex items-center gap-2.5 w-[28%] min-w-[180px] max-w-[300px]">
+          <div className="transport-track flex items-center gap-2.5 min-w-0 max-w-[300px]">
             {/* Artwork Thumbnail */}
             <div
               onClick={onOpenSanctuary}
@@ -163,7 +163,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
           </div>
 
           {/* CENTER SECTION: TACTILE TRANSPORT CONTROLS (SINGLE-AXIS 56PX) */}
-          <div className={`flex items-center justify-center gap-2 sm:gap-3 flex-1 transition-opacity ${!currentTrack ? 'opacity-40 pointer-events-none' : ''}`}>
+          <div className={`transport-controls flex items-center justify-center gap-2 sm:gap-3 min-w-0 transition-opacity ${!currentTrack ? 'opacity-40 pointer-events-none' : ''}`}>
             {/* Elapsed Time */}
             <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
               {formatTime(currentTime)}
@@ -233,7 +233,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
           </div>
 
           {/* RIGHT SECTION: AUDIOPHILE SIGNAL PATH, QUEUE & PLAYLIST TOGGLES, VOLUME */}
-          <div className="flex items-center justify-end gap-2 w-auto min-w-[280px] relative">
+          <div className="transport-actions flex items-center justify-end gap-2 min-w-0 relative">
             {/* Audio Output Device Modal Trigger */}
             <button
               onClick={() => setIsDeviceModalOpen(true)}
@@ -244,7 +244,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             </button>
 
             {/* Volume Control */}
-            <div className="flex items-center gap-1">
+            <div className="transport-volume flex items-center gap-1 shrink-0">
               <button
                 onClick={toggleMute}
                 disabled={isPurityMode}
@@ -277,7 +277,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 value={isPurityMode ? 1 : isMuted ? 0 : volume}
                 disabled={isPurityMode}
                 onChange={(e) => setVolume(Number(e.target.value))}
-                className={`w-14 h-1 rounded-lg appearance-none transition-all ${
+                className={`transport-volume-slider w-14 h-1 rounded-lg appearance-none transition-all ${
                   isPurityMode
                     ? 'bg-amber-400/40 accent-amber-400 cursor-not-allowed'
                     : 'bg-white/[0.15] accent-white cursor-pointer'
@@ -295,17 +295,17 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               <button
                 onClick={() => setIsSignalPopoverOpen((prev) => !prev)}
                 title="Inspect Deterministic Bit-Perfect Signal Path & DAC Clock"
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[11px] font-mono transition-all cursor-pointer shadow-sm group"
+                className="transport-signal-button flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[11px] font-mono transition-all cursor-pointer shadow-sm group shrink-0"
               >
                 <span
                   className="w-2 h-2 rounded-full animate-pulse shadow-sm"
                   style={{ backgroundColor: ledColor }}
                 />
-                <span className="text-[#F5F5F7] font-semibold">
+                <span className="transport-signal-label text-[#F5F5F7] font-semibold">
                   {streamTelemetry?.format || currentTrack?.format || 'PCM'}
                 </span>
-                <span className="text-[#8E8E93]">→</span>
-                <span className="text-[#8E8E93] truncate max-w-[70px]">
+                <span className="transport-signal-label text-[#8E8E93]">→</span>
+                <span className="transport-signal-label text-[#8E8E93] truncate max-w-[70px]">
                   {deviceType === 'upnp_streamer' ? 'UPnP' : isPurityMode ? 'WASAPI Ex.' : 'WASAPI'}
                 </span>
               </button>
@@ -315,10 +315,10 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             <button
               onClick={() => toggleGapless()}
               title={`Gapless Playback: ${isGapless ? 'Enabled' : 'Disabled'} • Click to toggle`}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[10px] font-mono transition-all cursor-pointer shadow-sm select-none"
+              className="transport-toggle-button flex items-center gap-1.5 px-2 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[10px] font-mono transition-all cursor-pointer shadow-sm select-none shrink-0"
             >
               <Sparkles className={`w-3 h-3 ${isGapless ? 'text-emerald-400' : 'text-neutral-500'}`} />
-              <span className={isGapless ? 'text-emerald-300' : 'text-neutral-400'}>Gapless</span>
+              <span className={`transport-secondary-label ${isGapless ? 'text-emerald-300' : 'text-neutral-400'}`}>Gapless</span>
             </button>
 
             {/* Dedicated Now Playing Queue Toggle (Matching Mockup) */}
@@ -332,7 +332,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               }`}
             >
               <ListMusic className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Queue</span>
+              <span className="transport-secondary-label">Queue</span>
               {upcomingTracks.length > 0 && (
                 <span className="flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-emerald-500 px-1 text-[9px] font-mono font-bold text-black shadow-sm">
                   {upcomingTracks.length}
@@ -351,7 +351,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               }`}
             >
               <Disc3 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Playlists</span>
+              <span className="transport-secondary-label">Playlists</span>
             </button>
 
             {/* Mobile Remote Pairing */}

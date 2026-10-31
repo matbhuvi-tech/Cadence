@@ -78,9 +78,9 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
   const activePort = status?.port || 4040
   const activeToken = status?.pairingToken || ''
   const hasValidIp = lifecycle === 'verified' && Boolean(selectedIp) && selectedIp !== '127.0.0.1'
-  const pairingUrl = hasValidIp ? `http://${selectedIp}:${activePort}/?token=${activeToken}` : ''
+  const pairingUrl = hasValidIp ? `https://${selectedIp}:${activePort}/?token=${activeToken}` : ''
   const mDnsUrl = status?.mDnsHost && hasValidIp
-    ? `http://${status.mDnsHost}:${activePort}/?token=${activeToken}`
+    ? `https://${status.mDnsHost}:${activePort}/?token=${activeToken}`
     : ''
 
   // High-Contrast Scannability QR Rendering:

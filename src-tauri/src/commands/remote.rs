@@ -32,7 +32,7 @@ pub fn get_remote_server_info(
     let qr_url = discovery
         .primary_ip
         .as_ref()
-        .map(|ip| format!("http://{}:{}/?token={}", ip, port, token));
+        .map(|ip| format!("https://{}:{}/?token={}", ip, port, token));
 
     RemoteServerStatus {
         enabled: true,

@@ -32,6 +32,7 @@ uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 chrono = { version = "0.4", features = ["serde"] }
 socket2 = "0.6"
 axum = { version = "0.7", default-features = false, features = ["ws", "tokio", "http1", "json", "query"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 futures-util = "0.3"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.5", features = ["cors"] }
@@ -40,6 +41,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 rusty-chromaprint = "0.3.0"
 tauri-plugin-window-state = "~2.4.1"
 rust-embed = { version = "8.5", features = ["interpolate-folder-path", "compression"] }
+rcgen = "0.13"
+rustls-pemfile = "2"
 mime_guess = "2.0"
 reqwest = { version = "0.13.5", features = ["json"] }
 

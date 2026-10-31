@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Disc3, Shield, ShieldAlert } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Pause, SkipBack, SkipForward, Disc3, Shield, ShieldAlert, RefreshCw, Speaker } from 'lucide-react';
 import type { PlaybackStatus } from '../../types/remote';
 import { getArtworkUrl } from '../../services/api';
 import { VolumeGuard } from './VolumeGuard';
@@ -13,6 +13,12 @@ interface NowPlayingViewProps {
   onSeek: (posSecs: number) => void;
   onVolumeChange: (vol: number) => void;
   onTogglePurity: (enabled: boolean) => void;
+  outputDevices: string[];
+  isLoadingDevices: boolean;
+  isChangingDevice: boolean;
+  deviceError: string | null;
+  onChangeOutputDevice: (deviceName: string) => void;
+  onRefreshOutputDevices: () => void;
 }
 
 function formatTime(seconds: number): string {
@@ -31,17 +37,40 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   onSeek,
   onVolumeChange,
   onTogglePurity,
+  outputDevices,
+  isLoadingDevices,
+  isChangingDevice,
+  deviceError,
+  onChangeOutputDevice,
+  onRefreshOutputDevices,
 }) => {
   const [sliderPos, setSliderPos] = useState<number>(status.positionSecs);
+  const [displayPosition, setDisplayPosition] = useState<number>(status.positionSecs);
   const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
   const [artworkLoaded, setArtworkLoaded] = useState<boolean>(false);
+  const positionAnchor = useRef({ position: status.positionSecs, at: performance.now() });
 
   // Sync slider position with server updates when not scrubbing
   useEffect(() => {
     if (!isScrubbing) {
       setSliderPos(status.positionSecs);
     }
+    positionAnchor.current = { position: status.positionSecs, at: performance.now() };
+    setDisplayPosition(status.positionSecs);
   }, [status.positionSecs, isScrubbing]);
+
+  useEffect(() => {
+    if (!status.isPlaying || status.isPaused || isScrubbing) return;
+    let frame = 0;
+    const updatePosition = (now: number) => {
+      const elapsed = (now - positionAnchor.current.at) / 1000;
+      const next = Math.min(status.durationSecs || Number.POSITIVE_INFINITY, positionAnchor.current.position + elapsed);
+      setDisplayPosition(next);
+      if (next < status.durationSecs) frame = requestAnimationFrame(updatePosition);
+    };
+    frame = requestAnimationFrame(updatePosition);
+    return () => cancelAnimationFrame(frame);
+  }, [status.isPlaying, status.isPaused, status.durationSecs, status.currentFile, isScrubbing]);
 
   const stream = status.streamInfo;
   const trackTitle = stream?.title || (status.currentFile ? status.currentFile.split(/[/\\]/).pop() : 'No Track Loaded');
@@ -50,6 +79,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
 
   const artworkId = status.currentFile || '';
   const artworkUrl = artworkId ? getArtworkUrl(artworkId, token) : '';
+  const upnpRouteLocked = Boolean(status.isPlaying && status.activeDevice?.startsWith('[UPnP]'));
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSliderPos(parseFloat(e.target.value));
@@ -124,7 +154,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
             min="0"
             max={status.durationSecs > 0 ? status.durationSecs : 100}
             step="0.5"
-            value={sliderPos}
+            value={isScrubbing ? sliderPos : displayPosition}
             onMouseDown={() => setIsScrubbing(true)}
             onTouchStart={() => setIsScrubbing(true)}
             onChange={handleSliderChange}
@@ -134,8 +164,8 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
           />
         </div>
         <div className="flex justify-between text-[11px] font-mono text-zinc-500 px-0.5">
-          <span>{formatTime(sliderPos)}</span>
-          <span>-{formatTime(Math.max(0, status.durationSecs - sliderPos))}</span>
+          <span>{formatTime(isScrubbing ? sliderPos : displayPosition)}</span>
+          <span>-{formatTime(Math.max(0, status.durationSecs - (isScrubbing ? sliderPos : displayPosition)))}</span>
         </div>
       </div>
 
@@ -168,6 +198,28 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
         >
           <SkipForward className="w-6 h-6 fill-current" />
         </button>
+      </div>
+
+      <div className="w-full max-w-sm mx-auto bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-3 flex flex-col space-y-2">
+        <div className="flex items-center justify-between text-xs text-zinc-400">
+          <span className="flex items-center gap-1.5 font-medium"><Speaker className="w-4 h-4 text-[#D4AF37]" />Output Device</span>
+          <button type="button" onClick={onRefreshOutputDevices} disabled={isLoadingDevices || isChangingDevice} aria-label="Refresh output devices" className="p-1 rounded text-zinc-400 hover:text-white disabled:opacity-50">
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingDevices ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+        <select
+          aria-label="Output device"
+          value={status.activeDevice || ''}
+          onChange={(event) => onChangeOutputDevice(event.target.value)}
+          disabled={isLoadingDevices || isChangingDevice || outputDevices.length === 0 || upnpRouteLocked}
+          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 outline-none focus:border-[#D4AF37]/60 disabled:opacity-60"
+        >
+          {outputDevices.length === 0 ? <option value="">{isLoadingDevices ? 'Searching outputs…' : 'No output devices found'}</option> : null}
+          {outputDevices.map((device) => <option key={device} value={device}>{device}</option>)}
+        </select>
+        {upnpRouteLocked && <p className="text-[11px] text-zinc-500">Stop playback before switching UPnP renderers to keep the current stream uninterrupted.</p>}
+        {deviceError && <p role="alert" className="text-[11px] text-rose-400">{deviceError}</p>}
+        {isChangingDevice && <p className="text-[11px] text-zinc-500">Switching output…</p>}
       </div>
 
       {/* Purity Switch & Volume Guard */}

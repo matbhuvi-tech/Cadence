@@ -18,6 +18,12 @@ export function App() {
     isConnected,
     isConnecting,
     error,
+    outputDevices,
+    isLoadingDevices,
+    isChangingDevice,
+    deviceError,
+    refreshOutputDevices,
+    changeOutputDevice,
     connect,
     playPause,
     nextTrack,
@@ -73,7 +79,7 @@ export function App() {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-[100dvh] w-full overflow-hidden bg-[#0D0E11] text-zinc-100 select-none">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#0D0E11] text-zinc-100 select-none">
       {/* Top Header */}
       <TopHeader
         status={status}
@@ -96,7 +102,7 @@ export function App() {
       )}
 
       {/* Main Tab View */}
-      <main className="flex-1 flex flex-col overflow-hidden relative">
+      <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {activeTab === 'now_playing' && (
           <NowPlayingView
             status={status}
@@ -107,6 +113,12 @@ export function App() {
             onSeek={seek}
             onVolumeChange={setVolume}
             onTogglePurity={togglePurity}
+            outputDevices={outputDevices}
+            isLoadingDevices={isLoadingDevices}
+            isChangingDevice={isChangingDevice}
+            deviceError={deviceError}
+            onChangeOutputDevice={changeOutputDevice}
+            onRefreshOutputDevices={refreshOutputDevices}
           />
         )}
 
