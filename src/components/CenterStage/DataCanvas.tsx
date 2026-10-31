@@ -19,6 +19,9 @@ import {
 } from 'lucide-react'
 import { Work, Track, Release, AlbumDisplayMode, AuditIssue, CanvasViewMode } from '../../core/types'
 import { AlbumCoverGrid, EntityTab, SortBy, CardSize } from './AlbumCoverGrid'
+import { CatalogScopeBar, ScopeTab } from './SubToolbar/CatalogScopeBar'
+import { ViewControlCluster } from './SubToolbar/ViewControlCluster'
+import { useContainerBreakpoint } from '../../hooks/useContainerBreakpoint'
 import { WorkMovementView } from './WorkMovementView'
 import { VariantStackCard } from './VariantStackCard'
 import { VirtualDataTable } from './VirtualDataTable'
@@ -301,6 +304,8 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
     }
   }
 
+  const { containerRef, tier, isUltrawide } = useContainerBreakpoint<HTMLElement>()
+
   const selectedTracksList = tracks.filter((t) => selectedTrackIds.has(t.id))
 
   // View title label
@@ -322,80 +327,31 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   }, [viewMode, releases.length, tracks.length, works.length])
 
   return (
-    <main className="flex-1 min-h-0 flex flex-col h-full overflow-hidden bg-[#0C0D10] select-none">
+    <main ref={containerRef} className="flex-1 min-h-0 flex flex-col h-full overflow-hidden bg-[#0C0D10] select-none">
       {/* 1. Sleek macOS Sub-Toolbar */}
       <header className="px-6 py-2.5 border-b border-white/[0.05] bg-[#121316]/70 backdrop-blur-2xl flex items-center justify-between gap-4 shrink-0 z-20">
         {/* Left: View Title or Translucent Entity Switcher & Active Filter Tokens */}
         <div className="flex items-center gap-3 min-w-0">
           {(viewMode === 'cover_grid' || viewMode === 'virtual_table') ? (
             !selectedAlbumId ? (
-              <div className="flex items-center gap-2 shrink-0">
-                <div className="flex items-center gap-1 p-0.5 rounded-xl bg-white/[0.04] border border-white/[0.08] shrink-0">
-                  <button
-                    onClick={() => {
-                      onViewModeChange('cover_grid')
-                      setActiveCoverTab('albums')
-                      onSelectAlbumId?.(null)
-                      onSelectArtist?.(null)
-                      onSelectComposer?.(null)
-                    }}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      viewMode === 'cover_grid' && activeCoverTab === 'albums'
-                        ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
-                        : 'text-[#8E8E93] hover:text-[#F5F5F7]'
-                    }`}
-                  >
-                    Albums ({albumsCount})
-                  </button>
-                  <button
-                    onClick={() => {
-                      onViewModeChange('cover_grid')
-                      setActiveCoverTab('artists')
-                      onSelectAlbumId?.(null)
-                      onSelectArtist?.(null)
-                      onSelectComposer?.(null)
-                    }}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      viewMode === 'cover_grid' && activeCoverTab === 'artists'
-                        ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
-                        : 'text-[#8E8E93] hover:text-[#F5F5F7]'
-                    }`}
-                  >
-                    Artists ({artistCount})
-                  </button>
-                  <button
-                    onClick={() => {
-                      onViewModeChange('cover_grid')
-                      setActiveCoverTab('composers')
-                      onSelectAlbumId?.(null)
-                      onSelectArtist?.(null)
-                      onSelectComposer?.(null)
-                    }}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      viewMode === 'cover_grid' && activeCoverTab === 'composers'
-                        ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
-                        : 'text-[#8E8E93] hover:text-[#F5F5F7]'
-                    }`}
-                  >
-                    Composers ({composerCount})
-                  </button>
-                  <button
-                    onClick={() => {
-                      onViewModeChange('virtual_table')
-                      onSelectAlbumId?.(null)
-                      onSelectArtist?.(null)
-                      onSelectComposer?.(null)
-                    }}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      viewMode === 'virtual_table'
-                        ? 'bg-white/[0.08] text-[#F5F5F7] shadow-sm'
-                        : 'text-[#8E8E93] hover:text-[#F5F5F7]'
-                    }`}
-                  >
-                    Tracks ({tracks.length})
-                  </button>
-                </div>
-              </div>
+              <CatalogScopeBar
+                activeTab={viewMode === 'virtual_table' ? 'tracks' : activeCoverTab}
+                onTabChange={(tab: ScopeTab) => {
+                  if (tab === 'tracks') {
+                    onViewModeChange('virtual_table')
+                  } else {
+                    onViewModeChange('cover_grid')
+                    setActiveCoverTab(tab)
+                  }
+                  onSelectAlbumId?.(null)
+                  onSelectArtist?.(null)
+                  onSelectComposer?.(null)
+                }}
+                albumsCount={albumsCount}
+                artistsCount={artistCount}
+                composersCount={composerCount}
+                tracksCount={tracks.length}
+              />
             ) : null
           ) : (
             <span className="font-semibold text-xs tracking-tight text-white whitespace-nowrap">
@@ -468,60 +424,17 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
         {/* Right: Operational Tool Triggers & Filter Shelf Toggle */}
         {!selectedAlbumId && (
           <div className="flex items-center gap-3 shrink-0">
-            {/* Filter Shelf Toggle (⌘F) */}
-            <button
-              onClick={() => setIsFilterShelfOpen((prev) => !prev)}
-              title="Filter by Era, Format, Dynamic Range, Composer (⌘F)"
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono transition-all cursor-pointer ${
-                isFilterShelfOpen || activeTokens.length > 0
-                  ? 'bg-[#D4AF37]/20 border border-[#D4AF37]/40 text-[#D4AF37] font-semibold'
-                  : 'bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-[#8E8E93] hover:text-[#F5F5F7]'
-              }`}
-            >
-              <Filter className="w-3 h-3 text-[#D4AF37]" />
-              <span>Filter</span>
-              {activeTokens.length > 0 && (
-                <span className="text-[10px] px-1 py-0.2 rounded-full bg-[#D4AF37] text-black font-bold">
-                  {activeTokens.length}
-                </span>
-              )}
-              <span className="text-[9px] text-[#636366] font-mono hidden sm:inline">⌘F</span>
-            </button>
-
-            {/* Sort & Grid Size when in Cover Grid Mode */}
-            {viewMode === 'cover_grid' && (
-              <>
-                {/* Sort By Dropdown */}
-                <div className="flex items-center gap-1.5 text-xs text-[#8E8E93]">
-                  <span className="text-[11px] font-mono text-[#8E8E93]">Sort:</span>
-                  <select
-                    value={coverSortBy}
-                    onChange={(e) => setCoverSortBy(e.target.value as SortBy)}
-                    className="bg-black/40 border border-white/[0.1] rounded-lg px-2.5 py-1 text-xs text-[#EDEDED] focus:border-[#D4AF37] focus:outline-none cursor-pointer"
-                  >
-                    <option value="year_desc">Year (Newest First)</option>
-                    <option value="year_asc">Year (Oldest First)</option>
-                    <option value="artist_asc">Artist (A-Z)</option>
-                    <option value="title_asc">Album Title (A-Z)</option>
-                  </select>
-                </div>
-
-                {/* Card Size Selector */}
-                <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-[11px] font-mono text-[#8E8E93]">
-                  {(['compact', 'standard', 'large'] as CardSize[]).map((size) => (
-                    <button
-                      key={size}
-                      onClick={() => setCoverCardSize(size)}
-                      className={`px-2 py-0.5 rounded capitalize transition-all cursor-pointer ${
-                        coverCardSize === size ? 'bg-white/10 text-white font-bold' : 'hover:text-white'
-                      }`}
-                    >
-                      {size}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
+            <ViewControlCluster
+              tier={tier}
+              isFilterShelfOpen={isFilterShelfOpen}
+              onToggleFilterShelf={() => setIsFilterShelfOpen((prev) => !prev)}
+              activeFiltersCount={activeTokens.length}
+              sortBy={coverSortBy}
+              onSortChange={setCoverSortBy}
+              cardSize={coverCardSize}
+              onCardSizeChange={setCoverCardSize}
+              showCardSizeSelector={viewMode === 'cover_grid'}
+            />
 
             {/* Display Mode Toggle (Album First vs Folder First) */}
             {(viewMode === 'virtual_table' || viewMode === 'work_movement' || viewMode === 'variant_stack') && (
@@ -809,7 +722,8 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
         ) : (
           <>
             {viewMode === 'cover_grid' && (
-              <AlbumCoverGrid
+              <div className="w-full h-full max-w-[2560px] mx-auto flex flex-col min-h-0">
+                <AlbumCoverGrid
                 releases={releases}
                 tracks={tracks}
                 selectedTrackId={selectedTrackId}
@@ -834,6 +748,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                 splitReleaseIds={splitReleaseIds}
                 onToggleReleaseSplit={onToggleReleaseSplit}
               />
+              </div>
             )}
 
             {viewMode === 'work_movement' && (
@@ -873,7 +788,8 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
             )}
 
             {viewMode === 'virtual_table' && (
-              <VirtualDataTable
+              <div className="w-full h-full max-w-[2000px] mx-auto flex flex-col min-h-0">
+                <VirtualDataTable
                 tracks={tracks}
                 releases={releases}
                 albumDisplayMode={albumDisplayMode}
@@ -890,6 +806,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                 onInspectRelease={onInspectRelease}
                 onUpdateReleaseDetails={onUpdateReleaseDetails}
               />
+              </div>
             )}
 
             {viewMode === 'folder_tree' && (
