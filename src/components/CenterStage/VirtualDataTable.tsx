@@ -1,29 +1,14 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react'
+import React, { useState, useMemo } from 'react'
 import {
-  ArrowUpDown,
-  ShieldCheck,
-  AlertTriangle,
-  Pin,
-  Clock,
-  Music,
   Disc3,
   SlidersHorizontal,
-  FileCode,
   Sparkles,
   Folder,
-  FolderOpen,
-  FolderTree,
   ChevronDown,
   ChevronRight,
   Edit3,
   Calendar,
-  Layers,
-  Table,
-  Image as ImageIcon,
-  Check,
-  User,
   Play,
-  Pause,
   Volume2,
   ArrowUpToLine,
   ListPlus,
@@ -39,35 +24,6 @@ import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBack
 import { getCuratedAlbumArtwork } from '../../core/taxonomyUtils'
 import { backdropAnalyzer } from '../../services/backdropAnalyzer'
 import { FEATURES } from '../../config/features'
-
-const IndeterminateCheckbox: React.FC<{
-  checked: boolean
-  indeterminate?: boolean
-  onChange: () => void
-  title?: string
-  className?: string
-  'data-tutorial-id'?: string
-}> = ({ checked, indeterminate, onChange, title, className, 'data-tutorial-id': tutorialId }) => {
-  const ref = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (ref.current) {
-      ref.current.indeterminate = Boolean(indeterminate)
-    }
-  }, [indeterminate])
-
-  return (
-    <input
-      ref={ref}
-      type="checkbox"
-      checked={checked}
-      onChange={onChange}
-      title={title}
-      data-tutorial-id={tutorialId}
-      className={className || 'accent-[#00F5FF] w-3.5 h-3.5 rounded cursor-pointer'}
-    />
-  )
-}
 
 interface VirtualDataTableProps {
   tracks: Track[]
@@ -100,7 +56,6 @@ interface VirtualDataTableProps {
 
 type SortField = 'trackNumber' | 'title' | 'artistCredit' | 'drScore' | 'sampleRate' | 'sidecarStatus'
 type SortOrder = 'asc' | 'desc'
-type LayoutMode = 'hierarchy' | 'flat'
 
 interface ReleaseGroup {
   id: string
@@ -116,8 +71,6 @@ interface ReleaseGroup {
   sampleRates: string[]
   avgDr: number
   tracks: Track[]
-  allSelected: boolean
-  someSelected: boolean
   stagedCount: number
 }
 
@@ -127,40 +80,15 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
   albumDisplayMode = 'album_first',
   selectedTrackId,
   onSelectTrack,
-  selectedTrackIds,
-  onToggleTrackSelection,
-  onSelectAll,
-  onOpenMultiEdit,
-  onOpenBatchDiff,
-  onOpenBatchAi,
   onOpenSidecar,
   onCustomizeRelease,
   onInspectRelease,
   onUpdateReleaseDetails,
 }) => {
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>('flat')
-  const [sortField, setSortField] = useState<SortField>('trackNumber')
-  const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
-  const [pinnedColumns, setPinnedColumns] = useState<Set<string>>(new Set(['select', 'trackNumber']))
+  const [sortField] = useState<SortField>('trackNumber')
+  const [sortOrder] = useState<SortOrder>('asc')
 
-  const { currentTrack, isPlaying, playTrack, togglePlayPause, playNext, addToQueue } = useAudioPlayer()
-
-  const containerRef = useRef<HTMLDivElement>(null)
-  const [scrollTop, setScrollTop] = useState(0)
-
-  // Virtualization constants for flat view
-  const ROW_HEIGHT = 44
-  const VISIBLE_COUNT = 25
-  const BUFFER_COUNT = 8
-
-  const handleSort = (field: SortField) => {
-    if (sortField === field) {
-      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
-    } else {
-      setSortField(field)
-      setSortOrder('asc')
-    }
-  }
+  const { currentTrack, isPlaying, playTrack, playNext, addToQueue } = useAudioPlayer()
 
   const sortedTracks = useMemo(() => {
     const list = [...tracks]
@@ -263,9 +191,6 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
           ? Math.round(groupTracks.reduce((acc, t) => acc + (t.drScore || 0), 0) / groupTracks.length)
           : 0
       const stagedCount = groupTracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
-      const selectedCount = groupTracks.filter((t) => selectedTrackIds.has(t.id)).length
-      const allSelected = groupTracks.length > 0 && selectedCount === groupTracks.length
-      const someSelected = selectedCount > 0 && selectedCount < groupTracks.length
 
       groups.push({
         id: key,
@@ -281,14 +206,12 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
         sampleRates,
         avgDr,
         tracks: groupTracks,
-        allSelected,
-        someSelected,
         stagedCount,
       })
     })
 
     return groups
-  }, [sortedTracks, releases, selectedTrackIds])
+  }, [sortedTracks, releases])
 
   // Track collapsed groups (all folders expanded by default across any number of albums)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
@@ -311,18 +234,6 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
 
   const collapseAll = () => {
     setCollapsedGroups(new Set(releaseGroups.map((g) => g.id)))
-  }
-
-  const handleToggleGroupSelection = (group: ReleaseGroup) => {
-    const shouldSelect = !group.allSelected
-    group.tracks.forEach((track) => {
-      const isCurrentlySelected = selectedTrackIds.has(track.id)
-      if (shouldSelect && !isCurrentlySelected) {
-        onToggleTrackSelection(track.id, false)
-      } else if (!shouldSelect && isCurrentlySelected) {
-        onToggleTrackSelection(track.id, false)
-      }
-    })
   }
 
   const handleEditAlbum = (group: ReleaseGroup) => {
@@ -362,219 +273,68 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
     }
   }
 
-  // Virtual windowing calculations for flat view
-  const totalHeight = sortedTracks.length * ROW_HEIGHT
-  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_COUNT)
-  const endIndex = Math.min(
-    sortedTracks.length,
-    Math.floor((scrollTop + 800) / ROW_HEIGHT) + BUFFER_COUNT
-  )
-  const visibleTracks = sortedTracks.slice(startIndex, endIndex)
-  const offsetY = startIndex * ROW_HEIGHT
-
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop)
-  }
-
-  const formatDuration = (secs: number) => {
+  const formatDuration = (secs?: number) => {
+    if (!secs || isNaN(secs)) return '0:00'
     const m = Math.floor(secs / 60)
     const s = Math.floor(secs % 60)
     return `${m}:${s.toString().padStart(2, '0')}`
   }
 
-  const allSelected = sortedTracks.length > 0 && selectedTrackIds.size === sortedTracks.length
-
   return (
     <div className="flex-1 min-h-0 flex flex-col h-full bg-[#0D0E12] select-none overflow-hidden">
-      {/* Table Top Action Bar */}
-      <div className="p-2.5 px-4 bg-[#12151D] border-b border-white/[0.08] flex items-center justify-between gap-4 shrink-0">
-        {/* Left: View Layout Toggle (Hierarchical Folder vs Flat Table) */}
+      {/* Compact Hierarchy Control Bar */}
+      <div className="py-2 px-5 bg-[#12151D] border-b border-white/[0.06] flex items-center justify-between gap-4 shrink-0">
         <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 p-0.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
-            <button
-              onClick={() => setLayoutMode('hierarchy')}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
-                layoutMode === 'hierarchy'
-                  ? 'bg-[#00F5FF] text-black font-semibold shadow-sm'
-                  : 'text-[#94A3B8] hover:text-white'
-              }`}
-              title="Hierarchical Folder & Tracks view: Work at album level for title, folder, composer, and artwork"
-            >
-              <FolderTree className="w-3.5 h-3.5" />
-              <span>Hierarchical Folders</span>
-            </button>
-            <button
-              onClick={() => setLayoutMode('flat')}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
-                layoutMode === 'flat'
-                  ? 'bg-[#00F5FF] text-black font-semibold shadow-sm'
-                  : 'text-[#94A3B8] hover:text-white'
-              }`}
-              title="Flat virtual table: View and sort all individual tracks"
-            >
-              <Table className="w-3.5 h-3.5" />
-              <span>Flat Table</span>
-            </button>
-          </div>
-
-          {layoutMode === 'hierarchy' && (
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={expandAll}
-                className="px-2 py-1 rounded text-[11px] font-mono text-[#94A3B8] hover:text-white hover:bg-white/[0.04] transition-colors cursor-pointer"
-                title="Expand all album folders"
-              >
-                Expand All
-              </button>
-              <span className="text-white/20">&bull;</span>
-              <button
-                onClick={collapseAll}
-                className="px-2 py-1 rounded text-[11px] font-mono text-[#94A3B8] hover:text-white hover:bg-white/[0.04] transition-colors cursor-pointer"
-                title="Collapse all album folders"
-              >
-                Collapse All
-              </button>
-              <span className="text-white/20">&bull;</span>
-              <span className="text-[11px] font-mono text-[#64748B]">
-                {releaseGroups.length} Folders &bull; {sortedTracks.length} Tracks
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Right: Selected tracks & Batch Operations */}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-2 text-xs font-mono text-[#00F5FF]">
-            <span className="font-bold">{selectedTrackIds.size}</span> tracks selected
-          </div>
-
-          {(onOpenBatchDiff || onOpenBatchAi) && (
-            <button
-              data-tutorial-id="btn-batch-ai-grid"
-              onClick={onOpenBatchDiff || onOpenBatchAi}
-              disabled={selectedTrackIds.size === 0}
-              title="Batch Enrich selected tracks across Apple Music, MusicBrainz, and Gemini AI"
-              className="px-3 py-1 rounded bg-gradient-to-r from-[#00F5FF] via-[#8B5CF6] to-[#EC4899] text-white font-semibold text-xs hover:brightness-110 transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-[#ADFF2F]" />
-              Batch Enrich ({Math.min(25, selectedTrackIds.size || 25)} Tracks)
-            </button>
-          )}
-
           <button
-            data-tutorial-id="btn-spreadsheet-multi-edit"
-            onClick={onOpenMultiEdit}
-            disabled={selectedTrackIds.size === 0}
-            className="px-3 py-1 rounded bg-[#00F5FF] text-black font-semibold text-xs hover:bg-[#00F5FF]/90 transition-all flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            onClick={expandAll}
+            className="px-2.5 py-1 rounded-lg text-[11px] font-mono text-[#94A3B8] hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
+            title="Expand all album folders"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            Spreadsheet Multi-Edit (Alt+E)
+            Expand All
+          </button>
+          <span className="text-white/20">&bull;</span>
+          <button
+            onClick={collapseAll}
+            className="px-2.5 py-1 rounded-lg text-[11px] font-mono text-[#94A3B8] hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
+            title="Collapse all album folders"
+          >
+            Collapse All
           </button>
         </div>
+
+        <span className="text-[11px] font-mono text-[#64748B]">
+          {releaseGroups.length} Albums &bull; {sortedTracks.length} Tracks
+        </span>
       </div>
 
-      {/* Table Header with Pinned Columns and Multi-Sort (Flat Table Mode Only) */}
-      {layoutMode === 'flat' && (
-        <div className="grid grid-cols-12 gap-2 px-4 py-2.5 bg-[#12151D] border-b border-white/[0.08] text-xs font-mono font-medium text-[#94A3B8] items-center shrink-0">
-          <div className="col-span-1 flex items-center gap-2">
-            <input
-              data-tutorial-id="virtual-grid-select-all"
-              type="checkbox"
-              checked={allSelected}
-              onChange={(e) => onSelectAll(e.target.checked)}
-              className="accent-[#00F5FF] w-3.5 h-3.5 rounded cursor-pointer"
-            />
-            <button
-              onClick={() => handleSort('trackNumber')}
-              className="flex items-center gap-1 hover:text-white cursor-pointer"
+      {/* Hierarchical Folder & Tracks View with Smooth Full Vertical Scrolling */}
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col p-4 gap-4 pb-28">
+        {releaseGroups.map((group) => {
+          const isExpanded = !collapsedGroups.has(group.id)
+
+          return (
+            <div
+              key={group.id}
+              className="flex flex-col relative shrink-0 overflow-hidden group/album rounded-2xl border border-white/[0.08] bg-[#12151D]/80 shadow-xl transition-all duration-300"
             >
-              <span>#</span>
-              <ArrowUpDown className="w-2.5 h-2.5" />
-            </button>
-          </div>
+              {/* Dedicated Full-Card Cinematic Album-Art Backdrop */}
+              <PanoramicAtmosphericBackdrop
+                coverArtUrl={group.coverArtUrl}
+                backdropUrl={group.backdropUrl}
+                overlayVariant="banner"
+              />
 
-          <div className="col-span-4 flex items-center">
-            <button
-              onClick={() => handleSort('title')}
-              className="flex items-center gap-1 hover:text-white cursor-pointer"
-            >
-              <span>Track Title & Work Hierarchy</span>
-              <ArrowUpDown className="w-2.5 h-2.5" />
-            </button>
-          </div>
-
-          <div className="col-span-2 flex items-center">
-            <button
-              onClick={() => handleSort('artistCredit')}
-              className="flex items-center gap-1 hover:text-white cursor-pointer"
-            >
-              <span>Performer / Composer</span>
-              <ArrowUpDown className="w-2.5 h-2.5" />
-            </button>
-          </div>
-
-          <div className="col-span-2 flex items-center">
-            <button
-              onClick={() => handleSort('drScore')}
-              className="flex items-center gap-1 hover:text-white cursor-pointer"
-            >
-              <span>DR & Dynamic Range</span>
-              <ArrowUpDown className="w-2.5 h-2.5" />
-            </button>
-          </div>
-
-          <div className="col-span-2 flex items-center">
-            <button
-              onClick={() => handleSort('sampleRate')}
-              className="flex items-center gap-1 hover:text-white cursor-pointer"
-            >
-              <span>Sample Format</span>
-              <ArrowUpDown className="w-2.5 h-2.5" />
-            </button>
-          </div>
-
-          <div className="col-span-1 flex items-center justify-end">
-            <button
-              onClick={() => handleSort('sidecarStatus')}
-              className="flex items-center gap-1 hover:text-white cursor-pointer"
-            >
-              <span>Status</span>
-              <ArrowUpDown className="w-2.5 h-2.5" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Main Content Area */}
-      {layoutMode === 'hierarchy' ? (
-        /* Hierarchical Folder & Tracks View with Smooth Full Vertical Scrolling */
-        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col p-3 gap-4 pb-28">
-          {releaseGroups.map((group) => {
-            const isExpanded = !collapsedGroups.has(group.id)
-
-            return (
-              <div
-                key={group.id}
-                className="flex flex-col relative shrink-0 overflow-hidden group/album rounded-2xl border border-white/[0.12] bg-[#0A0D14] shadow-2xl shadow-black/80 transition-all duration-300"
-              >
-                {/* Dedicated Full-Card Cinematic Album-Art Backdrop */}
-                <PanoramicAtmosphericBackdrop
-                  coverArtUrl={group.coverArtUrl}
-                  backdropUrl={group.backdropUrl}
-                  overlayVariant="banner"
-                />
-
-                {/* Album Content Layer: Header + Track List */}
-                <div className="relative z-10 flex flex-col w-full">
-                  {/* 1. EMBEDDED PANORAMIC COVER ART HERO BANNER HEADER */}
-                  <div className="relative min-h-[110px] md:min-h-[125px] px-5 py-4 flex items-center justify-between gap-4 border-b border-white/[0.1] select-none">
-                    {/* Left: Collapse, Checkbox, Sharp Front Artwork Thumbnail & Album Metadata */}
-                    <div className="flex items-center gap-3.5 min-w-0 flex-1 z-10">
+              {/* Album Content Layer: Header + Track List */}
+              <div className="relative z-10 flex flex-col w-full">
+                {/* 1. EMBEDDED PANORAMIC COVER ART HERO BANNER HEADER */}
+                <div className="relative min-h-[104px] px-5 py-4 flex items-center justify-between gap-4 border-b border-white/[0.08] select-none">
+                  {/* Left: Collapse, Sharp Front Artwork Thumbnail & Album Metadata */}
+                  <div className="flex items-center gap-3.5 min-w-0 flex-1 z-10">
                     {/* Expand / Collapse Toggle Button */}
                     <button
                       onClick={() => toggleGroup(group.id)}
                       className="p-1.5 rounded-lg text-[#94A3B8] hover:text-white hover:bg-white/[0.1] bg-black/40 backdrop-blur-sm border border-white/[0.1] transition-colors cursor-pointer shrink-0"
-                      title={isExpanded ? 'Collapse Folder' : 'Expand Folder'}
+                      title={isExpanded ? 'Collapse Album' : 'Expand Album'}
                     >
                       {isExpanded ? (
                         <ChevronDown className="w-4 h-4 text-[#00F5FF]" />
@@ -582,14 +342,6 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                         <ChevronRight className="w-4 h-4 text-[#64748B]" />
                       )}
                     </button>
-
-                    {/* Folder-Wide Selection Checkbox */}
-                    <IndeterminateCheckbox
-                      checked={group.allSelected}
-                      indeterminate={group.someSelected}
-                      onChange={() => handleToggleGroupSelection(group)}
-                      title={group.allSelected ? 'Deselect entire folder' : 'Select all tracks in this folder'}
-                    />
 
                     {/* Album Artwork Thumbnail with Large Hover Zoom Popover */}
                     <ArtworkHoverPreview
@@ -607,8 +359,8 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                     >
                       <div
                         onClick={() => handleEditAlbum(group)}
-                        className="w-14 h-14 md:w-16 md:h-16 rounded-xl overflow-hidden border border-white/[0.25] bg-black/70 shrink-0 cursor-pointer relative group/thumb hover:border-[#00F5FF] transition-all shadow-2xl ring-1 ring-white/10"
-                        title="Click to edit album details & cover art (Hover for large preview)"
+                        className="w-14 h-14 md:w-16 md:h-16 rounded-xl overflow-hidden border border-white/[0.2] bg-black/70 shrink-0 cursor-pointer relative group/thumb hover:border-[#00F5FF] transition-all shadow-2xl ring-1 ring-white/10"
+                        title="Click to inspect/curate album (Hover for large preview)"
                       >
                         {group.coverArtUrl ? (
                           <img
@@ -637,7 +389,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                           onClick={() => {
                             if (group.tracks.length > 0) onSelectTrack(group.tracks[0].id)
                           }}
-                          className="font-bold text-base md:text-xl text-white truncate hover:text-[#00F5FF] cursor-pointer drop-shadow-md tracking-tight"
+                          className="font-bold text-base md:text-lg text-white truncate hover:text-[#00F5FF] cursor-pointer drop-shadow-md tracking-tight"
                           title={`Album: ${group.title}`}
                         >
                           {albumDisplayMode === 'folder_first' ? (group.folderName || group.title) : group.title}
@@ -664,19 +416,18 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                         )}
                       </div>
 
-                      {/* Secondary line: Composer Pill, Artist, Year, Formats, Avg DR */}
+                      {/* Secondary line: Composer, Artist, Year, Formats, Avg DR */}
                       <div className="flex items-center gap-2 text-xs text-[#94A3B8] flex-wrap">
-                        {/* 1-Click Composer Badge */}
-                        <button
-                          onClick={() => handleEditAlbum(group)}
-                          className="flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#EC4899]/15 text-[#EC4899] hover:bg-[#EC4899]/25 border border-[#EC4899]/30 font-mono text-[11px] transition-all cursor-pointer shrink-0 font-bold backdrop-blur-sm"
-                          title="Composer for this album. Click to customize."
-                        >
-                          <span>🎼</span>
-                          <span>{group.composerName || 'Set Composer'}</span>
-                        </button>
+                        {group.composerName && (
+                          <>
+                            <span className="flex items-center gap-1 text-[#EC4899] font-mono text-[11px] font-semibold">
+                              <span>🎼</span>
+                              <span>{group.composerName}</span>
+                            </span>
+                            <span className="text-white/20">&bull;</span>
+                          </>
+                        )}
 
-                        <span className="text-white/20">&bull;</span>
                         <span className="text-[#CBD5E1] truncate font-medium">{group.artistCredit}</span>
 
                         {group.releaseYear && (
@@ -699,7 +450,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                           </>
                         )}
 
-                        {group.avgDr > 0 && (
+                        {FEATURES.DYNAMIC_RANGE && group.avgDr > 0 && (
                           <>
                             <span className="text-white/20">&bull;</span>
                             <span className="font-mono text-[11px] font-bold px-2 py-0.5 rounded bg-white/[0.08] text-[#CBD5E1] border border-white/[0.1]">
@@ -711,17 +462,15 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                     </div>
                   </div>
 
-                  {/* Right: Album-Level Actions with frosted glass */}
+                  {/* Right: Album-Level Actions matching Album Detail */}
                   <div className="flex items-center gap-2.5 shrink-0 z-10">
-
-                    {/* Primary actions */}
                     <button
                       onClick={() => {
                         if (group.tracks.length > 0) {
                           playTrack(group.tracks[0], group.tracks)
                         }
                       }}
-                      className="px-3 py-1.5 rounded-xl bg-[#10B981]/20 hover:bg-[#10B981]/30 text-[#10B981] border border-[#10B981]/40 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-bold shadow-md hover:scale-[1.02] active:scale-[0.98]"
+                      className="px-4 py-2 rounded-xl bg-[#00F5FF] hover:bg-[#00F5FF]/90 text-black font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-cyan-500/20 hover:scale-105 active:scale-95 transition-all cursor-pointer"
                       title="Play all tracks in this album"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />
@@ -729,60 +478,48 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                     </button>
 
                     <button
-                      onClick={() => handleEditAlbum(group)}
-                      className="px-3 py-1.5 rounded-xl bg-[#00F5FF]/15 hover:bg-[#00F5FF]/25 text-[#00F5FF] border border-[#00F5FF]/40 backdrop-blur-md transition-all text-xs flex items-center gap-1.5 cursor-pointer font-bold shadow-md hover:scale-[1.02] active:scale-[0.98]"
-                      title="Edit Album Title, Physical Folder Name, Composer, Year & Artwork"
+                      onClick={() => {
+                        addToQueue(group.tracks)
+                        window.dispatchEvent(
+                          new CustomEvent('cadence:toast', { detail: `Added ${group.tracks.length} tracks to queue` })
+                        )
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-1.5 hover:scale-105 active:scale-95 transition-all cursor-pointer"
+                      title="Add album tracks to queue"
                     >
-                      <SlidersHorizontal className="w-3.5 h-3.5" />
-                      <span>Edit Album</span>
+                      <ListPlus className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="hidden sm:inline">Queue</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        window.dispatchEvent(
+                          new CustomEvent('cadence:add-tracks-playlist', { detail: group.tracks })
+                        )
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-white font-semibold text-xs flex items-center gap-1.5 hover:scale-105 active:scale-95 transition-all cursor-pointer"
+                      title="Add album tracks to a playlist"
+                    >
+                      <BookmarkPlus className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="hidden sm:inline">Playlist</span>
                     </button>
 
                     {/* Secondary Overflow Actions */}
                     <div className="relative group/menu">
                       <button
-                        className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/15 transition-all text-xs flex items-center justify-center cursor-pointer"
+                        className="p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white/80 hover:text-white border border-white/[0.12] transition-all text-xs flex items-center justify-center cursor-pointer"
                         title="More album actions"
                       >
                         <MoreHorizontal className="w-4 h-4" />
                       </button>
                       <div className="absolute right-0 top-full mt-1.5 w-48 rounded-xl bg-[#12151D] border border-white/10 shadow-2xl p-1.5 hidden group-hover/menu:flex flex-col gap-1 z-30">
                         <button
-                          onClick={() => {
-                            addToQueue(group.tracks)
-                            window.dispatchEvent(
-                              new CustomEvent('cadence:toast', { detail: `Added ${group.tracks.length} tracks to queue` })
-                            )
-                          }}
-                          className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left"
+                          onClick={() => handleEditAlbum(group)}
+                          className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left cursor-pointer"
                         >
-                          <ListPlus className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Add to Queue</span>
+                          <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400" />
+                          <span>Edit Metadata in Curate</span>
                         </button>
-                        <button
-                          onClick={() => {
-                            window.dispatchEvent(
-                              new CustomEvent('cadence:add-tracks-playlist', { detail: group.tracks })
-                            )
-                          }}
-                          className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left"
-                        >
-                          <BookmarkPlus className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Add to Playlist</span>
-                        </button>
-                        {onOpenBatchDiff && (
-                          <button
-                            onClick={() => {
-                              group.tracks.forEach((t) => {
-                                if (!selectedTrackIds.has(t.id)) onToggleTrackSelection(t.id, false)
-                              })
-                              onOpenBatchDiff()
-                            }}
-                            className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left"
-                          >
-                            <Sparkles className="w-3.5 h-3.5 text-[#ADFF2F]" />
-                            <span>Enrich Album</span>
-                          </button>
-                        )}
                         {backdropAnalyzer.isBackdropUnformatted(group.release).isUnformatted && (
                           <button
                             onClick={async () => {
@@ -802,7 +539,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                                 }
                               }
                             }}
-                            className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-amber-300 text-xs flex items-center gap-2 text-left"
+                            className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-amber-300 text-xs flex items-center gap-2 text-left cursor-pointer"
                           >
                             <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                             <span>Format Backdrop</span>
@@ -813,449 +550,222 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                   </div>
                 </div>
 
-                {/* 2. INDENTED CHILD TRACKS TABLE */}
+                {/* 2. TRACKLIST TABLE (Matching Album Detail View) */}
                 {isExpanded && (
-                  <div className="flex flex-col divide-y divide-white/[0.03]">
-                    {group.tracks.map((track) => {
-                      const isSelected = selectedTrackId === track.id
-                      const isChecked = selectedTrackIds.has(track.id)
-                      const drClass = IntegrityScanner.getDrBadgeClass(track.drScore)
+                  <div>
+                    {/* Table Header */}
+                    <div className="grid grid-cols-12 gap-3 px-5 py-2.5 text-[11px] font-mono text-[#64748B] border-b border-white/[0.04] uppercase tracking-wider">
+                      <div className="col-span-1 text-center">#</div>
+                      <div className={FEATURES.DYNAMIC_RANGE ? 'col-span-6 sm:col-span-7' : 'col-span-7 sm:col-span-8'}>Title</div>
+                      <div className="col-span-3 sm:col-span-2 text-right">Format / Spec</div>
+                      {FEATURES.DYNAMIC_RANGE && <div className="col-span-1 text-center">DR</div>}
+                      <div className="col-span-1 text-right">Time</div>
+                    </div>
 
-                      return (
-                        <div
-                          key={track.id}
-                          onDoubleClick={() => playTrack(track, group.tracks)}
-                          onClick={(e) => {
-                            if (e.altKey || e.shiftKey) {
-                              onToggleTrackSelection(track.id, true)
-                            } else {
-                              onSelectTrack(track.id)
-                            }
-                          }}
-                          className={`grid grid-cols-12 gap-2 px-4 h-[42px] items-center text-xs border-b border-white/[0.02] transition-colors cursor-pointer text-left group/row ${
-                            isSelected
-                              ? 'bg-[#00F5FF]/10 text-white font-medium'
-                              : isChecked
-                              ? 'bg-white/[0.05] text-[#F1F5F9]'
-                              : 'hover:bg-white/[0.02] text-[#CBD5E1]'
-                          } ${track.isOnline === false ? 'opacity-40 hover:opacity-75' : ''}`}
-                        >
-                          {/* Col 1: Indented Checkbox & Track Number / Play */}
-                          <div className="col-span-1 flex items-center gap-2 pl-6 font-mono text-[#64748B]">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={(e) => {
-                                e.stopPropagation()
-                                onToggleTrackSelection(track.id, false)
-                              }}
-                              className="accent-[#00F5FF] w-3.5 h-3.5 rounded cursor-pointer"
-                            />
-                            <div
-                              className="w-5 flex items-center justify-center cursor-pointer"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                if (currentTrack?.id === track.id) {
-                                  togglePlayPause()
-                                } else {
-                                  playTrack(track, group.tracks)
-                                }
-                              }}
-                              title="Click to play track"
-                            >
-                              {currentTrack?.id === track.id ? (
-                                isPlaying ? (
-                                  <span className="flex items-center gap-0.5">
-                                    <span className="w-0.5 h-2.5 bg-[#00F5FF] animate-pulse" />
-                                    <span className="w-0.5 h-3.5 bg-[#00F5FF] animate-pulse" style={{ animationDelay: '150ms' }} />
-                                    <span className="w-0.5 h-2 bg-[#00F5FF] animate-pulse" style={{ animationDelay: '300ms' }} />
-                                  </span>
-                                ) : (
-                                  <Play className="w-3 h-3 text-[#00F5FF] fill-current" />
-                                )
-                              ) : (
-                                <>
-                                  <span className="group-hover/row:hidden">{track.trackNumber.toString().padStart(2, '0')}</span>
-                                  <Play className="w-3 h-3 text-white hidden group-hover/row:inline fill-current" />
-                                </>
-                              )}
-                            </div>
-                          </div>
+                    {/* Track Rows */}
+                    <div className="divide-y divide-white/[0.03]">
+                      {group.tracks.map((track, idx) => {
+                        const isCurrentPlaying = currentTrack?.id === track.id
+                        const isSelected = selectedTrackId === track.id
+                        const trackDrClass = IntegrityScanner.getDrBadgeClass(track.drScore)
 
-                          {/* Col 2: Title & Work Movement */}
-                          <div className="col-span-4 flex items-center gap-2 truncate pr-2">
-                            {track.sidecarStatus === 'uncommitted_sidecar' && (
-                              <span
+                        return (
+                          <div
+                            key={track.id}
+                            onClick={() => onSelectTrack(track.id)}
+                            onDoubleClick={() => playTrack(track, group.tracks)}
+                            className={`grid grid-cols-12 gap-3 px-5 py-2.5 items-center transition-colors cursor-pointer group/tr ${
+                              isCurrentPlaying
+                                ? 'bg-cyan-500/10 text-cyan-300'
+                                : isSelected
+                                ? 'bg-white/[0.05] text-white'
+                                : 'hover:bg-white/[0.03] text-[#CBD5E1]'
+                            } ${track.isOnline === false ? 'opacity-40 hover:opacity-75' : ''}`}
+                          >
+                            {/* Track Number / Play button */}
+                            <div className="col-span-1 flex items-center justify-center">
+                              <button
                                 onClick={(e) => {
                                   e.stopPropagation()
-                                  onOpenSidecar(track.id)
+                                  playTrack(track, group.tracks)
                                 }}
-                                title="Uncommitted sidecar edit staged (Raw audio file untouched)"
-                                className="sidecar-badge-dot shrink-0"
-                              />
-                            )}
-                            <div className="flex flex-col truncate">
-                              <span className="truncate font-medium text-[#F1F5F9]">{track.title}</span>
-                              {track.movementTitle && (
-                                <span className="text-[10px] text-[#64748B] font-mono truncate">
-                                  Mov {track.movementNumber}: {track.movementTitle}
+                                className={`w-6 h-6 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                                  isCurrentPlaying
+                                    ? 'bg-[#00F5FF] text-black shadow-md shadow-cyan-500/30'
+                                    : 'hover:bg-cyan-400 hover:text-black'
+                                }`}
+                                title="Play Track"
+                              >
+                                {isCurrentPlaying && isPlaying ? (
+                                  <Volume2 className="w-3.5 h-3.5 text-black animate-pulse" />
+                                ) : isCurrentPlaying ? (
+                                  <Play className="w-3.5 h-3.5 fill-current ml-0.5 text-black" />
+                                ) : (
+                                  <>
+                                    <span className="group-hover/tr:hidden text-xs font-mono text-[#64748B]">
+                                      {track.trackNumber
+                                        ? String(track.trackNumber).padStart(2, '0')
+                                        : String(idx + 1).padStart(2, '0')}
+                                    </span>
+                                    <Play className="w-3.5 h-3.5 fill-current hidden group-hover/tr:block ml-0.5" />
+                                  </>
+                                )}
+                              </button>
+                            </div>
+
+                            {/* Title & Classical movement / Artist */}
+                            <div className={`${FEATURES.DYNAMIC_RANGE ? 'col-span-6 sm:col-span-7' : 'col-span-7 sm:col-span-8'} min-w-0 pr-2 text-left`}>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`text-xs font-semibold truncate ${
+                                    isCurrentPlaying ? 'text-[#00F5FF]' : 'text-white'
+                                  }`}
+                                >
+                                  {track.title}
                                 </span>
+                                {track.sidecarStatus === 'uncommitted_sidecar' && (
+                                  <span
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      onOpenSidecar(track.id)
+                                    }}
+                                    className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0 cursor-pointer"
+                                    title="Staged sidecar edit"
+                                  />
+                                )}
+                              </div>
+                              {(track.movementTitle || track.workTitle) && (
+                                <div className="text-[10px] text-slate-400 truncate mt-0.5 font-mono">
+                                  {track.movementNumber ? `${track.movementNumber}. ` : ''}
+                                  {track.movementTitle || track.workTitle}
+                                </div>
+                              )}
+                              {track.artistCredit && track.artistCredit !== group.artistCredit && (
+                                <div className="text-[10px] text-[#94A3B8] truncate mt-0.5">
+                                  {track.artistCredit}
+                                </div>
                               )}
                               {track.canonicalAlbumTitle && !track.isCanonicalAlbumTrack && (
-                                <span
-                                  className={`text-[10px] bg-white/[0.05] text-zinc-400 border border-white/[0.08] px-1.5 py-0.5 rounded font-mono truncate flex items-center gap-1 w-fit mt-0.5 ${
-                                    track.canonicalReleaseId && onInspectRelease ? 'cursor-pointer hover:text-white hover:border-white/20' : 'opacity-85'
-                                  }`}
-                                  onClick={(e) => {
-                                    if (track.canonicalReleaseId && onInspectRelease) {
-                                      e.stopPropagation()
-                                      onInspectRelease(track.canonicalReleaseId)
-                                    }
-                                  }}
-                                  title={
-                                    track.canonicalReleaseId
-                                      ? `Originally released in ${track.canonicalAlbumTitle}. Click to inspect.`
-                                      : `Original Soundtrack: ${track.canonicalAlbumTitle} (Not in local library)`
-                                  }
-                                >
-                                  <Film className="w-2.5 h-2.5 text-zinc-400 shrink-0" />
-                                  <span>From {track.canonicalAlbumTitle}</span>
-                                  {track.canonicalReleaseYear && <span className="text-zinc-500">({track.canonicalReleaseYear})</span>}
-                                </span>
+                                <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                                  {track.canonicalReleaseId && onInspectRelease ? (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        onInspectRelease(track.canonicalReleaseId!)
+                                      }}
+                                      className="group/orig flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-cyan-300 hover:text-cyan-200 transition-all text-[10px] font-mono cursor-pointer"
+                                      title={`Click to jump to original soundtrack: ${track.canonicalAlbumTitle}`}
+                                    >
+                                      <Film className="w-2.5 h-2.5 text-cyan-400 group-hover/orig:scale-110 transition-transform" />
+                                      <span className="text-cyan-400 font-semibold">From</span>
+                                      <span className="font-semibold underline decoration-cyan-500/40 underline-offset-2 truncate max-w-[200px]">
+                                        {track.canonicalAlbumTitle}
+                                      </span>
+                                      {track.canonicalReleaseYear && (
+                                        <span className="text-cyan-400/60 font-normal">({track.canonicalReleaseYear})</span>
+                                      )}
+                                      <ChevronRight className="w-2.5 h-2.5 text-cyan-400/60 group-hover/orig:translate-x-0.5 transition-transform" />
+                                    </button>
+                                  ) : (
+                                    <div
+                                      className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-cyan-500/5 border border-cyan-500/15 text-cyan-300/80 text-[10px] font-mono select-none"
+                                      title={`Original Soundtrack: ${track.canonicalAlbumTitle} (Not in local library)`}
+                                    >
+                                      <Film className="w-2.5 h-2.5 text-cyan-400/70" />
+                                      <span className="text-cyan-400/80 font-semibold">From</span>
+                                      <span className="font-medium truncate max-w-[200px]">
+                                        {track.canonicalAlbumTitle}
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
                               )}
                             </div>
-                          </div>
 
-                          {/* Col 3: Performer / Composer */}
-                          <div className="col-span-2 flex flex-col truncate pr-2">
-                            <span className="truncate text-[#94A3B8]">{track.artistCredit}</span>
-                            {track.composerName && track.composerName !== group.composerName && (
-                              <span className="text-[10px] text-[#EC4899] font-mono truncate">
-                                {track.composerName}
+                            {/* Spec badge */}
+                            <div className="col-span-3 sm:col-span-2 text-right min-w-0">
+                              <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-mono text-slate-400 bg-white/[0.04] border border-white/[0.06] truncate">
+                                {track.format} {track.sampleRateStr}
                               </span>
-                            )}
-                          </div>
+                            </div>
 
-                          {/* Col 4: Inline DR Score & Spectral Meter */}
-                          <div className="col-span-2 flex items-center gap-2">
-                            {FEATURES.DYNAMIC_RANGE && track.drScore != null ? (
-                              <>
-                                <div
-                                  className={`px-1.5 py-0.2 rounded border font-mono font-bold text-[10px] ${drClass.bg} ${drClass.text}`}
+                            {/* DR */}
+                            {FEATURES.DYNAMIC_RANGE && (
+                              <div className="col-span-1 text-center">
+                                {track.drScore != null && track.drScore > 0 ? (
+                                  <span
+                                    className={`px-1 py-0.2 rounded font-mono font-bold text-[9px] border ${trackDrClass.bg} ${trackDrClass.text}`}
+                                  >
+                                    DR{track.drScore}
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-mono text-white/20">-</span>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Duration & Hover Quick Actions */}
+                            <div className="col-span-1 flex items-center justify-end gap-1.5 text-right relative">
+                              <span className="text-xs font-mono text-[#64748B] group-hover/tr:hidden">
+                                {formatDuration(track.durationSeconds || track.duration)}
+                              </span>
+
+                              <div className="hidden group-hover/tr:flex items-center gap-1 animate-fadeIn">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    playNext(track)
+                                    window.dispatchEvent(
+                                      new CustomEvent('cadence:toast', { detail: `Queued "${track.title}" to play next` })
+                                    )
+                                  }}
+                                  title="Play Next"
+                                  className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors cursor-pointer"
                                 >
-                                  DR{track.drScore}
-                                </div>
-                                <div className="w-16 h-2 bg-white/[0.05] rounded-full overflow-hidden flex">
-                                  <div
-                                    className={`h-full rounded-full ${
-                                      track.drScore >= 14
-                                        ? 'bg-[#10B981]'
-                                        : track.drScore >= 10
-                                        ? 'bg-[#00F5FF]'
-                                        : 'bg-[#F59E0B]'
-                                    }`}
-                                    style={{ width: `${Math.min(100, (track.drScore / 18) * 100)}%` }}
-                                  />
-                                </div>
-                              </>
-                            ) : (
-                              <span className="text-[10px] text-zinc-600 font-mono">—</span>
-                            )}
-                          </div>
-
-                          {/* Col 5: Sample Format */}
-                          <div className="col-span-2 flex items-center gap-1.5 font-mono text-[11px] text-[#94A3B8]">
-                            <span className="px-1.5 py-0.2 rounded bg-white/[0.04] text-[#CBD5E1]">
-                              {track.sampleRateStr}
-                            </span>
-                            <span className="text-[#94A3B8] font-semibold">{track.format}</span>
-                          </div>
-
-                          {/* Col 6: Duration & Checksum Status + Quick Actions on Hover */}
-                          <div
-                            data-tutorial-id="grid-sidecar-status-pill"
-                            className="col-span-1 flex items-center justify-end gap-1.5 text-right relative"
-                          >
-                            <span className="font-mono text-[11px] text-[#94A3B8] group-hover/row:hidden">
-                              {formatDuration(track.durationSeconds)}
-                            </span>
-                            <div className="group-hover/row:hidden" title={track.checksumValid ? 'Bit-perfect audio MD5 checksum verified' : 'Bit-rot / Checksum corrupt'}>
-                              {track.checksumValid ? (
-                                <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
-                              ) : (
-                                <AlertTriangle className="w-3.5 h-3.5 text-[#F43F5E]" />
-                              )}
-                            </div>
-
-                            {/* Quick Actions Revealed on Hover */}
-                            <div className="hidden group-hover/row:flex items-center gap-1 animate-fadeIn">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  playNext(track)
-                                  window.dispatchEvent(
-                                    new CustomEvent('cadence:toast', { detail: `Queued "${track.title}" to play next` })
-                                  )
-                                }}
-                                title="Play Next"
-                                className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors"
-                              >
-                                <ArrowUpToLine className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  addToQueue(track)
-                                  window.dispatchEvent(
-                                    new CustomEvent('cadence:toast', { detail: `Added "${track.title}" to queue` })
-                                  )
-                                }}
-                                title="Add to Queue"
-                                className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors"
-                              >
-                                <ListPlus className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  window.dispatchEvent(
-                                    new CustomEvent('cadence:add-tracks-playlist', { detail: [track] })
-                                  )
-                                }}
-                                title="Add to Playlist..."
-                                className="p-1 rounded text-neutral-400 hover:text-white hover:bg-white/10 transition-colors"
-                              >
-                                <BookmarkPlus className="w-3.5 h-3.5" />
-                              </button>
+                                  <ArrowUpToLine className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    addToQueue(track)
+                                    window.dispatchEvent(
+                                      new CustomEvent('cadence:toast', { detail: `Added "${track.title}" to queue` })
+                                    )
+                                  }}
+                                  title="Add to Queue"
+                                  className="p-1 rounded text-neutral-400 hover:text-emerald-400 hover:bg-white/10 transition-colors cursor-pointer"
+                                >
+                                  <ListPlus className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    window.dispatchEvent(
+                                      new CustomEvent('cadence:add-tracks-playlist', { detail: [track] })
+                                    )
+                                  }}
+                                  title="Add to Playlist..."
+                                  className="p-1 rounded text-neutral-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                                >
+                                  <BookmarkPlus className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      )
-                    })}
+                        )
+                      })}
+                    </div>
                   </div>
                 )}
-                </div>
               </div>
-            )
-          })}
-        </div>
-      ) : (
-        /* Flat Virtual Scrolling Table (60fps Windowing) */
-        <div
-          ref={containerRef}
-          onScroll={handleScroll}
-          className="flex-1 overflow-y-auto overflow-x-hidden relative"
-        >
-          <div style={{ height: `${totalHeight}px`, position: 'relative' }}>
-            <div
-              style={{
-                transform: `translateY(${offsetY}px)`,
-                position: 'absolute',
-                left: 0,
-                right: 0,
-                top: 0,
-              }}
-            >
-              {visibleTracks.map((track) => {
-                const isSelected = selectedTrackId === track.id
-                const isChecked = selectedTrackIds.has(track.id)
-                const drClass = IntegrityScanner.getDrBadgeClass(track.drScore)
-
-                return (
-                  <div
-                    key={track.id}
-                    onDoubleClick={() => playTrack(track, tracks)}
-                    onClick={(e) => {
-                      if (e.altKey || e.shiftKey) {
-                        onToggleTrackSelection(track.id, true)
-                      } else {
-                        onSelectTrack(track.id)
-                      }
-                    }}
-                    className={`grid grid-cols-12 gap-2 px-4 h-[44px] items-center text-xs border-b border-white/[0.03] transition-colors cursor-pointer text-left group/row ${
-                      isSelected
-                        ? 'bg-[#00F5FF]/10 text-white font-medium'
-                        : isChecked
-                        ? 'bg-white/[0.05] text-[#F1F5F9]'
-                        : 'hover:bg-white/[0.02] text-[#CBD5E1]'
-                    } ${track.isOnline === false ? 'opacity-40 hover:opacity-75' : ''}`}
-                  >
-                    {/* Col 1: Checkbox & Index / Play */}
-                    <div className="col-span-1 flex items-center gap-2 font-mono text-[#64748B]">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={(e) => {
-                          e.stopPropagation()
-                          onToggleTrackSelection(track.id, false)
-                        }}
-                        className="accent-[#00F5FF] w-3.5 h-3.5 rounded cursor-pointer"
-                      />
-                      <div
-                        className="w-5 flex items-center justify-center cursor-pointer"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          if (currentTrack?.id === track.id) {
-                            togglePlayPause()
-                          } else {
-                            playTrack(track, tracks)
-                          }
-                        }}
-                        title="Click to play track"
-                      >
-                        {currentTrack?.id === track.id ? (
-                          isPlaying ? (
-                            <span className="flex items-center gap-0.5">
-                              <span className="w-0.5 h-2.5 bg-[#00F5FF] animate-pulse" />
-                              <span className="w-0.5 h-3.5 bg-[#00F5FF] animate-pulse" style={{ animationDelay: '150ms' }} />
-                              <span className="w-0.5 h-2 bg-[#00F5FF] animate-pulse" style={{ animationDelay: '300ms' }} />
-                            </span>
-                          ) : (
-                            <Play className="w-3 h-3 text-[#00F5FF] fill-current" />
-                          )
-                        ) : (
-                          <>
-                            <span className="group-hover/row:hidden">{track.trackNumber.toString().padStart(2, '0')}</span>
-                            <Play className="w-3 h-3 text-white hidden group-hover/row:inline fill-current" />
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Col 2: Title & Work Movement */}
-                    <div className="col-span-4 flex items-center gap-2.5 truncate pr-2">
-                      {track.sidecarStatus === 'uncommitted_sidecar' && (
-                        <span
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onOpenSidecar(track.id)
-                          }}
-                          title="Uncommitted sidecar edit staged (Raw FLAC untouched)"
-                          className="sidecar-badge-dot shrink-0"
-                        />
-                      )}
-
-                      {(() => {
-                        const rel = releases?.find((r) => r.id === track.releaseId)
-                        const trkCoverUrl = track.pendingSidecarEdits?.coverArtUrl || rel?.artwork?.frontCoverUrl
-                        if (!trkCoverUrl) return null
-                        return (
-                          <ArtworkHoverPreview
-                            src={trkCoverUrl}
-                            alt={track.title}
-                            title={track.title}
-                            subtitle={track.artistCredit}
-                            composer={track.composerName}
-                            audioSpec={track.sampleRateStr}
-                            drScore={FEATURES.DYNAMIC_RANGE ? (track.drScore ?? undefined) : undefined}
-                            provider="local"
-                            previewSize={260}
-                          >
-                            <div className="w-6 h-6 rounded overflow-hidden border border-white/[0.1] shrink-0 bg-black/40 cursor-pointer shadow-sm">
-                              <img
-                                src={trkCoverUrl}
-                                alt=""
-                                className="w-full h-full object-cover"
-                                onError={(e) => {
-                                  ;(e.target as HTMLElement).style.display = 'none'
-                                }}
-                              />
-                            </div>
-                          </ArtworkHoverPreview>
-                        )
-                      })()}
-
-                      <div className="flex flex-col truncate">
-                        <div className="flex items-center gap-2 truncate">
-                          <span className="truncate font-medium text-[#F1F5F9]">{track.title}</span>
-                          {track.folderName && (
-                            <span
-                              className="text-[10px] text-[#38BDF8] bg-[#38BDF8]/10 px-1.5 py-0.2 rounded border border-[#38BDF8]/20 font-mono shrink-0 truncate max-w-[140px]"
-                              title={`Physical Folder: ${track.folderName}`}
-                            >
-                              📁 {track.folderName}
-                            </span>
-                          )}
-                        </div>
-                        {track.movementTitle && (
-                          <span className="text-[10px] text-[#64748B] font-mono truncate">
-                            Mov {track.movementNumber}: {track.movementTitle}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Col 3: Performer / Composer */}
-                    <div className="col-span-2 flex flex-col truncate pr-2">
-                      <span className="truncate text-[#94A3B8]">{track.artistCredit}</span>
-                      {track.composerName && (
-                        <span className="text-[10px] text-[#EC4899] font-mono truncate">
-                          {track.composerName}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Col 4: Inline DR Score & Spectral Meter */}
-                    <div className="col-span-2 flex items-center gap-2">
-                      {FEATURES.DYNAMIC_RANGE && track.drScore != null ? (
-                        <>
-                          <div
-                            className={`px-1.5 py-0.2 rounded border font-mono font-bold text-[10px] ${drClass.bg} ${drClass.text}`}
-                          >
-                            DR{track.drScore}
-                          </div>
-                          <div className="w-16 h-2 bg-white/[0.05] rounded-full overflow-hidden flex">
-                            <div
-                              className={`h-full rounded-full ${
-                                track.drScore >= 14
-                                  ? 'bg-[#10B981]'
-                                  : track.drScore >= 10
-                                  ? 'bg-[#00F5FF]'
-                                  : 'bg-[#F59E0B]'
-                              }`}
-                              style={{ width: `${Math.min(100, (track.drScore / 18) * 100)}%` }}
-                            />
-                          </div>
-                        </>
-                      ) : (
-                        <span className="text-[10px] text-zinc-600 font-mono">—</span>
-                      )}
-                    </div>
-
-                    {/* Col 5: Sample Format */}
-                    <div className="col-span-2 flex items-center gap-1.5 font-mono text-[11px] text-[#94A3B8]">
-                      <span className="px-1.5 py-0.2 rounded bg-white/[0.04] text-[#CBD5E1]">
-                        {track.sampleRateStr}
-                      </span>
-                      <span className="text-[#64748B]">{track.format}</span>
-                    </div>
-
-                    {/* Col 6: Checksum & Status */}
-                    <div
-                      data-tutorial-id="grid-sidecar-status-pill"
-                      className="col-span-1 flex items-center justify-end gap-2 text-right"
-                    >
-                      <span className="font-mono text-[11px] text-[#64748B]">
-                        {formatDuration(track.durationSeconds)}
-                      </span>
-                      <div title={track.checksumValid ? 'FLAC stream MD5 bit-perfect' : 'Bit-rot / Checksum corrupt'}>
-                        {track.checksumValid ? (
-                          <ShieldCheck className="w-3.5 h-3.5 text-[#10B981]" />
-                        ) : (
-                          <AlertTriangle className="w-3.5 h-3.5 text-[#F43F5E]" />
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
             </div>
-          </div>
-        </div>
-      )}
+          )
+        })}
+      </div>
     </div>
   )
 }
