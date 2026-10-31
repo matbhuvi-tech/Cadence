@@ -43,7 +43,8 @@ Mobile remote interactions must never degrade the primary listening experience o
 
 *   **Decision 1 (Build Orchestration & Dev Velocity)**: Root build chains `"build": "npm run build:pwa && tsc -b && vite build"`. Running `npm run tauri:dev` runs an upfront build of `pwa/` so `rust-embed` resolves compiled assets; for rapid mobile frontend iteration, engineers run `"dev:pwa": "npm run --prefix pwa dev"` on port 5174, which proxies API requests to the desktop daemon at `:4040`.
 *   **Decision 2 (Compression & In-Memory Footprint)**: Static assets in `src-tauri/src/remote/dist/` are embedded uncompressed in executable memory via `rust-embed` (< 2 MB footprint). Content-hashed assets (`/assets/*`) are served with `Cache-Control: public, max-age=31536000, immutable`, while runtime response compression is handled transparently by Axum's `tower-http` compression layer.
-*   **Decision 3 (Lock-Screen MediaSession Reliability)**: Handset lock-screen transport triggers (`play`, `pause`, `next`, `previous`) execute via on-demand HTTP REST requests (`POST /api/remote/playback/:action`), ensuring instant command delivery even when the WebSocket connection is intentionally closed during screen sleep.
+*   **Decision 3 (Lock-Screen MediaSession Reliability & Silent Audio Loop)**: Handset lock-screen transport triggers (`play`, `pause`, `next`, `previous`) execute via on-demand HTTP REST requests (`POST /api/remote/playback/:action`), ensuring instant command delivery even when the WebSocket connection is intentionally closed during screen sleep. To overcome the iOS Safari and Android background browser restriction where `navigator.mediaSession` deactivates without active tab audio, the PWA initiates an inaudible, looping HTML5 `<audio>` track (a tiny base64 silent WAV) upon the first user interaction during remote playback. This keeps the OS lock-screen media widget alive without streaming audio payloads to the handset.
+*   **Decision 4 (DHCP IP Shift & Reconnection Recovery Flow) - OPEN, NOT IMPLEMENTED**: The PWA is served by the desktop's own Axum server and connects through `window.location.host`. If the host IP changes (for example `192.168.1.120` to `192.168.1.135`), the installed home-screen app cannot load at all, so an in-app recovery sheet has nothing to run in. A service worker that caches the app shell would fix that, but service workers (and the camera APIs needed for in-app QR scanning) require a secure context, and plain `http://` LAN addresses are not one. A stable hostname via mDNS (for example `cadence.local`) would avoid the problem but adds periodic multicast traffic, which touches Global Invariant 4 (Network PHY Quietness) and needs explicit review. Until one of these is chosen, the supported recovery is: scan the desktop QR code with the phone's native camera app and re-add the page to the home screen.
 
 ## Critical User Journeys (CUJs)
 
@@ -58,14 +59,19 @@ Mobile remote interactions must never degrade the primary listening experience o
 *   **Then**: The modal suppresses QR canvas generation, displays a prominent `WifiOff` diagnostic card (*"No Local Wi-Fi Connection Found"*), and provides a "Refresh Network Interfaces" button alongside troubleshooting hints (e.g., setting Windows Network Profile to Private).
 
 ### CUJ 3: Seamless Mobile Listening, Queue Control & Lock-Screen Sync
-*   **Given**: The user has paired their Android Chrome browser with Cadence.
+*   **Given**: The user has paired their Android Chrome or iOS Safari browser with Cadence.
 *   **When**: The user browses albums, applies a `Hi-Res PCM` filter, adds an album to the queue, and locks their phone.
-*   **Then**: Playback triggers instantly on the desktop DAC; the mobile PWA updates the active track via event-driven WebSocket; when the screen locks, the PWA suspends all TCP polling while mirroring metadata and transport buttons to the phone's lock screen via `navigator.mediaSession`; pressing "Pause" on the lock screen dispatches an on-demand REST command without requiring an active socket.
+*   **Then**: Playback triggers instantly on the desktop DAC; the mobile PWA keeps the mobile OS lock-screen media widget active via an inaudible silent audio loop track, updates the active track via event-driven WebSocket, and suspends background TCP polling while screen is locked; pressing "Pause" on the lock screen dispatches an on-demand REST command without requiring an active socket.
 
 ### CUJ 4: Audiophile Bit-Perfect Mode Volume Guard
 *   **Given**: The desktop AudioEngine is actively streaming DSD64 or 192kHz/24-bit PCM in WASAPI Exclusive Bit-Perfect mode.
 *   **When**: The user opens the Now Playing drawer on their mobile device.
 *   **Then**: The mobile UI displays gold `Direct Hardware Transport` and `Bit-Perfect` badges, locks the volume slider to 100%, and informs the user to adjust volume via their analog amplifier.
+
+### CUJ 5: Mobile Reconnection & DHCP IP Shift Recovery (Pending Decision 4)
+*   **Given**: A user has installed Cadence PWA to their smartphone home screen configured to connect to `192.168.1.120:4040`. The desktop PC reboots or re-connects with DHCP lease `192.168.1.135`.
+*   **When**: The user opens the installed home screen PWA.
+*   **Then**: The PWA attempts connection, encounters a timeout, and renders an Apple HIG Reconnection Recovery sheet: *"Desktop Connection Lost (Host IP may have changed)"*, providing one-tap IP edit, subnet scan, or a camera QR code re-scan option that preserves the pairing token and immediately reconnects.
 
 
 --------------------------------------------------------------------------------
@@ -486,14 +492,28 @@ To enforce **Audiophile Invariant 4 (Network PHY Quietness)**:
 *   **Proposed Changes**:
     *   Synchronize active track title, artist, album, and artwork to `navigator.mediaSession.metadata`.
     *   Bind action handlers (`play`, `pause`, `previoustrack`, `nexttrack`, `seekto`) to dispatch on-demand REST requests (`POST /api/remote/playback/:action`), ensuring instant response when WebSocket is dormant.
-*   **Rationale**: Delivers platform-native mobile lock screen controls while audio is streaming on the desktop without violating network quietness.
+    *   **Silent Audio Loop Implementation**:
+        *   Instantiate an inaudible, looping HTML5 `<audio>` element (tiny base64-encoded silent WAV: `data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=`).
+        *   Trigger `.play()` on the first user playback interaction to satisfy iOS Safari/Chrome autoplay policy.
+        *   Keep the silent track cycling smoothly while `status.isPlaying` is true, ensuring `navigator.mediaSession` remains active on the OS lock screen even though actual music playback occurs on the desktop DAC.
+        *   Pause the silent track when desktop playback is paused/stopped to free mobile audio resources.
+*   **Rationale**: Delivers platform-native mobile lock screen controls while audio is streaming on the desktop without violating network quietness or failing iOS Safari's audio activation requirement.
 
 #### 19. `pwa/src/components/Navigation/TopHeader.tsx` & `TabBar.tsx` (Create)
 *   **Type / Scope**: Mobile Navigation Components
 *   **Proposed Changes**:
-    *   `TopHeader`: Concentric-C Cadence logo, live connection status pill, bit-perfect DAC indicator, and `pt-[env(safe-area-inset-top,12px)]`.
+    *   `TopHeader`: Concentric-C Cadence logo, live connection status pill, bit-perfect DAC indicator, reconnect trigger button, and `pt-[env(safe-area-inset-top,12px)]`.
     *   `TabBar`: 3-destination bottom thumb-zone navigation (`Now Playing`, `Catalog`, `Queue`) with `pb-[env(safe-area-inset-bottom,16px)]`.
 *   **Rationale**: Follows Apple HIG thumb-zone navigation conventions and safe-area guidelines for single-handed mobile operation.
+
+#### 20. `pwa/src/components/Navigation/ReconnectionRecoverySheet.tsx` (Create) - Blocked on Decision 4
+*   **Type / Scope**: PWA Reconnection & DHCP Recovery Modal Component
+*   **Proposed Changes**:
+    *   Render an Apple HIG bottom sheet / modal when WebSocket and REST connectivity fail continuously for >10 seconds.
+    *   Display diagnostic info: *"Cannot reach Cadence host at [192.168.1.xxx:4040]. Your host PC's IP address may have changed."*
+    *   Provide manual IP/Port editing input with preserved token parameter.
+    *   Provide a "Scan QR Code" camera button using `BarcodeDetector` API (or standard file input fallback) to re-pair instantly from the desktop screen without reinstalling the PWA.
+*   **Rationale**: Solves the first-time discovery deadlock in installed PWA home-screen instances when host DHCP addresses change.
 
 #### 20. `pwa/src/components/NowPlaying/NowPlayingView.tsx` & `VolumeGuard.tsx` (Create)
 *   **Type / Scope**: Immersive Mobile Playback Controller
