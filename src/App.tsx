@@ -187,7 +187,6 @@ function AppContent() {
   const [isBatchDiffModalOpen, setIsBatchDiffModalOpen] = useState(false)
   const [compilationModalRelease, setCompilationModalRelease] = useState<Release | null>(null)
   const [navigationAnchor, setNavigationAnchor] = useState<NavigationAnchor | null>(null)
-  const [curateAutoTriggerAi, setCurateAutoTriggerAi] = useState(false)
   const [sidecarTrackId, setSidecarTrackId] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
   const [isActivityPopoverOpen, setIsActivityPopoverOpen] = useState(false)
@@ -1132,14 +1131,13 @@ function AppContent() {
     showToast('Active Master Variant Updated')
   }
 
-  const handleInspectRelease = (releaseId: string, autoTriggerAi = false) => {
+  const handleInspectRelease = (releaseId: string) => {
     setSelectedAlbumId(releaseId)
     setNavigationAnchor({
       returnView: 'library',
       selectedAlbumId: releaseId,
       scrollPosition: window.scrollY || 0,
     })
-    setCurateAutoTriggerAi(autoTriggerAi)
     setTopMode('curate')
   }
 
@@ -1876,13 +1874,11 @@ function AppContent() {
             auditIssues={auditIssues}
             initialSelectedAlbumId={selectedAlbumId}
             navigationAnchor={navigationAnchor}
-            autoTriggerAi={curateAutoTriggerAi}
             onReturnToAnchor={() => {
               if (navigationAnchor) {
                 setSelectedAlbumId(navigationAnchor.selectedAlbumId)
                 const scrollPos = navigationAnchor.scrollPosition
                 setNavigationAnchor(null)
-                setCurateAutoTriggerAi(false)
                 setTopMode('library')
                 requestAnimationFrame(() => {
                   window.scrollTo({ top: scrollPos, behavior: 'instant' })
@@ -1899,7 +1895,6 @@ function AppContent() {
             }}
             onBackToLibrary={() => {
               setNavigationAnchor(null)
-              setCurateAutoTriggerAi(false)
               setTopMode('library')
             }}
             showToast={showToast}

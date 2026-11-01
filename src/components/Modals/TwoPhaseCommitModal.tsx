@@ -41,6 +41,7 @@ import {
   CommitUnitMetrics,
 } from '../../types/commit'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { LocalArtworkImage } from '../common/LocalArtworkImage'
 
 interface TwoPhaseCommitModalProps {
   uncommittedTracks: Track[]
@@ -753,8 +754,6 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
       release?.artwork?.originalFrontCoverUrl ||
       (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt
         ? release.artwork.frontCoverUrl
-        : relTracks[0]?.filePath
-        ? `/api/track-art?file=${encodeURIComponent(relTracks[0].filePath)}`
         : undefined)
     const stagedRes =
       relTracks.find((t) => t.pendingSidecarEdits?.coverResolution)?.pendingSidecarEdits?.coverResolution ||
@@ -1272,8 +1271,6 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
                         release?.artwork?.originalFrontCoverUrl ||
                         (release?.artwork?.frontCoverUrl && release.artwork.frontCoverUrl !== stagedCoverArt
                           ? release.artwork.frontCoverUrl
-                          : relTracks[0]?.filePath
-                          ? `/api/track-art?file=${encodeURIComponent(relTracks[0].filePath)}`
                           : undefined)
 
                       const isExpanded = expandedReleaseIds.has(relId)
@@ -1333,9 +1330,19 @@ export const TwoPhaseCommitModal: React.FC<TwoPhaseCommitModalProps> = ({
 
                               {/* Album Artwork Thumbnail (3x Size: 120px x 120px) */}
                               <div className="w-[120px] h-[120px] rounded-xl bg-black/60 border border-white/10 overflow-hidden flex items-center justify-center shrink-0 relative group/art shadow-lg">
-                                {stagedCoverArt || currentCoverArt ? (
+                                {stagedCoverArt ? (
                                   <img
-                                    src={stagedCoverArt || currentCoverArt}
+                                    src={stagedCoverArt}
+                                    alt="Staged cover"
+                                    className="w-full h-full object-cover transition-transform duration-300 group-hover/art:scale-105"
+                                    onError={(e) => {
+                                      ;(e.target as HTMLElement).style.display = 'none'
+                                    }}
+                                  />
+                                ) : currentCoverArt || relTracks[0]?.filePath ? (
+                                  <LocalArtworkImage
+                                    path={relTracks[0]?.filePath}
+                                    fallbackUrl={currentCoverArt}
                                     alt="Cover"
                                     className="w-full h-full object-cover transition-transform duration-300 group-hover/art:scale-105"
                                     onError={(e) => {

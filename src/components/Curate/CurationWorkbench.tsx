@@ -24,7 +24,6 @@ export interface CurationWorkbenchProps {
   auditIssues?: AuditIssue[]
   initialSelectedAlbumId?: string | null
   navigationAnchor?: NavigationAnchor | null
-  autoTriggerAi?: boolean
   onReturnToAnchor?: () => void
   onOpenCommitModal: () => void
   onBackToLibrary: () => void
@@ -38,7 +37,6 @@ export const CurationWorkbench: React.FC<CurationWorkbenchProps> = ({
   auditIssues = [],
   initialSelectedAlbumId,
   navigationAnchor,
-  autoTriggerAi = false,
   onReturnToAnchor,
   onOpenCommitModal,
   onBackToLibrary,
@@ -240,7 +238,6 @@ export const CurationWorkbench: React.FC<CurationWorkbenchProps> = ({
         showToast={showToast}
         isQueueCleared={isQueueCleared}
         navigationAnchor={navigationAnchor}
-        autoTriggerAi={autoTriggerAi}
         onReturnToAnchor={onReturnToAnchor}
       />
     </div>

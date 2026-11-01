@@ -7,6 +7,7 @@ pub mod scanner;
 
 use audio::AudioEngine;
 use commands::audio::*;
+use commands::artist_portrait::*;
 use commands::gemini_config::*;
 use commands::library::*;
 use commands::maintenance::*;
@@ -198,6 +199,7 @@ pub fn run() {
             remove_gemini_api_key,
             gemini_resolve,
             get_gemini_quota,
+            search_artist_portraits,
             play_track,
             pause_audio,
             resume_audio,

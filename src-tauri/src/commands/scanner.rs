@@ -117,19 +117,22 @@ pub fn read_cover_art_base64(file_path: String) -> Result<Option<String>, String
         return Ok(None);
     }
 
-    // 1. Try embedded picture
-    if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
-        if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
-            if let Some(pic) = tag.pictures().first() {
-                let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
-                let b64 = BASE64_STANDARD.encode(pic.data());
-                return Ok(Some(format!("data:{};base64,{}", mime, b64)));
+    // 1. Try embedded picture when the requested path is an audio file.
+    if path.is_file() {
+        if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+            if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+                if let Some(pic) = tag.pictures().first() {
+                    let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
+                    let b64 = BASE64_STANDARD.encode(pic.data());
+                    return Ok(Some(format!("data:{};base64,{}", mime, b64)));
+                }
             }
         }
     }
 
-    // 2. Try adjacent folder images
-    if let Some(parent) = path.parent() {
+    // 2. Try common cover names in the requested directory or audio file's parent.
+    let cover_dir = if path.is_dir() { Some(path) } else { path.parent() };
+    if let Some(parent) = cover_dir {
         let candidates = ["folder.jpg", "cover.jpg", "front.jpg", "album.jpg", "folder.png", "cover.png", "front.png"];
         for cand in candidates {
             let img_path = parent.join(cand);

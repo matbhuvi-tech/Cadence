@@ -24,6 +24,7 @@ import {
   BatchItem,
 } from '../../services/federatedResolvers'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
+import { LocalArtworkImage, useLocalArtworkUrl } from '../common/LocalArtworkImage'
 import { generatePanoramicBackdrop } from '../../services/panoramicBackdropGenerator'
 import { graphEngine } from '../../core/graphEngine'
 
@@ -186,18 +187,10 @@ export const SideBySideDiff: React.FC<SideBySideDiffProps> = ({
   )
 
   // Extract Local Artwork URL from track audio file, physical folder, or release artwork
-  const localCoverUrl = useMemo(() => {
-    if (track?.filePath) {
-      return `/api/track-art?path=${encodeURIComponent(track.filePath)}`
-    }
-    if (release?.folderPath) {
-      return `/api/track-art?path=${encodeURIComponent(release.folderPath)}`
-    }
-    if (release?.artwork?.frontCoverUrl && !release.artwork.frontCoverUrl.includes('unsplash')) {
-      return release.artwork.frontCoverUrl
-    }
-    return null
-  }, [track?.filePath, release?.folderPath, release?.artwork?.frontCoverUrl])
+  const localFallback = release?.artwork?.frontCoverUrl && !release.artwork.frontCoverUrl.includes('unsplash')
+    ? release.artwork.frontCoverUrl
+    : null
+  const localCoverUrl = useLocalArtworkUrl(track?.filePath || release?.folderPath, localFallback)
 
   const [imgErrors, setImgErrors] = useState<Record<string, boolean>>({})
 
@@ -934,8 +927,9 @@ export const SideBySideDiff: React.FC<SideBySideDiffProps> = ({
               >
                 <div className="relative aspect-square w-full rounded-md overflow-hidden bg-black/60 border border-white/[0.08] flex items-center justify-center">
                   {localCoverUrl && !imgErrors['local'] ? (
-                    <img
-                      src={localCoverUrl}
+                    <LocalArtworkImage
+                      path={track?.filePath || release?.folderPath}
+                      fallbackUrl={localFallback}
                       alt="Local Front Artwork"
                       onError={() => setImgErrors((prev) => ({ ...prev, local: true }))}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"

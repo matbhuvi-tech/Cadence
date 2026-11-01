@@ -41,14 +41,11 @@ import {
   CoverArtCandidate,
   ActiveItemCandidateResult,
 } from '../../services/federatedResolvers'
-import {
-  compilationCanonicalizerService,
-  ProposedTrackCanonicalization,
-} from '../../services/compilationCanonicalizerService'
 import { isDefectiveArtistTag, isPlaceholderTag, cleanRipNoise, extractMeaningfulFolderName } from '../../core/taxonomyUtils'
 import { creditInferenceService } from '../../services/creditInferenceService'
 import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 import { tauriBridge } from '../../services/tauriBridge'
+import { CompilationProvenanceModal } from '../Modals/CompilationProvenanceModal'
 
 export interface CurationReconciliationStageProps {
   albumItem: AlbumCurationQueueItem | null
@@ -67,7 +64,6 @@ export interface CurationReconciliationStageProps {
   showToast: (msg: string) => void
   isQueueCleared?: boolean
   navigationAnchor?: NavigationAnchor | null
-  autoTriggerAi?: boolean
   onReturnToAnchor?: () => void
 }
 
@@ -88,7 +84,6 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   showToast,
   isQueueCleared = false,
   navigationAnchor,
-  autoTriggerAi = false,
   onReturnToAnchor,
 }) => {
   // Candidate loading state
@@ -197,7 +192,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     composer?: string
     tracks: Track[]
   }[]>([])
-  const [isLoadingClusters, setIsLoadingClusters] = useState(false)
+  const [isSoundtrackResolverOpen, setIsSoundtrackResolverOpen] = useState(false)
 
   // AbortController for active remote queries
   const abortControllerRef = useRef<AbortController | null>(null)
@@ -548,80 +543,14 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
     setCompilationClusters(Array.from(clusterMap.values()))
 
-    // 2. Fetch AI compilation resolution asynchronously if available
-    let isCancelled = false
-    setIsLoadingClusters(true)
-
-    compilationCanonicalizerService
-      .resolveCompilationSoundtracks(release, tracks, allReleases)
-      .then((res) => {
-        if (isCancelled || !res.success || res.tracks.length === 0) return
-
-        const resolvedMap = new Map<string, { soundtrackTitle: string; year?: number; composer?: string; tracks: Track[] }>()
-
-        res.tracks.forEach((propTrack: ProposedTrackCanonicalization) => {
-          const matchedTrk = tracks.find((t) => t.id === propTrack.trackId)
-          if (!matchedTrk) return
-
-          const soundtrack = propTrack.proposedOriginalAlbum || release.title
-          if (!resolvedMap.has(soundtrack)) {
-            resolvedMap.set(soundtrack, {
-              soundtrackTitle: soundtrack,
-              year: propTrack.proposedOriginalYear || release.releaseYear,
-              composer: propTrack.composer || matchedTrk.composerName,
-              tracks: [],
-            })
-          }
-          resolvedMap.get(soundtrack)!.tracks.push(matchedTrk)
-        })
-
-        if (resolvedMap.size > 0) {
-          setCompilationClusters(Array.from(resolvedMap.values()))
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!isCancelled) setIsLoadingClusters(false)
-      })
-
-    return () => {
-      isCancelled = true
-    }
+    // Keep the initial grouping local and deterministic. AI identification is
+    // intentionally available only through the explicit user action below.
   }, [hasCompilationSignals, release, tracks, allReleases])
 
-  // Auto-trigger AI soundtrack canonicalization if requested
-  useEffect(() => {
-    if (autoTriggerAi && release && tracks.length > 0) {
-      setIsLoadingClusters(true)
-      compilationCanonicalizerService
-        .resolveCompilationSoundtracks(release, tracks, allReleases)
-        .then((res) => {
-          if (!res.success || res.tracks.length === 0) return
-          const resolvedMap = new Map<string, { soundtrackTitle: string; year?: number; composer?: string; tracks: Track[] }>()
-          res.tracks.forEach((propTrack: ProposedTrackCanonicalization) => {
-            const matchedTrk = tracks.find((t) => t.id === propTrack.trackId)
-            if (!matchedTrk) return
-            const soundtrack = propTrack.proposedOriginalAlbum || release.title
-            if (!resolvedMap.has(soundtrack)) {
-              resolvedMap.set(soundtrack, {
-                soundtrackTitle: soundtrack,
-                year: propTrack.proposedOriginalYear || release.releaseYear,
-                composer: propTrack.composer || matchedTrk.composerName,
-                tracks: [],
-              })
-            }
-            resolvedMap.get(soundtrack)!.tracks.push(matchedTrk)
-          })
-          if (resolvedMap.size > 0) {
-            setCompilationClusters(Array.from(resolvedMap.values()))
-          }
-        })
-        .catch(() => {})
-        .finally(() => {
-          setIsLoadingClusters(false)
-        })
-    }
-  }, [autoTriggerAi, release, tracks, allReleases])
+  const handleIdentifySoundtracks = () => {
+    if (!release || tracks.length === 0) return
+    setIsSoundtrackResolverOpen(true)
+  }
 
   // Toggle track selection
   const toggleTrack = (trackId: string) => {
@@ -1251,6 +1180,26 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
         </div>
       )}
 
+      {release && tracks.length > 0 && (
+        <div className="mx-6 mt-4 flex items-center justify-between gap-3 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.06] px-4 py-3">
+          <div>
+            <div className="text-xs font-medium text-cyan-100">Soundtrack provenance</div>
+            <p className="mt-0.5 text-[11px] text-cyan-100/60">
+              Ask Gemini to identify the original film or album for each track. Nothing is staged until you review and apply results.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleIdentifySoundtracks}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-[11px] font-medium text-cyan-200 transition-colors hover:bg-cyan-400/20"
+            title="Run Gemini soundtrack identification for this album"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Identify Soundtracks (AI)
+          </button>
+        </div>
+      )}
+
       {/* 3. Main Stage Content (pb-24 clears NowPlayingBar) */}
       <div className="p-6 pb-24 space-y-5 flex-1">
         {/* Combo CD Virtual Release Split Banner */}
@@ -1821,12 +1770,6 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                 <span>Multi-Soundtrack Compilation Clusters ({compilationClusters.length} Film Soundtracks)</span>
               </div>
               <div className="flex items-center gap-3">
-                {isLoadingClusters && (
-                  <div className="flex items-center gap-1.5 text-xs text-[#8E8E93]">
-                    <RotateCcw className="w-3.5 h-3.5 animate-spin text-[#D4AF37]" />
-                    <span>AI resolving soundtrack origins...</span>
-                  </div>
-                )}
                 <button
                   type="button"
                   onClick={handleResetAllTracks}
@@ -1916,6 +1859,21 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
             {renderTrackTable(tracks)}
           </div>
+        )}
+
+        {isSoundtrackResolverOpen && release && (
+          <CompilationProvenanceModal
+            isOpen
+            onClose={() => setIsSoundtrackResolverOpen(false)}
+            release={release}
+            allTracks={allTracks}
+            allReleases={allReleases}
+            onSuccess={() => {
+              setIsSoundtrackResolverOpen(false)
+              window.dispatchEvent(new CustomEvent('cadence:provenance-updated'))
+            }}
+            showToast={showToast}
+          />
         )}
       </div>
 

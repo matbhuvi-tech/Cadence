@@ -7,6 +7,7 @@ import {
   BookOpen,
 } from 'lucide-react'
 import { Release } from '../../core/types'
+import { LocalArtworkImage } from '../common/LocalArtworkImage'
 
 interface ArtworkMediaTrayProps {
   release: Release
@@ -61,23 +62,12 @@ export const ArtworkMediaTray: React.FC<ArtworkMediaTrayProps> = ({ release }) =
       {/* Media Preview Box with Physical Sleeve Border & Shadow */}
       <div className="relative rounded-2xl overflow-hidden ring-1 ring-inset ring-white/10 shadow-[0_12px_28px_rgba(0,0,0,0.6)] bg-black/60 aspect-square flex items-center justify-center group">
         {activeMediaTab === 'front' && (
-          <img
-            src={
-              artwork.frontCoverUrl && !artwork.frontCoverUrl.includes('unsplash')
-                ? artwork.frontCoverUrl
-                : release.folderPath
-                ? `/api/track-art?path=${encodeURIComponent(release.folderPath)}`
-                : artwork.frontCoverUrl
-            }
+          <LocalArtworkImage
+            path={release.folderPath}
+            fallbackUrl={artwork.frontCoverUrl && !artwork.frontCoverUrl.includes('unsplash') ? artwork.frontCoverUrl : null}
             alt="Front Cover Art"
             onError={(e) => {
-              if (release.folderPath) {
-                const target = e.currentTarget
-                const fallbackUrl = `/api/track-art?path=${encodeURIComponent(release.folderPath)}`
-                if (target.src !== fallbackUrl) {
-                  target.src = fallbackUrl
-                }
-              }
+              e.currentTarget.style.visibility = 'hidden'
             }}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
           />

@@ -36,7 +36,7 @@ interface AlbumCoverGridProps {
   tracks: Track[]
   selectedTrackId?: string
   onSelectTrack: (trackId: string) => void
-  onInspectRelease: (releaseId: string, autoTriggerAi?: boolean) => void
+  onInspectRelease: (releaseId: string) => void
   onCustomizeRelease?: (release: Release) => void
   onUpdateReleaseDetails?: (
     releaseId: string,
@@ -1003,20 +1003,6 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               >
                 <SlidersHorizontal className="w-4 h-4 text-slate-400" />
                 <span>Edit Metadata</span>
-              </button>
-
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (onInspectRelease) {
-                    onInspectRelease(activeReleaseId || album.id, true)
-                  }
-                }}
-                className="px-4 py-2.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/25 text-cyan-200 hover:text-white font-semibold text-xs flex items-center gap-2 hover:scale-105 active:scale-95 transition-all cursor-pointer shadow-sm"
-                title="Identify original movie soundtracks and release years with Gemini AI"
-              >
-                <Sparkles className="w-4 h-4 text-cyan-400" />
-                <span>Identify Soundtracks (AI)</span>
               </button>
 
               {/* Rating Stars */}

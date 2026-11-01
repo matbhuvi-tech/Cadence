@@ -44,7 +44,7 @@ rust-embed = { version = "8.5", features = ["interpolate-folder-path", "compress
 rcgen = "0.13"
 rustls-pemfile = "2"
 mime_guess = "2.0"
-reqwest = { version = "0.13.5", features = ["json"] }
+reqwest = { version = "0.13.5", features = ["json", "query"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

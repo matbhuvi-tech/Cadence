@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import {
   DiffField,
   DiffSource,
@@ -839,8 +840,11 @@ export class FederatedResolversService {
           return null
         })
         if (localRes && localRes.ok) {
-          const data = await localRes.json()
-          if (data.success && data.coverArtUrl) {
+          // Packaged Tauri builds do not run the Vite /api proxy. The app
+          // origin can answer that path with HTML, so a non-JSON proxy reply
+          // must fall through to the direct provider request below.
+          const data = await localRes.json().catch(() => null)
+          if (data?.success && data.coverArtUrl) {
             return {
               provider: 'apple',
               providerLabel: 'Apple Music HD',
@@ -918,8 +922,10 @@ export class FederatedResolversService {
           return null
         })
         if (localRes && localRes.ok) {
-          const data = await localRes.json()
-          if (data.success && data.coverArtUrl) {
+          // As above, treat an unavailable/non-JSON dev proxy like a miss and
+          // continue to MusicBrainz's direct search API.
+          const data = await localRes.json().catch(() => null)
+          if (data?.success && data.coverArtUrl) {
             return {
               provider: 'musicbrainz',
               providerLabel: 'MusicBrainz CAA',
@@ -1111,6 +1117,18 @@ export class FederatedResolversService {
    */
   public async searchArtistPortraits(artistName: string): Promise<ArtistPortraitCandidate[]> {
     if (!artistName || !artistName.trim()) return []
+    if (tauriBridge.isTauri()) {
+      try {
+        const result = await invoke<{ candidates?: ArtistPortraitCandidate[] }>(
+          'search_artist_portraits',
+          { artist: artistName.trim() }
+        )
+        return result.candidates || []
+      } catch (error) {
+        console.warn('Native artist portrait lookup failed:', error)
+        return []
+      }
+    }
     try {
       const url = `${this.getBaseUrl()}/api/artist-portrait-search?artist=${encodeURIComponent(artistName.trim())}`
       const res = await fetch(url)

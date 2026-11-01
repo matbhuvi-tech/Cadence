@@ -39,3 +39,4 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 - Frontend: `npm run build`
 - Native backend: `cargo test --manifest-path src-tauri/Cargo.toml`
+- Windows installer `npm run tauri:build -- --bundles nsis`
