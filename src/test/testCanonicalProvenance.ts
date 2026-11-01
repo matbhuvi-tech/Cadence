@@ -296,7 +296,26 @@ async function runTests() {
     federatedResolversService.isProviderCandidateAcceptable(rangaSig, validCand, 1982),
     'Ranga OST must be accepted for Ranga search query'
   )
-  console.log('  ✓ Rule 2 Sanity check correctly rejected mismatched store candidate.')
+
+  // Transliteration tolerance check (En Bommukutti Amavuku <-> En Bommukutty Ammavukku)
+  const bommukuttiSig = {
+    sanitizedTitle: 'En Bommukutti Amavuku',
+    sanitizedArtist: 'Ilaiyaraaja',
+    sanitizedComposer: 'Ilaiyaraaja',
+    trackCount: 9,
+  }
+  const appleBommukutty = {
+    provider: 'itunes' as const,
+    confidenceScore: 0.95,
+    releaseTitle: 'En Bommukutty Ammavukku (Original Motion Picture Soundtrack)',
+    artistCredit: 'Ilaiyaraaja, K. J. Yesudas & K. S. Chithra',
+    releaseYear: 2021, // Modern digital reissue year
+  }
+  assert(
+    federatedResolversService.isProviderCandidateAcceptable(bommukuttiSig, appleBommukutty, 1988),
+    'En Bommukutty Ammavukku must be accepted for En Bommukutti Amavuku with phonetic transliteration tolerance'
+  )
+  console.log('  ✓ Rule 2 Sanity check correctly rejected mismatched store candidate and accepted transliteration variant.')
 
   // Rule 3: Blind track-number guessing is suppressed
   const providerTracks = [

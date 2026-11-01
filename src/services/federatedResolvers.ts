@@ -1317,7 +1317,8 @@ export class FederatedResolversService {
 
   /**
    * Evaluates whether an online candidate matches the target search signature sufficiently
-   * to be accepted as a candidate. Enforces Rule 2 (Online Store Quality Sanity Check).
+   * to be accepted as a candidate. Enforces Rule 2 (Online Store Quality Sanity Check)
+   * while allowing authentic phonetic transliteration variations (e.g. Bommukutti <-> Bommukutty).
    */
   public isProviderCandidateAcceptable(
     signature: AlbumSignature,
@@ -1340,27 +1341,45 @@ export class FederatedResolversService {
     if (normTarget && normCand) {
       if (normTarget === normCand) return true
 
-      // Substring match if length >= 3
-      if (normTarget.length >= 3 && (normCand.includes(normTarget) || normTarget.includes(normCand))) {
-        if (targetYear && candidate.releaseYear) {
-          const yearDiff = Math.abs(candidate.releaseYear - targetYear)
-          if (yearDiff > 12) return false
+      // 2. Phonetic transliteration match for Indian music / transliterated titles
+      // e.g. "En Bommukutti Amavuku" <-> "En Bommukutty Ammavukku"
+      const phoneticStem = (str: string) =>
+        str
+          .toLowerCase()
+          .replace(/y/g, 'i')
+          .replace(/w/g, 'v')
+          .replace(/[uae]/g, 'o')
+          .replace(/([a-z])\1+/g, '$1')
+          .replace(/[^a-z0-9]+/g, '')
+
+      const stemTarget = phoneticStem(normTarget)
+      const stemCand = phoneticStem(normCand)
+
+      if (stemTarget && stemCand) {
+        if (stemTarget === stemCand || stemCand.startsWith(stemTarget) || stemTarget.startsWith(stemCand)) {
+          return true
         }
+        if (stemTarget.length >= 6 && (stemCand.includes(stemTarget) || stemTarget.includes(stemCand))) {
+          return true
+        }
+      }
+
+      // 3. Substring match if length >= 4
+      if (normTarget.length >= 4 && (normCand.includes(normTarget) || normTarget.includes(normCand))) {
         return true
       }
 
-      // Token overlap: calculate shared distinctive words (>= 3 chars)
+      // 4. Token overlap: calculate shared distinctive words (>= 3 chars) with phonetic tolerance
       const tokTarget = normTarget.split(/\s+/).filter((w) => w.length >= 3)
       const tokCand = normCand.split(/\s+/).filter((w) => w.length >= 3)
 
       if (tokTarget.length > 0) {
-        const shared = tokTarget.filter((t) => tokCand.includes(t))
+        const shared = tokTarget.filter((t) => {
+          const stemT = phoneticStem(t)
+          return tokCand.some((c) => c === t || (stemT.length >= 3 && phoneticStem(c) === stemT))
+        })
         const overlapRatio = shared.length / tokTarget.length
         if (overlapRatio >= 0.5) {
-          if (targetYear && candidate.releaseYear) {
-            const yearDiff = Math.abs(candidate.releaseYear - targetYear)
-            if (yearDiff > 12) return false
-          }
           return true
         }
       }
