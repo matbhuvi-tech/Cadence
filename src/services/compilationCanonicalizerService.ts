@@ -12,7 +12,7 @@ import { tauriBridge } from './tauriBridge'
 import { resolveGemini } from './geminiClient'
 import { ambientCurationService } from './ambientCurationService'
 import { graphEngine } from '../core/graphEngine'
-import { stripRipNoiseAndTags, isDefectiveArtistTag, isPlaceholderTag } from '../core/taxonomyUtils'
+import { stripRipNoiseAndTags, normalizeCanonicalAlbumTitle, isSameCanonicalAlbum, isDefectiveArtistTag, isPlaceholderTag } from '../core/taxonomyUtils'
 
 export interface ProposedTrackCanonicalization {
   trackId: string
@@ -55,7 +55,11 @@ class CompilationCanonicalizerService {
   public async resolveCompilationSoundtracks(
     release: Release,
     tracks: Track[],
-    allReleases: Release[] = []
+    allReleases: Release[] = [],
+    options?: {
+      referenceUrl?: string
+      userSearchQuery?: { albumTitle?: string; artistCredit?: string; year?: number }
+    }
   ): Promise<CompilationResolutionResult> {
     // 1. Audiophile Invariant Check: Never perform network lookups during active playback or cooldown
     const playbackStatus = await tauriBridge.getPlaybackStatus().catch(() => null)
@@ -91,7 +95,9 @@ class CompilationCanonicalizerService {
     for (const rel of allReleases) {
       if (rel.title) {
         const clean = stripRipNoiseAndTags(rel.title).toLowerCase().trim()
-        releaseTitleMap.set(clean, rel)
+        const norm = normalizeCanonicalAlbumTitle(rel.title)
+        if (clean) releaseTitleMap.set(clean, rel)
+        if (norm && !releaseTitleMap.has(norm)) releaseTitleMap.set(norm, rel)
       }
     }
 
@@ -99,8 +105,11 @@ class CompilationCanonicalizerService {
     try {
       const payload = {
         albumTitle: release.title,
+        folderName: release.folderName || '',
         artistCredit: release.artistCredit || release.composerName || '',
         releaseYear: release.releaseYear || release.originalYear,
+        referenceUrl: options?.referenceUrl?.trim() || '',
+        userSearchQuery: options?.userSearchQuery,
         tracks: tracks.map((t) => ({
           id: t.id,
           trackNumber: t.trackNumber || 1,
@@ -108,6 +117,7 @@ class CompilationCanonicalizerService {
           artist: t.artistCredit || '',
           composer: t.composerName || '',
           duration: t.durationSeconds || 0,
+          filePath: t.filePath || '',
         })),
       }
 
@@ -126,9 +136,19 @@ class CompilationCanonicalizerService {
         let matchedReleaseId: string | undefined
         let matchedReleaseTitle: string | undefined
 
-        if (proposedAlbum) {
+        const isSameAlbum = Boolean(
+          proposedAlbum && isSameCanonicalAlbum(proposedAlbum, release.title)
+        )
+
+        if (isSameAlbum) {
+          // Self-referencing invariant: album is its own ground-truth master release
+          matchedInLibrary = true
+          matchedReleaseId = release.id
+          matchedReleaseTitle = release.title
+        } else if (proposedAlbum) {
           const cleanProposed = stripRipNoiseAndTags(proposedAlbum).toLowerCase().trim()
-          const matchedRel = releaseTitleMap.get(cleanProposed)
+          const normProposed = normalizeCanonicalAlbumTitle(proposedAlbum)
+          const matchedRel = releaseTitleMap.get(normProposed) || releaseTitleMap.get(cleanProposed)
           if (matchedRel) {
             matchedInLibrary = true
             matchedReleaseId = matchedRel.id
@@ -136,16 +156,11 @@ class CompilationCanonicalizerService {
           }
         }
 
-        const isSameAlbum = Boolean(
-          proposedAlbum &&
-          stripRipNoiseAndTags(proposedAlbum).toLowerCase().trim() ===
-            stripRipNoiseAndTags(release.title).toLowerCase().trim()
-        )
-
-        const isCompilationTrack =
-          aiMatch?.isCompilationTrack !== undefined
-            ? Boolean(aiMatch.isCompilationTrack)
-            : !isSameAlbum
+        const isCompilationTrack = isSameAlbum
+          ? false
+          : aiMatch?.isCompilationTrack !== undefined
+          ? Boolean(aiMatch.isCompilationTrack)
+          : !isSameAlbum
 
         const proposedComposer = (aiMatch?.canonicalComposer || track.composerName || '').trim()
         const proposedVocalists = (aiMatch?.primaryVocalists || track.artistCredit || '').trim()
@@ -225,7 +240,10 @@ class CompilationCanonicalizerService {
     const releaseTitleMap = new Map<string, Release>()
     for (const rel of allReleases) {
       if (rel.title) {
-        releaseTitleMap.set(stripRipNoiseAndTags(rel.title).toLowerCase().trim(), rel)
+        const clean = stripRipNoiseAndTags(rel.title).toLowerCase().trim()
+        const norm = normalizeCanonicalAlbumTitle(rel.title)
+        if (clean) releaseTitleMap.set(clean, rel)
+        if (norm && !releaseTitleMap.has(norm)) releaseTitleMap.set(norm, rel)
       }
     }
 
@@ -250,12 +268,22 @@ class CompilationCanonicalizerService {
           targetTrack.canonicalReleaseYear = item.proposedOriginalYear
 
           const cleanProposed = stripRipNoiseAndTags(item.proposedOriginalAlbum).toLowerCase().trim()
-          const matchedRel = releaseTitleMap.get(cleanProposed)
+          const normProposed = normalizeCanonicalAlbumTitle(item.proposedOriginalAlbum)
+          const matchedRel = releaseTitleMap.get(normProposed) || releaseTitleMap.get(cleanProposed)
           if (matchedRel) {
             targetTrack.canonicalReleaseId = matchedRel.id
           }
 
-          targetTrack.isCanonicalAlbumTrack = false
+          const parentRelease = allReleases.find((r) => r.id === targetTrack.releaseId)
+          const isNativeToParent = parentRelease ? isSameCanonicalAlbum(item.proposedOriginalAlbum, parentRelease.title) : false
+
+          if (isNativeToParent) {
+            targetTrack.isCanonicalAlbumTrack = true
+            targetTrack.canonicalAlbumTitle = undefined
+            targetTrack.canonicalReleaseId = undefined
+          } else {
+            targetTrack.isCanonicalAlbumTrack = false
+          }
 
           if (item.primaryVocalists && item.primaryVocalists.trim()) {
             targetTrack.artistCredit = item.primaryVocalists.trim()

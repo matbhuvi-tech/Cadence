@@ -74,6 +74,52 @@ export function stripRipNoiseAndTags(raw: string): string {
 }
 
 /**
+ * Normalizes an album or soundtrack title to its canonical film/studio form:
+ * - Strips commercial packaging suffixes like (Original Motion Picture Soundtrack), - EP, [Deluxe], (Disc N)
+ * - Applies Unicode NFKD diacritic decomposition and cleans quotes
+ * - Enables deterministic self-referencing equality checks across editions
+ */
+export function normalizeCanonicalAlbumTitle(raw: string): string {
+  if (!raw) return ''
+
+  // 1. Strip digital rip and format noise
+  let cleaned = stripRipNoiseAndTags(raw)
+
+  // 2. Unicode NFKD normalization to normalize curly quotes, dashes, and accents
+  cleaned = cleaned
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, '-')
+
+  // 3. Strip commercial soundtrack and packaging descriptors
+  cleaned = cleaned
+    .replace(/\s*\((?:original\s+motion\s+picture\s+soundtrack|original\s+soundtrack|original\s+score|motion\s+picture\s+soundtrack|original\s+film\s+soundtrack|ost)\)/gi, '')
+    .replace(/\s*\[(?:original\s+motion\s+picture\s+soundtrack|original\s+soundtrack|original\s+score|motion\s+picture\s+soundtrack|original\s+film\s+soundtrack|ost)\]/gi, '')
+    .replace(/\s*-\s*(?:ep|single|lp|deluxe(?:\s+edition)?|remastered|expanded(?:\s+edition)?|bonus\s+track\s+version|original\s+soundtrack|ost)\b/gi, '')
+    .replace(/\s*\[(?:ep|deluxe(?:\s+edition)?|remastered|expanded|special\s+edition)\]/gi, '')
+    .replace(/\s*\((?:ep|deluxe(?:\s+edition)?|remastered|expanded|special\s+edition)\)/gi, '')
+    .replace(/\s*[\(\[]\s*disc\s*\d+\s*[\)\]]/gi, '')
+    .replace(/\s*[\(\[]\s*cd\s*\d+\s*[\)\]]/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return cleaned.toLowerCase()
+}
+
+/**
+ * Checks if two release/album title strings represent the exact same canonical album.
+ */
+export function isSameCanonicalAlbum(titleA?: string | null, titleB?: string | null): boolean {
+  if (!titleA || !titleB) return false
+  const normA = normalizeCanonicalAlbumTitle(titleA)
+  const normB = normalizeCanonicalAlbumTitle(titleB)
+  if (!normA || !normB) return false
+  return normA === normB
+}
+
+/**
  * Strips format, rip noise, and year brackets from a title or folder name.
  */
 export function cleanRipNoise(str: string): string {

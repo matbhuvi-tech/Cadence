@@ -1868,6 +1868,15 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
             release={release}
             allTracks={allTracks}
             allReleases={allReleases}
+            initialSearchQuery={
+              queryAlbum || queryArtist || queryYear
+                ? {
+                    albumTitle: queryAlbum || undefined,
+                    artistCredit: queryArtist || undefined,
+                    year: queryYear ? Number(queryYear) : undefined,
+                  }
+                : undefined
+            }
             onSuccess={() => {
               setIsSoundtrackResolverOpen(false)
               window.dispatchEvent(new CustomEvent('cadence:provenance-updated'))

@@ -23,6 +23,7 @@ import {
   Square,
   ShieldAlert,
   Info,
+  Link2,
 } from 'lucide-react'
 import { Release, Track } from '../../core/types'
 import {
@@ -36,6 +37,7 @@ export interface CompilationProvenanceModalProps {
   release: Release | null
   allTracks: Track[]
   allReleases: Release[]
+  initialSearchQuery?: { albumTitle?: string; artistCredit?: string; year?: number }
   onSuccess?: (updatedCount: number) => void
   showToast?: (msg: string) => void
 }
@@ -46,6 +48,7 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
   release,
   allTracks,
   allReleases,
+  initialSearchQuery,
   onSuccess,
   showToast,
 }) => {
@@ -54,6 +57,7 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isDeferredPlayback, setIsDeferredPlayback] = useState<boolean>(false)
   const [proposedTracks, setProposedTracks] = useState<ProposedTrackCanonicalization[]>([])
+  const [referenceUrl, setReferenceUrl] = useState<string>('')
   const [telemetry, setTelemetry] = useState<{
     modelUsed?: string
     pacingDelayMs?: number
@@ -87,7 +91,11 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
       const result = await compilationCanonicalizerService.resolveCompilationSoundtracks(
         release,
         releaseTracks,
-        allReleases
+        allReleases,
+        {
+          referenceUrl: referenceUrl.trim() || undefined,
+          userSearchQuery: initialSearchQuery,
+        }
       )
 
       if (!isMounted) return
@@ -123,6 +131,32 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
   const matchedInLibraryCount = proposedTracks.filter((t) => t.matchedInLibrary).length
   const externalMasterCount = proposedTracks.filter((t) => !t.matchedInLibrary && t.proposedOriginalAlbum).length
   const allSelected = proposedTracks.length > 0 && selectedCount === proposedTracks.length
+
+  const handleReTriggerWithUrl = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    if (!release) return
+    setIsLoading(true)
+    setErrorMessage(null)
+    setIsDeferredPlayback(false)
+    const result = await compilationCanonicalizerService.resolveCompilationSoundtracks(
+      release,
+      releaseTracks,
+      allReleases,
+      { referenceUrl: referenceUrl.trim() || undefined }
+    )
+    setIsLoading(false)
+    if (result.deferredPlayback) {
+      setIsDeferredPlayback(true)
+      setErrorMessage(result.error || 'Playback active. Transport Purity Lock enforced.')
+      return
+    }
+    if (!result.success) {
+      setErrorMessage(result.error || 'Failed resolving compilation soundtracks.')
+      return
+    }
+    setProposedTracks(result.tracks)
+    if (result.telemetry) setTelemetry(result.telemetry)
+  }
 
   const handleToggleSelect = (trackId: string) => {
     setProposedTracks((prev) =>
@@ -202,6 +236,27 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
           >
             <X className="w-5 h-5" />
           </button>
+        </div>
+
+        {/* Reference URL Grounding Bar (Apple HIG Grounding Input) */}
+        <div className="px-6 py-2.5 bg-cyan-950/20 border-b border-white/[0.06] flex items-center gap-3">
+          <Link2 className="w-4 h-4 text-cyan-400 shrink-0" />
+          <form onSubmit={handleReTriggerWithUrl} className="flex-1 flex items-center gap-2">
+            <input
+              type="url"
+              value={referenceUrl}
+              onChange={(e) => setReferenceUrl(e.target.value)}
+              placeholder="Paste Reference URL (Apple Music, MusicBrainz, Discogs, Wikipedia)..."
+              className="flex-1 bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500/50 transition-colors"
+            />
+            <button
+              type="submit"
+              disabled={isLoading || !referenceUrl.trim()}
+              className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 hover:text-white text-xs font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            >
+              Ground with Link
+            </button>
+          </form>
         </div>
 
         {/* Status / Metrics Sub-header (Simplicity & Scannability) */}
@@ -343,8 +398,25 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
                               )}
                             </div>
 
-                            {/* Badge: In Library vs External Master */}
-                            <div className="mt-1 flex items-center gap-1.5">
+                            {/* Badge: In Library vs External Master & Confidence Badge */}
+                            <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                              {/* Confidence Calibration Indicator */}
+                              {item.confidence >= 0.9 ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" title="Grounded Match (>= 90% certainty)">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                  <span>Grounded</span>
+                                </span>
+                              ) : item.confidence >= 0.6 ? (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/20" title="Heuristic Match (Needs user review)">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                                  <span>Heuristic</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-500/15 text-slate-400 border border-slate-500/25" title="Unresolved or low confidence">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+                                  <span>Unverified</span>
+                                </span>
+                              )}
                               {item.matchedInLibrary ? (
                                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
                                   <FolderCheck className="w-2.5 h-2.5" />

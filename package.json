@@ -19,6 +19,7 @@
     "test:commit": "tsx src/test/testCommitArchitecture.ts",
     "test:cyclic": "tsx src/test/testCyclicNormalizationFix.ts",
     "test:startup": "tsx src/test/testAppStartup.ts",
+    "test:provenance": "tsx src/test/testCanonicalProvenance.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

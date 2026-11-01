@@ -216,25 +216,76 @@ No other text or markdown explanation, just the pure JSON array."#;
             if album.is_empty() || tracks.is_empty() {
                 return Err("Missing albumTitle or tracks array in payload".into());
             }
-            let prompt = r#"You are an authoritative archival musicologist and expert discographer specializing in film soundtracks, compilations, boxsets, and multi-movie audio releases (including Indian cinema: Tamil, Hindi/Bollywood, Telugu, Malayalam, Kannada, as well as Western cinema, classical and world anthologies).
 
-Analyze the compilation or multi-film soundtrack album:
-Album Title: "__ALBUM__"
-Album Artist / Attributed: "__ARTIST__"
-Compilation Release Year: __YEAR__
+            let reference_url = payload["referenceUrl"].as_str().unwrap_or("").trim();
+            let mut ref_section = String::new();
+            if !reference_url.is_empty() {
+                ref_section = format!(
+                    "USER REFERENCE URL (TOP GROUND-TRUTH CITATION):
+"{}"
+Extract track titles, composer, singers, and original movie/soundtrack titles strictly matching this authoritative source.",
+                    reference_url
+                );
+            }
 
-Here is the tracklist of __TRACK_COUNT__ track(s):
+            let mut query_section = String::new();
+            if let Some(user_query) = payload.get("userSearchQuery") {
+                let q_album = user_query["albumTitle"].as_str().unwrap_or("").trim();
+                let q_artist = user_query["artistCredit"].as_str().unwrap_or("").trim();
+                let q_year = user_query["year"].as_i64().unwrap_or(0);
+                if !q_album.is_empty() || !q_artist.is_empty() || q_year > 0 {
+                    query_section = format!(
+                        "USER REFINE QUERY (HUMAN SEARCH GUIDANCE):
+Album: "{}"
+Artist: "{}"
+Year: {}
+Treat this human input as high-value intent above automatic heuristics.",
+                        q_album, q_artist, if q_year > 0 { q_year.to_string() } else { "Unknown".to_string() }
+                    );
+                }
+            }
+
+            let folder_hint = payload["folderName"].as_str().unwrap_or("").trim();
+            let folder_section = if !folder_hint.is_empty() {
+                format!("Physical Folder/File Context: "{}"", folder_hint)
+            } else {
+                String::new()
+            };
+
+            let prompt = r#"You are an authoritative archival discographer and musicologist specializing in film soundtracks, studio albums, and multi-movie audio releases (including Indian cinema: Tamil, Telugu, Hindi/Bollywood, Malayalam, Kannada, as well as Western cinema and world anthologies).
+
+DISCOGRAPHICAL CONTEXT:
+Target Release: "__ALBUM__"
+Attributed Artist/Composer: "__ARTIST__"
+Release Year: __YEAR__
+__FOLDER_SECTION__
+__USER_QUERY_SECTION__
+__REFERENCE_URL_SECTION__
+
+TRACKLIST (__TRACK_COUNT__ tracks):
 __TRACKS__
 
 TASK:
-For each track in this album, determine its canonical ORIGINAL soundtrack or debut motion picture release:
-1. "originalAlbum": The official canonical title of the original motion picture soundtrack or debut studio album where this song first originated (e.g., if the compilation is "World of Rahmania" and track is "Khalbali", the original soundtrack is "Rang De Basanti"; if track is "Chinna Chinna Aasai", the original soundtrack is "Roja"; if track is "Kallukulle Vandha Eeram", the original movie is "Manithanin Marupakkam"). If the album itself is already the original soundtrack (not a compilation), set "originalAlbum" to the native album title.
-2. "originalYear": The 4-digit original release year of that soundtrack/film.
-3. "canonicalComposer": The original composer of the composition.
-4. "primaryVocalists": The primary singers/vocalists credited on the original master recording.
-5. "isCompilationTrack": true if the song originated from a different film/album than "__ALBUM__", false if it originated with this album.
-6. "confidence": A score between 0.0 and 1.0 representing historical discographical certainty.
-7. "notes": A brief 1-line discographical origin note.
+Analyze this release and objectively determine whether it is:
+(A) A native standalone soundtrack / studio album, OR
+(B) A compilation / multi-film combo release containing tracks originating from different films/albums.
+
+DISCOGRAPHICAL RULES (STRICT):
+1. REFERENCE URL & USER QUERY:
+   - If a Reference URL or User Search Override is provided above, treat it as ground truth. Extract soundtrack titles, composer, singers, and release year matching that source.
+2. NATIVE ALBUM vs COMPILATION TRACKS:
+   - If all tracks originated from the film/album "__ALBUM__" (or its canonical movie title), this is a NATIVE release.
+   - For native tracks: set "isCompilationTrack": false, and set "originalAlbum" to the clean canonical film/album title (strip rip tags, edition subtitles like "- EP", "OST", "Original Motion Picture Soundtrack").
+   - If a track originated from a different film/debut album than "__ALBUM__", set "isCompilationTrack": true, and set "originalAlbum" to that distinct film's title.
+3. ANTI-HALLUCINATION GUARD:
+   - Never invent artist names, composers, or release years if discographical records are uncertain.
+   - If the true composer or year is unknown or unverified, return null. Do NOT guess generic names (e.g. do not guess "Deva" or arbitrary years like "2004" when unverified).
+   - Set "confidence":
+     * 0.95 - 1.0: Verified through reference URL, well-documented historical film release, or user search hint.
+     * 0.70 - 0.90: High-confidence match based on known song title and artist discography.
+     * < 0.60: Ambiguous or unverified.
+4. TITLE MATCHING:
+   - Variations like "__ALBUM__ (Original Motion Picture Soundtrack)", "__ALBUM__ - EP", and "__ALBUM__ CD RIP" refer to the SAME canonical film soundtrack.
 
 Return ONLY a valid JSON array of __TRACK_COUNT__ objects matching this exact structure:
 [
@@ -243,15 +294,16 @@ Return ONLY a valid JSON array of __TRACK_COUNT__ objects matching this exact st
     "trackNumber": 1,
     "title": "<clean song title>",
     "originalAlbum": "<canonical original soundtrack/film title>",
-    "originalYear": 2006,
-    "canonicalComposer": "<composer name>",
-    "primaryVocalists": "<vocalists>",
-    "isCompilationTrack": true,
-    "confidence": 0.98,
+    "originalYear": 1989,
+    "canonicalComposer": "<composer or null>",
+    "primaryVocalists": "<vocalists or null>",
+    "isCompilationTrack": false,
+    "confidence": 0.95,
     "notes": "<discographical note>"
   }
 ]
 Do not include any surrounding markdown or explanation, just the raw JSON array."#;
+
             let prompt = prompt
                 .replace("__ALBUM__", album)
                 .replace(
@@ -261,6 +313,9 @@ Do not include any surrounding markdown or explanation, just the raw JSON array.
                         .unwrap_or("Various Artists"),
                 )
                 .replace("__YEAR__", &payload["releaseYear"].to_string())
+                .replace("__FOLDER_SECTION__", &folder_section)
+                .replace("__USER_QUERY_SECTION__", &query_section)
+                .replace("__REFERENCE_URL_SECTION__", &ref_section)
                 .replace("__TRACK_COUNT__", &tracks.len().to_string())
                 .replace(
                     "__TRACKS__",

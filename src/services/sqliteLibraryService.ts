@@ -18,7 +18,7 @@ import {
   PressingVariant,
   UpdateArtistEditorialPayload,
 } from '../core/types'
-import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags, disambiguateComboTitle, extractMeaningfulFolderName } from '../core/taxonomyUtils'
+import { getCuratedAlbumArtwork, splitMultiArtistCredits, generateMonogramAvatar, stripRipNoiseAndTags, normalizeCanonicalAlbumTitle, isSameCanonicalAlbum, disambiguateComboTitle, extractMeaningfulFolderName } from '../core/taxonomyUtils'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 export interface MigrationResult {
@@ -639,13 +639,23 @@ export class SqliteLibraryService {
         if (r.isCompilation) return true
         if (r.id) {
           const rTracks = releaseTracksMap.get(r.id) || []
-          if (rTracks.some((t) => t.isCompilation)) return true
+          // Check for Various Artists
           if (rTracks.some((t) => t.albumArtist && /^(various artists|various|v\/a)$/i.test(t.albumArtist.trim()))) {
+            return true
+          }
+          // Provenance-based compilation detection: require 2 or more distinct external original albums
+          const distinctOrigins = new Set<string>()
+          for (const trk of rTracks) {
+            if (trk.originalAlbum && !isSameCanonicalAlbum(trk.originalAlbum, r.title)) {
+              distinctOrigins.add(normalizeCanonicalAlbumTitle(trk.originalAlbum))
+            }
+          }
+          if (distinctOrigins.size > 1) {
             return true
           }
         }
         const combined = `${r.title || ''} ${r.folderName || ''}`.toLowerCase()
-        return /\b(hits|collection|best of|anthology|platinum|duets|melodies|greatest hits|golden hits|favorites|vol\s*\d+|volume\s*\d+|top\s*\d+|super\s*hits|megahits|world of|classics|revisited|essential|tribute|celebration|unforgettable|cd\s*\d+|disc\s*\d+)\b|mania/i.test(combined)
+        return /\b(hits|collection|best of|anthology|platinum|duets|melodies|greatest hits|golden hits|favorites|vol\s*\d+|volume\s*\d+|top\s*\d+|super\s*hits|megahits|world of|classics|revisited|essential|tribute|celebration|unforgettable)\b|mania/i.test(combined)
       }
 
       const soundtrackMap = new Map<string, OriginalSoundtrackInfo>() // songKey -> OriginalSoundtrackInfo
@@ -656,13 +666,18 @@ export class SqliteLibraryService {
       releases.forEach((r) => {
         if (!isCompilation(r) && r.title) {
           const cleanRel = stripRipNoiseAndTags(r.title).toLowerCase().trim()
+          const normRel = normalizeCanonicalAlbumTitle(r.title)
+          const info: OriginalSoundtrackInfo = {
+            albumTitle: r.title,
+            releaseId: r.id,
+            masterReleaseId: r.masterReleaseId || r.id,
+            releaseYear: r.releaseYear || r.originalYear,
+          }
           if (cleanRel.length > 2) {
-            releaseTitleMap.set(cleanRel, {
-              albumTitle: r.title,
-              releaseId: r.id,
-              masterReleaseId: r.masterReleaseId || r.id,
-              releaseYear: r.releaseYear || r.originalYear,
-            })
+            releaseTitleMap.set(cleanRel, info)
+          }
+          if (normRel.length > 2 && !releaseTitleMap.has(normRel)) {
+            releaseTitleMap.set(normRel, info)
           }
         }
       })
@@ -750,9 +765,10 @@ export class SqliteLibraryService {
         let orig: OriginalSoundtrackInfo | undefined
 
         // Layer 1: Authoritative Container / AcoustID / Sidecar Provenance
-        if (t.originalAlbum && t.originalAlbum.toLowerCase().trim() !== parentRel?.title.toLowerCase().trim()) {
+        if (t.originalAlbum && !isSameCanonicalAlbum(t.originalAlbum, parentRel?.title)) {
           const cleanOrig = stripRipNoiseAndTags(t.originalAlbum).toLowerCase().trim()
-          const matchedRel = releaseTitleMap.get(cleanOrig)
+          const normOrig = normalizeCanonicalAlbumTitle(t.originalAlbum)
+          const matchedRel = releaseTitleMap.get(normOrig) || releaseTitleMap.get(cleanOrig)
           orig = {
             albumTitle: t.originalAlbum,
             releaseId: matchedRel?.releaseId || '',
@@ -797,13 +813,20 @@ export class SqliteLibraryService {
 
         let isProvenanceTrack = false
 
-        // Check if orig belongs to a different album
-        if (orig && orig.albumTitle !== parentRel?.title) {
+        // Check if orig belongs to a genuinely different album
+        if (orig && !isSameCanonicalAlbum(orig.albumTitle, parentRel?.title)) {
           t.canonicalAlbumTitle = orig.albumTitle
           t.canonicalReleaseId = orig.masterReleaseId || orig.releaseId
           t.canonicalReleaseYear = orig.releaseYear
           t.isCanonicalAlbumTrack = false
           isProvenanceTrack = true
+        } else if (orig && isSameCanonicalAlbum(orig.albumTitle, parentRel?.title)) {
+          // Explicit native master match: album resolves to itself
+          t.canonicalAlbumTitle = undefined
+          t.canonicalReleaseId = undefined
+          t.canonicalReleaseYear = undefined
+          t.isCanonicalAlbumTrack = true
+          isProvenanceTrack = false
         }
 
         // 5. Fallback for Hyphen pattern on compilation when Movie is NOT in local library (e.g. "Katiya Karun - Rockstar")
