@@ -2683,6 +2683,44 @@ impl DbOperations {
         })
     }
 
+    /// Returns item counts for the currently active commit batch, or the most
+    /// recently created batch when the queue is idle. UI progress is per-batch;
+    /// lifetime queue totals make each new commit appear to continue the last.
+    pub fn get_commit_batch_progress(
+        conn: &Connection,
+        preferred_batch_id: Option<&str>,
+    ) -> Result<(i64, i64, i64, i64)> {
+        let batch_id = match preferred_batch_id {
+            Some(id) => Some(id.to_string()),
+            None => conn
+                .query_row(
+                    "SELECT id FROM commit_queue_batches ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok(),
+        };
+
+        let Some(batch_id) = batch_id else {
+            return Ok((0, 0, 0, 0));
+        };
+
+        let count_status = |status: &str| -> Result<i64> {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM commit_queue_items WHERE batch_id = ?1 AND status = ?2",
+                rusqlite::params![batch_id, status],
+                |row| row.get(0),
+            )?)
+        };
+
+        Ok((
+            count_status("pending")?,
+            count_status("in_flight")?,
+            count_status("completed")?,
+            count_status("failed")?,
+        ))
+    }
+
     pub fn set_batch_override(conn: &Connection, batch_id: &str, allow: bool) -> Result<()> {
         conn.execute(
             "UPDATE commit_queue_batches SET force_override = ?1 WHERE id = ?2",

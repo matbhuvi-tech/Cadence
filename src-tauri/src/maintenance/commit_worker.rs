@@ -94,6 +94,18 @@ impl CommitQueueWorker {
             .expect("[CommitQueueWorker] Deadlock detected: DB Mutex lock timed out after 5 seconds")
     }
 
+    fn batch_progress(
+        &self,
+        summary: Option<&crate::db::CommitQueueSummary>,
+    ) -> (i64, i64, i64, i64) {
+        let conn = self.lock_db();
+        DbOperations::get_commit_batch_progress(
+            &conn,
+            summary.and_then(|s| s.active_batch_id.as_deref()),
+        )
+        .unwrap_or((0, 0, 0, 0))
+    }
+
     /// Performs startup crash recovery: sweeps `in_flight` items in SQLite and deletes orphaned temp files.
     pub fn perform_startup_recovery(&self) {
         let requeued_res = {
@@ -670,10 +682,8 @@ impl CommitQueueWorker {
             None => return,
         };
 
-        let pending_items = summary.pending_items;
-        let inflight_items = summary.inflight_items;
-        let completed_items = summary.completed_items;
-        let failed_items = summary.failed_items;
+        let (pending_items, inflight_items, completed_items, failed_items) =
+            self.batch_progress(Some(summary));
         let total_items = pending_items + inflight_items + completed_items + failed_items;
 
         let percent = if total_items > 0 {
@@ -745,10 +755,8 @@ impl CommitQueueWorker {
             DbOperations::get_commit_queue_summary(&conn).ok()
         };
 
-        let pending_items = summary.as_ref().map(|s| s.pending_items).unwrap_or(0);
-        let inflight_items = summary.as_ref().map(|s| s.inflight_items).unwrap_or(0);
-        let completed_items = summary.as_ref().map(|s| s.completed_items).unwrap_or(0);
-        let failed_items = summary.as_ref().map(|s| s.failed_items).unwrap_or(0);
+        let (pending_items, inflight_items, completed_items, failed_items) =
+            self.batch_progress(summary.as_ref());
         let total_items = pending_items + inflight_items + completed_items + failed_items;
 
         let percent = if total_items > 0 {
