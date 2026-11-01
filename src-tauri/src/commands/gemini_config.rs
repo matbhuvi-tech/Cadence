@@ -221,9 +221,7 @@ No other text or markdown explanation, just the pure JSON array."#;
             let mut ref_section = String::new();
             if !reference_url.is_empty() {
                 ref_section = format!(
-                    "USER REFERENCE URL (TOP GROUND-TRUTH CITATION):
-"{}"
-Extract track titles, composer, singers, and original movie/soundtrack titles strictly matching this authoritative source.",
+                    "USER REFERENCE URL (TOP GROUND-TRUTH CITATION):\n\"{}\"\nExtract track titles, composer, singers, and original movie/soundtrack titles strictly matching this authoritative source.",
                     reference_url
                 );
             }
@@ -235,11 +233,7 @@ Extract track titles, composer, singers, and original movie/soundtrack titles st
                 let q_year = user_query["year"].as_i64().unwrap_or(0);
                 if !q_album.is_empty() || !q_artist.is_empty() || q_year > 0 {
                     query_section = format!(
-                        "USER REFINE QUERY (HUMAN SEARCH GUIDANCE):
-Album: "{}"
-Artist: "{}"
-Year: {}
-Treat this human input as high-value intent above automatic heuristics.",
+                        "USER REFINE QUERY (HUMAN SEARCH GUIDANCE):\nAlbum: \"{}\"\nArtist: \"{}\"\nYear: {}\nTreat this human input as high-value intent above automatic heuristics.",
                         q_album, q_artist, if q_year > 0 { q_year.to_string() } else { "Unknown".to_string() }
                     );
                 }
@@ -247,7 +241,7 @@ Treat this human input as high-value intent above automatic heuristics.",
 
             let folder_hint = payload["folderName"].as_str().unwrap_or("").trim();
             let folder_section = if !folder_hint.is_empty() {
-                format!("Physical Folder/File Context: "{}"", folder_hint)
+                format!("Physical Folder/File Context: \"{}\"", folder_hint)
             } else {
                 String::new()
             };
