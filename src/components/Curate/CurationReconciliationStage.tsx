@@ -1727,7 +1727,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                       <td
                         onClick={() => {
                           if (aiCandidate?.composerName) {
-                            setSelectedFields((prev) => ({ ...prev, composerName: aiCandidate.composerName }))
+                            setSelectedFields((prev) => ({ ...prev, composerName: aiCandidate.composerName || '' }))
                             setUserOverriddenFields((prev) => ({ ...prev, composerName: true }))
                           }
                         }}
