@@ -122,6 +122,25 @@ export function isSameCanonicalAlbum(titleA?: string | null, titleB?: string | n
 /**
  * Strips format, rip noise, and year brackets from a title or folder name.
  */
+/**
+ * Generates transliteration and phonetic variants of an album/soundtrack title
+ * to overcome catalog spelling discrepancies (e.g., 'Aanand' vs 'Anand', 'Paasa' vs 'Pasa').
+ */
+export function generateSearchTitleVariants(raw: string): string[] {
+  if (!raw) return []
+  const base = cleanRipNoise(raw)
+  const variants: string[] = []
+  const add = (t: string) => {
+    const s = t.trim()
+    if (s && !variants.includes(s)) variants.push(s)
+  }
+  add(base)
+  // Single-vowel reduction for Indian cinema transliterations (Aanand -> Anand, Paasa -> Pasa, Baasha -> Basha)
+  const compressed = base.replace(/([aeiou])\1+/gi, '$1')
+  add(compressed)
+  return variants
+}
+
 export function cleanRipNoise(str: string): string {
   if (!str) return ''
   return str

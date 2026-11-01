@@ -38,7 +38,7 @@ export interface CompilationProvenanceModalProps {
   allTracks: Track[]
   allReleases: Release[]
   initialSearchQuery?: { albumTitle?: string; artistCredit?: string; year?: number }
-  onSuccess?: (updatedCount: number) => void
+  onSuccess?: (updatedCount: number, appliedAlbumMeta?: { title?: string; composer?: string; artist?: string; year?: number }) => void
   showToast?: (msg: string) => void
 }
 
@@ -188,7 +188,19 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
       }
 
       if (onSuccess) {
-        onSuccess(updatedCount)
+        // If tracks share a uniform canonical film/album origin, pass it to sync the album curation stage
+        const distinctAlbums = Array.from(new Set(proposedTracks.filter(t => t.selected && t.proposedOriginalAlbum).map(t => t.proposedOriginalAlbum)))
+        const distinctComposers = Array.from(new Set(proposedTracks.filter(t => t.selected && t.composer).map(t => t.composer!)))
+        const distinctYears = Array.from(new Set(proposedTracks.filter(t => t.selected && t.proposedOriginalYear).map(t => t.proposedOriginalYear!)))
+        
+        const appliedMeta = distinctAlbums.length === 1 ? {
+          title: distinctAlbums[0],
+          composer: distinctComposers.length === 1 ? distinctComposers[0] : undefined,
+          artist: distinctComposers.length === 1 ? distinctComposers[0] : undefined,
+          year: distinctYears.length === 1 ? distinctYears[0] : undefined,
+        } : undefined
+
+        onSuccess(updatedCount, appliedMeta)
       }
       onClose()
     } catch (err: any) {

@@ -1220,15 +1220,34 @@ function localLibraryScannerPlugin(): Plugin {
           cleanComposer = ''
         }
 
+        // Canonical alias expansion for authoritative composers/artists (e.g., Illayaraja -> Ilaiyaraaja)
+        if (/^ill?ayara[aj]+a?h?$/i.test(cleanArtist)) {
+          cleanArtist = 'Ilaiyaraaja'
+        }
+        if (/^ill?ayara[aj]+a?h?$/i.test(cleanComposer)) {
+          cleanComposer = 'Ilaiyaraaja'
+        }
+
+        // Generate transliteration variants for album titles (e.g. Aanand -> Anand, Paasa Mazhai -> Pasa Mazhai)
+        const albumVariants: string[] = []
+        if (cleanAlbum) {
+          albumVariants.push(cleanAlbum)
+          const comp = cleanAlbum.replace(/([aeiou])\1+/gi, '$1')
+          if (comp && !albumVariants.includes(comp)) albumVariants.push(comp)
+        }
+
         let foundItem: any = null
 
         // Primary entity search if entity === 'album' or no song title provided
         if (entity === 'album' || !cleanTitle) {
-          const albumQueries = [
-            cleanAlbum && cleanComposer ? `${cleanAlbum} ${cleanComposer}`.trim() : null,
-            cleanAlbum && cleanArtist ? `${cleanAlbum} ${cleanArtist}`.trim() : null,
-            cleanAlbum ? `${cleanAlbum}`.trim() : null,
-          ].filter(Boolean) as string[]
+          const albumQueries: string[] = []
+          for (const alb of albumVariants) {
+            if (cleanComposer) albumQueries.push(`${alb} ${cleanComposer}`.trim())
+            if (cleanArtist && cleanArtist !== cleanComposer) albumQueries.push(`${alb} ${cleanArtist}`.trim())
+          }
+          for (const alb of albumVariants) {
+            albumQueries.push(alb)
+          }
 
           for (const q of albumQueries) {
             try {
@@ -1286,24 +1305,37 @@ function localLibraryScannerPlugin(): Plugin {
           }
         }
 
-        // Secondary fallback: query album entity
+        // Secondary fallback: query album entity with artist validation guard
         if (!foundItem && cleanAlbum) {
           try {
-            const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(cleanAlbum)}&entity=album&limit=3`
-            const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
-            if (itunesRes.ok) {
-              const data = (await itunesRes.json()) as any
-              if (data.results && data.results.length > 0) {
-                const alb = data.results[0]
-                foundItem = {
-                  artistName: alb.artistName,
-                  trackName: cleanTitle || alb.collectionName,
-                  collectionName: alb.collectionName,
-                  releaseDate: alb.releaseDate,
-                  primaryGenreName: alb.primaryGenreName,
-                  artworkUrl100: alb.artworkUrl100,
-                  copyright: alb.copyright,
-                  collectionId: alb.collectionId,
+            for (const albName of albumVariants) {
+              const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(albName)}&entity=album&limit=5`
+              const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+              if (itunesRes.ok) {
+                const data = (await itunesRes.json()) as any
+                if (data.results && data.results.length > 0) {
+                  // If artist or composer was specified, require correlation to avoid random single hits (e.g. Christ Media)
+                  const targetArtist = (cleanComposer || cleanArtist || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+                  const matched = targetArtist
+                    ? data.results.find((r: any) => {
+                        const candArt = (r.artistName || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+                        return candArt.includes(targetArtist) || targetArtist.includes(candArt)
+                      })
+                    : data.results[0]
+
+                  if (matched) {
+                    foundItem = {
+                      artistName: matched.artistName,
+                      trackName: cleanTitle || matched.collectionName,
+                      collectionName: matched.collectionName,
+                      releaseDate: matched.releaseDate,
+                      primaryGenreName: matched.primaryGenreName,
+                      artworkUrl100: matched.artworkUrl100,
+                      copyright: matched.copyright,
+                      collectionId: matched.collectionId,
+                    }
+                    break
+                  }
                 }
               }
             }

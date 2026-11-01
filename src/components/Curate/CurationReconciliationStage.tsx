@@ -1977,8 +1977,32 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                   }
                 : undefined
             }
-            onSuccess={() => {
+            onSuccess={(_updatedCount, appliedAlbumMeta) => {
               setIsSoundtrackResolverOpen(false)
+              if (appliedAlbumMeta) {
+                if (appliedAlbumMeta.title) {
+                  setSelectedFields((prev) => ({ ...prev, title: appliedAlbumMeta.title! }))
+                  setQueryAlbum(appliedAlbumMeta.title)
+                }
+                if (appliedAlbumMeta.composer) {
+                  setSelectedFields((prev) => ({ ...prev, composerName: appliedAlbumMeta.composer! }))
+                }
+                if (appliedAlbumMeta.artist) {
+                  setSelectedFields((prev) => ({ ...prev, artistCredit: appliedAlbumMeta.artist! }))
+                  setQueryArtist(appliedAlbumMeta.artist)
+                }
+                if (appliedAlbumMeta.year) {
+                  setSelectedFields((prev) => ({ ...prev, releaseYear: String(appliedAlbumMeta.year) }))
+                  setQueryYear(String(appliedAlbumMeta.year))
+                }
+                // Refresh candidates with authoritative canonical metadata
+                fetchCandidates(true, {
+                  albumTitle: appliedAlbumMeta.title || queryAlbum,
+                  artistCredit: appliedAlbumMeta.artist || queryArtist,
+                  composerName: appliedAlbumMeta.composer,
+                  releaseYear: appliedAlbumMeta.year ? String(appliedAlbumMeta.year) : queryYear,
+                })
+              }
               window.dispatchEvent(new CustomEvent('cadence:provenance-updated'))
             }}
             showToast={showToast}

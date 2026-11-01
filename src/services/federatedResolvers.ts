@@ -19,6 +19,8 @@ import {
   disambiguateComboTitle,
   isDefectiveArtistTag,
   matchTrackArtistFromProviderList,
+  canonicalizeComposer,
+  generateSearchTitleVariants,
 } from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
 import { tauriBridge } from './tauriBridge'
@@ -862,11 +864,19 @@ export class FederatedResolversService {
         }
 
         // 2. Direct Apple iTunes Search API fallback (works offline / CLI / test)
-        const itunesQueries = [
-          cleanComposer ? `${cleanAlbum} ${cleanComposer}`.trim() : null,
-          cleanArtist ? `${cleanAlbum} ${cleanArtist}`.trim() : null,
-          `${cleanAlbum}`.trim(),
-        ].filter(Boolean) as string[]
+        const albumVariants = generateSearchTitleVariants(cleanAlbum)
+        const canonicalComp = canonicalizeComposer(cleanComposer || cleanArtist).canonicalName
+        const targetArtistName = canonicalComp && canonicalComp !== 'Unknown Composer' ? canonicalComp : (cleanComposer || cleanArtist)
+
+        const itunesQueries: string[] = []
+        for (const alb of albumVariants) {
+          if (targetArtistName) itunesQueries.push(`${alb} ${targetArtistName}`.trim())
+          if (cleanComposer && cleanComposer !== targetArtistName) itunesQueries.push(`${alb} ${cleanComposer}`.trim())
+          if (cleanArtist && cleanArtist !== targetArtistName) itunesQueries.push(`${alb} ${cleanArtist}`.trim())
+        }
+        for (const alb of albumVariants) {
+          itunesQueries.push(alb)
+        }
 
         for (const q of itunesQueries) {
           try {
