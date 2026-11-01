@@ -30,6 +30,8 @@ export interface ProposedTrackCanonicalization {
   matchedInLibrary: boolean
   matchedReleaseId?: string
   matchedReleaseTitle?: string
+  folderName?: string
+  filePath?: string
   selected: boolean
 }
 
@@ -205,6 +207,8 @@ class CompilationCanonicalizerService {
           matchedInLibrary,
           matchedReleaseId,
           matchedReleaseTitle,
+          folderName: track.folderName || release.folderName || '',
+          filePath: track.filePath || '',
           selected: Boolean(hasChange && confidence >= 0.7),
         }
       })

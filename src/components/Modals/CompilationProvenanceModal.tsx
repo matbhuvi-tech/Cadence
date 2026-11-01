@@ -381,6 +381,16 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
                               {item.primaryVocalists}
                             </span>
                           )}
+                          {/* Human Inspection: Original Folder & File Name */}
+                          <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 mt-1 select-text">
+                            <span className="text-zinc-400 font-medium truncate max-w-[150px]" title={`Folder: ${item.folderName || release.folderName || 'Folder'}`}>
+                              📁 {item.folderName || release.folderName || 'Folder'}
+                            </span>
+                            <span className="text-zinc-600">•</span>
+                            <span className="text-zinc-400 font-medium truncate max-w-[220px]" title={`File: ${item.filePath ? item.filePath.split(/[/\\]/).pop() : item.title}`}>
+                              📄 {item.filePath ? item.filePath.split(/[/\\]/).pop() : item.title}
+                            </span>
+                          </div>
                         </div>
 
                         {/* Mapping Arrow & Proposed Soundtrack */}

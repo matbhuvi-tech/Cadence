@@ -1335,7 +1335,7 @@ export class FederatedResolversService {
       mbVal?: string,
       defaultVal: string = ''
     ): ConsensusFieldResult<string> => {
-      const norm = (s?: string) => (s ? cleanConsensusTitle(s).toLowerCase() : '')
+      const norm = (s?: string) => (s ? cleanConsensusTitle(s).toLowerCase().replace(/[\s\-_–—.,&'"+/\\()[\]]/g, '') : '')
       const isLocalPlaceholder = isPlaceholderTag(localVal)
       const isApplePlaceholder = isPlaceholderTag(appleVal)
       const isMbPlaceholder = isPlaceholderTag(mbVal)

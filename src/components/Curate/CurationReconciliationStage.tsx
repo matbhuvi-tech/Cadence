@@ -165,6 +165,13 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     releaseYear: '',
     genre: '',
   })
+  const [userOverriddenFields, setUserOverriddenFields] = useState<{
+    title?: boolean
+    artistCredit?: boolean
+    composerName?: boolean
+    releaseYear?: boolean
+    genre?: boolean
+  }>({})
 
   // Selected artwork candidate
   const [selectedArtwork, setSelectedArtwork] = useState<CoverArtCandidate | null>(null)
@@ -289,6 +296,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
       releaseYear: initialYear,
       genre: initialGenre,
     })
+    setUserOverriddenFields({})
 
     // Prepare clean initial search terms for external database steering
     const cleanInitialTitle = initialTitle.replace(/\s*(?:\[|\()?cd\s*rip(?:\s*#?\d*)?(?:\]|\))?/i, '').trim() || initialTitle
@@ -474,6 +482,18 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
         // Select the highest-res candidate by default if available
         if (result.artworkCandidates.length > 0) {
           setSelectedArtwork(result.artworkCandidates[0])
+        }
+
+        // Prefill staged fields from AI candidate if not manually overridden by user
+        const aiCand = result.artworkCandidates.find((c) => c.provider === 'ai')
+        if (aiCand) {
+          setSelectedFields((prev) => ({
+            title: !userOverriddenFields.title && aiCand.albumTitle ? aiCand.albumTitle : prev.title,
+            artistCredit: !userOverriddenFields.artistCredit && aiCand.artistCredit && !isPlaceholderTag(aiCand.artistCredit) ? aiCand.artistCredit : prev.artistCredit,
+            composerName: !userOverriddenFields.composerName && aiCand.composerName ? aiCand.composerName : prev.composerName,
+            releaseYear: !userOverriddenFields.releaseYear && aiCand.releaseYear ? String(aiCand.releaseYear) : prev.releaseYear,
+            genre: prev.genre,
+          }))
         }
 
         // 2. Dispatch Lookahead Prefetch for next 2 queue items in idle background
@@ -920,6 +940,16 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                         : 'border-white/10 text-white hover:border-white/20 focus:border-[#D4AF37]'
                     }`}
                   />
+                  {/* Human Inspection: Original Folder and File Name */}
+                  <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 mt-1 px-0.5 select-text">
+                    <span className="text-zinc-400 font-medium truncate max-w-[140px]" title={`Folder: ${t.folderName || release?.folderName || 'Root'}`}>
+                      📁 {t.folderName || release?.folderName || 'Folder'}
+                    </span>
+                    <span className="text-zinc-600">•</span>
+                    <span className="text-zinc-400 font-medium truncate max-w-[220px]" title={`File: ${t.filePath ? t.filePath.split(/[/\]/).pop() : t.title}`}>
+                      📄 {t.filePath ? t.filePath.split(/[/\]/).pop() : t.title}
+                    </span>
+                  </div>
                 </td>
 
                 {/* Column 3: Inline-Editable Track Vocalists / Artists (44%) */}
@@ -1005,6 +1035,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
   const itunesCandidate = candidatesResult?.metadataCandidates?.itunes
   const mbCandidate = candidatesResult?.metadataCandidates?.musicbrainz
+  const aiCandidate = candidatesResult?.artworkCandidates?.find((c) => c.provider === 'ai')
   const hasValidLocalArt = Boolean(albumItem.coverArtUrl && !failedArtUrls.has(albumItem.coverArtUrl))
 
   return (
@@ -1500,11 +1531,12 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                 <table className="w-full table-fixed text-left text-xs border-collapse">
                   <thead>
                     <tr className="border-b border-white/[0.08] text-[#8E8E93] text-[11px] font-mono">
-                      <th className="py-2 px-3 w-[18%] font-medium">Field</th>
-                      <th className="py-2 px-3 w-[18%] font-medium">Local File Tag</th>
-                      <th className="py-2 px-3 w-[18%] font-medium">Apple Music Master</th>
-                      <th className="py-2 px-3 w-[18%] font-medium">MusicBrainz Archive</th>
-                      <th className="py-2 px-3 w-[28%] font-medium text-emerald-400">Staged Output</th>
+                      <th className="py-2 px-2.5 w-[14%] font-medium">Field</th>
+                      <th className="py-2 px-2.5 w-[16%] font-medium">Local File Tag</th>
+                      <th className="py-2 px-2.5 w-[17%] font-medium">Apple Music Master</th>
+                      <th className="py-2 px-2.5 w-[15%] font-medium">MusicBrainz Archive</th>
+                      <th className="py-2 px-2.5 w-[16%] font-medium text-cyan-400">Gemini AI Master</th>
+                      <th className="py-2 px-2.5 w-[22%] font-medium text-emerald-400">Staged Output</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.04]">
@@ -1549,12 +1581,29 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                       >
                         {mbCandidate?.releaseTitle || '—'}
                       </td>
-                      <td className="py-2 px-3 align-middle">
+                      <td
+                        onClick={() => {
+                          if (aiCandidate?.albumTitle) {
+                            setSelectedFields((prev) => ({ ...prev, title: aiCandidate.albumTitle }))
+                            setUserOverriddenFields((prev) => ({ ...prev, title: true }))
+                          }
+                        }}
+                        title={aiCandidate?.albumTitle || ''}
+                        className={`py-2 px-2.5 align-middle truncate transition-colors ${
+                          aiCandidate?.albumTitle ? 'text-cyan-300 hover:text-cyan-100 cursor-pointer font-medium' : 'text-[#636366]'
+                        }`}
+                      >
+                        {aiCandidate?.albumTitle || '—'}
+                      </td>
+                      <td className="py-2 px-2.5 align-middle">
                         <input
                           type="text"
                           value={selectedFields.title}
                           title={selectedFields.title}
-                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, title: e.target.value }))}
+                          onChange={(e) => {
+                            setSelectedFields((prev) => ({ ...prev, title: e.target.value }))
+                            setUserOverriddenFields((prev) => ({ ...prev, title: true }))
+                          }}
                           className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
                         />
                       </td>
@@ -1601,12 +1650,29 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                       >
                         {mbCandidate?.artistCredit || '—'}
                       </td>
-                      <td className="py-2 px-3 align-middle">
+                      <td
+                        onClick={() => {
+                          if (aiCandidate?.artistCredit) {
+                            setSelectedFields((prev) => ({ ...prev, artistCredit: aiCandidate.artistCredit }))
+                            setUserOverriddenFields((prev) => ({ ...prev, artistCredit: true }))
+                          }
+                        }}
+                        title={aiCandidate?.artistCredit || ''}
+                        className={`py-2 px-2.5 align-middle truncate transition-colors ${
+                          aiCandidate?.artistCredit ? 'text-cyan-300 hover:text-cyan-100 cursor-pointer font-medium' : 'text-[#636366]'
+                        }`}
+                      >
+                        {aiCandidate?.artistCredit || '—'}
+                      </td>
+                      <td className="py-2 px-2.5 align-middle">
                         <input
                           type="text"
                           value={selectedFields.artistCredit}
                           title={selectedFields.artistCredit}
-                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, artistCredit: e.target.value }))}
+                          onChange={(e) => {
+                            setSelectedFields((prev) => ({ ...prev, artistCredit: e.target.value }))
+                            setUserOverriddenFields((prev) => ({ ...prev, artistCredit: true }))
+                          }}
                           className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
                         />
                       </td>
@@ -1658,12 +1724,29 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                       >
                         {mbCandidate?.composer || '—'}
                       </td>
-                      <td className="py-2 px-3 align-middle">
+                      <td
+                        onClick={() => {
+                          if (aiCandidate?.composerName) {
+                            setSelectedFields((prev) => ({ ...prev, composerName: aiCandidate.composerName }))
+                            setUserOverriddenFields((prev) => ({ ...prev, composerName: true }))
+                          }
+                        }}
+                        title={aiCandidate?.composerName || ''}
+                        className={`py-2 px-2.5 align-middle truncate transition-colors ${
+                          aiCandidate?.composerName ? 'text-cyan-300 hover:text-cyan-100 cursor-pointer font-medium' : 'text-[#636366]'
+                        }`}
+                      >
+                        {aiCandidate?.composerName || '—'}
+                      </td>
+                      <td className="py-2 px-2.5 align-middle">
                         <input
                           type="text"
                           value={selectedFields.composerName}
                           title={selectedFields.composerName}
-                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, composerName: e.target.value }))}
+                          onChange={(e) => {
+                            setSelectedFields((prev) => ({ ...prev, composerName: e.target.value }))
+                            setUserOverriddenFields((prev) => ({ ...prev, composerName: true }))
+                          }}
                           className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs"
                         />
                       </td>
@@ -1712,12 +1795,29 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                       >
                         {mbCandidate?.releaseYear || '—'}
                       </td>
-                      <td className="py-2 px-3 align-middle font-mono">
+                      <td
+                        onClick={() => {
+                          if (aiCandidate?.releaseYear) {
+                            setSelectedFields((prev) => ({ ...prev, releaseYear: String(aiCandidate.releaseYear) }))
+                            setUserOverriddenFields((prev) => ({ ...prev, releaseYear: true }))
+                          }
+                        }}
+                        title={aiCandidate?.releaseYear ? String(aiCandidate.releaseYear) : ''}
+                        className={`py-2 px-2.5 align-middle font-mono truncate transition-colors ${
+                          aiCandidate?.releaseYear ? 'text-cyan-300 hover:text-cyan-100 cursor-pointer font-medium' : 'text-[#636366]'
+                        }`}
+                      >
+                        {aiCandidate?.releaseYear || '—'}
+                      </td>
+                      <td className="py-2 px-2.5 align-middle font-mono">
                         <input
                           type="text"
                           value={selectedFields.releaseYear}
                           title={selectedFields.releaseYear}
-                          onChange={(e) => setSelectedFields((prev) => ({ ...prev, releaseYear: e.target.value }))}
+                          onChange={(e) => {
+                            setSelectedFields((prev) => ({ ...prev, releaseYear: e.target.value }))
+                            setUserOverriddenFields((prev) => ({ ...prev, releaseYear: true }))
+                          }}
                           className="w-full px-2.5 py-1 rounded bg-black/40 border border-emerald-500/30 text-emerald-300 font-medium focus:outline-none focus:border-emerald-400 text-xs font-mono"
                         />
                       </td>
