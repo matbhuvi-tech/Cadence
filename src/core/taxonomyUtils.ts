@@ -1369,7 +1369,10 @@ export interface TrackMatchResult {
 export function matchTrackArtistFromProviderList(
   localTitle: string,
   providerTracks: ProviderTrackItem[],
-  localTrackNum?: number
+  localTrackNum?: number,
+  options?: {
+    albumVerified?: boolean
+  }
 ): TrackMatchResult | null {
   if (!providerTracks || providerTracks.length === 0) return null
 
@@ -1446,14 +1449,37 @@ export function matchTrackArtistFromProviderList(
     }
   }
 
-  // 4. Fallback to track number if confidence is still low and track number matches
-  if (!bestMatch && localTrackNum && localTrackNum > 0) {
+  // 4. Track number fallback: ONLY permitted if the album itself has been verified beyond doubt
+  // AND the local track title is either an unnamed placeholder (e.g., "Track 06", "06")
+  // or shares minimal phonetic/token root with the provider track.
+  // Blind track-number guessing on unverified albums or distinct, mismatched song titles is forbidden.
+  if (!bestMatch && localTrackNum && localTrackNum > 0 && options?.albumVerified) {
+    const isLocalPlaceholder = isPlaceholderTag(localTitle) || /^(?:track|audio)?\s*\d+$/i.test((localTitle || '').trim())
     const byNum = providerTracks.find((pt) => pt.trackNumber === localTrackNum)
     if (byNum && byNum.artistName) {
-      return {
-        artistName: byNum.artistName,
-        matchedTitle: byNum.trackName,
-        confidence: 0.7,
+      if (isLocalPlaceholder) {
+        return {
+          artistName: byNum.artistName,
+          matchedTitle: byNum.trackName,
+          confidence: 0.7,
+        }
+      }
+      const sProv = sanitizeForMatch(byNum.trackName)
+      if (sLocal && sProv) {
+        const hasTrigramOverlap = () => {
+          if (sLocal.length < 3 || sProv.length < 3) return false
+          for (let i = 0; i <= sLocal.length - 3; i++) {
+            if (sProv.includes(sLocal.slice(i, i + 3))) return true
+          }
+          return false
+        }
+        if (hasTrigramOverlap()) {
+          return {
+            artistName: byNum.artistName,
+            matchedTitle: byNum.trackName,
+            confidence: 0.65,
+          }
+        }
       }
     }
   }
