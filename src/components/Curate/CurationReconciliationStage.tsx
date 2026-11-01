@@ -946,8 +946,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                       📁 {t.folderName || release?.folderName || 'Folder'}
                     </span>
                     <span className="text-zinc-600">•</span>
-                    <span className="text-zinc-400 font-medium truncate max-w-[220px]" title={`File: ${t.filePath ? t.filePath.split(/[/\]/).pop() : t.title}`}>
-                      📄 {t.filePath ? t.filePath.split(/[/\]/).pop() : t.title}
+                    <span className="text-zinc-400 font-medium truncate max-w-[220px]" title={`File: ${t.filePath ? t.filePath.split(/[/\\\\]/).pop() : t.title}`}>
+                      📄 {t.filePath ? t.filePath.split(/[/\\\\]/).pop() : t.title}
                     </span>
                   </div>
                 </td>
