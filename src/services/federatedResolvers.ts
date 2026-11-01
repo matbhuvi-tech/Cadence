@@ -21,6 +21,8 @@ import {
   matchTrackArtistFromProviderList,
   canonicalizeComposer,
   generateSearchTitleVariants,
+  isSameCanonicalAlbum,
+  normalizeCanonicalAlbumTitle,
 } from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
 import { tauriBridge } from './tauriBridge'
@@ -887,9 +889,10 @@ export class FederatedResolversService {
               if (itunesData.results && itunesData.results.length > 0) {
                 const normAlbum = cleanAlbum.toLowerCase()
                 const matched =
-                  itunesData.results.find((r: any) =>
-                    (r.collectionName || '').toLowerCase().includes(normAlbum)
-                  ) || itunesData.results[0]
+                  itunesData.results.find((r: any) => {
+                    const colName = (r.collectionName || '').toLowerCase()
+                    return colName.includes(normAlbum) || normAlbum.includes(colName) || isSameCanonicalAlbum(cleanAlbum, r.collectionName)
+                  })
 
                 if (matched && matched.artworkUrl100) {
                   const highRes = matched.artworkUrl100.replace('100x100bb.jpg', '3000x3000bb.jpg')
@@ -973,8 +976,13 @@ export class FederatedResolversService {
             if (mbRes.ok) {
               const mbData = (await mbRes.json()) as any
               if (mbData.releases && mbData.releases.length > 0) {
+                const normAlbum = cleanAlbum.toLowerCase()
+                const matchedReleases = mbData.releases.filter((r: any) => {
+                  const t = (r.title || '').toLowerCase()
+                  return t.includes(normAlbum) || normAlbum.includes(t) || isSameCanonicalAlbum(cleanAlbum, r.title)
+                })
                 const relWithArt =
-                  mbData.releases.find((r: any) => r['cover-art-archive']?.front === true) || mbData.releases[0]
+                  matchedReleases.find((r: any) => r['cover-art-archive']?.front === true) || matchedReleases[0]
                 if (relWithArt && relWithArt.id) {
                   const caaUrl = `https://coverartarchive.org/release/${relWithArt.id}/front-500`
                   const thumbUrl = `https://coverartarchive.org/release/${relWithArt.id}/front-250`
@@ -1308,6 +1316,61 @@ export class FederatedResolversService {
   }
 
   /**
+   * Evaluates whether an online candidate matches the target search signature sufficiently
+   * to be accepted as a candidate. Enforces Rule 2 (Online Store Quality Sanity Check).
+   */
+  public isProviderCandidateAcceptable(
+    signature: AlbumSignature,
+    candidate: ProviderResult | null,
+    targetYear?: number
+  ): boolean {
+    if (!candidate || !candidate.releaseTitle) return false
+
+    const targetTitle = (signature.sanitizedTitle || '').trim()
+    if (!targetTitle) return true
+
+    // 1. Exact canonical album match (e.g. "Ranga (Original Motion Picture Soundtrack)" <-> "Ranga")
+    if (isSameCanonicalAlbum(targetTitle, candidate.releaseTitle)) {
+      return true
+    }
+
+    const normTarget = normalizeCanonicalAlbumTitle(targetTitle).toLowerCase().trim()
+    const normCand = normalizeCanonicalAlbumTitle(candidate.releaseTitle).toLowerCase().trim()
+
+    if (normTarget && normCand) {
+      if (normTarget === normCand) return true
+
+      // Substring match if length >= 3
+      if (normTarget.length >= 3 && (normCand.includes(normTarget) || normTarget.includes(normCand))) {
+        if (targetYear && candidate.releaseYear) {
+          const yearDiff = Math.abs(candidate.releaseYear - targetYear)
+          if (yearDiff > 12) return false
+        }
+        return true
+      }
+
+      // Token overlap: calculate shared distinctive words (>= 3 chars)
+      const tokTarget = normTarget.split(/\s+/).filter((w) => w.length >= 3)
+      const tokCand = normCand.split(/\s+/).filter((w) => w.length >= 3)
+
+      if (tokTarget.length > 0) {
+        const shared = tokTarget.filter((t) => tokCand.includes(t))
+        const overlapRatio = shared.length / tokTarget.length
+        if (overlapRatio >= 0.5) {
+          if (targetYear && candidate.releaseYear) {
+            const yearDiff = Math.abs(candidate.releaseYear - targetYear)
+            if (yearDiff > 12) return false
+          }
+          return true
+        }
+      }
+    }
+
+    // Zero similarity between candidate title and target title
+    return false
+  }
+
+  /**
    * Performs 2-of-3 consensus arbitration across Local tags, Apple Music, and MusicBrainz.
    */
   public async resolve2of3ReleaseConsensus(
@@ -1333,10 +1396,17 @@ export class FederatedResolversService {
       firstTrackTitle: localTracks[0]?.title,
     }
 
-    const [itunes, mb] = await Promise.all([
+    const [rawItunes, rawMb] = await Promise.all([
       this.fetchItunesAlbumCandidate(signature),
       this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch),
     ])
+
+    const itunesVerified = this.isProviderCandidateAcceptable(signature, rawItunes, localRelease.releaseYear)
+    const mbVerified = this.isProviderCandidateAcceptable(signature, rawMb, localRelease.releaseYear)
+
+    // Quality check guard: discard online store candidates that fail sanity check against search target
+    let itunes = itunesVerified ? rawItunes : null
+    let mb = mbVerified ? rawMb : null
 
     const earliestYear = calculateEarliestValidYear(
       localRelease.releaseYear,
@@ -1476,7 +1546,9 @@ export class FederatedResolversService {
 
       // 1. Check Apple Music tracklist
       if (itunes?.tracks && itunes.tracks.length > 0) {
-        const m = matchTrackArtistFromProviderList(lt.title, itunes.tracks, lt.trackNumber)
+        const m = matchTrackArtistFromProviderList(lt.title, itunes.tracks, lt.trackNumber, {
+          albumVerified: itunesVerified,
+        })
         if (m) {
           matchedArtist = m.artistName
           matchedSource = 'single_provider_match'
@@ -1487,7 +1559,9 @@ export class FederatedResolversService {
 
       // 2. Check MusicBrainz tracklist if no Apple match
       if (!matchedArtist && mb?.tracks && mb.tracks.length > 0) {
-        const m = matchTrackArtistFromProviderList(lt.title, mb.tracks, lt.trackNumber)
+        const m = matchTrackArtistFromProviderList(lt.title, mb.tracks, lt.trackNumber, {
+          albumVerified: mbVerified,
+        })
         if (m) {
           matchedArtist = m.artistName
           matchedSource = 'single_provider_match'

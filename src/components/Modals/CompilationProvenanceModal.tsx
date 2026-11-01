@@ -31,6 +31,15 @@ import {
   ProposedTrackCanonicalization,
 } from '../../services/compilationCanonicalizerService'
 
+export interface AppliedTrackDetail {
+  trackId: string
+  title: string
+  artistCredit?: string
+  composerName?: string
+  originalAlbum?: string
+  originalYear?: number
+}
+
 export interface CompilationProvenanceModalProps {
   isOpen: boolean
   onClose: () => void
@@ -38,7 +47,11 @@ export interface CompilationProvenanceModalProps {
   allTracks: Track[]
   allReleases: Release[]
   initialSearchQuery?: { albumTitle?: string; artistCredit?: string; year?: number }
-  onSuccess?: (updatedCount: number, appliedAlbumMeta?: { title?: string; composer?: string; artist?: string; year?: number }) => void
+  onSuccess?: (
+    updatedCount: number,
+    appliedAlbumMeta?: { title?: string; composer?: string; artist?: string; year?: number },
+    updatedTracks?: AppliedTrackDetail[]
+  ) => void
   showToast?: (msg: string) => void
 }
 
@@ -200,7 +213,18 @@ export const CompilationProvenanceModal: React.FC<CompilationProvenanceModalProp
           year: distinctYears.length === 1 ? distinctYears[0] : undefined,
         } : undefined
 
-        onSuccess(updatedCount, appliedMeta)
+        const updatedTracks: AppliedTrackDetail[] = proposedTracks
+          .filter((t) => t.selected)
+          .map((t) => ({
+            trackId: t.trackId,
+            title: t.title,
+            artistCredit: t.primaryVocalists,
+            composerName: t.composer,
+            originalAlbum: t.proposedOriginalAlbum,
+            originalYear: t.proposedOriginalYear,
+          }))
+
+        onSuccess(updatedCount, appliedMeta, updatedTracks)
       }
       onClose()
     } catch (err: any) {

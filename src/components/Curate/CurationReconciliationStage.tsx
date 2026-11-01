@@ -339,6 +339,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
         artistCredit?: string
         composerName?: string
         releaseYear?: string
+        artworkOnly?: boolean
       }
     ) => {
       if (!albumItem) return
@@ -424,8 +425,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
         setConsensusResult(consensus)
 
-        // Prepopulate staged fields with consensus values if present
-        if (consensus) {
+        // Prepopulate staged fields with consensus values if present (strictly barred in artworkOnly mode)
+        if (consensus && !queryOverrides?.artworkOnly) {
           const resolvedMasterArtist = consensus?.albumArtist?.value || searchArtist
           setSelectedFields((prev) => ({
             title: consensus?.albumTitle?.value || searchAlbum || prev.title,
@@ -454,7 +455,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
             const next = { ...prev }
             tracks.forEach((t) => {
               const tc = consensus?.trackConsensus?.[t.id]
-              if (tc?.artists?.value) {
+              // Safeguard: Only update if track artist is defective or empty, preserving authentic/approved singers
+              if (tc?.artists?.value && (isDefectiveArtistTag(t.artistCredit, searchAlbum) || !next[t.id])) {
                 next[t.id] = tc.artists.value
               } else if (isDefectiveArtistTag(t.artistCredit, searchAlbum) || !next[t.id]) {
                 if (resolvedMasterArtist && !isPlaceholderTag(resolvedMasterArtist)) {
@@ -484,9 +486,9 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
           setSelectedArtwork(result.artworkCandidates[0])
         }
 
-        // Prefill staged fields from AI candidate if not manually overridden by user
+        // Prefill staged fields from AI candidate if not manually overridden by user and not artworkOnly
         const aiCand = result.artworkCandidates.find((c) => c.provider === 'ai')
-        if (aiCand) {
+        if (aiCand && !queryOverrides?.artworkOnly) {
           setSelectedFields((prev) => ({
             title: !userOverriddenFields.title && aiCand.albumTitle ? aiCand.albumTitle : prev.title,
             artistCredit: !userOverriddenFields.artistCredit && aiCand.artistCredit && !isPlaceholderTag(aiCand.artistCredit) ? aiCand.artistCredit : prev.artistCredit,
@@ -1977,7 +1979,7 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                   }
                 : undefined
             }
-            onSuccess={(_updatedCount, appliedAlbumMeta) => {
+            onSuccess={(_updatedCount, appliedAlbumMeta, updatedTracks) => {
               setIsSoundtrackResolverOpen(false)
               if (appliedAlbumMeta) {
                 if (appliedAlbumMeta.title) {
@@ -1995,14 +1997,42 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
                   setSelectedFields((prev) => ({ ...prev, releaseYear: String(appliedAlbumMeta.year) }))
                   setQueryYear(String(appliedAlbumMeta.year))
                 }
-                // Refresh candidates with authoritative canonical metadata
-                fetchCandidates(true, {
-                  albumTitle: appliedAlbumMeta.title || queryAlbum,
-                  artistCredit: appliedAlbumMeta.artist || queryArtist,
-                  composerName: appliedAlbumMeta.composer,
-                  releaseYear: appliedAlbumMeta.year ? String(appliedAlbumMeta.year) : queryYear,
+                // Lock fields from background overwrites
+                setUserOverriddenFields((prev) => ({
+                  ...prev,
+                  title: Boolean(appliedAlbumMeta.title) || prev.title,
+                  artistCredit: Boolean(appliedAlbumMeta.artist) || prev.artistCredit,
+                  composerName: Boolean(appliedAlbumMeta.composer) || prev.composerName,
+                  releaseYear: Boolean(appliedAlbumMeta.year) || prev.releaseYear,
+                }))
+              }
+
+              // Rule 4: Instantly sync screen state for tracks with approved provenance
+              if (updatedTracks && updatedTracks.length > 0) {
+                setTrackTitles((prev) => {
+                  const next = { ...prev }
+                  updatedTracks.forEach((ut) => {
+                    if (ut.title) next[ut.trackId] = ut.title
+                  })
+                  return next
+                })
+                setTrackArtists((prev) => {
+                  const next = { ...prev }
+                  updatedTracks.forEach((ut) => {
+                    if (ut.artistCredit) next[ut.trackId] = ut.artistCredit
+                  })
+                  return next
                 })
               }
+
+              // Rule 1: Refresh candidates in ARTWORK-ONLY mode with authoritative canonical metadata
+              fetchCandidates(true, {
+                albumTitle: appliedAlbumMeta?.title || queryAlbum,
+                artistCredit: appliedAlbumMeta?.artist || queryArtist,
+                composerName: appliedAlbumMeta?.composer,
+                releaseYear: appliedAlbumMeta?.year ? String(appliedAlbumMeta.year) : queryYear,
+                artworkOnly: true,
+              })
               window.dispatchEvent(new CustomEvent('cadence:provenance-updated'))
             }}
             showToast={showToast}

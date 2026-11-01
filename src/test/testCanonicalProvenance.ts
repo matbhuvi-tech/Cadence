@@ -13,7 +13,9 @@ import {
   normalizeCanonicalAlbumTitle,
   isSameCanonicalAlbum,
   stripRipNoiseAndTags,
+  matchTrackArtistFromProviderList,
 } from '../core/taxonomyUtils'
+import { federatedResolversService } from '../services/federatedResolvers'
 import {
   compilationCanonicalizerService,
   ProposedTrackCanonicalization,
@@ -259,6 +261,60 @@ async function runTests() {
     'Compilation track must link to local master release ID'
   )
   console.log('✓ Multi-Film Compilation linking verified.\n')
+
+  // 5. Testing Safeguards: Quality check for online stores & blind track-number suppression
+  console.log('[5] Testing Safeguards: Quality check & blind track-number suppression (Ranga vs Aakasa Veedhi)...')
+  const rangaSig = {
+    sanitizedTitle: 'Ranga',
+    sanitizedArtist: 'Shankar Ganesh',
+    sanitizedComposer: 'Shankar Ganesh',
+    trackCount: 5,
+  }
+
+  const mismatchedCand = {
+    provider: 'itunes' as const,
+    confidenceScore: 0.95,
+    releaseTitle: 'Aakasa Veedhi (from "Padavala") - Single',
+    artistCredit: 'Viswanathan Ramamoorthy, Devi Sri Prasad',
+    releaseYear: 2006,
+  }
+
+  const validCand = {
+    provider: 'itunes' as const,
+    confidenceScore: 0.95,
+    releaseTitle: 'Ranga (Original Motion Picture Soundtrack)',
+    artistCredit: 'Shankar Ganesh',
+    releaseYear: 1982,
+  }
+
+  // Rule 2: Sanity check rejects completely unrelated albums
+  assert(
+    !federatedResolversService.isProviderCandidateAcceptable(rangaSig, mismatchedCand, 1982),
+    'Aakasa Veedhi must be rejected for Ranga search query'
+  )
+  assert(
+    federatedResolversService.isProviderCandidateAcceptable(rangaSig, validCand, 1982),
+    'Ranga OST must be accepted for Ranga search query'
+  )
+  console.log('  ✓ Rule 2 Sanity check correctly rejected mismatched store candidate.')
+
+  // Rule 3: Blind track-number guessing is suppressed
+  const providerTracks = [
+    { trackNumber: 6, trackName: 'Aakasa Veedhi', artistName: 'Devi Sri Prasad & Shankar Mahadevan' },
+  ]
+
+  // Contradictory track name with unverified album
+  const mUnverified = matchTrackArtistFromProviderList('Pattukottai', providerTracks, 6, { albumVerified: false })
+  assert(mUnverified === null, 'Pattukottai must not match Aakasa Veedhi by track number when album is unverified')
+
+  // Contradictory track name even if album was somehow verified
+  const mContradictory = matchTrackArtistFromProviderList('Pattukottai', providerTracks, 6, { albumVerified: true })
+  assert(mContradictory === null, 'Pattukottai must not match contradictory title Aakasa Veedhi')
+
+  // Unnamed placeholder on verified album can match
+  const mPlaceholder = matchTrackArtistFromProviderList('Track 06', providerTracks, 6, { albumVerified: true })
+  assert(mPlaceholder?.artistName === 'Devi Sri Prasad & Shankar Mahadevan', 'Unnamed placeholder Track 06 on verified album should match')
+  console.log('  ✓ Rule 3 Blind track-number guessing successfully suppressed for contradictory song titles.')
 
   console.log('=== ALL REGRESSION TESTS PASSED SUCCESSFULLY ===')
 }
