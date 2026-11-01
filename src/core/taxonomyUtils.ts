@@ -1424,7 +1424,29 @@ export function matchTrackArtistFromProviderList(
     }
   }
 
-  // 3. Fallback to track number if confidence is still low and track number matches
+  // 3. Phonetic dense substring matching for transliterated titles (e.g. Bomma Kutti Ammaavukku <-> Bommukutty)
+  if (!bestMatch) {
+    const phoneticStem = (str: string) =>
+      str
+        .toLowerCase()
+        .replace(/y/g, 'i')
+        .replace(/w/g, 'v')
+        .replace(/[uae]/g, 'o')
+        .replace(/([a-z])\1+/g, '$1')
+        .replace(/[^a-z0-9]+/g, '')
+
+    const stemLocal = phoneticStem(localTitle)
+    for (const pt of providerTracks) {
+      const stemProvider = phoneticStem(pt.trackName)
+      if (stemLocal && stemProvider && (stemProvider.includes(stemLocal) || stemLocal.includes(stemProvider))) {
+        bestMatch = pt
+        bestScore = 0.75
+        break
+      }
+    }
+  }
+
+  // 4. Fallback to track number if confidence is still low and track number matches
   if (!bestMatch && localTrackNum && localTrackNum > 0) {
     const byNum = providerTracks.find((pt) => pt.trackNumber === localTrackNum)
     if (byNum && byNum.artistName) {

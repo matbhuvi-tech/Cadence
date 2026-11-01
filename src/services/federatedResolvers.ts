@@ -1227,7 +1227,7 @@ export class FederatedResolversService {
     try {
       const url = `${this.getBaseUrl()}/api/itunes-search?album=${encodeURIComponent(
         signature.sanitizedTitle
-      )}&artist=${encodeURIComponent(signature.sanitizedArtist)}`
+      )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&composer=${encodeURIComponent(signature.sanitizedComposer || '')}`
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 4000)
 
@@ -1321,9 +1321,14 @@ export class FederatedResolversService {
     const sanitizedArtist = cleanConsensusTitle(localArtist)
     const localComposer = localRelease.composerName || ''
 
+    // Resolve effective composer from release or track metadata
+    const rawComposer = localRelease.composerName || localTracks.find(t => t.composerName)?.composerName || ''
+    const canonicalComp = rawComposer ? canonicalizeComposer(rawComposer).canonicalName : ''
+
     const signature: AlbumSignature = {
       sanitizedTitle,
-      sanitizedArtist: isPlaceholderTag(sanitizedArtist) ? '' : sanitizedArtist,
+      sanitizedArtist: isPlaceholderTag(sanitizedArtist) ? (canonicalComp || '') : sanitizedArtist,
+      sanitizedComposer: canonicalComp || rawComposer || '',
       trackCount: localTracks.length,
       firstTrackTitle: localTracks[0]?.title,
     }

@@ -484,6 +484,7 @@ export interface SampleRateTransition {
 export interface AlbumSignature {
   sanitizedTitle: string
   sanitizedArtist: string
+  sanitizedComposer?: string
   trackCount: number
   totalDurationSecs?: number
   firstTrackTitle?: string
