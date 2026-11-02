@@ -22,6 +22,7 @@ export interface TrackOracle {
   track_number: number;
   title: string;
   artists: string[];
+  primary_artists?: string[];
   composer?: string;
   duration_seconds: number;
   expected_file_pattern: string;
@@ -280,6 +281,7 @@ export class CurateMultimodalQaAgent {
   private cdp!: CdpSession;
   private oracleDb: CurateOracleDatabase;
   private bugs: BugRecord[] = [];
+  private recordedBugKeys = new Set<string>();
   private stepTrace: Array<{ step: number; action: string; reasoning: string; screenshot: string }> = [];
   private identityEpoch = 0;
   private visitedActions = new Set<string>();
@@ -1306,20 +1308,69 @@ Return ONLY JSON matching:
           t.index + 1 === oracleTrack.track_number
       );
       if (match) {
-        // Assert authentic singers with alias and token boundary normalization
-        for (const singer of oracleTrack.artists) {
-          const selectedText = match.selectedArtist || match.selected;
-          const aiText = match.aiArtist || match.ai;
-          const hasSinger = matchesSingerAlias(selectedText, singer) || matchesSingerAlias(aiText, singer);
-          if (!hasSinger) {
+        const selectedText = match.selectedArtist || match.selected || '';
+        const aiText = match.aiArtist || match.ai || '';
+
+        // Extract discrete credited vocalist tokens from selected and ai
+        const rawCredited = (match.selectedArtist || match.selected || '')
+          .split(/\s*(?:&|,|\band\b|\/\/)\s*/i)
+          .map((s: string) => s.trim())
+          .filter((s: string) => s && s.length > 2 && !s.includes('Track') && !s.includes('Requires Action') && s !== match.selectedTitle);
+
+        // 1. If primary_artists is explicitly specified on oracleTrack, ensure each primary vocalist is credited
+        if (oracleTrack.primary_artists && oracleTrack.primary_artists.length > 0) {
+          for (const primary of oracleTrack.primary_artists) {
+            const hasPrimary = matchesSingerAlias(selectedText, primary) || matchesSingerAlias(aiText, primary);
+            if (!hasPrimary) {
+              this.recordBug({
+                classification: 'Reconciliation Bug',
+                severity: 'MAJOR',
+                albumId,
+                stepNumber: 0,
+                description: `Primary playback singer "${primary}" missing from Track #${oracleTrack.track_number} ("${oracleTrack.title}").`,
+                expected: `Primary singer ${primary} credited`,
+                actual: `Selected: ${match.selected}, AI: ${match.ai}`,
+                screenshotPath,
+              });
+            }
+          }
+        } else {
+          // 2. Multi-singer pool check: Ensure at least one authentic vocalist from the allowed pool is credited
+          const allowedPool = oracleTrack.artists;
+          const matchingPoolArtists = allowedPool.filter(
+            (oracleSinger) => matchesSingerAlias(selectedText, oracleSinger) || matchesSingerAlias(aiText, oracleSinger)
+          );
+
+          if (matchingPoolArtists.length === 0) {
             this.recordBug({
               classification: 'Reconciliation Bug',
               severity: 'MAJOR',
               albumId,
               stepNumber: 0,
-              description: `Playback singer "${singer}" missing from Track #${oracleTrack.track_number} ("${oracleTrack.title}").`,
-              expected: `Singer ${singer} credited`,
+              description: `No credited vocalists on Track #${oracleTrack.track_number} ("${oracleTrack.title}") match the allowed artist pool: [${allowedPool.join(', ')}].`,
+              expected: `At least one vocalist from [${allowedPool.join(', ')}] credited`,
               actual: `Selected: ${match.selected}, AI: ${match.ai}`,
+              screenshotPath,
+            });
+          }
+        }
+
+        // 3. Verify that all credited vocalists match against the allowed artist pool (or the release composer/artist)
+        for (const credited of rawCredited) {
+          const isAllowed =
+            oracleTrack.artists.some((oracleSinger) => matchesSingerAlias(credited, oracleSinger)) ||
+            (oracle.canonical_composer && matchesSingerAlias(credited, oracle.canonical_composer)) ||
+            (oracle.canonical_artist && matchesSingerAlias(credited, oracle.canonical_artist));
+
+          if (!isAllowed) {
+            this.recordBug({
+              classification: 'Reconciliation Bug',
+              severity: 'MAJOR',
+              albumId,
+              stepNumber: 0,
+              description: `Credited vocalist "${credited}" on Track #${oracleTrack.track_number} ("${oracleTrack.title}") is not in the allowed artist pool.`,
+              expected: `One of: ${oracleTrack.artists.join(', ')} (or composer ${oracle.canonical_composer})`,
+              actual: `Credited: "${credited}" in [${rawCredited.join(', ')}]`,
               screenshotPath,
             });
           }
@@ -1331,6 +1382,12 @@ Return ONLY JSON matching:
   }
 
   private recordBug(bug: BugRecord) {
+    const albumKey = bug.albumId || 'current';
+    const dedupKey = `${albumKey}:${bug.classification}:${bug.description.trim()}`;
+    if (this.recordedBugKeys.has(dedupKey)) {
+      return;
+    }
+    this.recordedBugKeys.add(dedupKey);
     this.bugs.push(bug);
     console.log(`🚨 [BUG DETECTED] [${bug.classification}] (${bug.severity}): ${bug.description}`);
   }
