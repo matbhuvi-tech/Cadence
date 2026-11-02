@@ -102,6 +102,82 @@ interface AlbumWorkItem {
   rawTracks: Track[]
 }
 
+// Direct Apple Music URL and Slug Resolver
+async function resolveDirectAppleMusicCandidate(inputUrl: string, steerTitle?: string, steerArtist?: string): Promise<{
+  releaseTitle: string
+  artistCredit: string
+  composer: string
+  releaseYear?: number
+  genre: string
+  coverArtUrl: string
+  tracks: Array<{ trackNumber: number; trackName: string; artistName?: string }>
+} | null> {
+  let collectionId: string | null = null
+  const idMatch = inputUrl.match(/(?:album\/[^\/]+\/|album\/|id=?)(\d{8,12})/)
+  if (idMatch) collectionId = idMatch[1]
+
+  const parseResults = (results: any[]) => {
+    const coll = results.find(r => r.wrapperType === 'collection') || results[0]
+    const songs = results.filter(r => r.wrapperType === 'track')
+    return {
+      releaseTitle: coll.collectionName,
+      artistCredit: coll.artistName,
+      composer: coll.artistName,
+      releaseYear: coll.releaseDate ? parseInt(coll.releaseDate.slice(0, 4), 10) : undefined,
+      genre: coll.primaryGenreName || 'Soundtrack',
+      coverArtUrl: coll.artworkUrl100 ? coll.artworkUrl100.replace('100x100bb', '3000x3000bb') : '',
+      tracks: songs.map(s => ({
+        trackNumber: s.trackNumber,
+        trackName: s.trackName,
+        artistName: s.artistName,
+      })),
+    }
+  }
+
+  // 1. Direct ID lookup on iTunes Store API (try India storefront then global)
+  if (collectionId) {
+    try {
+      const res = await fetch(`https://itunes.apple.com/lookup?id=${collectionId}&country=in&entity=song`)
+      const data = await res.json()
+      if (data.resultCount > 0) return parseResults(data.results)
+
+      const resGlobal = await fetch(`https://itunes.apple.com/lookup?id=${collectionId}&entity=song`)
+      const dataGlobal = await resGlobal.json()
+      if (dataGlobal.resultCount > 0) return parseResults(dataGlobal.results)
+    } catch (e) {
+      console.warn('[AppleMusicResolver] Direct ID lookup failed:', e)
+    }
+  }
+
+  // 2. Fallback: Extract title slug from URL (e.g. if ID has typo or regional redirection)
+  let slugTitle = ''
+  const slugMatch = inputUrl.match(/album\/([^\/]+)\//)
+  if (slugMatch) {
+    slugTitle = slugMatch[1]
+      .replace(/-/g, ' ')
+      .replace(/\b(?:original motion picture soundtrack|soundtrack|ep|ost)\b/gi, '')
+      .trim()
+  }
+
+  const queryTerms = [slugTitle || steerTitle, steerArtist].filter(Boolean).join(' ')
+  if (queryTerms) {
+    try {
+      const sRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(queryTerms)}&country=in&media=music&entity=album`)
+      const sData = await sRes.json()
+      if (sData.resultCount > 0) {
+        const bestColl = sData.results[0]
+        const lRes = await fetch(`https://itunes.apple.com/lookup?id=${bestColl.collectionId}&country=in&entity=song`)
+        const lData = await lRes.json()
+        if (lData.resultCount > 0) return parseResults(lData.results)
+      }
+    } catch (e) {
+      console.warn('[AppleMusicResolver] Slug fallback search failed:', e)
+    }
+  }
+
+  return null
+}
+
 export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   tracks,
   releases,
@@ -595,20 +671,48 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }
       }
 
-      // 2. Build steered release for federated provider resolution
+      // 2. If user gave an Apple Music URL, directly resolve the authentic Apple Music album & tracklist
+      let directAppleMaster: any = null
+      if (steerGroundingUrl.includes('music.apple.com') || steerGroundingUrl.includes('itunes.apple.com')) {
+        directAppleMaster = await resolveDirectAppleMusicCandidate(steerGroundingUrl, steerAlbum, steerArtist)
+      }
+
+      const directAppleCandidate: any = directAppleMaster ? {
+        provider: 'itunes',
+        confidenceScore: 0.99,
+        releaseTitle: directAppleMaster.releaseTitle,
+        trackTitle: directAppleMaster.tracks[0]?.trackName || '',
+        artistCredit: directAppleMaster.artistCredit,
+        composer: directAppleMaster.composer,
+        releaseYear: directAppleMaster.releaseYear,
+        catalogNumber: '',
+        label: 'Apple Music Catalog',
+        barcodeUpc: '',
+        coverArtUrl: directAppleMaster.coverArtUrl,
+        coverResolution: '3000x3000px (Apple Music Master Scan)',
+        genre: directAppleMaster.genre,
+        tracks: directAppleMaster.tracks.map((t: any) => ({
+          trackNumber: t.trackNumber,
+          trackName: t.trackName,
+          artistName: t.artistName || '',
+        })),
+      } : null
+
+      // 3. Build steered release for federated provider resolution
       const steeredRelease: Release = {
         ...selectedAlbum.rawRelease,
-        title: steerAlbum.trim() || selectedAlbum.rawRelease.title,
-        artistCredit: steerArtist.trim() || selectedAlbum.rawRelease.artistCredit,
-        composerName: steerArtist.trim() || selectedAlbum.rawRelease.composerName,
-        releaseYear: Number(steerYear) || selectedAlbum.rawRelease.releaseYear,
+        title: directAppleMaster?.releaseTitle || steerAlbum.trim() || selectedAlbum.rawRelease.title,
+        artistCredit: directAppleMaster?.artistCredit || steerArtist.trim() || selectedAlbum.rawRelease.artistCredit,
+        composerName: directAppleMaster?.composer || steerArtist.trim() || selectedAlbum.rawRelease.composerName,
+        releaseYear: directAppleMaster?.releaseYear || Number(steerYear) || selectedAlbum.rawRelease.releaseYear,
       }
 
       const consensus = await federatedResolversService.resolve2of3ReleaseConsensus(
         steeredRelease,
         selectedAlbum.rawTracks,
         false,
-        aiMasterResult
+        aiMasterResult,
+        directAppleCandidate
       )
 
       // 3. Update album state with fresh candidates and grounded results
@@ -628,6 +732,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           composer: consensus.albumFieldStates?.composer || current.composer,
           year: consensus.albumFieldStates?.releaseYear || current.year,
           genre: consensus.albumFieldStates?.genre || current.genre,
+          coverArt: directAppleCandidate?.coverArtUrl ? {
+            ...current.coverArt,
+            apple: directAppleCandidate.coverArtUrl,
+            selected: current.coverArt.selected || directAppleCandidate.coverArtUrl,
+          } : (consensus.albumFieldStates?.coverArt ? {
+            ...current.coverArt,
+            apple: consensus.albumFieldStates.coverArt.apple || current.coverArt.apple,
+            musicbrainz: consensus.albumFieldStates.coverArt.musicbrainz || current.coverArt.musicbrainz,
+            selected: current.coverArt.selected || consensus.albumFieldStates.coverArt.selected,
+          } : current.coverArt),
           tracks: consensus.trackStates && consensus.trackStates.length > 0 ? consensus.trackStates : current.tracks,
         }
 
@@ -1021,7 +1135,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   }
 
   return (
-    <div className="w-full h-screen bg-[#0E0F12] text-[#F3F4F6] flex flex-col font-sans select-none overflow-hidden">
+    <div className="flex-1 h-full min-h-0 bg-[#0E0F12] text-[#F3F4F6] flex flex-col font-sans select-none overflow-hidden">
       {/* 1. Header Navigation Bar */}
       <header className="h-14 border-b border-white/[0.08] px-6 flex items-center justify-between shrink-0 bg-[#121318]/90 backdrop-blur-md">
         <div className="flex items-center gap-3">
@@ -1191,7 +1305,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
         {/* Center Reconciliation Workbench */}
         {selectedAlbum ? (
-          <main className="flex-1 flex flex-col bg-[#0E0F12] overflow-y-auto p-6 space-y-6">
+          <main className="flex-1 flex flex-col bg-[#0E0F12] overflow-y-auto p-6 space-y-6 pb-48">
             {/* Header for Active Album */}
             <div className="flex items-center justify-between pb-4 border-b border-white/[0.08]">
               <div className="flex items-center gap-3">
@@ -1645,6 +1759,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   </tbody>
                 </table>
               </div>
+              {/* Bottom Scrolling Breathing Room Spacer */}
+              <div className="h-36 pointer-events-none" />
             </section>
           </main>
         ) : (

@@ -1251,15 +1251,18 @@ function localLibraryScannerPlugin(): Plugin {
 
           for (const q of albumQueries) {
             try {
-              const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=album&limit=5`
+              const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&country=in&entity=album&limit=8`
               const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
                   const norm = cleanAlbum.toLowerCase()
                   const matched =
-                    data.results.find((r: any) => (r.collectionName || '').toLowerCase().includes(norm)) ||
-                    data.results[0]
+                    data.results.find((r: any) => {
+                      const name = (r.collectionName || '').toLowerCase()
+                      return name.includes(norm) && !/-\s*single\b/i.test(name)
+                    }) ||
+                    data.results.find((r: any) => (r.collectionName || '').toLowerCase().includes(norm))
                   if (matched) {
                     foundItem = {
                       artistName: matched.artistName,

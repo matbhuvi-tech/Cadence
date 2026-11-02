@@ -1342,6 +1342,13 @@ export class FederatedResolversService {
       return true
     }
 
+    // Guard against singles masquerading as soundtrack albums
+    const isTargetSingle = signature.trackCount === 1 || /-\s*single\b/i.test(targetTitle)
+    const isCandSingle = /-\s*single\b/i.test(candidate.releaseTitle) || /\(from\s+["'][^"']+["']\)/i.test(candidate.releaseTitle)
+    if (!isTargetSingle && isCandSingle && (signature.trackCount || 0) > 1) {
+      return false
+    }
+
     const normTarget = normalizeCanonicalAlbumTitle(targetTitle).toLowerCase().trim()
     const normCand = normalizeCanonicalAlbumTitle(candidate.releaseTitle).toLowerCase().trim()
 
@@ -1366,13 +1373,33 @@ export class FederatedResolversService {
         if (stemTarget === stemCand || stemCand.startsWith(stemTarget) || stemTarget.startsWith(stemCand)) {
           return true
         }
-        if (stemTarget.length >= 6 && (stemCand.includes(stemTarget) || stemTarget.includes(stemCand))) {
+        if (stemTarget.length >= 8 && (stemCand.includes(stemTarget) || stemTarget.includes(stemCand))) {
           return true
         }
       }
 
-      // 3. Substring match if length >= 4
-      if (normTarget.length >= 4 && (normCand.includes(normTarget) || normTarget.includes(normCand))) {
+      // Check artist/composer correlation for ambiguous short titles
+      const targetArtistTokens = [signature.sanitizedArtist, signature.sanitizedComposer]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((w) => w.length >= 3)
+      const candArtistTokens = (candidate.artistCredit || '')
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((w) => w.length >= 3)
+
+      const hasArtistOverlap =
+        targetArtistTokens.length === 0 ||
+        targetArtistTokens.some((t) =>
+          candArtistTokens.some((c) => c === t || phoneticStem(c) === phoneticStem(t))
+        )
+
+      // 3. Substring match with word boundary (only if artist overlaps or title is long)
+      const escaped = normTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const wordBoundaryMatch = new RegExp('\\b' + escaped + '\\b', 'i').test(normCand)
+      if (wordBoundaryMatch && (normTarget.length >= 8 || hasArtistOverlap)) {
         return true
       }
 
@@ -1386,7 +1413,7 @@ export class FederatedResolversService {
           return tokCand.some((c) => c === t || (stemT.length >= 3 && phoneticStem(c) === stemT))
         })
         const overlapRatio = shared.length / tokTarget.length
-        if (overlapRatio >= 0.5) {
+        if (overlapRatio >= 0.5 && (normTarget.length >= 8 || hasArtistOverlap)) {
           return true
         }
       }
@@ -1410,7 +1437,8 @@ export class FederatedResolversService {
       releaseYear?: number
       genre?: string
       tracks?: Array<{ trackNumber: number; trackName: string; artistName?: string }>
-    }
+    },
+    directAppleCandidate?: ProviderResult | null
   ): Promise<ReleaseConsensusResult> {
     const rawTitle = localRelease.title || ''
     const sanitizedTitle = cleanConsensusTitle(rawTitle)
@@ -1431,7 +1459,7 @@ export class FederatedResolversService {
     }
 
     const [rawItunes, rawMb] = await Promise.all([
-      this.fetchItunesAlbumCandidate(signature),
+      directAppleCandidate ? Promise.resolve(directAppleCandidate) : this.fetchItunesAlbumCandidate(signature),
       this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch),
     ])
 
