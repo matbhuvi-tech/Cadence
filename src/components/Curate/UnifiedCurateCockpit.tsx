@@ -15,7 +15,7 @@
  * - Unified Health & Audit drawer.
  */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react'
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   Sparkles,
   CheckCircle2,
@@ -61,6 +61,9 @@ import { federatedResolversService } from '../../services/federatedResolvers'
 import { compilationCanonicalizerService } from '../../services/compilationCanonicalizerService'
 import { behavioralLearningService } from '../../services/behavioralLearningService'
 import { tauriBridge } from '../../services/tauriBridge'
+import { provenanceCacheService } from '../../services/provenanceCacheService'
+import { resolveGemini } from '../../services/geminiClient'
+import type { CompilationProvenanceResult } from '../../core/types'
 import {
   cleanRipNoise,
   isPlaceholderTag,
@@ -223,6 +226,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [isBatchCommitting, setIsBatchCommitting] = useState(false)
   const [commitProgress, setCommitProgress] = useState<{ current: number; total: number } | null>(null)
 
+  // Compilation Provenance State & Abort Controller
+  const [isResolvingProvenance, setIsResolvingProvenance] = useState(false)
+  const [editingProvenanceTrackId, setEditingProvenanceTrackId] = useState<string | null>(null)
+  const [provenanceEditFilm, setProvenanceEditFilm] = useState('')
+  const [provenanceEditYear, setProvenanceEditYear] = useState('')
+  const provenanceAbortRef = useRef<AbortController | null>(null)
+
   // 3. Build Rich Album Work Items
   const [albumItems, setAlbumItems] = useState<Map<string, AlbumWorkItem>>(new Map())
 
@@ -274,6 +284,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           localDuration: t.duration,
           matchedTitle: t.title,
           matchedArtists: behavioralLearningService.applyLearnedRules(t.artistCredit || rawArtist, 'artist').value,
+          originalAlbum: t.originalAlbum || '',
+          originalYear: t.originalYear,
+          provenanceSource: t.originalAlbum ? ('local_fallback' as any) : undefined,
           confidence: 0.90,
           source: 'local_fallback',
           requiresHumanReview: isPlaceholderTag(t.artistCredit || ''),
@@ -758,6 +771,173 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     }
   }
 
+  // Compilation album detection heuristic
+  const isCompilationAlbum = useMemo(() => {
+    if (!selectedAlbum) return false
+    const rel = selectedAlbum.rawRelease
+    const g = (selectedAlbum.genre?.selected || '').toLowerCase()
+    const t = (selectedAlbum.albumTitle?.selected || selectedAlbum.currentTitle || '').toLowerCase()
+    return Boolean(
+      rel?.isCompilation ||
+      g.includes('compilation') ||
+      /\b(hits\s+of|best\s+of|golden\s+hits|anthology|collection|classics)\b/i.test(t) ||
+      selectedAlbum.rawTracks.some(trk => trk.isCompilation || /\(from\s+["'][^"']+["']\)/i.test(trk.title))
+    )
+  }, [selectedAlbum])
+
+  // Automatic debounced compilation provenance resolution (500ms, playback guarded, parameter-hashed cache)
+  useEffect(() => {
+    if (!selectedAlbum || !isCompilationAlbum) return
+
+    // Transport Invariant: Defer inference if audio is actively playing or in post-playback cooldown
+    if (isPlaying) {
+      console.log('[UnifiedCurateCockpit] Audio playback active; deferring provenance inference')
+      return
+    }
+
+    // Abort previous in-flight request if user switched albums
+    if (provenanceAbortRef.current) {
+      provenanceAbortRef.current.abort()
+      provenanceAbortRef.current = null
+    }
+
+    const controller = new AbortController()
+    provenanceAbortRef.current = controller
+
+    const timer = setTimeout(async () => {
+      try {
+        const albumTitleStr = selectedAlbum.albumTitle?.selected || selectedAlbum.currentTitle
+        const albumArtistStr = selectedAlbum.albumArtist?.selected || ''
+        const composerStr = selectedAlbum.composer?.selected || ''
+
+        const hashKey = await provenanceCacheService.computeHashKey(
+          albumTitleStr,
+          albumArtistStr,
+          composerStr,
+          selectedAlbum.rawTracks
+        )
+
+        // 1. Check SQLite / memory cache first
+        const cached = await provenanceCacheService.get(hashKey)
+        if (cached && Array.isArray(cached.tracks) && cached.tracks.length > 0) {
+          setAlbumItems(prev => {
+            const next = new Map(prev)
+            const cur = next.get(selectedAlbum.id)
+            if (!cur) return prev
+            const updatedTracks = cur.tracks.map(tState => {
+              const match = cached.tracks.find(ct => ct.trackId === tState.trackId || ct.trackNumber === tState.trackNumber)
+              if (match && match.originalAlbum) {
+                return {
+                  ...tState,
+                  originalAlbum: tState.userOverridden ? tState.originalAlbum : match.originalAlbum,
+                  originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
+                  provenanceSource: (tState.userOverridden ? 'user_override' : 'consensus') as any,
+                }
+              }
+              return tState
+            })
+            next.set(selectedAlbum.id, { ...cur, tracks: updatedTracks })
+            return next
+          })
+          return
+        }
+
+        // 2. Cache miss: initiate single-pass Gemini call via DPAPI backend
+        setIsResolvingProvenance(true)
+        const payload = {
+          albumTitle: albumTitleStr,
+          artistCredit: albumArtistStr,
+          composerName: composerStr,
+          tracks: selectedAlbum.rawTracks.map(t => ({
+            id: t.id,
+            trackNumber: t.trackNumber || 1,
+            title: t.title,
+            duration: t.duration || t.durationSeconds,
+            artists: t.artistCredit,
+          }))
+        }
+
+        const result: any = await resolveGemini('compilation', payload, controller.signal)
+        if (result && Array.isArray(result.tracks)) {
+          const provenanceResult: CompilationProvenanceResult = {
+            albumTitle: albumTitleStr,
+            isCompilation: true,
+            cached: false,
+            tracks: result.tracks.map((rt: any, idx: number) => ({
+              trackId: rt.trackId || rt.id || selectedAlbum.rawTracks[idx]?.id || `trk-${idx}`,
+              trackNumber: rt.trackNumber || (idx + 1),
+              title: rt.title || selectedAlbum.rawTracks[idx]?.title || '',
+              originalAlbum: rt.originalAlbum || rt.proposedOriginalAlbum || rt.movie || '',
+              originalYear: rt.originalYear || rt.proposedOriginalYear || rt.year,
+              confidence: rt.confidence || 0.9,
+              reasoning: rt.reasoning || rt.notes,
+            }))
+          }
+
+          // Save to parameter-hashed cache
+          await provenanceCacheService.set(hashKey, selectedAlbum.id, albumTitleStr, payload, provenanceResult)
+
+          // Update tracks in UI state
+          setAlbumItems(prev => {
+            const next = new Map(prev)
+            const cur = next.get(selectedAlbum.id)
+            if (!cur) return prev
+            const updatedTracks = cur.tracks.map(tState => {
+              const match = provenanceResult.tracks.find(ct => ct.trackId === tState.trackId || ct.trackNumber === tState.trackNumber)
+              if (match && match.originalAlbum) {
+                return {
+                  ...tState,
+                  originalAlbum: tState.userOverridden ? tState.originalAlbum : match.originalAlbum,
+                  originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
+                  provenanceSource: (tState.userOverridden ? 'user_override' : 'gemini_ai') as any,
+                }
+              }
+              return tState
+            })
+            next.set(selectedAlbum.id, { ...cur, tracks: updatedTracks })
+            return next
+          })
+        }
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.warn('[UnifiedCurateCockpit] Provenance inference note:', err)
+        }
+      } finally {
+        setIsResolvingProvenance(false)
+      }
+    }, 500)
+
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [selectedAlbum?.id, isCompilationAlbum, isPlaying])
+
+  // Manual edit handler for track provenance
+  const handleSaveProvenance = useCallback((trackId: string) => {
+    setAlbumItems(prev => {
+      const next = new Map(prev)
+      if (!selectedAlbum) return prev
+      const cur = next.get(selectedAlbum.id)
+      if (!cur) return prev
+      const updatedTracks = cur.tracks.map(t => {
+        if (t.trackId === trackId) {
+          return {
+            ...t,
+            originalAlbum: provenanceEditFilm.trim(),
+            originalYear: provenanceEditYear.trim() ? parseInt(provenanceEditYear.trim(), 10) : undefined,
+            provenanceSource: 'user_override' as any,
+            userOverridden: true,
+          }
+        }
+        return t
+      })
+      next.set(selectedAlbum.id, { ...cur, tracks: updatedTracks })
+      return next
+    })
+    setEditingProvenanceTrackId(null)
+  }, [selectedAlbum, provenanceEditFilm, provenanceEditYear])
+
   // Stage Album: saves state, keeps in queue with 'staged' badge, and advances
   const handleStage = useCallback(() => {
     if (!selectedAlbum) return
@@ -785,6 +965,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         composerName: selectedAlbum.composer.selected,
         releaseYear: selectedAlbum.year.selected,
         genre: selectedAlbum.genre.selected,
+        originalAlbum: trk.originalAlbum,
+        originalYear: trk.originalYear,
       })
     }
 
@@ -1306,6 +1488,28 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         {/* Center Reconciliation Workbench */}
         {selectedAlbum ? (
           <main className="flex-1 flex flex-col bg-[#0E0F12] overflow-y-auto p-6 space-y-6 pb-48">
+            {/* Status bar when resolving compilation provenance */}
+            {isResolvingProvenance && (
+              <div className="flex items-center justify-between px-3.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 animate-in fade-in duration-200">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                  <span>✦ Identifying source soundtracks and release years via Gemini...</span>
+                </div>
+                <button
+                  onClick={() => {
+                    if (provenanceAbortRef.current) {
+                      provenanceAbortRef.current.abort()
+                      provenanceAbortRef.current = null
+                      setIsResolvingProvenance(false)
+                    }
+                  }}
+                  className="px-2 py-0.5 rounded bg-white/[0.08] hover:bg-white/[0.15] text-white/70 text-[10px] cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
             {/* Header for Active Album */}
             <div className="flex items-center justify-between pb-4 border-b border-white/[0.08]">
               <div className="flex items-center gap-3">
@@ -1750,6 +1954,79 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                     <Edit2 className="w-3 h-3" />
                                   </button>
                                 </div>
+
+                                {/* Progressive Disclosure Compilation Provenance Sub-Row */}
+                                {isCompilationAlbum && (
+                                  <div className="mt-1 pt-1 border-t border-white/[0.04]">
+                                    {editingProvenanceTrackId === trk.trackId ? (
+                                      <div className="flex items-center gap-1.5 w-full">
+                                        <input
+                                          type="text"
+                                          value={provenanceEditFilm}
+                                          onChange={(e) => setProvenanceEditFilm(e.target.value)}
+                                          className="flex-1 bg-black/60 border border-amber-400 rounded px-1.5 py-0.5 text-[11px] text-white focus:outline-none"
+                                          placeholder="Original Film / Album"
+                                          autoFocus
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') handleSaveProvenance(trk.trackId)
+                                            if (e.key === 'Escape') setEditingProvenanceTrackId(null)
+                                          }}
+                                        />
+                                        <input
+                                          type="text"
+                                          value={provenanceEditYear}
+                                          onChange={(e) => setProvenanceEditYear(e.target.value)}
+                                          className="w-14 bg-black/60 border border-amber-400 rounded px-1.5 py-0.5 text-[11px] text-white focus:outline-none"
+                                          placeholder="Year"
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') handleSaveProvenance(trk.trackId)
+                                            if (e.key === 'Escape') setEditingProvenanceTrackId(null)
+                                          }}
+                                        />
+                                        <button
+                                          onClick={() => handleSaveProvenance(trk.trackId)}
+                                          className="px-1.5 py-0.5 rounded bg-amber-400 text-black font-semibold text-[10px] cursor-pointer"
+                                        >
+                                          ✓
+                                        </button>
+                                        <button
+                                          onClick={() => setEditingProvenanceTrackId(null)}
+                                          className="px-1.5 py-0.5 rounded bg-white/[0.08] text-white/60 text-[10px] cursor-pointer"
+                                        >
+                                          ✕
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center justify-between w-full group/prov">
+                                        <div className="flex items-center gap-1.5 text-[11px]">
+                                          <span className="text-[#D4AF37]/80 font-mono text-[10px]">↳ Film:</span>
+                                          <span className="text-white/80 font-medium">
+                                            {trk.originalAlbum || <span className="text-white/40 italic">Unassigned</span>}
+                                          </span>
+                                          {trk.originalYear && (
+                                            <span className="text-white/40 font-mono">({trk.originalYear})</span>
+                                          )}
+                                          {trk.provenanceSource === 'gemini_ai' && (
+                                            <span className="px-1.5 py-0.2 rounded text-[9px] bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono">
+                                              ✦ AI
+                                            </span>
+                                          )}
+                                        </div>
+                                        <button
+                                          onClick={() => {
+                                            setEditingProvenanceTrackId(trk.trackId)
+                                            setProvenanceEditFilm(trk.originalAlbum || '')
+                                            setProvenanceEditYear(trk.originalYear ? String(trk.originalYear) : '')
+                                          }}
+                                          className="opacity-0 group-hover/prov:opacity-100 p-0.5 hover:bg-white/[0.08] rounded text-white/50 transition-opacity cursor-pointer"
+                                          title="Edit Original Film & Year (Enter)"
+                                        >
+                                          <Edit2 className="w-2.5 h-2.5" />
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             )}
                           </td>

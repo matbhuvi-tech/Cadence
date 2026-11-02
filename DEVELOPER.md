@@ -31,9 +31,17 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 ## Global Side Effects
 
-- Manages a local SQLite database at `%APPDATA%/cadence.db`.
-- Modifies audio-file metadata tags (ID3v2, FLAC Vorbis, MP4 atoms) only through user-confirmed two-phase commit execution.
+- Manages a local SQLite database at `%APPDATA%/cadence.db`, including `compilation_provenance_cache` (parameter-hashed compilation soundtrack resolutions).
+- Modifies audio-file metadata tags (ID3v2 `TOAL`/`TORY`, FLAC Vorbis `ORIGINALALBUM`/`ORIGINALYEAR`, MP4 atoms) only through user-confirmed two-phase commit execution.
 - Binds local TCP ports for mobile remote control and UPnP streaming.
+
+## Subsystems
+
+### Compilation Soundtrack Provenance Engine
+- Automatically identifies original film/motion picture score and release year for tracks on multi-source compilation albums via single-pass Gemini inference (`src/services/geminiClient.ts`).
+- Results are cached in SQLite via `provenanceCacheService.ts`, keyed by SHA-256 parameter hash computed over normalized album title, artist, composer, and track signatures (`cleanConsensusTitle`).
+- Provenance tags (`ORIGINALALBUM`, `ORIGINALYEAR`) are staged in memory sidecars via `UnifiedCurateCockpit.tsx` and serialized into `payloadJson` via `transactionEngine.ts`.
+- Gated strictly by Invariant 1 (Storage bus silence) and Invariant 4 (Network quietness): all inference calls are deferred if audio playback transport is active or within cooldown.
 
 ## Verification
 
