@@ -785,12 +785,14 @@ Return ONLY JSON matching:
   private async verifyReleaseAgainstOracle(albumId: string, initialTitle: string, screenshotPath: string) {
     console.log(`\n🔍 [Evaluator] Asserting Invariants for "${initialTitle}" BEFORE Staging...`);
 
-    const matchedOracleKey = Object.keys(this.oracleDb.albums).find(
-      (k) =>
-        k.toLowerCase().includes(initialTitle.toLowerCase()) ||
-        initialTitle.toLowerCase().includes(k.toLowerCase()) ||
-        this.oracleDb.albums[k].canonical_title.toLowerCase().includes(initialTitle.toLowerCase())
-    );
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const initialNorm = norm(initialTitle);
+    const matchedOracleKey = Object.keys(this.oracleDb.albums).find((k) => {
+      const cand = this.oracleDb.albums[k];
+      const kNorm = norm(k);
+      const titleNorm = norm(cand.canonical_title);
+      return initialNorm.includes(kNorm) || kNorm.includes(initialNorm) || initialNorm.includes(titleNorm) || titleNorm.includes(initialNorm);
+    });
 
     if (!matchedOracleKey) {
       console.log(`ℹ️ No static Oracle fixture entry for "${initialTitle}". Recorded as Test Oracle Gap.`);

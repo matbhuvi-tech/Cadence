@@ -16,7 +16,9 @@
         {
           "track_number": 1,
           "title": "Chitra Chittugal",
-          "artists": ["K. S. Chithra"],
+          "artists": [
+            "K. S. Chithra"
+          ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 272,
           "expected_file_pattern": ".*(chitra|chittugal).*"
@@ -24,7 +26,10 @@
         {
           "track_number": 2,
           "title": "Uyire Uyirin",
-          "artists": ["K. J. Yesudas", "K. S. Chithra"],
+          "artists": [
+            "K. J. Yesudas",
+            "K. S. Chithra"
+          ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 290,
           "expected_file_pattern": ".*(uyire|uyirin).*"
@@ -32,7 +37,10 @@
         {
           "track_number": 3,
           "title": "Kuyile Kuyile",
-          "artists": ["K. J. Yesudas", "K. S. Chithra"],
+          "artists": [
+            "K. J. Yesudas",
+            "K. S. Chithra"
+          ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 284,
           "expected_file_pattern": ".*(kuyile|kuyile).*"
@@ -40,7 +48,10 @@
         {
           "track_number": 4,
           "title": "En Patharamathu",
-          "artists": ["S. P. Balasubrahmanyam", "Malaysia Vasudevan"],
+          "artists": [
+            "S. P. Balasubrahmanyam",
+            "Malaysia Vasudevan"
+          ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 278,
           "expected_file_pattern": ".*(en\\s*patharamathu|patharamathu).*"
@@ -48,7 +59,9 @@
         {
           "track_number": 5,
           "title": "Kanne Navamaniye",
-          "artists": ["Ilaiyaraaja"],
+          "artists": [
+            "Ilaiyaraaja"
+          ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 285,
           "expected_file_pattern": ".*(kanne|navamaniye).*"
@@ -56,7 +69,9 @@
         {
           "track_number": 6,
           "title": "Bommu Kutti",
-          "artists": ["K. J. Yesudas"],
+          "artists": [
+            "K. J. Yesudas"
+          ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 295,
           "expected_file_pattern": ".*(bommu|kutti).*"
@@ -76,7 +91,10 @@
         {
           "track_number": 1,
           "title": "Patakha Guddi",
-          "artists": ["Nooran Sisters", "A. R. Rahman"],
+          "artists": [
+            "Nooran Sisters",
+            "A. R. Rahman"
+          ],
           "composer": "A. R. Rahman",
           "duration_seconds": 284,
           "expected_file_pattern": ".*(patakha|guddi).*"
@@ -84,7 +102,9 @@
         {
           "track_number": 2,
           "title": "Maahi Ve",
-          "artists": ["A. R. Rahman"],
+          "artists": [
+            "A. R. Rahman"
+          ],
           "composer": "A. R. Rahman",
           "duration_seconds": 240,
           "expected_file_pattern": ".*(maahi|ve).*"
@@ -105,7 +125,10 @@
         {
           "track_number": 1,
           "title": "Pattu Poove",
-          "artists": ["S. P. Balasubrahmanyam", "Vani Jairam"],
+          "artists": [
+            "S. P. Balasubrahmanyam",
+            "Vani Jairam"
+          ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 270,
           "expected_file_pattern": ".*(pattu|poove).*"
@@ -113,7 +136,10 @@
         {
           "track_number": 2,
           "title": "Toothpaste",
-          "artists": ["Malaysia Vasudevan", "S. P. Sailaja"],
+          "artists": [
+            "Malaysia Vasudevan",
+            "S. P. Sailaja"
+          ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 265,
           "expected_file_pattern": ".*(toothpaste).*"
@@ -121,7 +147,9 @@
         {
           "track_number": 3,
           "title": "Anbaana",
-          "artists": ["S. P. Balasubrahmanyam"],
+          "artists": [
+            "S. P. Balasubrahmanyam"
+          ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 255,
           "expected_file_pattern": ".*(anbaana).*"
@@ -129,7 +157,10 @@
         {
           "track_number": 4,
           "title": "Kadhala",
-          "artists": ["S. P. Balasubrahmanyam", "P. Susheela"],
+          "artists": [
+            "S. P. Balasubrahmanyam",
+            "P. Susheela"
+          ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 280,
           "expected_file_pattern": ".*(kadhala).*"
@@ -137,13 +168,68 @@
         {
           "track_number": 5,
           "title": "Puriyadha",
-          "artists": ["S. P. Balasubrahmanyam"],
+          "artists": [
+            "S. P. Balasubrahmanyam"
+          ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 245,
           "expected_file_pattern": ".*(puriyadha).*"
         }
       ]
+    },
+    "aan-paavam": {
+      "album_id": "aan-paavam",
+      "album_type": "soundtrack",
+      "canonical_title": "Aan Paavam",
+      "canonical_artist": "Ilaiyaraaja",
+      "canonical_composer": "Ilaiyaraaja",
+      "release_year": 1985,
+      "genre": "Tamil Film Soundtrack",
+      "expected_track_count": 4,
+      "tracks": [
+        {
+          "track_number": 1,
+          "title": "Kuyile Kuyile",
+          "artists": [
+            "K. J. Yesudas",
+            "K. S. Chithra"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 280,
+          "expected_file_pattern": ".*(kuyile).*"
+        },
+        {
+          "track_number": 2,
+          "title": "Kadhal Kasakkudhaiya",
+          "artists": [
+            "Ilaiyaraaja"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(kadhal|kasakkudhaiya).*"
+        },
+        {
+          "track_number": 3,
+          "title": "Ooradungum Saamathila",
+          "artists": [
+            "Malaysia Vasudevan",
+            "S. Janaki"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 290,
+          "expected_file_pattern": ".*(ooradungum|saamathila).*"
+        },
+        {
+          "track_number": 4,
+          "title": "Chinna Mani",
+          "artists": [
+            "Ilaiyaraaja"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 260,
+          "expected_file_pattern": ".*(chinna|mani).*"
+        }
+      ]
     }
   }
 }
-
