@@ -1948,10 +1948,10 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.04]">
-                    {selectedAlbum.tracks.map((trk) => {
+                    {selectedAlbum.tracks.map((trk, idx) => {
                       const isEditing = editingTrack?.trackId === trk.trackId
                       return (
-                        <tr key={trk.trackId} className="hover:bg-white/[0.015] transition-colors">
+                        <tr key={trk.trackId} data-testid={`track-row-${idx}`} className="hover:bg-white/[0.015] transition-colors">
                           <td className="py-3 px-3 font-mono text-white/50 text-[11px]">
                             #{trk.trackNumber}
                             {trk.sequenceOffset ? (
