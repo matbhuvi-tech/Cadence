@@ -335,7 +335,14 @@ pub fn db_update_canonical_artist_editorial(
 #[tauri::command]
 pub fn db_backfill_artist_credits(db: State<'_, AppDb>) -> Result<usize, String> {
     let mut conn = db.conn.lock();
+    let _ = crate::db::DbOperations::recompute_release_artist_credits(&mut conn);
     crate::db::DbOperations::backfill_artist_credits_from_tracks(&mut conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_recompute_release_artist_credits(db: State<'_, AppDb>) -> Result<usize, String> {
+    let mut conn = db.conn.lock();
+    crate::db::DbOperations::recompute_release_artist_credits(&mut conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

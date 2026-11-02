@@ -678,8 +678,31 @@ impl ScannerController {
                             .map(|s| s.to_uppercase())
                             .unwrap_or_else(|| "FLAC".to_string());
 
-                        let release_id = if let Some(existing_rel) = pending_releases.values().find(|r| r.folder_path == folder_path_str && r.title == album) {
-                            existing_rel.id.clone()
+                        let existing_rel_id = pending_releases.values().find(|r| r.folder_path == folder_path_str && r.title == album).map(|r| r.id.clone());
+
+                        let release_id = if let Some(rel_id) = existing_rel_id {
+                            // Dynamically update container identity across subsequent tracks in release
+                            if let Some(existing_rel) = pending_releases.get_mut(&rel_id) {
+                                if let Some(ref aa) = album_artist {
+                                    let aa_t = aa.trim();
+                                    if !aa_t.is_empty() && !aa_t.eq_ignore_ascii_case("unknown artist") {
+                                        existing_rel.artist_credit = aa_t.to_string();
+                                    }
+                                } else if let Some(ref comp) = composer {
+                                    let is_soundtrack = genre.as_ref().map(|g| {
+                                        let gl = g.to_lowercase();
+                                        gl.contains("soundtrack") || gl.contains("film") || gl.contains("ost") || gl.contains("score")
+                                    }).unwrap_or(false);
+                                    if is_soundtrack || (existing_rel.artist_credit != *artist && !artist.eq_ignore_ascii_case("unknown artist")) {
+                                        existing_rel.artist_credit = comp.clone();
+                                        existing_rel.composer_name = Some(comp.clone());
+                                    }
+                                } else if existing_rel.artist_credit != *artist && !artist.eq_ignore_ascii_case("unknown artist") {
+                                    existing_rel.artist_credit = "Various Artists".to_string();
+                                    existing_rel.is_compilation = true;
+                                }
+                            }
+                            rel_id
                         } else {
                             // Check if release already exists in SQLite DB
                             let db_rel_info: Option<(String, Option<String>, Option<String>)> = {
@@ -717,6 +740,30 @@ impl ScannerController {
                                     front_cover_url = find_local_cover_art(parent_dir);
                                 }
 
+                                // Determine container release artist credit via Album Artist / Composer Promotion / Track Artist:
+                                let release_artist = if let Some(ref aa) = album_artist {
+                                    let aa_t = aa.trim();
+                                    if !aa_t.is_empty() && !aa_t.eq_ignore_ascii_case("unknown artist") {
+                                        aa_t.to_string()
+                                    } else if let Some(ref comp) = composer {
+                                        comp.clone()
+                                    } else {
+                                        artist.clone()
+                                    }
+                                } else if let Some(ref comp) = composer {
+                                    let is_soundtrack = genre.as_ref().map(|g| {
+                                        let gl = g.to_lowercase();
+                                        gl.contains("soundtrack") || gl.contains("film") || gl.contains("ost") || gl.contains("score")
+                                    }).unwrap_or(false);
+                                    if is_soundtrack {
+                                        comp.clone()
+                                    } else {
+                                        artist.clone()
+                                    }
+                                } else {
+                                    artist.clone()
+                                };
+
                                 pending_releases.insert(
                                     rel_id.clone(),
                                     DbRelease {
@@ -724,7 +771,7 @@ impl ScannerController {
                                         title: album.clone(),
                                         folder_path: folder_path_str.clone(),
                                         folder_name: alb_sidecar.folder_name.clone().unwrap_or_else(|| folder_name.clone()),
-                                        artist_credit: artist.clone(),
+                                        artist_credit: release_artist,
                                         composer_name: composer.clone(),
                                         release_year: year,
                                         genre_tags: genre.as_ref().map(|g| serde_json::to_string(&vec![g.clone()]).unwrap_or_default()),
@@ -823,8 +870,30 @@ impl ScannerController {
                                 (0.0, None, None, None)
                             };
 
-                            let release_id = if let Some(existing_rel) = pending_releases.values().find(|r| r.folder_path == folder_path_str && r.title == album) {
-                                existing_rel.id.clone()
+                            let existing_rel_id = pending_releases.values().find(|r| r.folder_path == folder_path_str && r.title == album).map(|r| r.id.clone());
+
+                            let release_id = if let Some(rel_id) = existing_rel_id {
+                                if let Some(existing_rel) = pending_releases.get_mut(&rel_id) {
+                                    if let Some(ref aa) = album_artist {
+                                        let aa_t = aa.trim();
+                                        if !aa_t.is_empty() && !aa_t.eq_ignore_ascii_case("unknown artist") {
+                                            existing_rel.artist_credit = aa_t.to_string();
+                                        }
+                                    } else if let Some(ref comp) = composer {
+                                        let is_soundtrack = genre.as_ref().map(|g| {
+                                            let gl = g.to_lowercase();
+                                            gl.contains("soundtrack") || gl.contains("film") || gl.contains("ost") || gl.contains("score")
+                                        }).unwrap_or(false);
+                                        if is_soundtrack || (existing_rel.artist_credit != *artist && !artist.eq_ignore_ascii_case("unknown artist")) {
+                                            existing_rel.artist_credit = comp.clone();
+                                            existing_rel.composer_name = Some(comp.clone());
+                                        }
+                                    } else if existing_rel.artist_credit != *artist && !artist.eq_ignore_ascii_case("unknown artist") {
+                                        existing_rel.artist_credit = "Various Artists".to_string();
+                                        existing_rel.is_compilation = true;
+                                    }
+                                }
+                                rel_id
                             } else {
                                 let db_rel_info: Option<(String, Option<String>, Option<String>)> = {
                                     let conn = db.conn.lock();
@@ -849,6 +918,30 @@ impl ScannerController {
                                     if front_cover_url.is_none() {
                                         front_cover_url = find_local_cover_art(parent_dir);
                                     }
+
+                                    let release_artist = if let Some(ref aa) = album_artist {
+                                        let aa_t = aa.trim();
+                                        if !aa_t.is_empty() && !aa_t.eq_ignore_ascii_case("unknown artist") {
+                                            aa_t.to_string()
+                                        } else if let Some(ref comp) = composer {
+                                            comp.clone()
+                                        } else {
+                                            artist.clone()
+                                        }
+                                    } else if let Some(ref comp) = composer {
+                                        let is_soundtrack = genre.as_ref().map(|g| {
+                                            let gl = g.to_lowercase();
+                                            gl.contains("soundtrack") || gl.contains("film") || gl.contains("ost") || gl.contains("score")
+                                        }).unwrap_or(false);
+                                        if is_soundtrack {
+                                            comp.clone()
+                                        } else {
+                                            artist.clone()
+                                        }
+                                    } else {
+                                        artist.clone()
+                                    };
+
                                     pending_releases.insert(
                                         rel_id.clone(),
                                         DbRelease {
@@ -856,7 +949,7 @@ impl ScannerController {
                                             title: album.clone(),
                                             folder_path: folder_path_str.clone(),
                                             folder_name: alb_sidecar.folder_name.clone().unwrap_or_else(|| folder_name.clone()),
-                                            artist_credit: artist.clone(),
+                                            artist_credit: release_artist,
                                             composer_name: composer.clone(),
                                             release_year: year,
                                             genre_tags: genre.as_ref().map(|g| serde_json::to_string(&vec![g.clone()]).unwrap_or_default()),
@@ -991,9 +1084,10 @@ impl ScannerController {
             // Flush any remaining tracks & releases to SQLite
             flush_batch(&mut pending_tracks, &mut pending_releases, total_candidates);
 
-            // Restore mount status to online
+            // Recompute release container artists to ensure multi-track consensus across the library
             {
-                let conn = db.conn.lock();
+                let mut conn = db.conn.lock();
+                let _ = DbOperations::recompute_release_artist_credits(&mut conn);
                 let _ = DbOperations::set_mount_status(&conn, &mount_id, "online");
             }
 

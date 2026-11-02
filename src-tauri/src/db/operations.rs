@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use chrono::Utc;
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
@@ -1878,6 +1879,141 @@ impl DbOperations {
         }
         tx.commit()?;
         Ok(inserted_credits)
+    }
+
+    /// Deterministically recomputes release container artist credits across all releases:
+    /// 1. Explicit container tag (ALBUMARTIST / ALBUM ARTIST) if present on >= 50% of tracks.
+    /// 2. Composer promotion if soundtrack / Indian film music convention or diverse performers.
+    /// 3. Track artist majority consensus (>= 70% share same artist).
+    /// 4. Fallback to "Various Artists" for heterogeneous releases.
+    pub fn recompute_release_artist_credits(conn: &mut Connection) -> Result<usize> {
+        let releases: Vec<(String, String, Option<String>, Option<String>, i64)> = {
+            let mut stmt = conn.prepare("SELECT id, artist_credit, composer_name, genre_tags, is_compilation FROM releases")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?.filter_map(|r| r.ok()).collect();
+            rows
+        };
+
+        let mut track_stmt = conn.prepare(
+            "SELECT artist_credit, album_artist, composer, genre FROM tracks WHERE release_id = ?1"
+        )?;
+
+        let mut updates: Vec<(String, String, Option<String>, i64)> = Vec::new();
+
+        for (rel_id, current_artist, composer_name, genre_tags, current_is_comp) in releases {
+            let tracks: Vec<(String, Option<String>, Option<String>, Option<String>)> = track_stmt
+                .query_map([&rel_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if tracks.is_empty() {
+                continue;
+            }
+
+            let total_tracks = tracks.len();
+            let mut album_artist_counts: HashMap<String, usize> = HashMap::new();
+            let mut track_artist_counts: HashMap<String, usize> = HashMap::new();
+            let mut first_composer: Option<String> = composer_name.clone();
+            let mut has_soundtrack_cue = false;
+
+            if let Some(ref gt) = genre_tags {
+                let gt_lower = gt.to_lowercase();
+                if gt_lower.contains("soundtrack") || gt_lower.contains("film") || gt_lower.contains("ost") || gt_lower.contains("score") {
+                    has_soundtrack_cue = true;
+                }
+            }
+
+            for (artist_credit, album_artist, composer, genre) in &tracks {
+                let a_trimmed = artist_credit.trim();
+                if !a_trimmed.is_empty() && !a_trimmed.eq_ignore_ascii_case("unknown artist") {
+                    *track_artist_counts.entry(a_trimmed.to_string()).or_insert(0) += 1;
+                }
+
+                if let Some(ref aa) = album_artist {
+                    let aa_trimmed = aa.trim();
+                    if !aa_trimmed.is_empty() && !aa_trimmed.eq_ignore_ascii_case("unknown artist") {
+                        *album_artist_counts.entry(aa_trimmed.to_string()).or_insert(0) += 1;
+                    }
+                }
+
+                if first_composer.is_none() {
+                    if let Some(ref c) = composer {
+                        let c_trimmed = c.trim();
+                        if !c_trimmed.is_empty() && !c_trimmed.eq_ignore_ascii_case("unknown artist") {
+                            first_composer = Some(c_trimmed.to_string());
+                        }
+                    }
+                }
+
+                if let Some(ref g) = genre {
+                    let g_lower = g.to_lowercase();
+                    if g_lower.contains("soundtrack") || g_lower.contains("film") || g_lower.contains("ost") || g_lower.contains("score") {
+                        has_soundtrack_cue = true;
+                    }
+                }
+            }
+
+            let distinct_artists_count = track_artist_counts.len();
+            let mut resolved_artist: Option<String> = None;
+            let mut resolved_is_comp = current_is_comp;
+
+            // 1. Explicit Album Artist Tag (if >= 50% of tracks agree)
+            if !album_artist_counts.is_empty() {
+                let mut sorted_aa: Vec<_> = album_artist_counts.into_iter().collect();
+                sorted_aa.sort_by(|a, b| b.1.cmp(&a.1));
+                if sorted_aa[0].1 >= (total_tracks / 2).max(1) {
+                    resolved_artist = Some(sorted_aa[0].0.clone());
+                }
+            }
+
+            // 2. Composer Promotion (Soundtrack or Multi-Singer Indian Soundtrack)
+            if resolved_artist.is_none() {
+                if let Some(ref comp) = first_composer {
+                    if distinct_artists_count > 1 || has_soundtrack_cue || (distinct_artists_count == 1 && !track_artist_counts.contains_key(comp)) {
+                        resolved_artist = Some(comp.clone());
+                    }
+                }
+            }
+
+            // 3. Track Artist Majority Consensus (>= 70%)
+            if resolved_artist.is_none() && !track_artist_counts.is_empty() {
+                let mut sorted_ta: Vec<_> = track_artist_counts.into_iter().collect();
+                sorted_ta.sort_by(|a, b| b.1.cmp(&a.1));
+                if (sorted_ta[0].1 as f64) >= ((total_tracks as f64) * 0.70) {
+                    resolved_artist = Some(sorted_ta[0].0.clone());
+                } else if distinct_artists_count > 1 {
+                    resolved_artist = Some("Various Artists".to_string());
+                    resolved_is_comp = 1;
+                }
+            }
+
+            if let Some(new_artist) = resolved_artist {
+                if new_artist != current_artist || resolved_is_comp != current_is_comp {
+                    updates.push((rel_id, new_artist, first_composer, resolved_is_comp));
+                }
+            }
+        }
+
+        drop(track_stmt);
+
+        let tx = conn.transaction()?;
+        let mut updated_count = 0;
+        {
+            let mut update_stmt = tx.prepare(
+                "UPDATE releases SET artist_credit = ?1, composer_name = COALESCE(?2, composer_name), is_compilation = ?3 WHERE id = ?4"
+            )?;
+
+            for (rel_id, new_artist, composer, is_comp) in updates {
+                update_stmt.execute(rusqlite::params![new_artist, composer, is_comp, rel_id])?;
+                updated_count += 1;
+            }
+        }
+        tx.commit()?;
+
+        Ok(updated_count)
     }
 
     pub fn search_catalog(

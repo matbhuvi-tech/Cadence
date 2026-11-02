@@ -279,6 +279,7 @@ pub fn run() {
             db_set_artist_portrait,
             db_update_canonical_artist_editorial,
             db_backfill_artist_credits,
+            db_recompute_release_artist_credits,
             db_search_catalog,
             // Playlists
             db_get_playlists,
