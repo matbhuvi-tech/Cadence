@@ -558,4 +558,57 @@ export interface NavigationAnchor {
   filterState?: Record<string, any>
 }
 
+// ============================================================================
+// 2-Tier Metadata Management & 4-Way Reconciliation Models
+// ============================================================================
+
+export type CurateTier = 'tier1' | 'tier2'
+
+export interface MetadataFieldState<T = string | number> {
+  local?: T
+  apple?: T
+  musicbrainz?: T
+  ai?: T
+  selected: T
+  userOverridden?: boolean
+  confidence: number // 0.0 - 1.0
+  source: ConsensusFieldSource
+  requiresHumanReview?: boolean
+}
+
+export interface TrackCandidateState {
+  trackId: string
+  trackNumber: number
+  localTitle: string
+  localArtists: string
+  localDuration?: number
+  providerTrackNumber?: number
+  matchedTitle?: string
+  matchedArtists?: string
+  matchedComposer?: string
+  durationDeltaSec?: number
+  sequenceOffset?: number
+  confidence: number
+  source: ConsensusFieldSource
+  userOverridden?: boolean
+  requiresHumanReview?: boolean
+}
+
+export interface LearnedRule {
+  id: string
+  pattern: string
+  normalizedValue: string
+  category: 'artist' | 'composer' | 'delimiter' | 'genre'
+  frequency: number
+  lastUsed: string
+  createdAt: string
+}
+
+export interface SequenceOffsetDetectionResult {
+  detectedOffset: number // e.g. -5 if local tracks #6-#10 map to provider #1-#5
+  confidence: number
+  matchedTrackCount: number
+  totalLocalTracks: number
+  isConfidentOffset: boolean
+}
 

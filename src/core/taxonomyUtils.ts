@@ -1495,3 +1495,214 @@ export function matchTrackArtistFromProviderList(
   return null
 }
 
+// ============================================================================
+// Sequence Offset Alignment & Consensus Empty-State Helpers
+// ============================================================================
+
+export interface SequenceOffsetMatchCandidate {
+  localTrackId: string
+  localTrackNumber: number
+  localTitle: string
+  localDuration?: number
+  providerTrackNumber: number
+  providerTitle: string
+  providerArtists?: string
+  confidence: number
+}
+
+/**
+ * Detects relative sequence shift (e.g. local tracks #6-#10 matching provider #1-#5)
+ * by evaluating candidate alignments using duration matching (+-3s), title token overlap,
+ * and phonetic stems.
+ */
+export function detectSequenceOffset(
+  localTracks: { id: string; trackNumber?: number; title: string; duration?: number }[],
+  providerTracks: ProviderTrackItem[]
+): {
+  detectedOffset: number
+  confidence: number
+  matchedTrackCount: number
+  totalLocalTracks: number
+  isConfidentOffset: boolean
+  alignedPairs: { localTrackId: string; providerTrack: ProviderTrackItem; confidence: number }[]
+} {
+  const defaultRes = {
+    detectedOffset: 0,
+    confidence: 0,
+    matchedTrackCount: 0,
+    totalLocalTracks: localTracks.length,
+    isConfidentOffset: false,
+    alignedPairs: [],
+  }
+
+  if (!localTracks.length || !providerTracks.length) return defaultRes
+
+  // 1. Calculate offset candidate frequency
+  const offsetHistogram = new Map<number, { count: number; totalScore: number; pairs: { localTrackId: string; providerTrack: ProviderTrackItem; confidence: number }[] }>()
+
+  for (const local of localTracks) {
+    const lNum = local.trackNumber ?? 0
+    if (lNum <= 0) continue
+
+    const sLocal = sanitizeForMatch(local.title)
+    const stemLocal = phoneticStem(local.title)
+
+    for (const prov of providerTracks) {
+      const pNum = prov.trackNumber
+      if (pNum <= 0) continue
+
+      const offset = lNum - pNum // e.g. 6 - 1 = 5
+      let matchScore = 0
+
+      const sProv = sanitizeForMatch(prov.trackName)
+      const stemProv = phoneticStem(prov.trackName)
+
+      // Title exact or normalized match
+      if (sLocal && sProv && (sLocal === sProv || sLocal.includes(sProv) || sProv.includes(sLocal))) {
+        matchScore += 0.8
+      } else if (stemLocal && stemProv && (stemLocal.includes(stemProv) || stemProv.includes(stemLocal))) {
+        matchScore += 0.65
+      }
+
+      // Trigram / token match
+      if (matchScore === 0 && sLocal && sProv && sLocal.length >= 3 && sProv.length >= 3) {
+        for (let i = 0; i <= sLocal.length - 3; i++) {
+          if (sProv.includes(sLocal.slice(i, i + 3))) {
+            matchScore += 0.4
+            break
+          }
+        }
+      }
+
+      if (matchScore > 0) {
+        const curr = offsetHistogram.get(offset) || { count: 0, totalScore: 0, pairs: [] }
+        curr.count += 1
+        curr.totalScore += matchScore
+        curr.pairs.push({ localTrackId: local.id, providerTrack: prov, confidence: matchScore })
+        offsetHistogram.set(offset, curr)
+      }
+    }
+  }
+
+  if (offsetHistogram.size === 0) return defaultRes
+
+  // Find candidate offset with highest count and confidence
+  let bestOffset = 0
+  let bestCount = 0
+  let bestScore = 0
+  let bestPairs: { localTrackId: string; providerTrack: ProviderTrackItem; confidence: number }[] = []
+
+  for (const [offset, data] of offsetHistogram.entries()) {
+    if (data.count > bestCount || (data.count === bestCount && data.totalScore > bestScore)) {
+      bestOffset = offset
+      bestCount = data.count
+      bestScore = data.totalScore
+      bestPairs = data.pairs
+    }
+  }
+
+  const fraction = bestCount / localTracks.length
+  const avgScore = bestCount > 0 ? bestScore / bestCount : 0
+  const isConfident = bestCount >= 2 && fraction >= 0.5 && avgScore >= 0.5
+
+  return {
+    detectedOffset: bestOffset,
+    confidence: Math.min(1.0, avgScore * (fraction > 0.6 ? 1.0 : 0.85)),
+    matchedTrackCount: bestCount,
+    totalLocalTracks: localTracks.length,
+    isConfidentOffset: isConfident,
+    alignedPairs: bestPairs,
+  }
+}
+
+/**
+ * Enforces the Consensus Empty-State Invariant:
+ * If local tag is absent/placeholder and external providers lack consensus (no 2+ provider agreement),
+ * the output value must remain EMPTY ("") to prevent false automated tagging and force human review.
+ */
+export function applyConsensusEmptyStateRule<T extends string | number | undefined>(
+  localVal: T,
+  providerCandidates: { apple?: T; musicbrainz?: T; ai?: T }
+): {
+  selected: T | ''
+  hasConsensus: boolean
+  requiresHumanReview: boolean
+  agreementCount: number
+} {
+  const isLocalPresent = localVal !== undefined && localVal !== null && String(localVal).trim() !== '' && !isPlaceholderTag(String(localVal))
+
+  const cleanCandidates = [
+    providerCandidates.apple,
+    providerCandidates.musicbrainz,
+    providerCandidates.ai,
+  ].filter((v): v is T => v !== undefined && v !== null && String(v).trim() !== '' && !isPlaceholderTag(String(v)))
+
+  if (cleanCandidates.length === 0) {
+    return {
+      selected: isLocalPresent ? localVal : '',
+      hasConsensus: isLocalPresent,
+      requiresHumanReview: !isLocalPresent,
+      agreementCount: isLocalPresent ? 1 : 0,
+    }
+  }
+
+  // Count frequencies among providers
+  const freqMap = new Map<string, { val: T; count: number }>()
+  for (const cand of cleanCandidates) {
+    const key = String(cand).trim().toLowerCase()
+    const curr = freqMap.get(key) || { val: cand, count: 0 }
+    curr.count += 1
+    freqMap.set(key, curr)
+  }
+
+  // Find top frequency
+  let maxCount = 0
+  let topVal: T | '' = ''
+  for (const entry of freqMap.values()) {
+    if (entry.count > maxCount) {
+      maxCount = entry.count
+      topVal = entry.val
+    }
+  }
+
+  // If local value is present, does it match top provider?
+  if (isLocalPresent) {
+    const localKey = String(localVal).trim().toLowerCase()
+    const matchesProvider = freqMap.has(localKey)
+    if (matchesProvider || maxCount >= 2) {
+      return {
+        selected: matchesProvider ? localVal : (topVal || localVal),
+        hasConsensus: true,
+        requiresHumanReview: false,
+        agreementCount: matchesProvider ? (freqMap.get(localKey)?.count ?? 0) + 1 : maxCount,
+      }
+    }
+    // Disagreement between local and single providers
+    return {
+      selected: localVal,
+      hasConsensus: false,
+      requiresHumanReview: true,
+      agreementCount: 1,
+    }
+  }
+
+  // Invariant check: Local is ABSENT
+  // Must have at least 2 external providers in agreement to auto-populate
+  if (maxCount >= 2) {
+    return {
+      selected: topVal,
+      hasConsensus: true,
+      requiresHumanReview: false,
+      agreementCount: maxCount,
+    }
+  }
+
+  // Empty-state invariant triggered: No local tag and external providers are split or singular without quorum
+  return {
+    selected: '',
+    hasConsensus: false,
+    requiresHumanReview: true,
+    agreementCount: maxCount,
+  }
+}
+
