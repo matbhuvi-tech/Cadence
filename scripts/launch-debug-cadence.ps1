@@ -34,6 +34,9 @@ if (Test-CdpPort -TargetPort $Port) {
     exit 0
 }
 
+# Set Microsoft WebView2 browser arguments so the embedded browser opens the CDP debugging port
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port"
+
 # Search for built binaries first (debug or release)
 $repoRoot = Resolve-Path "$PSScriptRoot\.."
 $candidates = @(

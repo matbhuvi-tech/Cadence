@@ -82,7 +82,18 @@ class CdpSession {
   private pending = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void }>();
 
   static async connect(port = 9222): Promise<CdpSession> {
-    const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
+    let listRes;
+    try {
+      listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
+    } catch (err: any) {
+      if (err.cause?.code === 'ECONNREFUSED' || err.message?.includes('fetch failed')) {
+        console.error(`\n❌ Could not connect to Cadence CDP endpoint on port ${port} (ECONNREFUSED).`);
+        console.error(`💡 Cadence is not currently running with remote debugging enabled.`);
+        console.error(`👉 Please launch Cadence first in a separate terminal using:`);
+        console.error(`     .\\scripts\\launch-debug-cadence.ps1\n`);
+      }
+      throw err;
+    }
     const targets = (await listRes.json()) as any[];
     const pageTarget = targets.find((t) => t.type === 'page' || t.title.includes('Cadence'));
 
@@ -656,3 +667,4 @@ if (process.argv[1] && process.argv[1].endsWith('curateQaAgent.ts')) {
     process.exit(1);
   });
 }
+
