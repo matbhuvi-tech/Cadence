@@ -574,6 +574,221 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [selectedAlbumId, tier2Items, isRulesModalOpen, isHealthDrawerOpen, onBackToLibrary])
 
+  // Row Renderer: Album Text Field
+  const renderFieldRow = (
+    fieldKey: 'albumTitle' | 'albumArtist' | 'composer' | 'year' | 'genre',
+    label: string,
+    fieldState: MetadataFieldState<any>
+  ) => {
+    const isEditing = editingFieldKey === fieldKey
+    const selectedVal = fieldState.selected
+
+    return (
+      <tr key={fieldKey} className="hover:bg-white/[0.015] transition-colors">
+        <td className="py-2.5 px-4 font-medium text-white/70">{label}</td>
+
+        {/* Local */}
+        <td
+          onClick={() => handleSelectFieldSource(fieldKey, 'local')}
+          className={`py-2.5 px-4 cursor-pointer transition-colors ${
+            fieldState.source === 'local_fallback' ? 'bg-white/[0.04] text-white font-medium' : 'text-white/60 hover:text-white'
+          }`}
+        >
+          {String(fieldState.local ?? '—')}
+        </td>
+
+        {/* Apple */}
+        <td
+          onClick={() => handleSelectFieldSource(fieldKey, 'apple')}
+          className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-[#D4AF37] transition-colors"
+        >
+          {String(fieldState.apple ?? '—')}
+        </td>
+
+        {/* MusicBrainz */}
+        <td
+          onClick={() => handleSelectFieldSource(fieldKey, 'musicbrainz')}
+          className="py-2.5 px-4 cursor-pointer text-white/60 hover:text-white transition-colors"
+        >
+          {String(fieldState.musicbrainz ?? '—')}
+        </td>
+
+        {/* Gemini AI */}
+        <td
+          onClick={() => handleSelectFieldSource(fieldKey, 'ai')}
+          className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-cyan-300 transition-colors"
+        >
+          {String(fieldState.ai ?? '—')}
+        </td>
+
+        {/* Selected Output */}
+        <td className="py-2.5 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+          {isEditing ? (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={editInputValue}
+                onChange={(e) => setEditInputValue(e.target.value)}
+                className="flex-1 bg-black/60 border border-emerald-400 rounded px-2 py-1 text-xs text-white focus:outline-none"
+                autoFocus
+              />
+              <button
+                onClick={() => handleSaveManualField(fieldKey)}
+                className="p-1 rounded bg-emerald-500 text-black cursor-pointer"
+                title="Save"
+              >
+                <Check className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setEditingFieldKey(null)}
+                className="p-1 rounded bg-white/[0.08] text-white/60 cursor-pointer"
+                title="Cancel"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2 group">
+              {selectedVal !== '' && selectedVal !== undefined ? (
+                <span className="font-semibold text-emerald-300 truncate">{String(selectedVal)}</span>
+              ) : (
+                <span className="text-[11px] text-amber-300 font-medium">
+                  ⚠️ Action Required (No Consensus)
+                </span>
+              )}
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  onClick={() => {
+                    setEditingFieldKey(fieldKey)
+                    setEditInputValue(String(selectedVal || ''))
+                  }}
+                  className="p-1 rounded hover:bg-white/[0.08] text-white/60 hover:text-white transition-colors cursor-pointer"
+                  title="Edit manually"
+                >
+                  <Edit2 className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          )}
+        </td>
+      </tr>
+    )
+  }
+
+  // Row Renderer: Artwork Row
+  const renderArtworkRow = (fieldState: MetadataFieldState<string>) => {
+    const isEditing = editingFieldKey === 'coverArt'
+
+    return (
+      <tr className="hover:bg-white/[0.015] transition-colors">
+        <td className="py-3 px-4 font-medium text-white/70">Cover Artwork</td>
+
+        {/* Local */}
+        <td onClick={() => handleSelectFieldSource('coverArt', 'local')} className="py-3 px-4 cursor-pointer">
+          {fieldState.local ? (
+            <img src={fieldState.local} alt="Local Art" className="w-12 h-12 rounded object-cover shadow" />
+          ) : (
+            <div className="w-10 h-10 rounded border border-white/10 bg-black/40 flex items-center justify-center text-white/30 text-[10px]">
+              None
+            </div>
+          )}
+        </td>
+
+        {/* Apple */}
+        <td onClick={() => handleSelectFieldSource('coverArt', 'apple')} className="py-3 px-4 cursor-pointer">
+          {fieldState.apple ? (
+            <div className="p-0.5 rounded-lg w-fit">
+              <img src={fieldState.apple} alt="Apple Art" className="w-12 h-12 rounded object-cover shadow" />
+              <span className="text-[9px] text-[#D4AF37] block mt-1">3000px HD</span>
+            </div>
+          ) : (
+            <span className="text-white/40 text-xs">—</span>
+          )}
+        </td>
+
+        {/* MusicBrainz */}
+        <td onClick={() => handleSelectFieldSource('coverArt', 'musicbrainz')} className="py-3 px-4 cursor-pointer">
+          {fieldState.musicbrainz ? (
+            <div className="p-0.5 rounded-lg w-fit">
+              <img src={fieldState.musicbrainz} alt="MB Art" className="w-12 h-12 rounded object-cover shadow opacity-70" />
+              <span className="text-[9px] text-white/50 block mt-1">CAA</span>
+            </div>
+          ) : (
+            <span className="text-white/40 text-xs">—</span>
+          )}
+        </td>
+
+        {/* Gemini AI */}
+        <td onClick={() => handleSelectFieldSource('coverArt', 'ai')} className="py-3 px-4 cursor-pointer">
+          {fieldState.ai ? (
+            <div className="p-0.5 rounded-lg w-fit">
+              <img src={fieldState.ai} alt="AI Art" className="w-12 h-12 rounded object-cover shadow" />
+              <span className="text-[9px] text-cyan-300 block mt-1">AI Verified</span>
+            </div>
+          ) : (
+            <span className="text-white/40 text-xs">—</span>
+          )}
+        </td>
+
+        {/* Selected Artwork */}
+        <td className="py-3 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+          {isEditing ? (
+            <div className="flex flex-col gap-2">
+              <input
+                type="text"
+                value={editInputValue}
+                onChange={(e) => setEditInputValue(e.target.value)}
+                placeholder="Paste Image URL (https://...)"
+                className="bg-black/60 border border-emerald-400 rounded px-2.5 py-1 text-xs text-white focus:outline-none"
+                autoFocus
+              />
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => handleSaveManualField('coverArt')}
+                  className="px-2.5 py-0.5 rounded bg-emerald-500 text-black font-semibold text-[11px] cursor-pointer"
+                >
+                  Save URL
+                </button>
+                <button
+                  onClick={() => setEditingFieldKey(null)}
+                  className="px-2.5 py-0.5 rounded bg-white/[0.08] text-white/60 text-[11px] cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3 group">
+              {fieldState.selected ? (
+                <img
+                  src={fieldState.selected}
+                  alt="Selected Art"
+                  className="w-14 h-14 rounded-lg object-cover border-2 border-emerald-500/60 shadow-lg"
+                />
+              ) : (
+                <div className="w-14 h-14 rounded-lg border-2 border-dashed border-amber-400/40 flex items-center justify-center text-amber-300 text-[10px] text-center p-1">
+                  No Art
+                </div>
+              )}
+              <div>
+                <button
+                  onClick={() => {
+                    setEditingFieldKey('coverArt')
+                    setEditInputValue(fieldState.selected || '')
+                  }}
+                  className="flex items-center gap-1 text-[11px] text-white/50 hover:text-white cursor-pointer"
+                >
+                  <Edit2 className="w-3 h-3" />
+                  <span>Custom URL</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </td>
+      </tr>
+    )
+  }
+
   return (
     <div className="w-full h-screen bg-[#0E0F12] text-[#F3F4F6] flex flex-col font-sans select-none overflow-hidden">
       {/* 1. Header Navigation Bar */}
@@ -1005,221 +1220,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         )}
       </div>
 
-      {/* Row Renderer: Album Text Field */}
-      {function renderFieldRow(
-        fieldKey: 'albumTitle' | 'albumArtist' | 'composer' | 'year' | 'genre',
-        label: string,
-        fieldState: MetadataFieldState<any>
-      ) {
-        const isEditing = editingFieldKey === fieldKey
-        const selectedVal = fieldState.selected
-
-        return (
-          <tr key={fieldKey} className="hover:bg-white/[0.015] transition-colors">
-            <td className="py-2.5 px-4 font-medium text-white/70">{label}</td>
-
-            {/* Local */}
-            <td
-              onClick={() => handleSelectFieldSource(fieldKey, 'local')}
-              className={`py-2.5 px-4 cursor-pointer transition-colors ${
-                fieldState.source === 'local_fallback' ? 'bg-white/[0.04] text-white font-medium' : 'text-white/60 hover:text-white'
-              }`}
-            >
-              {String(fieldState.local ?? '—')}
-            </td>
-
-            {/* Apple */}
-            <td
-              onClick={() => handleSelectFieldSource(fieldKey, 'apple')}
-              className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-[#D4AF37] transition-colors"
-            >
-              {String(fieldState.apple ?? '—')}
-            </td>
-
-            {/* MusicBrainz */}
-            <td
-              onClick={() => handleSelectFieldSource(fieldKey, 'musicbrainz')}
-              className="py-2.5 px-4 cursor-pointer text-white/60 hover:text-white transition-colors"
-            >
-              {String(fieldState.musicbrainz ?? '—')}
-            </td>
-
-            {/* Gemini AI */}
-            <td
-              onClick={() => handleSelectFieldSource(fieldKey, 'ai')}
-              className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-cyan-300 transition-colors"
-            >
-              {String(fieldState.ai ?? '—')}
-            </td>
-
-            {/* Selected Output */}
-            <td className="py-2.5 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
-              {isEditing ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={editInputValue}
-                    onChange={(e) => setEditInputValue(e.target.value)}
-                    className="flex-1 bg-black/60 border border-emerald-400 rounded px-2 py-1 text-xs text-white focus:outline-none"
-                    autoFocus
-                  />
-                  <button
-                    onClick={() => handleSaveManualField(fieldKey)}
-                    className="p-1 rounded bg-emerald-500 text-black cursor-pointer"
-                    title="Save"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => setEditingFieldKey(null)}
-                    className="p-1 rounded bg-white/[0.08] text-white/60 cursor-pointer"
-                    title="Cancel"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center justify-between gap-2 group">
-                  {selectedVal !== '' && selectedVal !== undefined ? (
-                    <span className="font-semibold text-emerald-300 truncate">{String(selectedVal)}</span>
-                  ) : (
-                    <span className="text-[11px] text-amber-300 font-medium">
-                      ⚠️ Action Required (No Consensus)
-                    </span>
-                  )}
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={() => {
-                        setEditingFieldKey(fieldKey)
-                        setEditInputValue(String(selectedVal || ''))
-                      }}
-                      className="p-1 rounded hover:bg-white/[0.08] text-white/60 hover:text-white transition-colors cursor-pointer"
-                      title="Edit manually"
-                    >
-                      <Edit2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </td>
-          </tr>
-        )
-      }}
-
-      {/* Row Renderer: Artwork Row */}
-      {function renderArtworkRow(fieldState: MetadataFieldState<string>) {
-        const isEditing = editingFieldKey === 'coverArt'
-
-        return (
-          <tr className="hover:bg-white/[0.015] transition-colors">
-            <td className="py-3 px-4 font-medium text-white/70">Cover Artwork</td>
-
-            {/* Local */}
-            <td onClick={() => handleSelectFieldSource('coverArt', 'local')} className="py-3 px-4 cursor-pointer">
-              {fieldState.local ? (
-                <img src={fieldState.local} alt="Local Art" className="w-12 h-12 rounded object-cover shadow" />
-              ) : (
-                <div className="w-10 h-10 rounded border border-white/10 bg-black/40 flex items-center justify-center text-white/30 text-[10px]">
-                  None
-                </div>
-              )}
-            </td>
-
-            {/* Apple */}
-            <td onClick={() => handleSelectFieldSource('coverArt', 'apple')} className="py-3 px-4 cursor-pointer">
-              {fieldState.apple ? (
-                <div className="p-0.5 rounded-lg w-fit">
-                  <img src={fieldState.apple} alt="Apple Art" className="w-12 h-12 rounded object-cover shadow" />
-                  <span className="text-[9px] text-[#D4AF37] block mt-1">3000px HD</span>
-                </div>
-              ) : (
-                <span className="text-white/40 text-xs">—</span>
-              )}
-            </td>
-
-            {/* MusicBrainz */}
-            <td onClick={() => handleSelectFieldSource('coverArt', 'musicbrainz')} className="py-3 px-4 cursor-pointer">
-              {fieldState.musicbrainz ? (
-                <div className="p-0.5 rounded-lg w-fit">
-                  <img src={fieldState.musicbrainz} alt="MB Art" className="w-12 h-12 rounded object-cover shadow opacity-70" />
-                  <span className="text-[9px] text-white/50 block mt-1">CAA</span>
-                </div>
-              ) : (
-                <span className="text-white/40 text-xs">—</span>
-              )}
-            </td>
-
-            {/* Gemini AI */}
-            <td onClick={() => handleSelectFieldSource('coverArt', 'ai')} className="py-3 px-4 cursor-pointer">
-              {fieldState.ai ? (
-                <div className="p-0.5 rounded-lg w-fit">
-                  <img src={fieldState.ai} alt="AI Art" className="w-12 h-12 rounded object-cover shadow" />
-                  <span className="text-[9px] text-cyan-300 block mt-1">AI Verified</span>
-                </div>
-              ) : (
-                <span className="text-white/40 text-xs">—</span>
-              )}
-            </td>
-
-            {/* Selected Artwork */}
-            <td className="py-3 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
-              {isEditing ? (
-                <div className="flex flex-col gap-2">
-                  <input
-                    type="text"
-                    value={editInputValue}
-                    onChange={(e) => setEditInputValue(e.target.value)}
-                    placeholder="Paste Image URL (https://...)"
-                    className="bg-black/60 border border-emerald-400 rounded px-2.5 py-1 text-xs text-white focus:outline-none"
-                    autoFocus
-                  />
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => handleSaveManualField('coverArt')}
-                      className="px-2.5 py-0.5 rounded bg-emerald-500 text-black font-semibold text-[11px] cursor-pointer"
-                    >
-                      Save URL
-                    </button>
-                    <button
-                      onClick={() => setEditingFieldKey(null)}
-                      className="px-2.5 py-0.5 rounded bg-white/[0.08] text-white/60 text-[11px] cursor-pointer"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-3 group">
-                  {fieldState.selected ? (
-                    <img
-                      src={fieldState.selected}
-                      alt="Selected Art"
-                      className="w-14 h-14 rounded-lg object-cover border-2 border-emerald-500/60 shadow-lg"
-                    />
-                  ) : (
-                    <div className="w-14 h-14 rounded-lg border-2 border-dashed border-amber-400/40 flex items-center justify-center text-amber-300 text-[10px] text-center p-1">
-                      No Art
-                    </div>
-                  )}
-                  <div>
-                    <button
-                      onClick={() => {
-                        setEditingFieldKey('coverArt')
-                        setEditInputValue(fieldState.selected || '')
-                      }}
-                      className="flex items-center gap-1 text-[11px] text-white/50 hover:text-white cursor-pointer"
-                    >
-                      <Edit2 className="w-3 h-3" />
-                      <span>Custom URL</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-            </td>
-          </tr>
-        )
-      }}
-
       {/* 3. Learned Rules Modal */}
       {isRulesModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
@@ -1350,3 +1350,4 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   )
 }
 export default UnifiedCurateCockpit
+
