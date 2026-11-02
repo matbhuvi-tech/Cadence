@@ -9,7 +9,7 @@
 [CmdletBinding()]
 param (
     [int]$Port = 9222,
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,29 +29,59 @@ function Test-CdpPort {
     return $false
 }
 
+function Test-HttpPort {
+    param([string]$Uri)
+    try {
+        $resp = Invoke-WebRequest -Uri $Uri -TimeoutSec 1 -ErrorAction SilentlyContinue
+        return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
+    } catch {
+        return $false
+    }
+}
+
 if (Test-CdpPort -TargetPort $Port) {
     Write-Host "[OK] Cadence is already running and listening for CDP on port $Port!" -ForegroundColor Green
     exit 0
 }
 
-# Set Microsoft WebView2 browser arguments so the embedded browser opens the CDP debugging port
+# Set Microsoft WebView2 browser arguments so embedded browser opens the CDP debugging port
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port"
 
-# Search for built binaries first (debug or release)
 $repoRoot = Resolve-Path "$PSScriptRoot\.."
 $candidates = @(
+    "$repoRoot\src-tauri\target\debug\cadence-core.exe",
     "$repoRoot\src-tauri\target\debug\cadence.exe",
+    "$repoRoot\src-tauri\target\release\cadence-core.exe",
     "$repoRoot\src-tauri\target\release\cadence.exe"
 )
 
 $targetExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if ($targetExe) {
+    # If using debug binary, ensure Vite dev server is running on port 5173
+    if ($targetExe -like "*\debug\*" -and -not (Test-HttpPort "http://localhost:5173")) {
+        Write-Host "[VITE] Starting Vite dev server on http://localhost:5173..." -ForegroundColor Cyan
+        Start-Process -FilePath "npm.cmd" -ArgumentList "run", "dev" -WorkingDirectory $repoRoot
+        
+        Write-Host "[WAIT] Waiting for Vite to be ready..." -ForegroundColor Cyan
+        $viteReady = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Milliseconds 1000
+            if (Test-HttpPort "http://localhost:5173") {
+                $viteReady = $true
+                break
+            }
+        }
+        if ($viteReady) {
+            Write-Host "[OK] Vite is ready!" -ForegroundColor Green
+        }
+    }
+
     Write-Host "[LAUNCH] Launching Cadence binary from $targetExe with --remote-debugging-port=$Port..." -ForegroundColor Cyan
-    $process = Start-Process -FilePath $targetExe -ArgumentList "--remote-debugging-port=$Port" -PassThru
+    $process = Start-Process -FilePath $targetExe -ArgumentList "--remote-debugging-port=$Port" -WorkingDirectory "$repoRoot\src-tauri" -PassThru
 } else {
-    Write-Host "[LAUNCH] No pre-built cadence.exe found. Launching via npm run tauri:dev..." -ForegroundColor Yellow
-    $process = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "tauri:dev", "--", "--", "--remote-debugging-port=$Port" -PassThru
+    Write-Host "[LAUNCH] Launching via npm run tauri:dev..." -ForegroundColor Yellow
+    $process = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "tauri:dev", "--", "--", "--remote-debugging-port=$Port" -WorkingDirectory $repoRoot -PassThru
 }
 
 Write-Host "[WAIT] Waiting for WebView2 CDP endpoint to initialize at http://127.0.0.1:$Port/json/version..." -ForegroundColor Cyan
