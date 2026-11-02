@@ -151,111 +151,121 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         if (next.has(qItem.albumId)) {
           continue
         }
-      const rel = releases.find((r) => r.id === qItem.albumId)
-      const albTracks = tracks.filter(
-        (t) =>
-          t.releaseId === qItem.albumId ||
-          (t.albumTitle && t.albumTitle.toLowerCase().trim() === qItem.albumTitle.toLowerCase().trim())
-      ).sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0))
 
-      if (!rel && albTracks.length === 0) continue
+        const rel = releases.find((r) => r.id === qItem.albumId)
+        const albTracks = tracks.filter(
+          (t) =>
+            t.releaseId === qItem.albumId ||
+            (t.albumTitle && t.albumTitle.toLowerCase().trim() === qItem.albumTitle.toLowerCase().trim())
+        ).sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0))
 
-      const rawTitle = rel?.title || albTracks[0]?.albumTitle || qItem.albumTitle || 'Unknown Album'
-      const rawArtist = rel?.artistCredit || albTracks[0]?.artistCredit || 'Unknown Artist'
-      const rawComposer = rel?.composerName || albTracks.find((t) => t.composerName)?.composerName || ''
-      const rawYear = rel?.releaseYear || albTracks[0]?.releaseYear
-      const rawArt = rel?.coverArtUri || albTracks[0]?.coverArtUri || ''
-      const rawGenre = rel?.genreTags?.[0] || albTracks[0]?.genre || 'Soundtrack'
+        if (!rel && albTracks.length === 0) continue
 
-      // Check learned rules for artist and composer
-      const learnedArtist = behavioralLearningService.applyLearnedRules(rawArtist, 'artist').value
-      const learnedComposer = rawComposer ? behavioralLearningService.applyLearnedRules(rawComposer, 'composer').value : ''
+        const rawTitle = rel?.title || albTracks[0]?.albumTitle || qItem.albumTitle || 'Unknown Album'
+        const rawArtist = rel?.artistCredit || albTracks[0]?.artistCredit || 'Unknown Artist'
+        const rawComposer = rel?.composerName || albTracks.find((t) => t.composerName)?.composerName || ''
+        const rawYear = rel?.releaseYear || albTracks[0]?.releaseYear
+        const rawArt = rel?.coverArtUri || albTracks[0]?.coverArtUri || ''
+        const rawGenre = rel?.genreTags?.[0] || albTracks[0]?.genre || 'Soundtrack'
 
-      // Track candidate states
-      const trackStates: TrackCandidateState[] = albTracks.map((t) => ({
-        trackId: t.id,
-        trackNumber: t.trackNumber || 0,
-        localTitle: t.title,
-        localArtists: t.artistCredit || '',
-        localDuration: t.duration,
-        matchedTitle: t.title,
-        matchedArtists: behavioralLearningService.applyLearnedRules(t.artistCredit || rawArtist, 'artist').value,
-        confidence: 0.90,
-        source: 'local_fallback',
-        requiresHumanReview: isPlaceholderTag(t.artistCredit || ''),
-      }))
+        // Check learned rules for artist and composer
+        const learnedArtist = behavioralLearningService.applyLearnedRules(rawArtist, 'artist').value
+        const learnedComposer = rawComposer ? behavioralLearningService.applyLearnedRules(rawComposer, 'composer').value : ''
 
-      const emptyArtistRule = applyConsensusEmptyStateRule(rawArtist, {})
-      const isClean = !qItem.requiresDisambiguation && qItem.confidenceScore >= 0.85 && !isPlaceholderTag(rawArtist)
+        // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Genre = 'Tamil Film Soundtrack')
+        const conv = behavioralLearningService.applySoundtrackConventions({
+          composer: rawComposer,
+          albumArtist: rawArtist,
+          genre: rawGenre,
+          language: 'Tamil',
+        })
 
-      itemsMap.set(qItem.albumId, {
-        id: qItem.albumId,
-        folderName: qItem.folderName,
-        currentTitle: rawTitle,
-        tier: isClean ? 'tier1' : 'tier2',
-        status: 'staged',
-        confidenceScore: qItem.confidenceScore,
-        rawRelease: rel,
-        rawTracks: albTracks,
-        albumTitle: {
-          local: rawTitle,
-          apple: undefined,
-          musicbrainz: undefined,
-          ai: undefined,
-          selected: rawTitle,
-          confidence: 0.9,
+        // Track candidate states
+        const trackStates: TrackCandidateState[] = albTracks.map((t) => ({
+          trackId: t.id,
+          trackNumber: t.trackNumber || 0,
+          localTitle: t.title,
+          localArtists: t.artistCredit || '',
+          localDuration: t.duration,
+          matchedTitle: t.title,
+          matchedArtists: behavioralLearningService.applyLearnedRules(t.artistCredit || rawArtist, 'artist').value,
+          confidence: 0.90,
           source: 'local_fallback',
-        },
-        albumArtist: {
-          local: rawArtist,
-          apple: undefined,
-          musicbrainz: undefined,
-          ai: undefined,
-          selected: emptyArtistRule.selected !== '' ? learnedArtist : '',
-          confidence: emptyArtistRule.hasConsensus ? 0.9 : 0.3,
-          source: 'local_fallback',
-          requiresHumanReview: emptyArtistRule.requiresHumanReview,
-        },
-        composer: {
-          local: rawComposer,
-          apple: undefined,
-          musicbrainz: undefined,
-          ai: undefined,
-          selected: learnedComposer,
-          confidence: rawComposer ? 0.9 : 0.4,
-          source: 'local_fallback',
-        },
-        year: {
-          local: rawYear,
-          apple: undefined,
-          musicbrainz: undefined,
-          ai: undefined,
-          selected: rawYear,
-          confidence: rawYear ? 0.9 : 0.4,
-          source: 'local_fallback',
-        },
-        coverArt: {
-          local: rawArt,
-          apple: undefined,
-          musicbrainz: undefined,
-          ai: undefined,
-          selected: rawArt,
-          confidence: rawArt ? 0.9 : 0.3,
-          source: 'local_fallback',
-        },
-        genre: {
-          local: rawGenre,
-          apple: undefined,
-          musicbrainz: undefined,
-          ai: undefined,
-          selected: rawGenre,
-          confidence: 0.85,
-          source: 'local_fallback',
-        },
-        tracks: trackStates,
-      })
-    }
+          requiresHumanReview: isPlaceholderTag(t.artistCredit || ''),
+        }))
 
+        const emptyArtistRule = applyConsensusEmptyStateRule(rawArtist, {})
+        const isClean = !qItem.requiresDisambiguation && qItem.confidenceScore >= 0.85 && !isPlaceholderTag(rawArtist)
+
+        const finalAlbumArtist = conv.albumArtist || (emptyArtistRule.selected !== '' ? learnedArtist : '')
+        const finalGenre = conv.genre || rawGenre
+
+        next.set(qItem.albumId, {
+          id: qItem.albumId,
+          folderName: qItem.folderName,
+          currentTitle: rawTitle,
+          tier: isClean ? 'tier1' : 'tier2',
+          status: 'staged',
+          confidenceScore: qItem.confidenceScore,
+          rawRelease: rel,
+          rawTracks: albTracks,
+          albumTitle: {
+            local: rawTitle,
+            apple: undefined,
+            musicbrainz: undefined,
+            ai: undefined,
+            selected: rawTitle,
+            confidence: 0.9,
+            source: 'local_fallback',
+          },
+          albumArtist: {
+            local: rawArtist,
+            apple: undefined,
+            musicbrainz: undefined,
+            ai: undefined,
+            selected: finalAlbumArtist,
+            confidence: emptyArtistRule.hasConsensus ? 0.9 : 0.3,
+            source: 'local_fallback',
+            requiresHumanReview: !finalAlbumArtist || emptyArtistRule.requiresHumanReview,
+          },
+          composer: {
+            local: rawComposer,
+            apple: undefined,
+            musicbrainz: undefined,
+            ai: undefined,
+            selected: learnedComposer,
+            confidence: rawComposer ? 0.9 : 0.4,
+            source: 'local_fallback',
+          },
+          year: {
+            local: rawYear,
+            apple: undefined,
+            musicbrainz: undefined,
+            ai: undefined,
+            selected: rawYear,
+            confidence: rawYear ? 0.9 : 0.4,
+            source: 'local_fallback',
+          },
+          coverArt: {
+            local: rawArt,
+            apple: undefined,
+            musicbrainz: undefined,
+            ai: undefined,
+            selected: rawArt,
+            confidence: rawArt ? 0.9 : 0.3,
+            source: 'local_fallback',
+          },
+          genre: {
+            local: rawGenre,
+            apple: undefined,
+            musicbrainz: undefined,
+            ai: undefined,
+            selected: finalGenre,
+            confidence: 0.85,
+            source: 'local_fallback',
+          },
+          tracks: trackStates,
+        })
       }
 
       if (!selectedAlbumId && next.size > 0) {
