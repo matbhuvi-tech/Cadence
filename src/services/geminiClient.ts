@@ -1,8 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
+import type { CompilationProvenanceResult } from '../core/types'
 
 const isDesktop = () => typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__)
 
-export async function resolveGemini(operation: 'metadata' | 'cover-art' | 'compilation' | 'agent-chat', payload: unknown, signal?: AbortSignal): Promise<any> {
+export async function resolveGemini(operation: 'metadata' | 'cover-art' | 'compilation' | 'agent-chat', payload: unknown, signal?: AbortSignal): Promise<CompilationProvenanceResult | any> {
   if (isDesktop()) return invoke('gemini_resolve', { operation, payload })
   const endpoint: Record<typeof operation, string> = {
     metadata: '/api/ai-metadata-resolver',

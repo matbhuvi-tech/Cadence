@@ -598,12 +598,31 @@ export interface TrackCandidateState {
   matchedTitle?: string
   matchedArtists?: string
   matchedComposer?: string
+  originalAlbum?: string
+  originalYear?: number
+  provenanceSource?: 'local_fallback' | 'gemini_ai' | 'consensus' | 'user_override'
   durationDeltaSec?: number
   sequenceOffset?: number
   confidence: number
   source: ConsensusFieldSource
   userOverridden?: boolean
   requiresHumanReview?: boolean
+}
+export interface CompilationTrackProvenance {
+  trackId: string
+  trackNumber: number
+  title: string
+  originalAlbum: string
+  originalYear?: number
+  confidence: number
+  reasoning?: string
+}
+
+export interface CompilationProvenanceResult {
+  albumTitle: string
+  isCompilation: boolean
+  tracks: CompilationTrackProvenance[]
+  cached: boolean
 }
 
 export interface SemanticConventions {
