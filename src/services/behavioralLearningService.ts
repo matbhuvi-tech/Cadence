@@ -97,8 +97,26 @@ class BehavioralLearningService {
       params.composer.trim() !== ''
     ) {
       const comp = params.composer.trim()
-      // If current album artist is empty, placeholder, or different from composer on a film soundtrack
-      if (!outArtist || outArtist.trim() === '' || outArtist.toLowerCase().includes('unknown') || outArtist.toLowerCase().includes('various')) {
+      const rawArtistLower = (outArtist || '').trim().toLowerCase()
+      const compLower = comp.toLowerCase()
+
+      // Check if current album artist is empty, placeholder, unknown, various,
+      // or if it differs from the primary composer on a soundtrack release
+      const isPlaceholder =
+        !outArtist ||
+        rawArtistLower === '' ||
+        rawArtistLower.includes('unknown') ||
+        rawArtistLower.includes('various')
+
+      // If it's a soundtrack, composer promotion takes precedence unless albumArtist is explicitly canonicalized
+      const isSoundtrackContext =
+        params.isSoundtrack ||
+        !outGenre ||
+        outGenre.toLowerCase().includes('soundtrack') ||
+        outGenre.toLowerCase().includes('film') ||
+        outGenre.toLowerCase().includes('ost')
+
+      if (isPlaceholder || (isSoundtrackContext && rawArtistLower !== compLower)) {
         outArtist = comp
         applied.push('album_artist_equals_composer')
       }

@@ -260,8 +260,28 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         if (!rel && albTracks.length === 0) continue
 
         const rawTitle = rel?.title || albTracks[0]?.albumTitle || qItem.albumTitle || 'Unknown Album'
-        const rawArtist = rel?.artistCredit || albTracks[0]?.artistCredit || 'Unknown Artist'
         const rawComposer = rel?.composerName || albTracks.find((t) => t.composerName)?.composerName || ''
+
+        // Multi-track artist consensus: inspect if tracks have multiple distinct performers
+        // or an explicit common container tag rather than blindly taking the first track's artist
+        const trackArtists = albTracks.map((t) => (t.artistCredit || '').trim()).filter(Boolean)
+        const distinctTrackArtists = Array.from(new Set(trackArtists))
+        const hasExplicitAlbumArtist = (albTracks.find((t) => (t as any).albumArtist) as any)?.albumArtist
+
+        let resolvedRawArtist: string
+        if (hasExplicitAlbumArtist) {
+          resolvedRawArtist = hasExplicitAlbumArtist
+        } else if (rawComposer && (distinctTrackArtists.length > 1 || !rel?.artistCredit)) {
+          // If tracks have diverse performers (e.g. playback singers) or rel artist is missing, promote composer
+          resolvedRawArtist = rawComposer
+        } else if (distinctTrackArtists.length === 1) {
+          // Unanimous single performer across all tracks
+          resolvedRawArtist = distinctTrackArtists[0]
+        } else {
+          resolvedRawArtist = rel?.artistCredit || albTracks[0]?.artistCredit || 'Unknown Artist'
+        }
+
+        const rawArtist = resolvedRawArtist
         const rawYear = rel?.releaseYear || albTracks[0]?.releaseYear
         const rawArt =
           rel?.coverArtUrl ||
