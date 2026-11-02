@@ -610,6 +610,10 @@ export interface TrackCandidateState {
   requiresHumanReview?: boolean
   aiTitle?: string
   aiArtists?: string
+  filePath?: string;
+  format?: string;
+  bitDepth?: number;
+  sampleRate?: number;
 }
 export interface CompilationTrackProvenance {
   trackId: string

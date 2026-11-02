@@ -43,6 +43,7 @@ import {
   Plus,
   Search,
   ArrowLeft,
+  Folder,
 } from 'lucide-react'
 import {
   Track,
@@ -271,7 +272,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           albTracks[0]?.artworkUrl ||
           albTracks[0]?.frontCoverUrl ||
           getCuratedAlbumArtwork(rawTitle, rawComposer || rawArtist) ||
-          ''
+          (albTracks[0]?.id ? `cadence:cover://${albTracks[0].id}` : '')
         const rawGenre = rel?.genreTags?.[0] || albTracks[0]?.genre || 'Soundtrack'
 
         // Detect album primary language for accurate conventions
@@ -310,6 +311,10 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           confidence: 0.90,
           source: 'local_fallback',
           requiresHumanReview: isPlaceholderTag(t.artistCredit || ''),
+          filePath: t.filePath,
+          format: t.format,
+          bitDepth: t.bitDepth,
+          sampleRate: t.sampleRate,
         }))
 
         const emptyArtistRule = applyConsensusEmptyStateRule(rawArtist, {})
@@ -868,7 +873,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
                   provenanceSource: (tState.userOverridden ? 'user_override' : 'consensus') as any,
                   aiTitle: match.title,
-                  aiArtists: match.primaryVocalists || match.canonicalComposer,
+                  aiArtists: match.primaryVocalists || (match.primaryVocalists === undefined && (match as any).singers ? (match as any).singers : undefined),
                 }
               }
               return tState
@@ -939,7 +944,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
                   provenanceSource: (tState.userOverridden ? 'user_override' : 'gemini_ai') as any,
                   aiTitle: match.title,
-                  aiArtists: match.primaryVocalists || match.canonicalComposer,
+                  aiArtists: match.primaryVocalists || (match.primaryVocalists === undefined && (match as any).singers ? (match as any).singers : undefined),
                 }
               }
               return tState
@@ -1269,9 +1274,40 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         <td className="py-3 px-4 font-medium text-white/70">Cover Artwork</td>
 
         {/* Local */}
-        <td onClick={() => handleSelectFieldSource('coverArt', 'local')} className="py-3 px-4 cursor-pointer">
-          {fieldState.local ? (
-            <img src={fieldState.local} alt="Local Art" className="w-12 h-12 rounded object-cover shadow" />
+        <td
+          onClick={() => {
+            const fallbackArt = selectedAlbum?.leadTrackId
+              ? `cadence:cover://${selectedAlbum.leadTrackId}`
+              : (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : null);
+            const effectiveArt = fieldState.local || fallbackArt;
+            if (!fieldState.local && effectiveArt) {
+              setAlbumItems((prev) => {
+                const next = new Map(prev);
+                const curr = next.get(selectedAlbum.id);
+                if (curr) {
+                  next.set(selectedAlbum.id, {
+                    ...curr,
+                    coverArt: { ...curr.coverArt, local: effectiveArt, selected: effectiveArt, source: 'local_fallback' },
+                  });
+                }
+                return next;
+              });
+              showToast('Adopted LOCAL artwork');
+            } else {
+              handleSelectFieldSource('coverArt', 'local');
+            }
+          }}
+          className="py-3 px-4 cursor-pointer group"
+        >
+          {fieldState.local || (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : null) ? (
+            <div className="p-0.5 rounded-lg w-fit">
+              <img
+                src={fieldState.local || `cadence:cover://${selectedAlbum.tracks[0].trackId}`}
+                alt="Local Art"
+                className="w-12 h-12 rounded object-cover shadow border border-white/10 group-hover:border-emerald-500/50 transition-colors"
+              />
+              <span className="text-[9px] text-neutral-400 block mt-1">Local Tag</span>
+            </div>
           ) : (
             <div className="w-10 h-10 rounded border border-white/10 bg-black/40 flex items-center justify-center text-white/30 text-[10px]">
               None
@@ -1753,8 +1789,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 currentGenre.toLowerCase().includes('ost') ||
                 isCompilationAlbum
 
-              if (!isSoundtrackLike || currentGenre === targetSoundtrackGenre || dismissedPrompts.has('prompt_genre')) {
-                return null
+              const currentGenreLower = currentGenre.toLowerCase();
+              const langLower = detectedLanguage.toLowerCase();
+              const alreadyMatchesLang = currentGenreLower.includes(langLower) && (currentGenreLower.includes('soundtrack') || currentGenreLower.includes('film') || currentGenreLower.includes('music'));
+
+              if (!isSoundtrackLike || currentGenre === targetSoundtrackGenre || alreadyMatchesLang || dismissedPrompts.has('prompt_genre')) {
+                return null;
               }
 
               return (
@@ -1917,6 +1957,25 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           >
                             <div className="font-medium text-white/80">{trk.localTitle}</div>
                             <div className="text-[10px] text-white/40 font-mono">{trk.localArtists || 'Unknown'}</div>
+                            {trk.filePath && (
+                              <div
+                                className="flex items-center gap-1.5 text-[10px] text-neutral-400 font-mono mt-1 max-w-[280px]"
+                                title={trk.filePath}
+                              >
+                                <Folder className="w-3 h-3 text-neutral-500 shrink-0" />
+                                <span className="truncate">
+                                  {(() => {
+                                    const parts = trk.filePath.replace(/\\/g, '/').split('/');
+                                    return parts.slice(-2).join('/');
+                                  })()}
+                                </span>
+                                {(trk.format || trk.bitDepth) && (
+                                  <span className="text-[9px] text-neutral-400 border border-neutral-700 rounded px-1 shrink-0">
+                                    {trk.format?.toUpperCase() || ''}{trk.bitDepth ? ` ${trk.bitDepth}b` : ''}{trk.sampleRate ? `/${Math.round(trk.sampleRate / 1000)}k` : ''}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </td>
 
                           {/* Apple Music Cell */}
@@ -1952,16 +2011,18 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           {/* Gemini AI Cell */}
                           <td
                             onClick={() => {
-                              const candArtist = trk.aiArtists || selectedAlbum.albumArtist.ai
+                              const candArtist = trk.aiArtists || trk.matchedArtists;
                               if (candArtist) {
-                                handleSelectTrackArtist(trk.trackId, candArtist, 'ai_synthesized')
+                                handleSelectTrackArtist(trk.trackId, candArtist, 'ai_synthesized');
                               }
                             }}
                             className="py-3 px-3 cursor-pointer text-white/70 hover:text-cyan-300 transition-colors"
                           >
                             <div className="font-medium text-cyan-300">{trk.aiTitle || trk.matchedTitle}</div>
                             <div className="text-[10px] text-cyan-200/60 mt-0.5">
-                              {trk.aiArtists || selectedAlbum.albumArtist.ai || '—'}
+                              {trk.aiArtists
+                                ? trk.aiArtists
+                                : (trk.matchedArtists ? trk.matchedArtists : (selectedAlbum.albumArtist.ai ? `${selectedAlbum.albumArtist.ai} (Composer)` : '—'))}
                             </div>
                           </td>
 

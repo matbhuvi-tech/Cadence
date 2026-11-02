@@ -860,6 +860,16 @@ export function detectLanguage(meta: {
     if (rawTag.includes('kan') || rawTag.includes('kn') || rawTag.includes('ಕನ್ನಡ')) return 'Kannada'
   }
 
+  // Check explicit genre tags for language cues before generic full-text matching
+  const genreStr = (meta.genreTags || []).join(' ').toLowerCase();
+  if (genreStr) {
+    if (/\\b(hindi|bollywood)\\b/i.test(genreStr)) return 'Hindi';
+    if (/\\b(tamil|kollywood)\\b/i.test(genreStr)) return 'Tamil';
+    if (/\\b(telugu|tollywood)\\b/i.test(genreStr)) return 'Telugu';
+    if (/\\b(malayalam|mollywood)\\b/i.test(genreStr)) return 'Malayalam';
+    if (/\\b(kannada|sandalwood)\\b/i.test(genreStr)) return 'Kannada';
+  }
+
   const allText = [
     meta.title,
     meta.artistCredit,
