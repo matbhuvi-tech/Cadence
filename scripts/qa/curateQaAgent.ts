@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline/promises';
 
 // --- Types ---
 export interface TrackOracle {
@@ -387,6 +388,12 @@ export class CurateMultimodalQaAgent {
     this.identityEpoch = 0;
     this.visitedActions.clear();
 
+    // 0. CHECK ORACLE GROUND TRUTH FIRST
+    let oracle = this.findMatchingOracle(initialTitle);
+    if (!oracle) {
+      oracle = await this.promptUserForOracleGrounding(initialTitle);
+    }
+
     // Select album in sidebar
     await this.cdp.evaluate(`
       (() => {
@@ -450,7 +457,7 @@ export class CurateMultimodalQaAgent {
       if (action.action === 'STAGE') {
         // MANDATORY AUDIT: Verify against Oracle BEFORE clicking "Stage & Next"!
         console.log(`🔍 [Pre-Stage Gate] Running Oracle & Invariant Verification BEFORE clicking Stage...`);
-        await this.verifyReleaseAgainstOracle(albumId, initialTitle, screenshotPath);
+        await this.verifyReleaseAgainstOracle(albumId, initialTitle, screenshotPath, oracle);
 
         const clicked = await this.cdp.clickSelector('[data-testid="btn-stage-next"]');
         if (clicked) {
@@ -520,6 +527,265 @@ export class CurateMultimodalQaAgent {
       }
 
       turn++;
+    }
+  }
+
+  private findMatchingOracle(initialTitle: string): AlbumOracleManifest | null {
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const initialNorm = norm(initialTitle);
+    const matchedKey = Object.keys(this.oracleDb.albums).find((k) => {
+      const cand = this.oracleDb.albums[k];
+      const kNorm = norm(k);
+      const titleNorm = norm(cand.canonical_title || '');
+      return (
+        initialNorm.includes(kNorm) ||
+        kNorm.includes(initialNorm) ||
+        initialNorm.includes(titleNorm) ||
+        titleNorm.includes(initialNorm)
+      );
+    });
+    return matchedKey ? this.oracleDb.albums[matchedKey] : null;
+  }
+
+  private async promptUserForOracleGrounding(initialTitle: string): Promise<AlbumOracleManifest | null> {
+    console.log('\n======================================================');
+    console.log(`⚠️  [Oracle Missing] No entry found in oracle.json for: "${initialTitle}"`);
+    console.log('======================================================');
+    console.log('Provide a reference URL to construct the ground-truth fixture:');
+    console.log('  - Wikipedia: e.g. https://en.wikipedia.org/wiki/...');
+    console.log('  - Apple Music: e.g. https://music.apple.com/in/album/...');
+    console.log('  - Or press ENTER to skip ground-truth assertions for this album.');
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    let inputUrl = '';
+    try {
+      inputUrl = (await rl.question('\n🔗 Reference URL: ')).trim();
+    } finally {
+      rl.close();
+    }
+
+    if (!inputUrl) {
+      console.log(`ℹ️ No URL provided. Skipping ground truth construction for "${initialTitle}".`);
+      return null;
+    }
+
+    console.log(`\n⏳ Fetching reference data from: ${inputUrl}...`);
+    let manifest: AlbumOracleManifest | null = null;
+
+    if (inputUrl.includes('music.apple.com') || inputUrl.includes('itunes.apple.com')) {
+      manifest = await this.constructOracleFromAppleMusic(inputUrl, initialTitle);
+    } else if (inputUrl.includes('wikipedia.org')) {
+      manifest = await this.constructOracleFromWikipedia(inputUrl, initialTitle);
+    } else {
+      console.log('⚠️ Unrecognized URL domain. Expected Wikipedia or Apple Music.');
+      return null;
+    }
+
+    if (!manifest) {
+      console.log('❌ Failed to extract metadata from the provided URL.');
+      return null;
+    }
+
+    // Save to tests/fixtures/curate/oracle.json
+    const oraclePath = path.resolve(process.cwd(), 'tests', 'fixtures', 'curate', 'oracle.json');
+    const slug = (manifest.canonical_title || initialTitle)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
+
+    manifest.album_id = slug;
+    this.oracleDb.albums[slug] = manifest;
+    fs.writeFileSync(oraclePath, JSON.stringify(this.oracleDb, null, 2), 'utf8');
+
+    console.log('\n======================================================');
+    console.log(`✅ Constructed Oracle fixture for "${manifest.canonical_title}"!`);
+    console.log(`💾 Saved to: ${oraclePath}`);
+    console.log('======================================================');
+    console.log('👉 Please inspect and validate the updates in oracle.json in your editor.');
+
+    const rlConfirm = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = await rlConfirm.question(`Press ENTER to confirm you have validated oracle.json (or type 'cancel' to skip): `);
+      if (answer.trim().toLowerCase() === 'cancel') {
+        console.log('🚫 Oracle validation cancelled by user. Skipping release.');
+        return null;
+      }
+    } finally {
+      rlConfirm.close();
+    }
+
+    // Reload from disk to capture any manual edits made by the user
+    this.oracleDb = JSON.parse(fs.readFileSync(oraclePath, 'utf8'));
+    const reloaded = this.oracleDb.albums[slug] || manifest;
+    console.log('✨ Oracle validated and reloaded from disk. Proceeding with testing!');
+    return reloaded;
+  }
+
+  private async constructOracleFromAppleMusic(url: string, fallbackTitle: string): Promise<AlbumOracleManifest | null> {
+    try {
+      const match = url.match(/\/album\/(?:[^\/]+\/)?(\d+)/i) || url.match(/id=(\d+)/i) || url.match(/(\d{8,12})/);
+      if (!match) {
+        console.error('❌ Could not parse Apple Music album ID from URL.');
+        return null;
+      }
+      const albumId = match[1];
+      const countryMatch = url.match(/music\.apple\.com\/([a-z]{2})\//i);
+      const country = countryMatch ? countryMatch[1] : 'in';
+
+      const res = await fetch(`https://itunes.apple.com/lookup?id=${albumId}&entity=song&country=${country}`);
+      if (!res.ok) throw new Error(`iTunes API HTTP ${res.status}`);
+      const data = (await res.json()) as any;
+      const results = data.results || [];
+      if (results.length === 0) return null;
+
+      const coll = results[0];
+      const songs = results.slice(1);
+
+      const cleanTitle = (coll.collectionName || fallbackTitle)
+        .replace(/\s*-\s*(single|ep|original motion picture soundtrack|soundtrack)\b/gi, '')
+        .trim();
+
+      const year = coll.releaseDate ? parseInt(coll.releaseDate.slice(0, 4), 10) : new Date().getFullYear();
+
+      const manifest: AlbumOracleManifest = {
+        album_id: cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+        album_type: 'soundtrack',
+        canonical_title: cleanTitle,
+        canonical_artist: coll.artistName || 'Various Artists',
+        canonical_composer: coll.artistName || '',
+        release_year: year,
+        genre: coll.primaryGenreName || 'Soundtrack',
+        expected_track_count: songs.length,
+        tracks: songs.map((s: any, idx: number) => ({
+          track_number: s.trackNumber || idx + 1,
+          title: (s.trackName || `Track ${idx + 1}`).trim(),
+          artists: [s.artistName || coll.artistName || ''],
+          composer: coll.artistName || '',
+          duration_seconds: Math.round((s.trackTimeMillis || 0) / 1000),
+          expected_file_pattern: `.*(${s.trackName ? s.trackName.toLowerCase().replace(/[^a-z0-9]+/g, '.*') : '.*'}).*`,
+        })),
+      };
+
+      return manifest;
+    } catch (err) {
+      console.error('❌ Failed to construct Oracle from Apple Music:', err);
+      return null;
+    }
+  }
+
+  private async constructOracleFromWikipedia(url: string, fallbackTitle: string): Promise<AlbumOracleManifest | null> {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'Cadence-QA-Agent/1.0 (contact: info@cadence.local)' } });
+      if (!res.ok) throw new Error(`Wikipedia fetch HTTP ${res.status}`);
+      const html = await res.text();
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (apiKey) {
+        console.log('🤖 Using Gemini to extract structured ground-truth manifest from Wikipedia...');
+        const textContent = html
+          .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+          .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .slice(0, 50000);
+
+        const prompt = `You are an archival music librarian creating a ground-truth test manifest from this Wikipedia article.
+Target Album: "${fallbackTitle}"
+Article text:
+${textContent}
+
+Extract and return ONLY a valid JSON object matching this exact structure:
+{
+  "album_type": "soundtrack",
+  "canonical_title": "<official movie/album title without rip tags>",
+  "canonical_artist": "<primary music director/artist e.g. Ilaiyaraaja, A. R. Rahman>",
+  "canonical_composer": "<music director/composer>",
+  "release_year": 1985,
+  "genre": "Tamil Film Soundtrack",
+  "expected_track_count": 5,
+  "tracks": [
+    {
+      "track_number": 1,
+      "title": "<clean song title>",
+      "artists": ["<Playback Singer 1>", "<Playback Singer 2>"],
+      "composer": "<composer>",
+      "duration_seconds": 270,
+      "expected_file_pattern": ".*(keyword).*"
+    }
+  ]
+}
+RULES:
+- tracks[i].artists MUST be the authentic Playback Singers from the Track Listing table.
+- NEVER copy the composer into track artists unless the composer personally sang on that track.
+No markdown backticks, just the JSON.`;
+
+        const gemRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { responseMimeType: 'application/json' },
+          }),
+        });
+
+        if (gemRes.ok) {
+          const gemData = await gemRes.json();
+          const jsonText = gemData.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (jsonText) {
+            const parsed = JSON.parse(jsonText);
+            parsed.album_id = (parsed.canonical_title || fallbackTitle).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+            return parsed as AlbumOracleManifest;
+          }
+        }
+      }
+
+      // Fallback HTML table parser if no Gemini API key
+      console.log('ℹ️ Parsing Wikipedia HTML soundtrack section...');
+      const soundtrackMatch =
+        html.match(/id="Soundtrack"[\s\S]*?(<table[\s\S]*?<\/table>)/i) ||
+        html.match(/id="Track_listing"[\s\S]*?(<table[\s\S]*?<\/table>)/i);
+
+      const tracks: TrackOracle[] = [];
+      if (soundtrackMatch) {
+        const tableHtml = soundtrackMatch[1];
+        const rowMatches = tableHtml.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+        let tNum = 1;
+        for (const row of rowMatches) {
+          const cells = (row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map((c) => c.replace(/<[^>]+>/g, '').trim());
+          if (cells.length >= 2 && !cells[0].toLowerCase().includes('no') && !cells[0].toLowerCase().includes('#')) {
+            const title = cells[1] ? cells[1].replace(/"/g, '') : `Track ${tNum}`;
+            const singerStr = cells[2] || '';
+            const singers = singerStr.split(/[,&]/).map((s) => s.trim()).filter(Boolean);
+            tracks.push({
+              track_number: tNum,
+              title,
+              artists: singers.length > 0 ? singers : ['Unknown'],
+              duration_seconds: 270,
+              expected_file_pattern: `.*(${title.toLowerCase().split(' ')[0] || '.*'}).*`,
+            });
+            tNum++;
+          }
+        }
+      }
+
+      const cleanTitle = fallbackTitle.replace(/\s*cd\s*rip/gi, '').trim();
+      return {
+        album_id: cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+        album_type: 'soundtrack',
+        canonical_title: cleanTitle,
+        canonical_artist: 'Various Artists',
+        canonical_composer: '',
+        release_year: 1985,
+        genre: 'Tamil Film Soundtrack',
+        expected_track_count: tracks.length || 5,
+        tracks:
+          tracks.length > 0
+            ? tracks
+            : [{ track_number: 1, title: 'Sample Track', artists: ['Sample Singer'], duration_seconds: 270, expected_file_pattern: '.*' }],
+      };
+    } catch (err) {
+      console.error('❌ Failed to construct Oracle from Wikipedia:', err);
+      return null;
     }
   }
 
@@ -782,19 +1048,10 @@ Return ONLY JSON matching:
   /**
    * Pre-Staging Invariant & Ground Truth Verification against Oracle
    */
-  private async verifyReleaseAgainstOracle(albumId: string, initialTitle: string, screenshotPath: string) {
+  private async verifyReleaseAgainstOracle(albumId: string, initialTitle: string, screenshotPath: string, oracle: AlbumOracleManifest | null) {
     console.log(`\n🔍 [Evaluator] Asserting Invariants for "${initialTitle}" BEFORE Staging...`);
 
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const initialNorm = norm(initialTitle);
-    const matchedOracleKey = Object.keys(this.oracleDb.albums).find((k) => {
-      const cand = this.oracleDb.albums[k];
-      const kNorm = norm(k);
-      const titleNorm = norm(cand.canonical_title);
-      return initialNorm.includes(kNorm) || kNorm.includes(initialNorm) || initialNorm.includes(titleNorm) || titleNorm.includes(initialNorm);
-    });
-
-    if (!matchedOracleKey) {
+    if (!oracle) {
       console.log(`ℹ️ No static Oracle fixture entry for "${initialTitle}". Recorded as Test Oracle Gap.`);
       this.recordBug({
         classification: 'Test Oracle Gap',
@@ -808,8 +1065,6 @@ Return ONLY JSON matching:
       });
       return;
     }
-
-    const oracle = this.oracleDb.albums[matchedOracleKey];
     console.log(`📖 Ground Truth Oracle Loaded: "${oracle.canonical_title}" (${oracle.release_year}) by ${oracle.canonical_artist}`);
 
     const state = await this.extractCockpitState();
