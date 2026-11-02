@@ -241,6 +241,39 @@ export class CdpSession {
 }
 
 // --- Main QA Agent Harness ---
+function matchesSingerAlias(targetText: string, oracleSinger: string): boolean {
+  if (!targetText) return false;
+  const norm = (s: string) => s.toLowerCase().replace(/[\.\s\-_,]+/g, ' ').trim();
+  const tNorm = norm(targetText);
+  const sNorm = norm(oracleSinger);
+
+  if (tNorm.includes(sNorm)) return true;
+
+  // Common aliases mapping in Indian cinema discography
+  const aliases: Record<string, string[]> = {
+    's. p. balasubrahmanyam': ['spb', 's p b', 'balasubrahmanyam', 'balasubramaniam', 's.p.b', 's. p. b.'],
+    'k. s. chithra': ['chithra', 'chitra', 'k s chitra', 'k.s. chitra', 'k. s. chitra'],
+    'k. j. yesudas': ['yesudas', 'k j yesudas', 'k.j. yesudas', 'k. j. yesudas'],
+    's. janaki': ['janaki', 's janaki', 's. janaki'],
+    'p. susheela': ['susheela', 'p susheela', 'p. susheela'],
+    'malaysia vasudevan': ['vasudevan', 'malaysia vasudevan'],
+    'ilaiyaraaja': ['ilayaraja', 'illayaraja', 'raaja', 'ilaiyaraaja'],
+    'a. r. rahman': ['ar rahman', 'a r rahman', 'rahman', 'a.r. rahman'],
+  };
+
+  for (const [canonical, aliasList] of Object.entries(aliases)) {
+    if (sNorm.includes(canonical) || aliasList.some((a) => norm(a) === sNorm)) {
+      if (aliasList.some((a) => tNorm.includes(norm(a))) || tNorm.includes(canonical)) {
+        return true;
+      }
+    }
+  }
+
+  // Token boundary check: if any significant word (>=4 chars) matches
+  const tokens = sNorm.split(' ').filter((w) => w.length >= 4);
+  return tokens.some((tok) => tNorm.includes(tok));
+}
+
 export class CurateMultimodalQaAgent {
   private cdp!: CdpSession;
   private oracleDb: CurateOracleDatabase;
@@ -398,9 +431,18 @@ export class CurateMultimodalQaAgent {
       // 3. PREVENT INFINITE LOOPS
       const actionKey = `${action.priorityLevel}:${action.action}:${action.targetSelector || action.value || action.targetDescription}`;
       if (this.visitedActions.has(actionKey) && action.action !== 'STAGE') {
-        console.log(`⚠️ Action ${actionKey} already visited in epoch ${this.identityEpoch}. Escalating...`);
-        // Escalate to next stage or steer
-        action.action = 'STAGE';
+        console.log(`⚠️ Infinite action loop detected on ${actionKey}; Cadence UI failed to mutate state after previous interaction.`);
+        this.recordBug({
+          classification: 'UI Interaction Bug',
+          severity: 'BLOCKER',
+          albumId,
+          stepNumber: turn,
+          description: `Infinite action loop detected on ${actionKey}; Cadence UI failed to mutate state after previous interaction.`,
+          expected: 'UI state mutation upon interaction',
+          actual: 'State remained unchanged, causing cycle',
+          screenshotPath,
+        });
+        break;
       }
       this.visitedActions.add(actionKey);
 
@@ -445,7 +487,7 @@ export class CurateMultimodalQaAgent {
             screenshotPath,
           });
         }
-        const fetchClicked = await this.cdp.clickSelector('[data-testid="btn-fetch-anchor"], button:has-text("Fetch & Anchor")');
+        const fetchClicked = await this.cdp.clickSelector('[data-testid="btn-fetch-anchor"]');
         if (!fetchClicked) {
           this.recordBug({
             classification: 'UI Interaction Bug',
@@ -806,9 +848,10 @@ Return ONLY JSON matching:
     for (const oracleTrack of oracle.tracks) {
       const match = tracks.find((t: any) => t.selected?.toLowerCase().includes(oracleTrack.title.toLowerCase()) || t.index + 1 === oracleTrack.track_number);
       if (match) {
-        // Assert authentic singers
+        // Assert authentic singers with alias and token boundary normalization
         for (const singer of oracleTrack.artists) {
-          if (!match.selected.toLowerCase().includes(singer.toLowerCase()) && !match.ai?.toLowerCase().includes(singer.toLowerCase())) {
+          const hasSinger = matchesSingerAlias(match.selected, singer) || matchesSingerAlias(match.ai, singer);
+          if (!hasSinger) {
             this.recordBug({
               classification: 'Reconciliation Bug',
               severity: 'MAJOR',
