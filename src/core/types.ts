@@ -606,11 +606,17 @@ export interface TrackCandidateState {
   requiresHumanReview?: boolean
 }
 
+export interface SemanticConventions {
+  albumArtistEqualsComposerForIndianSoundtracks: boolean
+  languagePrefixedSoundtrackGenre: boolean
+  defaultSoundtrackLanguage: string
+}
+
 export interface LearnedRule {
   id: string
   pattern: string
   normalizedValue: string
-  category: 'artist' | 'composer' | 'delimiter' | 'genre'
+  category: 'artist' | 'composer' | 'delimiter' | 'genre' | 'convention'
   frequency: number
   lastUsed: string
   createdAt: string

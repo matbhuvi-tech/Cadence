@@ -7,13 +7,18 @@
  * matching candidates to Tier 1 confidence.
  */
 
-import { LearnedRule } from '../core/types'
+import { LearnedRule, SemanticConventions } from '../core/types'
 
 const STORAGE_KEY = 'cadence_behavioral_learned_rules_v1'
 
 class BehavioralLearningService {
   private rules: Map<string, LearnedRule> = new Map()
   private initialized: boolean = false
+  private conventions: SemanticConventions = {
+    albumArtistEqualsComposerForIndianSoundtracks: true,
+    languagePrefixedSoundtrackGenre: true,
+    defaultSoundtrackLanguage: 'Tamil',
+  }
 
   constructor() {
     this.loadRules()
@@ -31,8 +36,12 @@ class BehavioralLearningService {
           for (const rule of parsed) {
             this.rules.set(rule.id, rule)
           }
-          return
         }
+        const rawConv = window.localStorage.getItem(STORAGE_KEY + '_conventions')
+        if (rawConv) {
+          this.conventions = { ...this.conventions, ...JSON.parse(rawConv) }
+        }
+        if (raw) return
       } catch (err) {
         console.warn('[BehavioralLearningService] Failed to load rules from localStorage:', err)
       }
@@ -47,9 +56,77 @@ class BehavioralLearningService {
       try {
         const arr = Array.from(this.rules.values())
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(arr))
+        window.localStorage.setItem(STORAGE_KEY + '_conventions', JSON.stringify(this.conventions))
       } catch (err) {
         console.warn('[BehavioralLearningService] Failed to persist rules:', err)
       }
+    }
+  }
+
+  public getConventions(): SemanticConventions {
+    return { ...this.conventions }
+  }
+
+  public updateConventions(updates: Partial<SemanticConventions>): void {
+    this.conventions = { ...this.conventions, ...updates }
+    this.persistRules()
+  }
+
+  /**
+   * Applies high-level semantic conventions for Indian film music and soundtracks.
+   */
+  public applySoundtrackConventions(params: {
+    composer?: string
+    albumArtist?: string
+    genre?: string
+    language?: string
+    isSoundtrack?: boolean
+  }): {
+    albumArtist?: string
+    genre?: string
+    appliedConventions: string[]
+  } {
+    const applied: string[] = []
+    let outArtist = params.albumArtist
+    let outGenre = params.genre
+
+    // 1. Indian Movie Music: Album Artist = Composer
+    if (
+      this.conventions.albumArtistEqualsComposerForIndianSoundtracks &&
+      params.composer &&
+      params.composer.trim() !== ''
+    ) {
+      const comp = params.composer.trim()
+      // If current album artist is empty, placeholder, or different from composer on a film soundtrack
+      if (!outArtist || outArtist.trim() === '' || outArtist.toLowerCase().includes('unknown') || outArtist.toLowerCase().includes('various')) {
+        outArtist = comp
+        applied.push('album_artist_equals_composer')
+      }
+    }
+
+    // 2. Language-Prefixed Soundtrack Genre (e.g. "Tamil Film Soundtrack")
+    if (this.conventions.languagePrefixedSoundtrackGenre) {
+      const lang = params.language || this.conventions.defaultSoundtrackLanguage || 'Tamil'
+      const targetGenre = `${lang} Film Soundtrack`
+      
+      const isSoundtrackLike =
+        params.isSoundtrack ||
+        !outGenre ||
+        outGenre.toLowerCase().includes('soundtrack') ||
+        outGenre.toLowerCase().includes('film') ||
+        outGenre.toLowerCase().includes('score') ||
+        outGenre.toLowerCase().includes('ost')
+
+      if (isSoundtrackLike && outGenre !== targetGenre) {
+        outGenre = targetGenre
+        applied.push('language_prefixed_soundtrack_genre')
+      }
+    }
+
+    return {
+      albumArtist: outArtist,
+      genre: outGenre,
+      appliedConventions: applied,
     }
   }
 

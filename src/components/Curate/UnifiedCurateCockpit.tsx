@@ -53,6 +53,7 @@ import {
   MetadataFieldState,
   TrackCandidateState,
   LearnedRule,
+  SemanticConventions,
 } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
 import { curationQueueService, AlbumCurationQueueItem } from '../../services/curationQueueService'
@@ -124,6 +125,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [isHealthDrawerOpen, setIsHealthDrawerOpen] = useState(false)
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(initialSelectedAlbumId || null)
   const [learnedRules, setLearnedRules] = useState<LearnedRule[]>(() => behavioralLearningService.getLearnedRules())
+  const [conventions, setConventions] = useState<SemanticConventions>(() => behavioralLearningService.getConventions())
+  const [dismissedPrompts, setDismissedPrompts] = useState<Set<string>>(new Set())
 
   // Inline editing state
   const [editingFieldKey, setEditingFieldKey] = useState<string | null>(null)
@@ -138,11 +141,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // 3. Build Rich Album Work Items
   const [albumItems, setAlbumItems] = useState<Map<string, AlbumWorkItem>>(new Map())
 
-  // Initialize and populate album items
+  // Initialize and populate album items - PRESERVES user edits across library refreshes
   useEffect(() => {
-    const itemsMap = new Map<string, AlbumWorkItem>()
+    setAlbumItems((prev) => {
+      const next = new Map(prev)
 
-    for (const qItem of baseQueue) {
+      for (const qItem of baseQueue) {
+        // If album already exists in state, PRESERVE IT and do not overwrite user choices
+        if (next.has(qItem.albumId)) {
+          continue
+        }
       const rel = releases.find((r) => r.id === qItem.albumId)
       const albTracks = tracks.filter(
         (t) =>
@@ -248,12 +256,15 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       })
     }
 
-    setAlbumItems(itemsMap)
+      }
 
-    if (!selectedAlbumId && itemsMap.size > 0) {
-      const firstTier2 = Array.from(itemsMap.values()).find((a) => a.tier === 'tier2')
-      setSelectedAlbumId(firstTier2 ? firstTier2.id : Array.from(itemsMap.values())[0].id)
-    }
+      if (!selectedAlbumId && next.size > 0) {
+        const firstTier2 = Array.from(next.values()).find((a) => a.tier === 'tier2' && a.status !== 'committed')
+        if (firstTier2) setSelectedAlbumId(firstTier2.id)
+      }
+
+      return next
+    })
   }, [baseQueue, releases, tracks])
 
   // Active selected album
@@ -264,11 +275,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // Count by tier
   const tier1Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier1' && a.status === 'staged')
+    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier1' && a.status !== 'committed')
   }, [albumItems])
 
   const tier2Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status === 'staged')
+    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status !== 'committed')
   }, [albumItems])
 
   // Asynchronously resolve 4-way consensus for selected album
@@ -291,6 +302,26 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           const current = next.get(selectedAlbum.id)
           if (!current) return prev
 
+          // Preserve user-selected values and manual overrides when online provider candidates arrive
+          const preserveField = <T,>(curr: MetadataFieldState<T>, cand?: MetadataFieldState<T>): MetadataFieldState<T> => {
+            if (!cand) return curr
+            const isUserSet = curr.userOverridden || (curr.selected !== '' && curr.selected !== undefined && curr.source !== 'local_fallback')
+            return {
+              ...cand,
+              selected: isUserSet ? curr.selected : (cand.selected || curr.selected),
+              userOverridden: curr.userOverridden,
+              source: curr.userOverridden ? 'manual_override' : (isUserSet ? curr.source : cand.source),
+            }
+          }
+
+          // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Genre = 'Tamil Film Soundtrack')
+          const convRes = behavioralLearningService.applySoundtrackConventions({
+            composer: String(consensus.albumFieldStates?.composer?.selected || current.composer.selected || ''),
+            albumArtist: String(consensus.albumFieldStates?.albumArtist?.selected || current.albumArtist.selected || ''),
+            genre: String(consensus.albumFieldStates?.genre?.selected || current.genre.selected || ''),
+            language: 'Tamil',
+          })
+
           const updated: AlbumWorkItem = {
             ...current,
             tier: consensus.tier || current.tier,
@@ -298,12 +329,24 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             offsetApplied: consensus.sequenceOffsetResult?.isConfidentOffset
               ? consensus.sequenceOffsetResult.detectedOffset
               : undefined,
-            albumTitle: consensus.albumFieldStates?.albumTitle || current.albumTitle,
-            albumArtist: consensus.albumFieldStates?.albumArtist || current.albumArtist,
-            composer: consensus.albumFieldStates?.composer || current.composer,
-            year: consensus.albumFieldStates?.releaseYear || current.year,
-            genre: consensus.albumFieldStates?.genre || current.genre,
-            tracks: consensus.trackStates && consensus.trackStates.length > 0 ? consensus.trackStates : current.tracks,
+            albumTitle: preserveField(current.albumTitle, consensus.albumFieldStates?.albumTitle),
+            albumArtist: {
+              ...preserveField(current.albumArtist, consensus.albumFieldStates?.albumArtist),
+              selected: current.userOverridden
+                ? current.albumArtist.selected
+                : (convRes.albumArtist || preserveField(current.albumArtist, consensus.albumFieldStates?.albumArtist).selected),
+            },
+            composer: preserveField(current.composer, consensus.albumFieldStates?.composer),
+            year: preserveField(current.year, consensus.albumFieldStates?.releaseYear),
+            genre: {
+              ...preserveField(current.genre, consensus.albumFieldStates?.genre),
+              selected: current.userOverridden
+                ? current.genre.selected
+                : (convRes.genre || preserveField(current.genre, consensus.albumFieldStates?.genre).selected),
+            },
+            tracks: current.tracks.some(t => t.userOverridden)
+              ? current.tracks
+              : (consensus.trackStates && consensus.trackStates.length > 0 ? consensus.trackStates : current.tracks),
           }
 
           next.set(selectedAlbum.id, updated)
@@ -479,9 +522,55 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     showToast(`Adopted ${source.toUpperCase()} for all tracks`)
   }
 
-  // Stage & Next in Tier 2
-  const handleStageAndNext = useCallback(() => {
+  // Stage Album: saves state, keeps in queue with 'staged' badge, and advances
+  const handleStage = useCallback(() => {
     if (!selectedAlbum) return
+
+    // 1. Mark as staged in local state so changes are strictly preserved
+    setAlbumItems((prev) => {
+      const next = new Map(prev)
+      const current = next.get(selectedAlbum.id)
+      if (current) {
+        next.set(selectedAlbum.id, {
+          ...current,
+          status: 'staged',
+          userOverridden: true,
+        })
+      }
+      return next
+    })
+
+    // 2. Save sidecar in memory via graphEngine
+    for (const trk of selectedAlbum.tracks) {
+      graphEngine.updateTrackSidecar(trk.trackId, {
+        title: trk.matchedTitle,
+        artistCredit: trk.matchedArtists,
+        albumTitle: selectedAlbum.albumTitle.selected,
+        composerName: selectedAlbum.composer.selected,
+        releaseYear: selectedAlbum.year.selected,
+        genre: selectedAlbum.genre.selected,
+      })
+    }
+
+    showToast(`✓ Staged "${selectedAlbum.albumTitle.selected}". Saved for review in queue.`)
+
+    // 3. Advance to next album in queue
+    const activeList = (activeTier === 'tier1' ? tier1Items : tier2Items).filter(a => a.status !== 'committed')
+    const currIdx = activeList.findIndex((a) => a.id === selectedAlbum.id)
+    if (currIdx >= 0 && currIdx < activeList.length - 1) {
+      setSelectedAlbumId(activeList[currIdx + 1].id)
+    }
+  }, [selectedAlbum, activeTier, tier1Items, tier2Items, showToast])
+
+  // Commit Album: permanently writes to disk and REMOVES it from the queue
+  const handleCommitAlbum = useCallback(async () => {
+    if (!selectedAlbum) return
+
+    // Audiophile Transport Guard
+    if (isPlaying) {
+      showToast('⚠️ Storage Bus Silence: Playback active. Disk writes are paused until audio pauses.')
+      return
+    }
 
     // 1. Commit edits into graphEngine sidecars
     for (const trk of selectedAlbum.tracks) {
@@ -495,17 +584,37 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       })
     }
 
-    onRefreshLibrary?.()
-    showToast(`Staged "${selectedAlbum.albumTitle.selected}"!`)
+    // 2. Physical flush to disk via tauriBridge
+    try {
+      await tauriBridge.commitStagedSidecars()
+    } catch (err) {
+      console.warn('[UnifiedCurateCockpit] Commit notice:', err)
+    }
 
-    // 2. Advance to next Tier 2 album
-    const remaining = tier2Items.filter((a) => a.id !== selectedAlbum.id)
+    // 3. Mark as committed in state so it is removed from active review queue
+    setAlbumItems((prev) => {
+      const next = new Map(prev)
+      const current = next.get(selectedAlbum.id)
+      if (current) {
+        next.set(selectedAlbum.id, {
+          ...current,
+          status: 'committed',
+        })
+      }
+      return next
+    })
+
+    onRefreshLibrary?.()
+    showToast(`✓ Committed "${selectedAlbum.albumTitle.selected}" to library and removed from queue!`)
+
+    // 4. Advance to next remaining album
+    const remaining = tier2Items.filter((a) => a.id !== selectedAlbum.id && a.status !== 'committed')
     if (remaining.length > 0) {
       setSelectedAlbumId(remaining[0].id)
     } else {
       setSelectedAlbumId(null)
     }
-  }, [selectedAlbum, tier2Items, onRefreshLibrary, showToast])
+  }, [selectedAlbum, isPlaying, tier2Items, onRefreshLibrary, showToast])
 
   // Batch commit Tier 1 albums in background with Audiophile Guard
   const handleCommitAllTier1 = async () => {
@@ -935,6 +1044,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                         +{alb.offsetApplied} offset
                       </span>
                     )}
+                    {alb.userOverridden && (
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-medium">
+                        ✓ Staged
+                      </span>
+                    )}
                     {alb.albumArtist.requiresHumanReview && (
                       <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-medium">
                         Action Req.
@@ -971,16 +1085,123 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 </span>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5">
+                {/* Stage Button (keeps in queue, preserves all changes) */}
                 <button
-                  onClick={handleStageAndNext}
-                  className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-sm flex items-center gap-1.5"
+                  onClick={handleStage}
+                  className="px-3.5 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium text-xs border border-white/20 transition-all cursor-pointer flex items-center gap-1.5"
+                  title="Save changes and keep in queue for later review"
+                >
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Stage & Next</span>
+                </button>
+
+                {/* Commit Button (saves permanently and removes from queue) */}
+                <button
+                  onClick={handleCommitAlbum}
+                  className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-md flex items-center gap-1.5"
+                  title="Commit permanently to library and remove from queue"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Stage & Next Album</span>
+                  <span>Commit Album</span>
                 </button>
               </div>
             </div>
+
+            {/* Interactive Learned Rule Confirmation Banners */}
+            {selectedAlbum.composer.selected &&
+              selectedAlbum.albumArtist.selected !== selectedAlbum.composer.selected &&
+              !dismissedPrompts.has('prompt_composer_artist') && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between animate-fade-in shadow-md">
+                  <div className="flex items-center gap-2.5">
+                    <Sparkles className="w-4 h-4 text-[#D4AF37] shrink-0" />
+                    <div>
+                      <span className="text-xs font-semibold text-white">Indian Soundtrack Rule:</span>{' '}
+                      <span className="text-xs text-white/80">
+                        Set Album Artist equal to Composer (<strong>{selectedAlbum.composer.selected}</strong>)?
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setAlbumItems((prev) => {
+                          const next = new Map(prev)
+                          const curr = next.get(selectedAlbum.id)
+                          if (curr) {
+                            next.set(selectedAlbum.id, {
+                              ...curr,
+                              albumArtist: { ...curr.albumArtist, selected: curr.composer.selected, userOverridden: true },
+                            })
+                          }
+                          return next
+                        })
+                        behavioralLearningService.updateConventions({ albumArtistEqualsComposerForIndianSoundtracks: true })
+                        setConventions(behavioralLearningService.getConventions())
+                        showToast(`✓ Learned convention: Album Artist = Composer for Indian soundtracks!`)
+                      }}
+                      className="px-3 py-1 rounded bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs cursor-pointer transition-colors shadow-sm"
+                    >
+                      Apply & Remember Always
+                    </button>
+                    <button
+                      onClick={() => setDismissedPrompts((prev) => new Set(prev).add('prompt_composer_artist'))}
+                      className="p-1 text-white/40 hover:text-white cursor-pointer"
+                      title="Dismiss prompt"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+            {selectedAlbum.genre.selected !== 'Tamil Film Soundtrack' &&
+              !dismissedPrompts.has('prompt_genre') && (
+                <div className="p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-between animate-fade-in shadow-md">
+                  <div className="flex items-center gap-2.5">
+                    <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <div>
+                      <span className="text-xs font-semibold text-white">Soundtrack Genre Rule:</span>{' '}
+                      <span className="text-xs text-white/80">
+                        Standardize Genre as <strong>Tamil Film Soundtrack</strong>?
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setAlbumItems((prev) => {
+                          const next = new Map(prev)
+                          const curr = next.get(selectedAlbum.id)
+                          if (curr) {
+                            next.set(selectedAlbum.id, {
+                              ...curr,
+                              genre: { ...curr.genre, selected: 'Tamil Film Soundtrack', userOverridden: true },
+                            })
+                          }
+                          return next
+                        })
+                        behavioralLearningService.updateConventions({
+                          languagePrefixedSoundtrackGenre: true,
+                          defaultSoundtrackLanguage: 'Tamil',
+                        })
+                        setConventions(behavioralLearningService.getConventions())
+                        showToast(`✓ Learned convention: Tamil Film Soundtrack genre!`)
+                      }}
+                      className="px-3 py-1 rounded bg-cyan-500 hover:bg-cyan-400 text-black font-semibold text-xs cursor-pointer transition-colors shadow-sm"
+                    >
+                      Apply & Remember Always
+                    </button>
+                    <button
+                      onClick={() => setDismissedPrompts((prev) => new Set(prev).add('prompt_genre'))}
+                      className="p-1 text-white/40 hover:text-white cursor-pointer"
+                      title="Dismiss prompt"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
 
             {/* TABLE 1: Album-Level 4-Way Metadata Reconciliation Table */}
             <section className="space-y-3">
@@ -1239,6 +1460,44 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             <p className="text-xs text-white/60 mt-2">
               Cadence learns your spelling, punctuation, and initials preferences and auto-elevates matches to Tier 1.
             </p>
+
+            {/* Automated Semantic Conventions */}
+            <div className="mt-4 p-4 rounded-xl bg-white/[0.03] border border-white/[0.08] space-y-3">
+              <h4 className="text-xs font-semibold text-white/80 uppercase tracking-wider">
+                Automated Library Conventions
+              </h4>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-medium text-white">Indian Film Soundtracks: Album Artist = Composer</div>
+                  <div className="text-[11px] text-white/50">Automatically sets Album Artist to Composer (e.g. Ilaiyaraaja, A. R. Rahman)</div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={conventions.albumArtistEqualsComposerForIndianSoundtracks}
+                  onChange={(e) => {
+                    behavioralLearningService.updateConventions({ albumArtistEqualsComposerForIndianSoundtracks: e.target.checked })
+                    setConventions(behavioralLearningService.getConventions())
+                  }}
+                  className="w-4 h-4 accent-[#D4AF37] cursor-pointer"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-white/[0.04]">
+                <div>
+                  <div className="text-xs font-medium text-white">Soundtrack Genre Formatting</div>
+                  <div className="text-[11px] text-white/50">Standardizes film soundtrack genres to "{conventions.defaultSoundtrackLanguage} Film Soundtrack"</div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={conventions.languagePrefixedSoundtrackGenre}
+                  onChange={(e) => {
+                    behavioralLearningService.updateConventions({ languagePrefixedSoundtrackGenre: e.target.checked })
+                    setConventions(behavioralLearningService.getConventions())
+                  }}
+                  className="w-4 h-4 accent-[#D4AF37] cursor-pointer"
+                />
+              </div>
+            </div>
             <div className="mt-4 divide-y divide-white/[0.06] max-h-72 overflow-y-auto">
               {learnedRules.map((rule) => (
                 <div key={rule.id} className="py-2.5 flex items-center justify-between group">
