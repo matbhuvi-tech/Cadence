@@ -1031,6 +1031,60 @@ impl DbOperations {
         Ok(())
     }
 
+    pub fn get_provenance_cache(
+        conn: &Connection,
+        hash_key: &str,
+    ) -> Result<Option<crate::commands::maintenance::DbProvenanceCacheEntry>> {
+        let mut stmt = conn.prepare(
+            "SELECT hash_key, album_id, album_title, input_params_json, response_json, model_version, created_at
+             FROM compilation_provenance_cache WHERE hash_key = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![hash_key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(crate::commands::maintenance::DbProvenanceCacheEntry {
+                hash_key: row.get(0)?,
+                album_id: row.get(1)?,
+                album_title: row.get(2)?,
+                input_params_json: row.get(3)?,
+                response_json: row.get(4)?,
+                model_version: row.get(5)?,
+                created_at: row.get(6)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_provenance_cache(
+        conn: &Connection,
+        hash_key: &str,
+        album_id: &str,
+        album_title: &str,
+        input_params_json: &str,
+        response_json: &str,
+        model_version: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT OR REPLACE INTO compilation_provenance_cache
+             (hash_key, album_id, album_title, input_params_json, response_json, model_version, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![hash_key, album_id, album_title, input_params_json, response_json, model_version, now],
+        )?;
+
+        // Enforce 1000-entry LRU cap
+        let _ = conn.execute(
+            "DELETE FROM compilation_provenance_cache
+             WHERE hash_key NOT IN (
+                 SELECT hash_key FROM compilation_provenance_cache
+                 ORDER BY created_at DESC LIMIT 1000
+             )",
+            [],
+        );
+
+        Ok(())
+    }
+
     pub fn get_file_mtimes(conn: &Connection, folder_path: &str) -> Result<Vec<FileMtimeCheck>> {
         let pattern = format!("{}%", folder_path);
         let mut stmt = conn.prepare(

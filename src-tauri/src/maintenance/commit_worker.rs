@@ -438,6 +438,12 @@ impl CommitQueueWorker {
             if let Some(cover) = payload.get("coverArtUrl").and_then(|s| s.as_str()) {
                 sidecar_val["coverArtUrl"] = serde_json::json!(cover);
             }
+            if let Some(orig_album) = payload.get("originalAlbum").and_then(|s| s.as_str()) {
+                sidecar_val["originalAlbum"] = serde_json::json!(orig_album);
+            }
+            if let Some(orig_year) = payload.get("originalYear").and_then(|v| v.as_i64()) {
+                sidecar_val["originalYear"] = serde_json::json!(orig_year);
+            }
 
             let sidecar_str = serde_json::to_string_pretty(&sidecar_val)
                 .map_err(|e| format!("Failed to serialize sidecar: {}", e))?;
@@ -519,6 +525,12 @@ impl CommitQueueWorker {
             if let Some(genre) = payload.get("genre").and_then(|s| s.as_str()) {
                 tag.set_genre(genre.to_string());
             }
+            if let Some(orig_album) = payload.get("originalAlbum").and_then(|s| s.as_str()) {
+                tag.insert(TagItem::new(ItemKey::OriginalAlbumTitle, ItemValue::Text(orig_album.to_string())));
+            }
+            if let Some(orig_year) = payload.get("originalYear").and_then(|v| v.as_i64()) {
+                tag.insert(TagItem::new(ItemKey::OriginalReleaseDate, ItemValue::Text(orig_year.to_string())));
+            }
 
             tag.save_to_path(&temp_path, WriteOptions::default())
                 .map_err(|e| format!("Lofty save_to_path failed: {}", e))?;
@@ -574,8 +586,10 @@ impl CommitQueueWorker {
                     release_year = COALESCE(?6, release_year),
                     track_number = COALESCE(?7, track_number),
                     genre = COALESCE(?8, genre),
+                    original_album = COALESCE(?9, original_album),
+                    original_year = COALESCE(?10, original_year),
                     sidecar_status = 'synced'
-                 WHERE id = ?9",
+                 WHERE id = ?11",
                 rusqlite::params![
                     payload.get("title").and_then(|s| s.as_str()),
                     payload.get("artist").or_else(|| payload.get("artistCredit")).and_then(|s| s.as_str()),
@@ -585,6 +599,8 @@ impl CommitQueueWorker {
                     payload.get("year").and_then(|v| v.as_i64()),
                     payload.get("trackNumber").and_then(|v| v.as_i64()),
                     payload.get("genre").and_then(|s| s.as_str()),
+                    payload.get("originalAlbum").and_then(|s| s.as_str()),
+                    payload.get("originalYear").and_then(|v| v.as_i64()),
                     item.track_id,
                 ],
             ) {

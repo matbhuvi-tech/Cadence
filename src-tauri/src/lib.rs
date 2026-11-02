@@ -244,6 +244,8 @@ pub fn run() {
             db_update_track_provenance,
             db_get_cached_acoustid,
             db_cache_acoustid_result,
+            db_get_provenance_cache,
+            db_set_provenance_cache,
             // SQLite Library & Storage commands
             check_storage_mounts_accessibility,
             check_path_accessible,

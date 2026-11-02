@@ -119,6 +119,49 @@ pub fn db_cache_acoustid_result(
     ).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbProvenanceCacheEntry {
+    pub hash_key: String,
+    pub album_id: String,
+    pub album_title: String,
+    pub input_params_json: String,
+    pub response_json: String,
+    pub model_version: String,
+    pub created_at: i64,
+}
+
+#[tauri::command]
+pub fn db_get_provenance_cache(
+    db: State<crate::db::AppDb>,
+    hash_key: String,
+) -> Result<Option<DbProvenanceCacheEntry>, String> {
+    let conn = db.conn.lock();
+    crate::db::DbOperations::get_provenance_cache(&conn, &hash_key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_set_provenance_cache(
+    db: State<crate::db::AppDb>,
+    hash_key: String,
+    album_id: String,
+    album_title: String,
+    input_params_json: String,
+    response_json: String,
+    model_version: String,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    crate::db::DbOperations::set_provenance_cache(
+        &conn,
+        &hash_key,
+        &album_id,
+        &album_title,
+        &input_params_json,
+        &response_json,
+        &model_version,
+    ).map_err(|e| e.to_string())
+}
+
 // Background Commit Queue IPC Commands
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

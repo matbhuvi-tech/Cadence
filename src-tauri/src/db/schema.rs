@@ -247,6 +247,19 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_commit_queue_mount ON commit_queue_items(mount_id, status);
         CREATE INDEX IF NOT EXISTS idx_commit_queue_track ON commit_queue_items(track_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_commit_queue_unique_pending ON commit_queue_items(track_id) WHERE status = 'pending';
+
+        -- 6. Compilation Provenance Cache
+        CREATE TABLE IF NOT EXISTS compilation_provenance_cache (
+            hash_key TEXT PRIMARY KEY,
+            album_id TEXT NOT NULL,
+            album_title TEXT NOT NULL,
+            input_params_json TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_compilation_cache_created_at ON compilation_provenance_cache(created_at);
         "
     )?;
 
@@ -314,6 +327,21 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_mount ON commit_queue_items(mount_id, status)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_track ON commit_queue_items(track_id)", []);
     let _ = conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_commit_queue_unique_pending ON commit_queue_items(track_id) WHERE status = 'pending'", []);
+
+    // Ensure compilation_provenance_cache exists on upgraded databases
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS compilation_provenance_cache (
+            hash_key TEXT PRIMARY KEY,
+            album_id TEXT NOT NULL,
+            album_title TEXT NOT NULL,
+            input_params_json TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_compilation_cache_created_at ON compilation_provenance_cache(created_at)", []);
 
     Ok(())
 }
