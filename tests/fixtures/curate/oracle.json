@@ -2,6 +2,82 @@
   "version": "1.0.0",
   "description": "Authoritative Ground Truth Test Oracle for Cadence Curate Multimodal QA Agent",
   "albums": {
+    "aan-paavam": {
+      "album_id": "aan-paavam",
+      "album_type": "soundtrack",
+      "canonical_title": "Aan Paavam",
+      "canonical_artist": "Ilaiyaraaja",
+      "canonical_composer": "Ilaiyaraaja",
+      "release_year": 1985,
+      "genre": "Tamil Film Soundtrack",
+      "expected_track_count": 6,
+      "tracks": [
+        {
+          "track_number": 1,
+          "title": "Kadhal Kasakkudhaiya",
+          "artists": [
+            "Ilaiyaraaja"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 260,
+          "expected_file_pattern": ".*(kadhal|kasakkudhaiya|kasakkuthaiya).*"
+        },
+        {
+          "track_number": 2,
+          "title": "Kuyile Kuyile Puyaladikkuthu",
+          "artists": [
+            "K. J. Yesudas",
+            "K. S. Chithra",
+            "Chitra",
+            "Malaysia Vasudevan"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 280,
+          "expected_file_pattern": ".*(kuyile|puyaladikkuthu).*"
+        },
+        {
+          "track_number": 3,
+          "title": "Ennai Paada Chollathey",
+          "artists": [
+            "S. Janaki"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 275,
+          "expected_file_pattern": ".*(ennai\\s*paada|paada).*"
+        },
+        {
+          "track_number": 4,
+          "title": "Otti Vandha Ratha Thilakam",
+          "artists": [
+            "Kollangudi Karuppayee"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 215,
+          "expected_file_pattern": ".*(otti\\s*vandha|kollangudi).*"
+        },
+        {
+          "track_number": 5,
+          "title": "Ooradangum Saamathil",
+          "artists": [
+            "Malaysia Vasudevan",
+            "S. Janaki"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 285,
+          "expected_file_pattern": ".*(ooradangum|saamathil).*"
+        },
+        {
+          "track_number": 6,
+          "title": "Enga Ooru Periya Ooru",
+          "artists": [
+            "Malaysia Vasudevan"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 255,
+          "expected_file_pattern": ".*(enga\\s*ooru|periya\\s*ooru).*"
+        }
+      ]
+    },
     "en-bommukutti-amavuku": {
       "album_id": "en-bommukutti-amavuku",
       "album_type": "soundtrack",
@@ -11,103 +87,65 @@
       "release_year": 1988,
       "reissue_year": 2021,
       "genre": "Tamil Film Soundtrack",
-      "expected_track_count": 6,
+      "expected_track_count": 5,
       "tracks": [
         {
           "track_number": 1,
-          "title": "Chitra Chittugal",
+          "title": "Kuku Kuku Koovum",
           "artists": [
-            "K. S. Chithra"
+            "K. S. Chithra",
+            "Chithra",
+            "Chitra"
           ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 272,
-          "expected_file_pattern": ".*(chitra|chittugal).*"
+          "expected_file_pattern": ".*(kuku|koovum).*"
         },
         {
           "track_number": 2,
-          "title": "Uyire Uyirin",
+          "title": "Chithirai Sevvaanam",
           "artists": [
             "K. J. Yesudas",
-            "K. S. Chithra"
+            "Yesudas"
+          ],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 268,
+          "expected_file_pattern": ".*(chithirai|sevvaanam).*"
+        },
+        {
+          "track_number": 3,
+          "title": "Uyire Uyirin Oliye",
+          "artists": [
+            "K. J. Yesudas",
+            "K. S. Chithra",
+            "Chitra",
+            "Yesudas"
           ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 290,
           "expected_file_pattern": ".*(uyire|uyirin).*"
         },
         {
-          "track_number": 3,
-          "title": "Kuyile Kuyile",
+          "track_number": 4,
+          "title": "Nallathor Veenai Seithe",
           "artists": [
             "K. J. Yesudas",
-            "K. S. Chithra"
+            "Yesudas"
           ],
           "composer": "Ilaiyaraaja",
-          "duration_seconds": 284,
-          "expected_file_pattern": ".*(kuyile|kuyile).*"
-        },
-        {
-          "track_number": 4,
-          "title": "En Patharamathu",
-          "artists": [
-            "S. P. Balasubrahmanyam",
-            "Malaysia Vasudevan"
-          ],
-          "composer": "Ilaiyaraaja",
-          "duration_seconds": 278,
-          "expected_file_pattern": ".*(en\\s*patharamathu|patharamathu).*"
+          "duration_seconds": 242,
+          "expected_file_pattern": ".*(nallathor|veenai).*"
         },
         {
           "track_number": 5,
           "title": "Kanne Navamaniye",
           "artists": [
-            "Ilaiyaraaja"
+            "K. J. Yesudas",
+            "Yesudas"
           ],
           "composer": "Ilaiyaraaja",
           "duration_seconds": 285,
           "expected_file_pattern": ".*(kanne|navamaniye).*"
-        },
-        {
-          "track_number": 6,
-          "title": "Bommu Kutti",
-          "artists": [
-            "K. J. Yesudas"
-          ],
-          "composer": "Ilaiyaraaja",
-          "duration_seconds": 295,
-          "expected_file_pattern": ".*(bommu|kutti).*"
-        }
-      ]
-    },
-    "signature-collection-2": {
-      "album_id": "signature-collection-2",
-      "album_type": "compilation",
-      "canonical_title": "Signature Collection 2",
-      "canonical_artist": "A. R. Rahman",
-      "canonical_composer": "A. R. Rahman",
-      "release_year": 2014,
-      "genre": "Hindi Film Soundtrack",
-      "expected_track_count": 45,
-      "tracks": [
-        {
-          "track_number": 1,
-          "title": "Patakha Guddi",
-          "artists": [
-            "Nooran Sisters",
-            "A. R. Rahman"
-          ],
-          "composer": "A. R. Rahman",
-          "duration_seconds": 284,
-          "expected_file_pattern": ".*(patakha|guddi).*"
-        },
-        {
-          "track_number": 2,
-          "title": "Maahi Ve",
-          "artists": [
-            "A. R. Rahman"
-          ],
-          "composer": "A. R. Rahman",
-          "duration_seconds": 240,
-          "expected_file_pattern": ".*(maahi|ve).*"
         }
       ]
     },
@@ -127,7 +165,9 @@
           "title": "Pattu Poove",
           "artists": [
             "S. P. Balasubrahmanyam",
-            "Vani Jairam"
+            "SPB",
+            "Vani Jairam",
+            "Vani Jayaram"
           ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 270,
@@ -135,10 +175,12 @@
         },
         {
           "track_number": 2,
-          "title": "Toothpaste",
+          "title": "Toothpaste Irukka",
           "artists": [
             "Malaysia Vasudevan",
-            "S. P. Sailaja"
+            "Vani Jairam",
+            "Vani Jayaram",
+            "S. Janaki"
           ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 265,
@@ -146,9 +188,10 @@
         },
         {
           "track_number": 3,
-          "title": "Anbaana",
+          "title": "Anbaana Manavale",
           "artists": [
-            "S. P. Balasubrahmanyam"
+            "S. P. Balasubrahmanyam",
+            "SPB"
           ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 255,
@@ -156,10 +199,12 @@
         },
         {
           "track_number": 4,
-          "title": "Kadhala",
+          "title": "Kadhala En Kadhala",
           "artists": [
             "S. P. Balasubrahmanyam",
-            "P. Susheela"
+            "SPB",
+            "P. Susheela",
+            "Susheela"
           ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 280,
@@ -167,67 +212,14 @@
         },
         {
           "track_number": 5,
-          "title": "Puriyadha",
+          "title": "Puriyadha Velaiyil",
           "artists": [
-            "S. P. Balasubrahmanyam"
+            "S. P. Balasubrahmanyam",
+            "SPB"
           ],
           "composer": "Shankar-Ganesh",
           "duration_seconds": 245,
           "expected_file_pattern": ".*(puriyadha).*"
-        }
-      ]
-    },
-    "aan-paavam": {
-      "album_id": "aan-paavam",
-      "album_type": "soundtrack",
-      "canonical_title": "Aan Paavam",
-      "canonical_artist": "Ilaiyaraaja",
-      "canonical_composer": "Ilaiyaraaja",
-      "release_year": 1985,
-      "genre": "Tamil Film Soundtrack",
-      "expected_track_count": 4,
-      "tracks": [
-        {
-          "track_number": 1,
-          "title": "Kuyile Kuyile",
-          "artists": [
-            "K. J. Yesudas",
-            "K. S. Chithra"
-          ],
-          "composer": "Ilaiyaraaja",
-          "duration_seconds": 280,
-          "expected_file_pattern": ".*(kuyile).*"
-        },
-        {
-          "track_number": 2,
-          "title": "Kadhal Kasakkudhaiya",
-          "artists": [
-            "Ilaiyaraaja"
-          ],
-          "composer": "Ilaiyaraaja",
-          "duration_seconds": 270,
-          "expected_file_pattern": ".*(kadhal|kasakkudhaiya).*"
-        },
-        {
-          "track_number": 3,
-          "title": "Ooradungum Saamathila",
-          "artists": [
-            "Malaysia Vasudevan",
-            "S. Janaki"
-          ],
-          "composer": "Ilaiyaraaja",
-          "duration_seconds": 290,
-          "expected_file_pattern": ".*(ooradungum|saamathila).*"
-        },
-        {
-          "track_number": 4,
-          "title": "Chinna Mani",
-          "artists": [
-            "Ilaiyaraaja"
-          ],
-          "composer": "Ilaiyaraaja",
-          "duration_seconds": 260,
-          "expected_file_pattern": ".*(chinna|mani).*"
         }
       ]
     }

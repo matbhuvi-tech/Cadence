@@ -71,6 +71,7 @@ export interface AgentAction {
   targetSelector?: string;
   targetDescription: string;
   value?: string;
+  artistValue?: string;
   priorityLevel: 'P1' | 'P2' | 'P3' | 'P4';
   reasoning: string;
   detectedBugs?: BugRecord[];
@@ -509,6 +510,13 @@ export class CurateMultimodalQaAgent {
         }
         console.log(`⏳ Awaiting provider fetch & anchor for epoch ${this.identityEpoch}...`);
         await new Promise((r) => setTimeout(r, 3000));
+      } else if (action.action === 'EDIT' && action.targetSelector && action.value) {
+        console.log(`?? Executing Manual Edit on ${action.targetSelector} with value: "${action.value}"`);
+        await this.cdp.clickSelector(action.targetSelector);
+        await new Promise((r) => setTimeout(r, 400));
+        await this.cdp.typeIntoSelector('td input[type="text"], input[type="text"]:focus', action.value);
+        await this.cdp.clickSelector('button[title="Save"], td button.bg-emerald-500');
+        await new Promise((r) => setTimeout(r, 600));
       } else if (action.action === 'CLICK' && action.targetSelector) {
         const ok = await this.cdp.clickSelector(action.targetSelector);
         if (!ok) {
@@ -809,14 +817,45 @@ No markdown backticks, just the JSON.`;
         const getTrackRows = () => {
           const rows = document.querySelectorAll('tr[data-testid^="track-row-"]');
           return Array.from(rows).map((row, idx) => {
-            const getVal = (col) => row.querySelector(\`[data-testid="track-cell-\${idx}-\${col}"]\`)?.textContent?.trim() || '';
+            const getCell = (col) => {
+              const cell = row.querySelector('[data-testid="track-cell-' + idx + '-' + col + '"]');
+              if (!cell) return { text: '', title: '', artist: '' };
+              const titleEl = cell.querySelector('.font-medium');
+              const artistEl = cell.querySelector('[class*="text-[10px]"], [class*="text-[11px]"]');
+              const title = titleEl ? titleEl.textContent.trim() : '';
+              let artist = artistEl ? artistEl.textContent.trim() : '';
+              if (artist.startsWith('??') || artist.includes('Requires Action')) {
+                artist = '';
+              }
+              const text = (title && artist && artist !== '?' && artist !== '-')
+                ? (title + ' // ' + artist)
+                : (title || artist || cell.textContent.trim());
+              return { text, title, artist };
+            };
+
+            const localCell = getCell('local');
+            const appleCell = getCell('apple');
+            const mbCell = getCell('musicbrainz');
+            const aiCell = getCell('ai');
+            const selectedCell = getCell('selected');
+
             return {
               index: idx,
-              local: getVal('local'),
-              apple: getVal('apple'),
-              musicbrainz: getVal('musicbrainz'),
-              ai: getVal('ai'),
-              selected: getVal('selected')
+              local: localCell.text,
+              localTitle: localCell.title,
+              localArtist: localCell.artist,
+              apple: appleCell.text,
+              appleTitle: appleCell.title,
+              appleArtist: appleCell.artist,
+              musicbrainz: mbCell.text,
+              musicbrainzTitle: mbCell.title,
+              musicbrainzArtist: mbCell.artist,
+              ai: aiCell.text,
+              aiTitle: aiCell.title,
+              aiArtist: aiCell.artist,
+              selected: selectedCell.text,
+              selectedTitle: selectedCell.title,
+              selectedArtist: selectedCell.artist
             };
           });
         };
@@ -832,6 +871,8 @@ No markdown backticks, just the JSON.`;
           },
           tracks: getTrackRows(),
           steerQuery: document.querySelector('input[data-testid="input-steer-album"]')?.value || '',
+          steerArtistQuery: document.querySelector('input[data-testid="input-steer-artist"]')?.value || '',
+          canFetchAnchor: Boolean(document.querySelector('[data-testid="btn-fetch-anchor"]')),
           canStage: Boolean(document.querySelector('[data-testid="btn-stage-next"]'))
         };
       })()
@@ -989,7 +1030,162 @@ Return ONLY JSON matching:
       }
     }
 
-    // 2. Cover Artwork Resolution
+    // 2. Audit Auto-Consensus & Performer Contamination for Album Artist (Container Identity)
+    const artistRow = master.artist;
+    if (artistRow) {
+      const selected = (artistRow.selected || '').trim();
+      const apple = (artistRow.apple || '').trim();
+      const mb = (artistRow.musicbrainz || '').trim();
+      const ai = (artistRow.ai || '').trim();
+
+      const isValid = (val: string) => {
+        if (!val) return false;
+        const stripped = val.replace(/[\u2014\u2013\-\s]/g, '').trim();
+        return stripped !== '' && !/unknown/i.test(stripped) && !stripped.includes('Action Required');
+      };
+
+      // Check external provider candidates
+      const providerEntries: { col: 'apple' | 'musicbrainz' | 'ai'; val: string }[] = [];
+      if (isValid(apple)) providerEntries.push({ col: 'apple', val: apple });
+      if (isValid(mb)) providerEntries.push({ col: 'musicbrainz', val: mb });
+      if (isValid(ai)) providerEntries.push({ col: 'ai', val: ai });
+
+      // Check composer row as well (in Indian film soundtracks, composer is the canonical container artist)
+      const composerRow = master.composer;
+      const composerCandidates = [
+        composerRow?.selected,
+        composerRow?.ai,
+        composerRow?.apple,
+        composerRow?.musicbrainz,
+        composerRow?.local,
+      ].filter(isValid);
+      const composer = composerCandidates[0] || '';
+
+      // Gather track performers to detect if container artist is polluted by a single track singer
+      const trackPerformers = new Set<string>();
+      for (const t of tracks) {
+        const performers = [t.localArtist, t.selectedArtist, t.aiArtist].filter(Boolean);
+        for (const p of performers) {
+          const split = p.split(/s*(?:&|,|and)s*/i);
+          for (const s of split) {
+            const clean = s.trim().toLowerCase();
+            if (clean && clean.length > 2) trackPerformers.add(clean);
+          }
+          if (p.trim().length > 2) trackPerformers.add(p.trim().toLowerCase());
+        }
+      }
+
+      // Determine external provider consensus
+      let consensusArtist = '';
+      let consensusCol: 'apple' | 'musicbrainz' | 'ai' | null = null;
+
+      if (providerEntries.length >= 2) {
+        for (let j = 0; j < providerEntries.length; j++) {
+          for (let k = j + 1; k < providerEntries.length; k++) {
+            if (providerEntries[j].val.toLowerCase() === providerEntries[k].val.toLowerCase()) {
+              consensusArtist = providerEntries[j].val;
+              consensusCol = providerEntries[j].col;
+              break;
+            }
+          }
+          if (consensusArtist) break;
+        }
+      }
+
+      // If no 2-provider consensus, check if a provider matches composer
+      if (!consensusArtist && composer) {
+        const match = providerEntries.find(
+          (p) => p.val.toLowerCase().includes(composer.toLowerCase()) || composer.toLowerCase().includes(p.val.toLowerCase())
+        );
+        if (match) {
+          consensusArtist = match.val;
+          consensusCol = match.col;
+        }
+      }
+
+      // If still no consensus, check Gemini AI or single provider
+      if (!consensusArtist && isValid(ai)) {
+        consensusArtist = ai;
+        consensusCol = 'ai';
+      } else if (!consensusArtist && providerEntries.length > 0) {
+        consensusArtist = providerEntries[0].val;
+        consensusCol = providerEntries[0].col;
+      }
+
+      // Is selected equal to the primary composer?
+      const isComposer = Boolean(composer && selected && selected.toLowerCase() === composer.toLowerCase());
+
+      // Is selected equal to a single track performer when not the primary composer?
+      const isSingleTrackPerformer = !isComposer && Boolean(
+        selected &&
+          Array.from(trackPerformers).some((p) => {
+            const sLower = selected.toLowerCase();
+            return sLower === p || sLower.includes(p) || p.includes(sLower);
+          })
+      );
+
+      const targetArtist = consensusArtist || composer;
+      const hasMismatch = targetArtist && selected.toLowerCase() !== targetArtist.toLowerCase();
+      const providersUnpopulated = providerEntries.length === 0;
+
+      if ((isSingleTrackPerformer && targetArtist && hasMismatch) || (hasMismatch && consensusArtist)) {
+        bugs.push({
+          classification: 'Identity Resolution Bug',
+          severity: 'MAJOR',
+          albumId: '',
+          stepNumber: 0,
+          description: isSingleTrackPerformer
+            ? `Album Artist is contaminated with single track performer "${selected}", while provider/composer consensus points to "${targetArtist}".`
+            : `Auto-consensus failed on Album Artist: Providers agree on "${targetArtist}", but Selected is "${selected || '(Empty)'}".`,
+          expected: targetArtist,
+          actual: selected || '(Empty)',
+        });
+
+        if (consensusCol) {
+          return {
+            action: 'CLICK',
+            targetSelector: `[data-testid="master-cell-albumArtist-${consensusCol}"]`,
+            targetDescription: `Adopt consensus Album Artist: "${consensusArtist}" from ${consensusCol}`,
+            priorityLevel: 'P1',
+            reasoning: isSingleTrackPerformer
+              ? `Selected artist "${selected}" is a single track performer; switching to container artist "${consensusArtist}".`
+              : `Selected artist "${selected}" does not match provider consensus "${consensusArtist}".`,
+            detectedBugs: bugs,
+          };
+        } else if (state.canFetchAnchor || providersUnpopulated) {
+          return {
+            action: 'STEER',
+            value: master.title?.selected || '',
+            artistValue: targetArtist,
+            targetDescription: `Steer Providers with title "${master.title?.selected}" and artist "${targetArtist}" to resolve container consensus`,
+            priorityLevel: 'P1',
+            reasoning: `Selected album artist "${selected}" is contaminated and external providers are unpopulated. Triggering provider search to resolve consensus.`,
+            detectedBugs: bugs,
+          };
+        } else if (targetArtist) {
+          return {
+            action: 'EDIT',
+            targetSelector: '[data-testid="btn-edit-master-albumArtist"]',
+            value: targetArtist,
+            targetDescription: `Edit Album Artist manually to: "${targetArtist}"`,
+            priorityLevel: 'P1',
+            reasoning: `No provider cell contains "${targetArtist}"; editing master Album Artist manually.`,
+            detectedBugs: bugs,
+          };
+        }
+      } else if (isSingleTrackPerformer && providersUnpopulated && state.canFetchAnchor) {
+        return {
+          action: 'STEER',
+          value: master.title?.selected || '',
+          artistValue: composer || '',
+          targetDescription: `Steer Providers with album title "${master.title?.selected}" to resolve container artist`,
+          priorityLevel: 'P1',
+          reasoning: `Selected album artist "${selected}" appears to be a single track performer. Fetching external providers to determine authentic container artist.`,
+        };
+      }
+    }
+
+    // 3. Cover Artwork Resolution
     const artRow = master.art;
     if (artRow) {
       const local = artRow.local || '';
@@ -1103,11 +1299,18 @@ Return ONLY JSON matching:
 
     // Assert Track Singers & Titles
     for (const oracleTrack of oracle.tracks) {
-      const match = tracks.find((t: any) => t.selected?.toLowerCase().includes(oracleTrack.title.toLowerCase()) || t.index + 1 === oracleTrack.track_number);
+      const match = tracks.find(
+        (t: any) =>
+          (t.selectedTitle && t.selectedTitle.toLowerCase().includes(oracleTrack.title.toLowerCase())) ||
+          (t.selected && t.selected.toLowerCase().includes(oracleTrack.title.toLowerCase())) ||
+          t.index + 1 === oracleTrack.track_number
+      );
       if (match) {
         // Assert authentic singers with alias and token boundary normalization
         for (const singer of oracleTrack.artists) {
-          const hasSinger = matchesSingerAlias(match.selected, singer) || matchesSingerAlias(match.ai, singer);
+          const selectedText = match.selectedArtist || match.selected;
+          const aiText = match.aiArtist || match.ai;
+          const hasSinger = matchesSingerAlias(selectedText, singer) || matchesSingerAlias(aiText, singer);
           if (!hasSinger) {
             this.recordBug({
               classification: 'Reconciliation Bug',

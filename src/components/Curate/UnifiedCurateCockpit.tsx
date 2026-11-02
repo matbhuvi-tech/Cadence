@@ -1257,6 +1257,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     setEditInputValue(String(selectedVal || ''))
                   }}
                   className="p-1 rounded hover:bg-white/[0.08] text-white/60 hover:text-white transition-colors cursor-pointer"
+                  data-testid={`btn-edit-master-${fieldKey}`}
                   title="Edit manually"
                 >
                   <Edit2 className="w-3 h-3" />
@@ -1696,6 +1697,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     value={steerArtist}
                     onChange={(e) => setSteerArtist(e.target.value)}
                     placeholder="Artist / Composer"
+                    data-testid="input-steer-artist"
                     className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-white text-xs focus:outline-none focus:border-[#D4AF37]/60"
                   />
                   <span className="absolute right-2 top-2 text-[9px] font-mono text-white/40 pointer-events-none uppercase">Artist</span>
