@@ -9,12 +9,12 @@
 [CmdletBinding()]
 param (
     [int]$Port = 9222,
-    [int]$TimeoutSeconds = 30
+    [int]$TimeoutSeconds = 45
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "🔍 Checking if Cadence is already running with remote debugging on port $Port..." -ForegroundColor Cyan
+Write-Host "[INFO] Checking if Cadence is already running with remote debugging on port $Port..." -ForegroundColor Cyan
 
 function Test-CdpPort {
     param([int]$TargetPort)
@@ -30,7 +30,7 @@ function Test-CdpPort {
 }
 
 if (Test-CdpPort -TargetPort $Port) {
-    Write-Host "✅ Cadence is already running and listening for CDP on port $Port!" -ForegroundColor Green
+    Write-Host "[OK] Cadence is already running and listening for CDP on port $Port!" -ForegroundColor Green
     exit 0
 }
 
@@ -44,14 +44,14 @@ $candidates = @(
 $targetExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if ($targetExe) {
-    Write-Host "🚀 Launching Cadence binary from $targetExe with --remote-debugging-port=$Port..." -ForegroundColor Cyan
+    Write-Host "[LAUNCH] Launching Cadence binary from $targetExe with --remote-debugging-port=$Port..." -ForegroundColor Cyan
     $process = Start-Process -FilePath $targetExe -ArgumentList "--remote-debugging-port=$Port" -PassThru
 } else {
-    Write-Host "⚠️ No pre-built cadence.exe found. Launching via npm run tauri:dev..." -ForegroundColor Yellow
+    Write-Host "[LAUNCH] No pre-built cadence.exe found. Launching via npm run tauri:dev..." -ForegroundColor Yellow
     $process = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "tauri:dev", "--", "--", "--remote-debugging-port=$Port" -PassThru
 }
 
-Write-Host "⏳ Waiting for WebView2 CDP endpoint to initialize at http://127.0.0.1:$Port/json/version..." -ForegroundColor Cyan
+Write-Host "[WAIT] Waiting for WebView2 CDP endpoint to initialize at http://127.0.0.1:$Port/json/version..." -ForegroundColor Cyan
 $startTime = Get-Date
 $ready = $false
 
@@ -67,10 +67,10 @@ while (((Get-Date) - $startTime).TotalSeconds -lt $TimeoutSeconds) {
 Write-Host ""
 
 if ($ready) {
-    Write-Host "🎉 Cadence WebView2 CDP debug endpoint is ready at http://127.0.0.1:$Port!" -ForegroundColor Green
+    Write-Host "[READY] Cadence WebView2 CDP debug endpoint is ready at http://127.0.0.1:$Port!" -ForegroundColor Green
     Write-Host "You can now run: npx tsx scripts/qa/curateQaAgent.ts" -ForegroundColor Green
     exit 0
 } else {
-    Write-Error "❌ Timeout waiting for Cadence CDP debug endpoint on port $Port after $TimeoutSeconds seconds."
+    Write-Error "[TIMEOUT] Timeout waiting for Cadence CDP debug endpoint on port $Port after $TimeoutSeconds seconds."
     exit 1
 }
