@@ -60,6 +60,7 @@ import { MobileRemoteModal } from './components/Modals/MobileRemoteModal'
 import { MaintainCockpit, MaintainSubTab } from './components/Maintain/MaintainCockpit'
 import { FocusedWorkbench } from './components/CenterStage/FocusedWorkbench'
 import { CurationWorkbench } from './components/Curate/CurationWorkbench'
+import { UnifiedCurateCockpit } from './components/Curate/UnifiedCurateCockpit'
 import { SanctuaryListeningLounge } from './components/AudioPlayer/SanctuaryListeningLounge'
 import { ScanProgressPayload, WatchedFolder, SkippedFile } from './core/types'
 import { backdropAnalyzer } from './services/backdropAnalyzer'
@@ -1613,7 +1614,7 @@ function AppContent() {
               setTopMode('curate')
               setFocusedWorkbenchTrack(null)
             }}
-            title="Precision Metadata Workbench (⌘2)"
+            title="Unified Precision Metadata Workbench & Catalog Hygiene (⌘2)"
             className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
               topMode === 'curate'
                 ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
@@ -1621,33 +1622,12 @@ function AppContent() {
             }`}
           >
             <span>Curate</span>
-            {triageAlbumsCount > 0 && (
+            {(triageAlbumsCount > 0 || impactedAlbumsCount > 0) && (
               <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-[#D4AF37]/20 text-[#D4AF37] font-mono font-medium">
-                {triageAlbumsCount}
+                {triageAlbumsCount + impactedAlbumsCount}
               </span>
             )}
             <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘2</span>
-          </button>
-
-          <button
-            onClick={() => {
-              setTopMode('maintain')
-              setFocusedWorkbenchTrack(null)
-            }}
-            title="Library Hygiene & Storage Audit (⌘3)"
-            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
-              topMode === 'maintain'
-                ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
-                : 'text-[#8E8E93] hover:text-[#EDEDED]'
-            }`}
-          >
-            <span>Audit</span>
-            {impactedAlbumsCount > 0 && (
-              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 font-mono font-medium">
-                {impactedAlbumsCount}
-              </span>
-            )}
-            <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘3</span>
           </button>
         </div>
 
@@ -1868,7 +1848,7 @@ function AppContent() {
             }}
           />
         ) : topMode === 'curate' ? (
-          <CurationWorkbench
+          <UnifiedCurateCockpit
             tracks={tracks}
             releases={releases}
             auditIssues={auditIssues}
@@ -1902,6 +1882,7 @@ function AppContent() {
               refreshFromEngine()
               persistCurrentLibrary()
             }}
+            isPlaying={isPlaying}
           />
         ) : focusedWorkbenchTrack ? (
           <FocusedWorkbench
