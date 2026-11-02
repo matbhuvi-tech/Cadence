@@ -70,6 +70,8 @@ import {
   isDefectiveArtistTag,
   detectSequenceOffset,
   applyConsensusEmptyStateRule,
+  detectLanguage,
+  getCuratedAlbumArtwork,
 } from '../../core/taxonomyUtils'
 
 export interface UnifiedCurateCockpitProps {
@@ -260,19 +262,37 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         const rawArtist = rel?.artistCredit || albTracks[0]?.artistCredit || 'Unknown Artist'
         const rawComposer = rel?.composerName || albTracks.find((t) => t.composerName)?.composerName || ''
         const rawYear = rel?.releaseYear || albTracks[0]?.releaseYear
-        const rawArt = rel?.coverArtUri || albTracks[0]?.coverArtUri || ''
+        const rawArt =
+          rel?.coverArtUrl ||
+          rel?.artwork?.frontCoverUrl ||
+          (rel as any)?.front_cover_url ||
+          (rel as any)?.frontCoverUrl ||
+          albTracks[0]?.coverArtUrl ||
+          albTracks[0]?.artworkUrl ||
+          albTracks[0]?.frontCoverUrl ||
+          getCuratedAlbumArtwork(rawTitle, rawComposer || rawArtist) ||
+          ''
         const rawGenre = rel?.genreTags?.[0] || albTracks[0]?.genre || 'Soundtrack'
+
+        // Detect album primary language for accurate conventions
+        const initDetectedLang = detectLanguage({
+          title: rawTitle,
+          artistCredit: rawArtist,
+          composerName: rawComposer,
+          genreTags: rel?.genreTags || (albTracks[0]?.genre ? [albTracks[0].genre] : []),
+          filePath: albTracks[0]?.filePath,
+        }) || 'Hindi'
 
         // Check learned rules for artist and composer
         const learnedArtist = behavioralLearningService.applyLearnedRules(rawArtist, 'artist').value
         const learnedComposer = rawComposer ? behavioralLearningService.applyLearnedRules(rawComposer, 'composer').value : ''
 
-        // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Genre = 'Tamil Film Soundtrack')
+        // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Language-prefixed genre)
         const conv = behavioralLearningService.applySoundtrackConventions({
           composer: rawComposer,
           albumArtist: rawArtist,
           genre: rawGenre,
-          language: 'Tamil',
+          language: initDetectedLang,
         })
 
         // Track candidate states
