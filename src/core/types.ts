@@ -558,6 +558,7 @@ export interface ReleaseConsensusResult {
     composer: MetadataFieldState<string>
     releaseYear: MetadataFieldState<number | undefined>
     genre: MetadataFieldState<string>
+    coverArt?: MetadataFieldState<string>
   }
   trackStates?: TrackCandidateState[]
   sequenceOffsetResult?: SequenceOffsetDetectionResult
@@ -607,6 +608,8 @@ export interface TrackCandidateState {
   source: ConsensusFieldSource
   userOverridden?: boolean
   requiresHumanReview?: boolean
+  aiTitle?: string
+  aiArtists?: string
 }
 export interface CompilationTrackProvenance {
   trackId: string
@@ -616,6 +619,8 @@ export interface CompilationTrackProvenance {
   originalYear?: number
   confidence: number
   reasoning?: string
+  primaryVocalists?: string
+  canonicalComposer?: string
 }
 
 export interface CompilationProvenanceResult {

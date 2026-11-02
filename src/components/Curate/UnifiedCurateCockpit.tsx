@@ -432,12 +432,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             }
           }
 
-          // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Genre = 'Tamil Film Soundtrack')
+          // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Language-prefixed genre)
           const convRes = behavioralLearningService.applySoundtrackConventions({
             composer: String(consensus.albumFieldStates?.composer?.selected || current.composer.selected || ''),
             albumArtist: String(consensus.albumFieldStates?.albumArtist?.selected || current.albumArtist.selected || ''),
             genre: String(consensus.albumFieldStates?.genre?.selected || current.genre.selected || ''),
-            language: 'Tamil',
+            language: detectedLanguage,
           })
 
           const updated: AlbumWorkItem = {
@@ -456,6 +456,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             },
             composer: preserveField(current.composer, consensus.albumFieldStates?.composer),
             year: preserveField(current.year, consensus.albumFieldStates?.releaseYear),
+            coverArt: preserveField(current.coverArt, consensus.albumFieldStates?.coverArt),
             genre: {
               ...preserveField(current.genre, consensus.albumFieldStates?.genre),
               selected: current.userOverridden
@@ -667,11 +668,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           if (canonicalRes && canonicalRes.success && canonicalRes.tracks && canonicalRes.tracks.length > 0) {
             const firstProp = canonicalRes.tracks[0]
             aiMasterResult = {
-              releaseTitle: firstProp?.proposedOriginalAlbum || steerAlbum.trim(),
+              releaseTitle: isCompilationAlbum ? (steerAlbum.trim() || selectedAlbum.rawRelease.title) : (firstProp?.proposedOriginalAlbum || steerAlbum.trim()),
               artistCredit: firstProp?.proposedComposer || steerArtist.trim(),
               composer: firstProp?.proposedComposer || steerArtist.trim(),
               releaseYear: firstProp?.proposedYear || (Number(steerYear) || undefined),
-              genre: 'Tamil Film Soundtrack',
+              genre: `${detectedLanguage} Film Soundtrack`,
               tracks: canonicalRes.tracks.map((pt, idx) => ({
                 trackNumber: idx + 1,
                 trackName: pt.proposedTitle || pt.localTitle,
@@ -771,6 +772,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     }
   }
 
+  // Dynamically detect album language based on tags, file path, and title
+  const detectedLanguage = useMemo(() => {
+    if (!selectedAlbum) return 'Hindi'
+    return detectLanguage({
+      title: selectedAlbum.albumTitle?.selected || selectedAlbum.currentTitle,
+      artistCredit: selectedAlbum.albumArtist?.selected,
+      composerName: selectedAlbum.composer?.selected,
+      genreTags: selectedAlbum.genre?.selected
+        ? [selectedAlbum.genre.selected]
+        : (selectedAlbum.genre?.local ? [selectedAlbum.genre.local] : (selectedAlbum.rawRelease?.genreTags || [])),
+      filePath: selectedAlbum.rawTracks?.[0]?.filePath,
+    }) || 'Hindi'
+  }, [selectedAlbum])
+
   // Compilation album detection heuristic
   const isCompilationAlbum = useMemo(() => {
     if (!selectedAlbum) return false
@@ -832,11 +847,21 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   originalAlbum: tState.userOverridden ? tState.originalAlbum : match.originalAlbum,
                   originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
                   provenanceSource: (tState.userOverridden ? 'user_override' : 'consensus') as any,
+                  aiTitle: match.title,
+                  aiArtists: match.primaryVocalists || match.canonicalComposer,
                 }
               }
               return tState
             })
-            next.set(selectedAlbum.id, { ...cur, tracks: updatedTracks })
+            next.set(selectedAlbum.id, {
+              ...cur,
+              albumTitle: { ...cur.albumTitle, ai: albumTitleStr },
+              albumArtist: { ...cur.albumArtist, ai: albumArtistStr || cur.albumArtist.selected },
+              composer: { ...cur.composer, ai: composerStr || cur.composer.selected },
+              year: { ...cur.year, ai: cur.year.selected },
+              genre: { ...cur.genre, ai: `${detectedLanguage} Film Soundtrack` },
+              tracks: updatedTracks,
+            })
             return next
           })
           return
@@ -858,12 +883,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }
 
         const result: any = await resolveGemini('compilation', payload, controller.signal)
-        if (result && Array.isArray(result.tracks)) {
+        const rawTracks = Array.isArray(result) ? result : (Array.isArray(result?.tracks) ? result.tracks : [])
+        if (rawTracks.length > 0) {
           const provenanceResult: CompilationProvenanceResult = {
             albumTitle: albumTitleStr,
             isCompilation: true,
             cached: false,
-            tracks: result.tracks.map((rt: any, idx: number) => ({
+            tracks: rawTracks.map((rt: any, idx: number) => ({
               trackId: rt.trackId || rt.id || selectedAlbum.rawTracks[idx]?.id || `trk-${idx}`,
               trackNumber: rt.trackNumber || (idx + 1),
               title: rt.title || selectedAlbum.rawTracks[idx]?.title || '',
@@ -871,13 +897,15 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               originalYear: rt.originalYear || rt.proposedOriginalYear || rt.year,
               confidence: rt.confidence || 0.9,
               reasoning: rt.reasoning || rt.notes,
+              primaryVocalists: rt.primaryVocalists || rt.singers || rt.artists,
+              canonicalComposer: rt.canonicalComposer || rt.composer,
             }))
           }
 
           // Save to parameter-hashed cache
           await provenanceCacheService.set(hashKey, selectedAlbum.id, albumTitleStr, payload, provenanceResult)
 
-          // Update tracks in UI state
+          // Update tracks and Gemini AI Master column in UI state
           setAlbumItems(prev => {
             const next = new Map(prev)
             const cur = next.get(selectedAlbum.id)
@@ -890,11 +918,21 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   originalAlbum: tState.userOverridden ? tState.originalAlbum : match.originalAlbum,
                   originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
                   provenanceSource: (tState.userOverridden ? 'user_override' : 'gemini_ai') as any,
+                  aiTitle: match.title,
+                  aiArtists: match.primaryVocalists || match.canonicalComposer,
                 }
               }
               return tState
             })
-            next.set(selectedAlbum.id, { ...cur, tracks: updatedTracks })
+            next.set(selectedAlbum.id, {
+              ...cur,
+              albumTitle: { ...cur.albumTitle, ai: albumTitleStr },
+              albumArtist: { ...cur.albumArtist, ai: albumArtistStr || cur.albumArtist.selected },
+              composer: { ...cur.composer, ai: composerStr || cur.composer.selected },
+              year: { ...cur.year, ai: cur.year.selected },
+              genre: { ...cur.genre, ai: `${detectedLanguage} Film Soundtrack` },
+              tracks: updatedTracks,
+            })
             return next
           })
         }
@@ -1686,15 +1724,27 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 </div>
               )}
 
-            {selectedAlbum.genre.selected !== 'Tamil Film Soundtrack' &&
-              !dismissedPrompts.has('prompt_genre') && (
+            {(() => {
+              const targetSoundtrackGenre = `${detectedLanguage} Film Soundtrack`
+              const currentGenre = selectedAlbum.genre.selected || ''
+              const isSoundtrackLike =
+                currentGenre.toLowerCase().includes('soundtrack') ||
+                currentGenre.toLowerCase().includes('film') ||
+                currentGenre.toLowerCase().includes('ost') ||
+                isCompilationAlbum
+
+              if (!isSoundtrackLike || currentGenre === targetSoundtrackGenre || dismissedPrompts.has('prompt_genre')) {
+                return null
+              }
+
+              return (
                 <div className="p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-between animate-fade-in shadow-md">
                   <div className="flex items-center gap-2.5">
                     <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
                     <div>
                       <span className="text-xs font-semibold text-white">Soundtrack Genre Rule:</span>{' '}
                       <span className="text-xs text-white/80">
-                        Standardize Genre as <strong>Tamil Film Soundtrack</strong>?
+                        Standardize Genre as <strong>{targetSoundtrackGenre}</strong>?
                       </span>
                     </div>
                   </div>
@@ -1707,17 +1757,17 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           if (curr) {
                             next.set(selectedAlbum.id, {
                               ...curr,
-                              genre: { ...curr.genre, selected: 'Tamil Film Soundtrack', userOverridden: true },
+                              genre: { ...curr.genre, selected: targetSoundtrackGenre, userOverridden: true },
                             })
                           }
                           return next
                         })
                         behavioralLearningService.updateConventions({
                           languagePrefixedSoundtrackGenre: true,
-                          defaultSoundtrackLanguage: 'Tamil',
+                          defaultSoundtrackLanguage: detectedLanguage,
                         })
                         setConventions(behavioralLearningService.getConventions())
-                        showToast(`✓ Learned convention: Tamil Film Soundtrack genre!`)
+                        showToast(`✓ Learned convention: ${targetSoundtrackGenre} genre!`)
                       }}
                       className="px-3 py-1 rounded bg-cyan-500 hover:bg-cyan-400 text-black font-semibold text-xs cursor-pointer transition-colors shadow-sm"
                     >
@@ -1732,7 +1782,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     </button>
                   </div>
                 </div>
-              )}
+              )
+            })()}
 
             {/* TABLE 1: Album-Level 4-Way Metadata Reconciliation Table */}
             <section className="space-y-3">
@@ -1881,15 +1932,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           {/* Gemini AI Cell */}
                           <td
                             onClick={() => {
-                              if (selectedAlbum.albumArtist.ai) {
-                                handleSelectTrackArtist(trk.trackId, selectedAlbum.albumArtist.ai, 'ai_synthesized')
+                              const candArtist = trk.aiArtists || selectedAlbum.albumArtist.ai
+                              if (candArtist) {
+                                handleSelectTrackArtist(trk.trackId, candArtist, 'ai_synthesized')
                               }
                             }}
                             className="py-3 px-3 cursor-pointer text-white/70 hover:text-cyan-300 transition-colors"
                           >
-                            <div className="font-medium text-cyan-300">{trk.matchedTitle}</div>
+                            <div className="font-medium text-cyan-300">{trk.aiTitle || trk.matchedTitle}</div>
                             <div className="text-[10px] text-cyan-200/60 mt-0.5">
-                              {selectedAlbum.albumArtist.ai || '—'}
+                              {trk.aiArtists || selectedAlbum.albumArtist.ai || '—'}
                             </div>
                           </td>
 

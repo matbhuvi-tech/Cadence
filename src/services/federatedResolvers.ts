@@ -1436,6 +1436,7 @@ export class FederatedResolversService {
       composer?: string
       releaseYear?: number
       genre?: string
+      coverArtUrl?: string
       tracks?: Array<{ trackNumber: number; trackName: string; artistName?: string }>
     },
     directAppleCandidate?: ProviderResult | null
@@ -1819,12 +1820,34 @@ export class FederatedResolversService {
       })
     }
 
+    const localCoverArt =
+      localRelease.coverArtUrl ||
+      localRelease.artwork?.frontCoverUrl ||
+      (localRelease as any)?.front_cover_url ||
+      (localRelease as any)?.frontCoverUrl ||
+      localTracks[0]?.coverArtUrl ||
+      localTracks[0]?.artworkUrl ||
+      localTracks[0]?.frontCoverUrl ||
+      getCuratedAlbumArtwork(rawTitle, rawComposer || rawArtist) ||
+      ''
+
+    const coverArtState: MetadataFieldState<string> = {
+      local: localCoverArt,
+      apple: itunes?.coverArtUrl,
+      musicbrainz: mb?.coverArtUrl,
+      ai: aiMaster?.coverArtUrl,
+      selected: localCoverArt || itunes?.coverArtUrl || mb?.coverArtUrl || aiMaster?.coverArtUrl || '',
+      confidence: localCoverArt ? 0.95 : (itunes?.coverArtUrl ? 0.90 : 0.40),
+      source: localCoverArt ? 'local_fallback' : (itunes?.coverArtUrl ? 'single_provider_match' : 'none'),
+    }
+
     const albumFieldStates = {
       albumTitle: titleArbitration.fieldState,
       albumArtist: artistArbitration.fieldState,
       composer: composerArbitration.fieldState,
       releaseYear: releaseYearState,
       genre: genreArbitration.fieldState,
+      coverArt: coverArtState,
     }
 
     const hasAnyAlbumReviewRequired = Object.values(albumFieldStates).some(f => f.requiresHumanReview)
