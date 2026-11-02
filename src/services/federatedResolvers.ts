@@ -10,6 +10,10 @@ import {
   UpdateArtistEditorialPayload,
   Release,
   Track,
+  CurateTier,
+  MetadataFieldState,
+  TrackCandidateState,
+  SequenceOffsetDetectionResult,
 } from '../core/types'
 import {
   getCuratedAlbumArtwork,
@@ -23,8 +27,11 @@ import {
   generateSearchTitleVariants,
   isSameCanonicalAlbum,
   normalizeCanonicalAlbumTitle,
+  detectSequenceOffset,
+  applyConsensusEmptyStateRule,
 } from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
+import { behavioralLearningService } from './behavioralLearningService'
 import { tauriBridge } from './tauriBridge'
 import { getGeminiQuota, resolveGemini } from './geminiClient'
 
@@ -1395,7 +1402,15 @@ export class FederatedResolversService {
   public async resolve2of3ReleaseConsensus(
     localRelease: Release,
     localTracks: Track[],
-    isPrefetch = false
+    isPrefetch = false,
+    aiMaster?: {
+      releaseTitle?: string
+      artistCredit?: string
+      composer?: string
+      releaseYear?: number
+      genre?: string
+      tracks?: Array<{ trackNumber: number; trackName: string; artistName?: string }>
+    }
   ): Promise<ReleaseConsensusResult> {
     const rawTitle = localRelease.title || ''
     const sanitizedTitle = cleanConsensusTitle(rawTitle)
@@ -1427,85 +1442,154 @@ export class FederatedResolversService {
     let itunes = itunesVerified ? rawItunes : null
     let mb = mbVerified ? rawMb : null
 
+    // Apply behavioral learning normalization to candidates
+    const normalizeWithLearning = (val?: string, category: 'artist' | 'composer' | 'genre' = 'artist'): string => {
+      if (!val) return ''
+      return behavioralLearningService.applyLearnedRules(val, category).value
+    }
+
+    const learnedLocalArtist = normalizeWithLearning(localArtist, 'artist')
+    const learnedItunesArtist = normalizeWithLearning(itunes?.artistCredit, 'artist')
+    const learnedMbArtist = normalizeWithLearning(mb?.artistCredit, 'artist')
+    const learnedAiArtist = normalizeWithLearning(aiMaster?.artistCredit, 'artist')
+
     const earliestYear = calculateEarliestValidYear(
       localRelease.releaseYear,
       itunes?.releaseYear,
       mb?.releaseYear
     )
 
-    const arbitrateField = (
+    // Field arbitration with Consensus Empty-State Invariant
+    const arbitrateFieldWithEmptyState = (
       localVal: string,
       appleVal?: string,
       mbVal?: string,
-      defaultVal: string = ''
-    ): ConsensusFieldResult<string> => {
-      const norm = (s?: string) => (s ? cleanConsensusTitle(s).toLowerCase().replace(/[\s\-_–—.,&'"+/\\()[\]]/g, '') : '')
-      const isLocalPlaceholder = isPlaceholderTag(localVal)
-      const isApplePlaceholder = isPlaceholderTag(appleVal)
-      const isMbPlaceholder = isPlaceholderTag(mbVal)
-
-      const normLocal = isLocalPlaceholder ? '' : norm(localVal)
-      const normApple = isApplePlaceholder ? '' : norm(appleVal)
-      const normMb = isMbPlaceholder ? '' : norm(mbVal)
-
+      aiVal?: string,
+      category: 'artist' | 'composer' | 'genre' = 'artist'
+    ): {
+      fieldResult: ConsensusFieldResult<string>
+      fieldState: MetadataFieldState<string>
+    } => {
       const candidates = {
         local: localVal,
         itunes: appleVal,
         musicbrainz: mbVal,
+        ai: aiVal,
       }
 
-      // 1. All three agree
-      if (normLocal && normApple && normMb && normLocal === normApple && normApple === normMb) {
-        return { value: localVal, source: 'consensus_all', confidence: 0.99, candidates }
-      }
+      // Check consensus empty-state rule:
+      const emptyStateCheck = applyConsensusEmptyStateRule(localVal, {
+        apple: appleVal,
+        musicbrainz: mbVal,
+        ai: aiVal,
+      })
 
-      // 2. Apple and MB agree
-      if (normApple && normMb && normApple === normMb) {
-        return { value: mbVal || appleVal!, source: 'consensus_apple_mb', confidence: 0.95, candidates }
-      }
-
-      // 3. Local and MB agree
-      if (normLocal && normMb && normLocal === normMb) {
-        return { value: mbVal || localVal, source: 'consensus_local_mb', confidence: 0.92, candidates }
-      }
-
-      // 4. Local and Apple agree
-      if (normLocal && normApple && normLocal === normApple) {
-        return { value: appleVal || localVal, source: 'consensus_local_apple', confidence: 0.88, candidates }
-      }
-
-      // 5. External when local is placeholder
-      if (isLocalPlaceholder) {
-        if (mbVal && !isMbPlaceholder) {
-          return { value: mbVal, source: 'single_provider_match', confidence: 0.85, candidates }
+      // If consensus empty-state triggered (no local and no provider consensus), preserve empty string
+      if (!emptyStateCheck.hasConsensus && emptyStateCheck.selected === '') {
+        const fieldResult: ConsensusFieldResult<string> = {
+          value: '',
+          source: 'local_fallback',
+          confidence: 0.2,
+          candidates,
         }
-        if (appleVal && !isApplePlaceholder) {
-          return { value: appleVal, source: 'single_provider_match', confidence: 0.82, candidates }
+        const fieldState: MetadataFieldState<string> = {
+          local: localVal,
+          apple: appleVal,
+          musicbrainz: mbVal,
+          ai: aiVal,
+          selected: '',
+          confidence: 0.2,
+          source: 'local_fallback',
+          requiresHumanReview: true,
+        }
+        return { fieldResult, fieldState }
+      }
+
+      const norm = (s?: string) => (s ? cleanConsensusTitle(s).toLowerCase().replace(/[\s\-_–—.,&'"+/\\()[\]]/g, '') : '')
+      const isLocalPlaceholder = isPlaceholderTag(localVal)
+
+      const normLocal = isLocalPlaceholder ? '' : norm(localVal)
+      const normApple = norm(appleVal)
+      const normMb = norm(mbVal)
+      const normAi = norm(aiVal)
+
+      let selectedVal = emptyStateCheck.selected || localVal
+      let source: ConsensusFieldSource = 'local_fallback'
+      let confidence = 0.5
+
+      // 1. All agree or 3 out of 4 agree
+      const allNorms = [normLocal, normApple, normMb, normAi].filter(Boolean)
+      const matchCounts = new Map<string, number>()
+      for (const n of allNorms) matchCounts.set(n, (matchCounts.get(n) || 0) + 1)
+      let maxMatch = 0
+      let topNorm = ''
+      for (const [n, count] of matchCounts.entries()) {
+        if (count > maxMatch) {
+          maxMatch = count
+          topNorm = n
         }
       }
 
-      // 6. External preference
-      if (mbVal && !isMbPlaceholder) {
-        return { value: mbVal, source: 'single_provider_match', confidence: 0.70, candidates }
-      }
-      if (appleVal && !isApplePlaceholder) {
-        return { value: appleVal, source: 'single_provider_match', confidence: 0.65, candidates }
+      if (maxMatch >= 3) {
+        source = 'consensus_all'
+        confidence = 0.98
+        selectedVal = (topNorm === normLocal ? localVal : (topNorm === normApple ? appleVal : (topNorm === normMb ? mbVal : aiVal))) || localVal
+      } else if (normApple && normMb && normApple === normMb) {
+        source = 'consensus_apple_mb'
+        confidence = 0.95
+        selectedVal = mbVal || appleVal || localVal
+      } else if (normLocal && (normApple === normLocal || normMb === normLocal)) {
+        source = normApple === normLocal ? 'consensus_local_apple' : 'consensus_local_mb'
+        confidence = 0.92
+        selectedVal = localVal
+      } else if (normAi && (normAi === normApple || normAi === normMb || normAi === normLocal)) {
+        source = 'ai_synthesized'
+        confidence = 0.90
+        selectedVal = aiVal || appleVal || mbVal || localVal
+      } else if (isLocalPlaceholder) {
+        if (mbVal && !isPlaceholderTag(mbVal)) {
+          selectedVal = mbVal
+          source = 'single_provider_match'
+          confidence = 0.80
+        } else if (appleVal && !isPlaceholderTag(appleVal)) {
+          selectedVal = appleVal
+          source = 'single_provider_match'
+          confidence = 0.75
+        } else if (aiVal && !isPlaceholderTag(aiVal)) {
+          selectedVal = aiVal
+          source = 'ai_synthesized'
+          confidence = 0.70
+        }
       }
 
-      // 7. Fallback to local
-      return {
-        value: !isLocalPlaceholder ? localVal : defaultVal,
-        source: 'local_fallback',
-        confidence: !isLocalPlaceholder ? 0.60 : 0.30,
+      selectedVal = normalizeWithLearning(selectedVal, category)
+
+      const fieldResult: ConsensusFieldResult<string> = {
+        value: selectedVal,
+        source,
+        confidence,
         candidates,
       }
+
+      const fieldState: MetadataFieldState<string> = {
+        local: localVal,
+        apple: appleVal,
+        musicbrainz: mbVal,
+        ai: aiVal,
+        selected: selectedVal,
+        confidence,
+        source,
+        requiresHumanReview: confidence < 0.80 || emptyStateCheck.requiresHumanReview,
+      }
+
+      return { fieldResult, fieldState }
     }
 
-    const albumTitle = arbitrateField(sanitizedTitle || rawTitle, itunes?.releaseTitle, mb?.releaseTitle, rawTitle)
-    const albumArtist = arbitrateField(localArtist, itunes?.artistCredit, mb?.artistCredit, 'Unknown Artist')
-    const composer = arbitrateField(localComposer, itunes?.composer, mb?.composer, '')
-    const genre = arbitrateField(localRelease.genreTags?.[0] || '', itunes?.genre, mb?.genre, 'Soundtrack')
-    const label = arbitrateField(localRelease.label || '', itunes?.label, mb?.label, '')
+    const titleArbitration = arbitrateFieldWithEmptyState(sanitizedTitle || rawTitle, itunes?.releaseTitle, mb?.releaseTitle, aiMaster?.releaseTitle, 'artist')
+    const artistArbitration = arbitrateFieldWithEmptyState(learnedLocalArtist, learnedItunesArtist, learnedMbArtist, learnedAiArtist, 'artist')
+    const composerArbitration = arbitrateFieldWithEmptyState(localComposer, itunes?.composer, mb?.composer, aiMaster?.composer, 'composer')
+    const genreArbitration = arbitrateFieldWithEmptyState(localRelease.genreTags?.[0] || '', itunes?.genre, mb?.genre, aiMaster?.genre, 'genre')
+    const labelArbitration = arbitrateFieldWithEmptyState(localRelease.label || '', itunes?.label, mb?.label, '', 'artist')
 
     // Check combo releases
     const comboDisambig = disambiguateComboTitle(rawTitle, localRelease.folderPath)
@@ -1539,15 +1623,39 @@ export class FederatedResolversService {
         local: localRelease.releaseYear,
         itunes: itunes?.releaseYear,
         musicbrainz: mb?.releaseYear,
+        ai: aiMaster?.releaseYear,
       },
     }
 
-    const requiresAiFallback =
-      albumTitle.confidence < 0.60 ||
-      albumArtist.confidence < 0.60 ||
-      (isCombo && (!subReleaseGroupings || subReleaseGroupings.length === 0))
+    const releaseYearState: MetadataFieldState<number | undefined> = {
+      local: localRelease.releaseYear,
+      apple: itunes?.releaseYear,
+      musicbrainz: mb?.releaseYear,
+      ai: aiMaster?.releaseYear,
+      selected: earliestYear,
+      confidence: earliestYear ? 0.90 : 0.40,
+      source: yearSource,
+      requiresHumanReview: !earliestYear,
+    }
 
-    // Build Track-Level Consensus
+    // Sequence Offset Alignment across providers
+    const itunesTracks = itunes?.tracks || []
+    const mbTracks = mb?.tracks || []
+
+    const offsetResultApple = detectSequenceOffset(
+      localTracks.map(t => ({ id: t.id, trackNumber: t.trackNumber, title: t.title, duration: t.duration })),
+      itunesTracks
+    )
+    const offsetResultMb = detectSequenceOffset(
+      localTracks.map(t => ({ id: t.id, trackNumber: t.trackNumber, title: t.title, duration: t.duration })),
+      mbTracks
+    )
+
+    const effectiveSequenceOffset = offsetResultApple.isConfidentOffset
+      ? offsetResultApple
+      : (offsetResultMb.isConfidentOffset ? offsetResultMb : offsetResultApple)
+
+    // Build Track-Level Consensus and 4-way candidate states
     const trackConsensus: Record<string, {
       title: ConsensusFieldResult<string>
       artists: ConsensusFieldResult<string>
@@ -1555,17 +1663,27 @@ export class FederatedResolversService {
       trackNumber?: number
     }> = {}
 
-    const resolvedAlbumArtist = (albumArtist.value || itunes?.artistCredit || mb?.artistCredit || localRelease.artistCredit || '').trim()
+    const trackStates: TrackCandidateState[] = []
+    const resolvedAlbumArtist = (artistArbitration.fieldResult.value || itunes?.artistCredit || mb?.artistCredit || localRelease.artistCredit || '').trim()
 
     for (const lt of localTracks) {
       let matchedArtist: string | null = null
       let matchedSource: ConsensusFieldSource = 'consensus_all'
       let matchedConfidence = 0.95
       let matchedTitle = lt.title
+      let providerTrackNum: number | undefined = undefined
 
-      // 1. Check Apple Music tracklist
-      if (itunes?.tracks && itunes.tracks.length > 0) {
-        const m = matchTrackArtistFromProviderList(lt.title, itunes.tracks, lt.trackNumber, {
+      const effectiveAppleTrackNum = (offsetResultApple.isConfidentOffset && lt.trackNumber)
+        ? lt.trackNumber - offsetResultApple.detectedOffset
+        : lt.trackNumber
+
+      const effectiveMbTrackNum = (offsetResultMb.isConfidentOffset && lt.trackNumber)
+        ? lt.trackNumber - offsetResultMb.detectedOffset
+        : lt.trackNumber
+
+      // 1. Check Apple Music tracklist with sequence offset awareness
+      if (itunesTracks.length > 0) {
+        const m = matchTrackArtistFromProviderList(lt.title, itunesTracks, effectiveAppleTrackNum, {
           albumVerified: itunesVerified,
         })
         if (m) {
@@ -1573,12 +1691,13 @@ export class FederatedResolversService {
           matchedSource = 'single_provider_match'
           matchedConfidence = Math.max(0.7, m.confidence)
           matchedTitle = m.matchedTitle
+          providerTrackNum = effectiveAppleTrackNum
         }
       }
 
-      // 2. Check MusicBrainz tracklist if no Apple match
-      if (!matchedArtist && mb?.tracks && mb.tracks.length > 0) {
-        const m = matchTrackArtistFromProviderList(lt.title, mb.tracks, lt.trackNumber, {
+      // 2. Check MusicBrainz tracklist with sequence offset awareness if no Apple match
+      if (!matchedArtist && mbTracks.length > 0) {
+        const m = matchTrackArtistFromProviderList(lt.title, mbTracks, effectiveMbTrackNum, {
           albumVerified: mbVerified,
         })
         if (m) {
@@ -1586,20 +1705,52 @@ export class FederatedResolversService {
           matchedSource = 'single_provider_match'
           matchedConfidence = Math.max(0.7, m.confidence)
           matchedTitle = m.matchedTitle
+          providerTrackNum = effectiveMbTrackNum
         }
       }
 
-      // 3. Fallback: If local track artist is defective (contains CD RIP, placeholder, folder rip name),
-      // replace with the reconciled album artist!
+      // 3. Check AI tracks
+      if (!matchedArtist && aiMaster?.tracks && aiMaster.tracks.length > 0) {
+        const aiTrack = aiMaster.tracks.find(t => t.trackNumber === lt.trackNumber || cleanConsensusTitle(t.trackName).toLowerCase() === cleanConsensusTitle(lt.title).toLowerCase())
+        if (aiTrack && aiTrack.artistName) {
+          matchedArtist = aiTrack.artistName
+          matchedSource = 'ai_synthesized'
+          matchedConfidence = 0.85
+          matchedTitle = aiTrack.trackName
+          providerTrackNum = aiTrack.trackNumber
+        }
+      }
+
+      // 4. Fallback: Defective tag cleanup
       if (!matchedArtist && isDefectiveArtistTag(lt.artistCredit, rawTitle)) {
         if (resolvedAlbumArtist && !isPlaceholderTag(resolvedAlbumArtist)) {
           matchedArtist = resolvedAlbumArtist
-          matchedSource = albumArtist.source
-          matchedConfidence = albumArtist.confidence
+          matchedSource = artistArbitration.fieldResult.source
+          matchedConfidence = artistArbitration.fieldResult.confidence
         }
       }
 
+      // Apply behavioral learned rules to track artist
       if (matchedArtist) {
+        matchedArtist = normalizeWithLearning(matchedArtist, 'artist')
+      }
+
+      const appleTrack = itunesTracks.find(t => t.trackNumber === effectiveAppleTrackNum)
+      const mbTrack = mbTracks.find(t => t.trackNumber === effectiveMbTrackNum)
+      const aiTrack = aiMaster?.tracks?.find(t => t.trackNumber === lt.trackNumber)
+
+      // Apply Consensus Empty-State rule to track vocalists:
+      // If local artist is absent/placeholder and external providers don't have agreement, leave empty!
+      const trackEmptyState = applyConsensusEmptyStateRule(lt.artistCredit, {
+        apple: appleTrack?.artistName,
+        musicbrainz: mbTrack?.artistName,
+        ai: aiTrack?.artistName,
+      })
+
+      const finalArtistValue = matchedArtist || (trackEmptyState.selected ? String(trackEmptyState.selected) : '')
+      const requiresReview = !finalArtistValue || trackEmptyState.requiresHumanReview || matchedConfidence < 0.75
+
+      if (finalArtistValue) {
         trackConsensus[lt.id] = {
           title: {
             value: matchedTitle,
@@ -1610,28 +1761,73 @@ export class FederatedResolversService {
             },
           },
           artists: {
-            value: matchedArtist,
+            value: finalArtistValue,
             source: matchedSource,
             confidence: matchedConfidence,
             candidates: {
               local: lt.artistCredit,
-              itunes: itunes?.tracks?.find((t) => t.trackNumber === lt.trackNumber)?.artistName,
-              musicbrainz: mb?.tracks?.find((t) => t.trackNumber === lt.trackNumber)?.artistName,
+              itunes: appleTrack?.artistName,
+              musicbrainz: mbTrack?.artistName,
+              ai: aiTrack?.artistName,
             },
           },
           trackNumber: lt.trackNumber,
         }
       }
+
+      trackStates.push({
+        trackId: lt.id,
+        trackNumber: lt.trackNumber || 0,
+        localTitle: lt.title,
+        localArtists: lt.artistCredit || '',
+        localDuration: lt.duration,
+        providerTrackNumber: providerTrackNum,
+        matchedTitle,
+        matchedArtists: finalArtistValue,
+        sequenceOffset: effectiveSequenceOffset.isConfidentOffset ? effectiveSequenceOffset.detectedOffset : 0,
+        confidence: matchedConfidence,
+        source: matchedSource,
+        requiresHumanReview: requiresReview,
+      })
     }
+
+    const albumFieldStates = {
+      albumTitle: titleArbitration.fieldState,
+      albumArtist: artistArbitration.fieldState,
+      composer: composerArbitration.fieldState,
+      releaseYear: releaseYearState,
+      genre: genreArbitration.fieldState,
+    }
+
+    const hasAnyAlbumReviewRequired = Object.values(albumFieldStates).some(f => f.requiresHumanReview)
+    const hasAnyTrackReviewRequired = trackStates.some(t => t.requiresHumanReview)
+
+    const overallConfidence = (
+      titleArbitration.fieldState.confidence +
+      artistArbitration.fieldState.confidence +
+      composerArbitration.fieldState.confidence +
+      releaseYearState.confidence
+    ) / 4.0
+
+    // Tier 1 vs Tier 2 Classification:
+    // Tier 1: High confidence, consensus reached on all album fields, no empty required tags, no split tracks.
+    // Tier 2: Disagreement, offset alignment required, split votes, or empty local without quorum.
+    const isTier1 =
+      !hasAnyAlbumReviewRequired &&
+      !hasAnyTrackReviewRequired &&
+      overallConfidence >= 0.85 &&
+      !isCombo
+
+    const tier: CurateTier = isTier1 ? 'tier1' : 'tier2'
 
     return {
       releaseId: localRelease.id,
-      albumTitle,
-      albumArtist,
-      composer,
+      albumTitle: titleArbitration.fieldResult,
+      albumArtist: artistArbitration.fieldResult,
+      composer: composerArbitration.fieldResult,
       releaseYear: releaseYearResult,
-      genre,
-      label,
+      genre: genreArbitration.fieldResult,
+      label: labelArbitration.fieldResult,
       barcode: mb?.barcodeUpc
         ? { value: mb.barcodeUpc, source: 'single_provider_match', confidence: 0.9, candidates: { musicbrainz: mb.barcodeUpc } }
         : undefined,
@@ -1641,7 +1837,13 @@ export class FederatedResolversService {
       isComboRelease: isCombo,
       subReleaseGroupings,
       trackConsensus,
-      requiresAiFallback,
+      requiresAiFallback: !isTier1,
+      tier,
+      confidenceScore: overallConfidence,
+      requiresHumanReview: !isTier1,
+      albumFieldStates,
+      trackStates,
+      sequenceOffsetResult: effectiveSequenceOffset,
     }
   }
 

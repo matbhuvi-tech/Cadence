@@ -549,6 +549,18 @@ export interface ReleaseConsensusResult {
     trackNumber?: number
   }>
   requiresAiFallback?: boolean
+  tier?: CurateTier
+  confidenceScore?: number
+  requiresHumanReview?: boolean
+  albumFieldStates?: {
+    albumTitle: MetadataFieldState<string>
+    albumArtist: MetadataFieldState<string>
+    composer: MetadataFieldState<string>
+    releaseYear: MetadataFieldState<number | undefined>
+    genre: MetadataFieldState<string>
+  }
+  trackStates?: TrackCandidateState[]
+  sequenceOffsetResult?: SequenceOffsetDetectionResult
 }
 
 export interface NavigationAnchor {

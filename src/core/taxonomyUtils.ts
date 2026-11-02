@@ -1366,6 +1366,25 @@ export interface TrackMatchResult {
  * Matches a local track against a list of provider tracks (e.g. from Apple Music or MusicBrainz)
  * using fuzzy title similarity, token overlap, and position fallbacks.
  */
+export function sanitizeTrackTitleForMatch(s: string): string {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(?:folk\s*song|song|audio|track|theme|bit|remaster(?:ed)?|version)\b/gi, '')
+    .replace(/([a-z])\1+/g, '$1')
+    .trim()
+}
+
+export function phoneticTrackStem(str: string): string {
+  return (str || '')
+    .toLowerCase()
+    .replace(/y/g, 'i')
+    .replace(/w/g, 'v')
+    .replace(/[uae]/g, 'o')
+    .replace(/([a-z])\1+/g, '$1')
+    .replace(/[^a-z0-9]+/g, '')
+}
+
 export function matchTrackArtistFromProviderList(
   localTitle: string,
   providerTracks: ProviderTrackItem[],
@@ -1384,14 +1403,14 @@ export function matchTrackArtistFromProviderList(
       .replace(/([a-z])\1+/g, '$1')
       .trim()
 
-  const sLocal = sanitizeForMatch(localTitle)
+  const sLocal = sanitizeTrackTitleForMatch(localTitle)
   const tokLocal = sLocal.split(/\s+/).filter((w) => w.length >= 2)
 
   let bestMatch: ProviderTrackItem | null = null
   let bestScore = 0
 
   for (const pt of providerTracks) {
-    const sProvider = sanitizeForMatch(pt.trackName)
+    const sProvider = sanitizeTrackTitleForMatch(pt.trackName)
     if (!sProvider) continue
 
     // 1. Exact or Substring match
@@ -1438,9 +1457,9 @@ export function matchTrackArtistFromProviderList(
         .replace(/([a-z])\1+/g, '$1')
         .replace(/[^a-z0-9]+/g, '')
 
-    const stemLocal = phoneticStem(localTitle)
+    const stemLocal = phoneticTrackStem(localTitle)
     for (const pt of providerTracks) {
-      const stemProvider = phoneticStem(pt.trackName)
+      const stemProvider = phoneticTrackStem(pt.trackName)
       if (stemLocal && stemProvider && (stemProvider.includes(stemLocal) || stemLocal.includes(stemProvider))) {
         bestMatch = pt
         bestScore = 0.75
@@ -1464,7 +1483,7 @@ export function matchTrackArtistFromProviderList(
           confidence: 0.7,
         }
       }
-      const sProv = sanitizeForMatch(byNum.trackName)
+      const sProv = sanitizeTrackTitleForMatch(byNum.trackName)
       if (sLocal && sProv) {
         const hasTrigramOverlap = () => {
           if (sLocal.length < 3 || sProv.length < 3) return false
@@ -1544,8 +1563,8 @@ export function detectSequenceOffset(
     const lNum = local.trackNumber ?? 0
     if (lNum <= 0) continue
 
-    const sLocal = sanitizeForMatch(local.title)
-    const stemLocal = phoneticStem(local.title)
+    const sLocal = sanitizeTrackTitleForMatch(local.title)
+    const stemLocal = phoneticTrackStem(local.title)
 
     for (const prov of providerTracks) {
       const pNum = prov.trackNumber
@@ -1554,8 +1573,8 @@ export function detectSequenceOffset(
       const offset = lNum - pNum // e.g. 6 - 1 = 5
       let matchScore = 0
 
-      const sProv = sanitizeForMatch(prov.trackName)
-      const stemProv = phoneticStem(prov.trackName)
+      const sProv = sanitizeTrackTitleForMatch(prov.trackName)
+      const stemProv = phoneticTrackStem(prov.trackName)
 
       // Title exact or normalized match
       if (sLocal && sProv && (sLocal === sProv || sLocal.includes(sProv) || sProv.includes(sLocal))) {
