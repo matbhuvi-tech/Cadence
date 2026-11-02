@@ -280,6 +280,11 @@ DISCOGRAPHICAL RULES (STRICT):
      * < 0.60: Ambiguous or unverified.
 4. TITLE MATCHING:
    - Variations like "__ALBUM__ (Original Motion Picture Soundtrack)", "__ALBUM__ - EP", and "__ALBUM__ CD RIP" refer to the SAME canonical film soundtrack.
+5. PLAYBACK SINGERS vs COMPOSER (CRITICAL FOR FILM SOUNDTRACKS):
+   - Set "canonicalComposer" to the music director/composer (e.g., Ilaiyaraaja, A. R. Rahman, M. S. Viswanathan, R. D. Burman, Shankar-Ganesh).
+   - "primaryVocalists" MUST be extracted from the Wikipedia/discography Track Listing table corresponding to the authentic Playback Singers who actually sang the track (e.g., "K. S. Chithra", "K. J. Yesudas, K. S. Chithra", "S. P. Balasubrahmanyam, Malaysia Vasudevan").
+   - NEVER copy the composer into "primaryVocalists" unless the composer personally performed as a lead vocalist on that specific song (e.g., "Kanne Navamaniye" sung by Ilaiyaraaja). If the composer did NOT sing on that track, they must NOT appear in "primaryVocalists".
+   - If multiple singers performed, list all of them comma-separated in authentic discographical billing order.
 
 Return ONLY a valid JSON array of __TRACK_COUNT__ objects matching this exact structure:
 [

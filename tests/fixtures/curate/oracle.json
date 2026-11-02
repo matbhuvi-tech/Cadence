@@ -1,0 +1,148 @@
+{
+  "version": "1.0.0",
+  "description": "Authoritative Ground Truth Test Oracle for Cadence Curate Multimodal QA Agent",
+  "albums": {
+    "en-bommukutti-amavuku": {
+      "album_id": "en-bommukutti-amavuku",
+      "album_type": "soundtrack",
+      "canonical_title": "En Bommukutti Amavuku",
+      "canonical_artist": "Ilaiyaraaja",
+      "canonical_composer": "Ilaiyaraaja",
+      "release_year": 1988,
+      "reissue_year": 2021,
+      "genre": "Tamil Film Soundtrack",
+      "expected_track_count": 6,
+      "tracks": [
+        {
+          "track_number": 1,
+          "title": "Chitra Chittugal",
+          "artists": ["K. S. Chithra"],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 272,
+          "expected_file_pattern": ".*(chitra|chittugal).*"
+        },
+        {
+          "track_number": 2,
+          "title": "Uyire Uyirin",
+          "artists": ["K. J. Yesudas", "K. S. Chithra"],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 290,
+          "expected_file_pattern": ".*(uyire|uyirin).*"
+        },
+        {
+          "track_number": 3,
+          "title": "Kuyile Kuyile",
+          "artists": ["K. J. Yesudas", "K. S. Chithra"],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 284,
+          "expected_file_pattern": ".*(kuyile|kuyile).*"
+        },
+        {
+          "track_number": 4,
+          "title": "En Patharamathu",
+          "artists": ["S. P. Balasubrahmanyam", "Malaysia Vasudevan"],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 278,
+          "expected_file_pattern": ".*(en\\s*patharamathu|patharamathu).*"
+        },
+        {
+          "track_number": 5,
+          "title": "Kanne Navamaniye",
+          "artists": ["Ilaiyaraaja"],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 285,
+          "expected_file_pattern": ".*(kanne|navamaniye).*"
+        },
+        {
+          "track_number": 6,
+          "title": "Bommu Kutti",
+          "artists": ["K. J. Yesudas"],
+          "composer": "Ilaiyaraaja",
+          "duration_seconds": 295,
+          "expected_file_pattern": ".*(bommu|kutti).*"
+        }
+      ]
+    },
+    "signature-collection-2": {
+      "album_id": "signature-collection-2",
+      "album_type": "compilation",
+      "canonical_title": "Signature Collection 2",
+      "canonical_artist": "A. R. Rahman",
+      "canonical_composer": "A. R. Rahman",
+      "release_year": 2014,
+      "genre": "Hindi Film Soundtrack",
+      "expected_track_count": 45,
+      "tracks": [
+        {
+          "track_number": 1,
+          "title": "Patakha Guddi",
+          "artists": ["Nooran Sisters", "A. R. Rahman"],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 284,
+          "expected_file_pattern": ".*(patakha|guddi).*"
+        },
+        {
+          "track_number": 2,
+          "title": "Maahi Ve",
+          "artists": ["A. R. Rahman"],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 240,
+          "expected_file_pattern": ".*(maahi|ve).*"
+        }
+      ]
+    },
+    "ranga-cd-rip": {
+      "album_id": "ranga-cd-rip",
+      "album_type": "soundtrack",
+      "canonical_title": "Ranga",
+      "canonical_artist": "Shankar-Ganesh",
+      "canonical_composer": "Shankar-Ganesh",
+      "release_year": 1982,
+      "genre": "Tamil Film Soundtrack",
+      "expected_track_count": 5,
+      "sequence_offset": 5,
+      "tracks": [
+        {
+          "track_number": 1,
+          "title": "Pattu Poove",
+          "artists": ["S. P. Balasubrahmanyam", "Vani Jairam"],
+          "composer": "Shankar-Ganesh",
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(pattu|poove).*"
+        },
+        {
+          "track_number": 2,
+          "title": "Toothpaste",
+          "artists": ["Malaysia Vasudevan", "S. P. Sailaja"],
+          "composer": "Shankar-Ganesh",
+          "duration_seconds": 265,
+          "expected_file_pattern": ".*(toothpaste).*"
+        },
+        {
+          "track_number": 3,
+          "title": "Anbaana",
+          "artists": ["S. P. Balasubrahmanyam"],
+          "composer": "Shankar-Ganesh",
+          "duration_seconds": 255,
+          "expected_file_pattern": ".*(anbaana).*"
+        },
+        {
+          "track_number": 4,
+          "title": "Kadhala",
+          "artists": ["S. P. Balasubrahmanyam", "P. Susheela"],
+          "composer": "Shankar-Ganesh",
+          "duration_seconds": 280,
+          "expected_file_pattern": ".*(kadhala).*"
+        },
+        {
+          "track_number": 5,
+          "title": "Puriyadha",
+          "artists": ["S. P. Balasubrahmanyam"],
+          "composer": "Shankar-Ganesh",
+          "duration_seconds": 245,
+          "expected_file_pattern": ".*(puriyadha).*"
+        }
+      ]
+    }
+  }
+}

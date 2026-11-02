@@ -908,7 +908,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }
 
         const result: any = await resolveGemini('compilation', payload, controller.signal)
-        const rawTracks = Array.isArray(result) ? result : (Array.isArray(result?.tracks) ? result.tracks : [])
+        const rawTracks = Array.isArray(result) ? result : (Array.isArray(result?.tracks) ? result.tracks : (Array.isArray(result?.results) ? result.results : []))
         if (rawTracks.length > 0) {
           const provenanceResult: CompilationProvenanceResult = {
             albumTitle: albumTitleStr,
