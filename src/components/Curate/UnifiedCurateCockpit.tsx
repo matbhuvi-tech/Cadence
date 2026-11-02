@@ -1174,12 +1174,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     const selectedVal = fieldState.selected
 
     return (
-      <tr key={fieldKey} className="hover:bg-white/[0.015] transition-colors">
+      <tr key={fieldKey} data-testid={`master-row-${fieldKey}`} className="hover:bg-white/[0.015] transition-colors">
         <td className="py-2.5 px-4 font-medium text-white/70">{label}</td>
 
         {/* Local */}
         <td
           onClick={() => handleSelectFieldSource(fieldKey, 'local')}
+          data-testid={`master-cell-${fieldKey}-local`}
           className={`py-2.5 px-4 cursor-pointer transition-colors ${
             fieldState.source === 'local_fallback' ? 'bg-white/[0.04] text-white font-medium' : 'text-white/60 hover:text-white'
           }`}
@@ -1190,6 +1191,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         {/* Apple */}
         <td
           onClick={() => handleSelectFieldSource(fieldKey, 'apple')}
+          data-testid={`master-cell-${fieldKey}-apple`}
           className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-[#D4AF37] transition-colors"
         >
           {String(fieldState.apple ?? '—')}
@@ -1198,6 +1200,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         {/* MusicBrainz */}
         <td
           onClick={() => handleSelectFieldSource(fieldKey, 'musicbrainz')}
+          data-testid={`master-cell-${fieldKey}-musicbrainz`}
           className="py-2.5 px-4 cursor-pointer text-white/60 hover:text-white transition-colors"
         >
           {String(fieldState.musicbrainz ?? '—')}
@@ -1206,13 +1209,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         {/* Gemini AI */}
         <td
           onClick={() => handleSelectFieldSource(fieldKey, 'ai')}
+          data-testid={`master-cell-${fieldKey}-ai`}
           className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-cyan-300 transition-colors"
         >
           {String(fieldState.ai ?? '—')}
         </td>
 
         {/* Selected Output */}
-        <td className="py-2.5 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+        <td data-testid={`master-cell-${fieldKey}-selected`} className="py-2.5 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
           {isEditing ? (
             <div className="flex items-center gap-2">
               <input
@@ -1270,7 +1274,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     const isEditing = editingFieldKey === 'coverArt'
 
     return (
-      <tr className="hover:bg-white/[0.015] transition-colors">
+      <tr data-testid="master-row-coverArt" className="hover:bg-white/[0.015] transition-colors">
         <td className="py-3 px-4 font-medium text-white/70">Cover Artwork</td>
 
         {/* Local */}
@@ -1297,6 +1301,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               handleSelectFieldSource('coverArt', 'local');
             }
           }}
+          data-testid="master-cell-coverArt-local"
           className="py-3 px-4 cursor-pointer group"
         >
           {fieldState.local || (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : null) ? (
@@ -1316,7 +1321,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         </td>
 
         {/* Apple */}
-        <td onClick={() => handleSelectFieldSource('coverArt', 'apple')} className="py-3 px-4 cursor-pointer">
+        <td data-testid="master-cell-coverArt-apple" onClick={() => handleSelectFieldSource('coverArt', 'apple')} className="py-3 px-4 cursor-pointer">
           {fieldState.apple ? (
             <div className="p-0.5 rounded-lg w-fit">
               <img src={fieldState.apple} alt="Apple Art" className="w-12 h-12 rounded object-cover shadow" />
@@ -1328,7 +1333,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         </td>
 
         {/* MusicBrainz */}
-        <td onClick={() => handleSelectFieldSource('coverArt', 'musicbrainz')} className="py-3 px-4 cursor-pointer">
+        <td data-testid="master-cell-coverArt-musicbrainz" onClick={() => handleSelectFieldSource('coverArt', 'musicbrainz')} className="py-3 px-4 cursor-pointer">
           {fieldState.musicbrainz ? (
             <div className="p-0.5 rounded-lg w-fit">
               <img src={fieldState.musicbrainz} alt="MB Art" className="w-12 h-12 rounded object-cover shadow opacity-70" />
@@ -1340,7 +1345,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         </td>
 
         {/* Gemini AI */}
-        <td onClick={() => handleSelectFieldSource('coverArt', 'ai')} className="py-3 px-4 cursor-pointer">
+        <td data-testid="master-cell-coverArt-ai" onClick={() => handleSelectFieldSource('coverArt', 'ai')} className="py-3 px-4 cursor-pointer">
           {fieldState.ai ? (
             <div className="p-0.5 rounded-lg w-fit">
               <img src={fieldState.ai} alt="AI Art" className="w-12 h-12 rounded object-cover shadow" />
@@ -1352,7 +1357,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         </td>
 
         {/* Selected Artwork */}
-        <td className="py-3 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+        <td data-testid="master-cell-coverArt-selected" className="py-3 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
           {isEditing ? (
             <div className="flex flex-col gap-2">
               <input
@@ -1639,6 +1644,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Stage Button (keeps in queue, preserves all changes) */}
                 <button
                   onClick={handleStage}
+                  data-testid="btn-stage-next"
                   className="px-3.5 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium text-xs border border-white/20 transition-all cursor-pointer flex items-center gap-1.5"
                   title="Save changes and keep in queue for later review"
                 >
@@ -1649,6 +1655,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Commit Button (saves permanently and removes from queue) */}
                 <button
                   onClick={handleCommitAlbum}
+                  data-testid="btn-commit-album"
                   className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-md flex items-center gap-1.5"
                   title="Commit permanently to library and remove from queue"
                 >
@@ -1676,6 +1683,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     value={steerAlbum}
                     onChange={(e) => setSteerAlbum(e.target.value)}
                     placeholder="Album Title"
+                    data-testid="input-steer-album"
                     className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-white text-xs focus:outline-none focus:border-[#D4AF37]/60"
                   />
                   <span className="absolute right-2 top-2 text-[9px] font-mono text-white/40 pointer-events-none uppercase">Album</span>
@@ -1722,6 +1730,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Fetch & Anchor Button */}
                 <button
                   type="submit"
+                  data-testid="btn-fetch-anchor"
                   disabled={isSteeringLoading || (!steerAlbum.trim() && !steerGroundingUrl.trim())}
                   className="px-4 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-black font-semibold text-xs flex items-center gap-1.5 cursor-pointer shadow-md shadow-cyan-500/20 disabled:opacity-50 transition-all shrink-0"
                 >
@@ -1954,6 +1963,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
                           {/* Local Track Cell */}
                           <td
+                            data-testid={`track-cell-${idx}-local`}
                             onClick={() => handleSelectTrackArtist(trk.trackId, trk.localArtists, 'local_fallback')}
                             className="py-3 px-3 cursor-pointer text-white/60 hover:text-white transition-colors"
                           >
@@ -1982,6 +1992,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
                           {/* Apple Music Cell */}
                           <td
+                            data-testid={`track-cell-${idx}-apple`}
                             onClick={() => {
                               if (selectedAlbum.albumArtist.apple) {
                                 handleSelectTrackArtist(trk.trackId, selectedAlbum.albumArtist.apple, 'single_provider_match')
@@ -1997,6 +2008,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
                           {/* MusicBrainz Cell */}
                           <td
+                            data-testid={`track-cell-${idx}-musicbrainz`}
                             onClick={() => {
                               if (selectedAlbum.albumArtist.musicbrainz) {
                                 handleSelectTrackArtist(trk.trackId, selectedAlbum.albumArtist.musicbrainz, 'single_provider_match')
@@ -2012,6 +2024,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
                           {/* Gemini AI Cell */}
                           <td
+                            data-testid={`track-cell-${idx}-ai`}
                             onClick={() => {
                               const candArtist = trk.aiArtists || trk.matchedArtists;
                               if (candArtist) {
@@ -2029,7 +2042,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           </td>
 
                           {/* Selected Output Cell */}
-                          <td className="py-3 px-3 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+                          <td data-testid={`track-cell-${idx}-selected`} className="py-3 px-3 bg-emerald-500/[0.03] border-l border-white/[0.06]">
                             {isEditing ? (
                               <div className="flex flex-col gap-1.5">
                                 <input
