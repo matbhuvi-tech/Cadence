@@ -58,6 +58,7 @@ import {
 import { graphEngine } from '../../core/graphEngine'
 import { curationQueueService, AlbumCurationQueueItem } from '../../services/curationQueueService'
 import { federatedResolversService } from '../../services/federatedResolvers'
+import { compilationCanonicalizerService } from '../../services/compilationCanonicalizerService'
 import { behavioralLearningService } from '../../services/behavioralLearningService'
 import { tauriBridge } from '../../services/tauriBridge'
 import {
@@ -127,6 +128,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [learnedRules, setLearnedRules] = useState<LearnedRule[]>(() => behavioralLearningService.getLearnedRules())
   const [conventions, setConventions] = useState<SemanticConventions>(() => behavioralLearningService.getConventions())
   const [dismissedPrompts, setDismissedPrompts] = useState<Set<string>>(new Set())
+
+  // Steer Providers & AI Grounding State
+  const [isReQueryOpen, setIsReQueryOpen] = useState(true)
+  const [steerAlbum, setSteerAlbum] = useState('')
+  const [steerArtist, setSteerArtist] = useState('')
+  const [steerYear, setSteerYear] = useState('')
+  const [steerGroundingUrl, setSteerGroundingUrl] = useState('')
+  const [isSteeringLoading, setIsSteeringLoading] = useState(false)
 
   // Inline editing state
   const [editingFieldKey, setEditingFieldKey] = useState<string | null>(null)
@@ -282,6 +291,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     if (!selectedAlbumId) return null
     return albumItems.get(selectedAlbumId) || null
   }, [albumItems, selectedAlbumId])
+
+  // Sync steering parameters when active album changes
+  useEffect(() => {
+    if (selectedAlbum) {
+      setSteerAlbum(selectedAlbum.albumTitle.selected || selectedAlbum.currentTitle || '')
+      setSteerArtist(selectedAlbum.composer.selected || selectedAlbum.albumArtist.selected || '')
+      setSteerYear(selectedAlbum.year.selected ? String(selectedAlbum.year.selected) : '')
+      setSteerGroundingUrl('')
+    }
+  }, [selectedAlbumId])
 
   // Count by tier
   const tier1Items = useMemo(() => {
@@ -530,6 +549,99 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       return next
     })
     showToast(`Adopted ${source.toUpperCase()} for all tracks`)
+  }
+
+  // Steer Providers & Ground AI handler
+  const handleFetchAndAnchor = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    if (!selectedAlbum || !selectedAlbum.rawRelease) return
+
+    setIsSteeringLoading(true)
+    showToast(`Searching providers for "${steerAlbum || selectedAlbum.currentTitle}"...`)
+
+    try {
+      let aiMasterResult: any = undefined
+
+      // 1. If user supplied a grounding URL or custom search, call compilationCanonicalizerService
+      if (steerGroundingUrl.trim() || steerAlbum.trim()) {
+        try {
+          const canonicalRes = await compilationCanonicalizerService.resolveCompilationSoundtracks(
+            selectedAlbum.rawRelease,
+            selectedAlbum.rawTracks,
+            releases,
+            {
+              referenceUrl: steerGroundingUrl.trim() || undefined,
+              userSearchQuery: steerAlbum.trim() || undefined,
+            }
+          )
+
+          if (canonicalRes && canonicalRes.success && canonicalRes.tracks && canonicalRes.tracks.length > 0) {
+            const firstProp = canonicalRes.tracks[0]
+            aiMasterResult = {
+              releaseTitle: firstProp?.proposedOriginalAlbum || steerAlbum.trim(),
+              artistCredit: firstProp?.proposedComposer || steerArtist.trim(),
+              composer: firstProp?.proposedComposer || steerArtist.trim(),
+              releaseYear: firstProp?.proposedYear || (Number(steerYear) || undefined),
+              genre: 'Tamil Film Soundtrack',
+              tracks: canonicalRes.tracks.map((pt, idx) => ({
+                trackNumber: idx + 1,
+                trackName: pt.proposedTitle || pt.localTitle,
+                artistName: pt.proposedSingers || pt.proposedArtist,
+              })),
+            }
+          }
+        } catch (aiErr) {
+          console.warn('[UnifiedCurateCockpit] AI Grounding note:', aiErr)
+        }
+      }
+
+      // 2. Build steered release for federated provider resolution
+      const steeredRelease: Release = {
+        ...selectedAlbum.rawRelease,
+        title: steerAlbum.trim() || selectedAlbum.rawRelease.title,
+        artistCredit: steerArtist.trim() || selectedAlbum.rawRelease.artistCredit,
+        composerName: steerArtist.trim() || selectedAlbum.rawRelease.composerName,
+        releaseYear: Number(steerYear) || selectedAlbum.rawRelease.releaseYear,
+      }
+
+      const consensus = await federatedResolversService.resolve2of3ReleaseConsensus(
+        steeredRelease,
+        selectedAlbum.rawTracks,
+        false,
+        aiMasterResult
+      )
+
+      // 3. Update album state with fresh candidates and grounded results
+      setAlbumItems((prev) => {
+        const next = new Map(prev)
+        const current = next.get(selectedAlbum.id)
+        if (!current) return prev
+
+        const updated: AlbumWorkItem = {
+          ...current,
+          confidenceScore: consensus.confidenceScore || current.confidenceScore,
+          offsetApplied: consensus.sequenceOffsetResult?.isConfidentOffset
+            ? consensus.sequenceOffsetResult.detectedOffset
+            : current.offsetApplied,
+          albumTitle: consensus.albumFieldStates?.albumTitle || current.albumTitle,
+          albumArtist: consensus.albumFieldStates?.albumArtist || current.albumArtist,
+          composer: consensus.albumFieldStates?.composer || current.composer,
+          year: consensus.albumFieldStates?.releaseYear || current.year,
+          genre: consensus.albumFieldStates?.genre || current.genre,
+          tracks: consensus.trackStates && consensus.trackStates.length > 0 ? consensus.trackStates : current.tracks,
+        }
+
+        next.set(selectedAlbum.id, updated)
+        return next
+      })
+
+      showToast(`✓ Grounded providers with "${steerAlbum || steerGroundingUrl}"!`)
+    } catch (err) {
+      console.error('[UnifiedCurateCockpit] Fetch & Anchor error:', err)
+      showToast('⚠️ Failed to re-query providers. Check search inputs.')
+    } finally {
+      setIsSteeringLoading(false)
+    }
   }
 
   // Stage Album: saves state, keeps in queue with 'staged' badge, and advances
@@ -1096,6 +1208,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               </div>
 
               <div className="flex items-center gap-2.5">
+                {/* Re-Query / Paste Store Link Button */}
+                <button
+                  onClick={() => setIsReQueryOpen(!isReQueryOpen)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                    isReQueryOpen
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 shadow-sm'
+                      : 'bg-white/[0.06] hover:bg-white/[0.1] text-white/80 border-white/10'
+                  }`}
+                  title="Toggle Steer Providers and AI Grounding bar"
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  <span>{isReQueryOpen ? 'Hide Query' : 'Re-Query / Paste Store Link'}</span>
+                </button>
+
                 {/* Stage Button (keeps in queue, preserves all changes) */}
                 <button
                   onClick={handleStage}
@@ -1117,6 +1243,83 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 </button>
               </div>
             </div>
+
+            {/* Steer Providers & AI Grounding Bar */}
+            {isReQueryOpen && (
+              <form
+                onSubmit={handleFetchAndAnchor}
+                className="p-3 rounded-xl bg-black/60 border border-cyan-500/30 flex flex-wrap items-center gap-2.5 shadow-xl transition-all"
+              >
+                <div className="flex items-center gap-1.5 text-cyan-400 font-medium text-xs shrink-0">
+                  <Search className="w-3.5 h-3.5" />
+                  <span>Steer Providers:</span>
+                </div>
+
+                {/* Album Input */}
+                <div className="relative w-40">
+                  <input
+                    type="text"
+                    value={steerAlbum}
+                    onChange={(e) => setSteerAlbum(e.target.value)}
+                    placeholder="Album Title"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-white text-xs focus:outline-none focus:border-[#D4AF37]/60"
+                  />
+                  <span className="absolute right-2 top-2 text-[9px] font-mono text-white/40 pointer-events-none uppercase">Album</span>
+                </div>
+
+                {/* Artist / Composer Input */}
+                <div className="relative w-40">
+                  <input
+                    type="text"
+                    value={steerArtist}
+                    onChange={(e) => setSteerArtist(e.target.value)}
+                    placeholder="Artist / Composer"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-white text-xs focus:outline-none focus:border-[#D4AF37]/60"
+                  />
+                  <span className="absolute right-2 top-2 text-[9px] font-mono text-white/40 pointer-events-none uppercase">Artist</span>
+                </div>
+
+                {/* Year Input */}
+                <div className="relative w-24">
+                  <input
+                    type="text"
+                    value={steerYear}
+                    onChange={(e) => setSteerYear(e.target.value)}
+                    placeholder="Year"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-white text-xs focus:outline-none focus:border-[#D4AF37]/60"
+                  />
+                  <span className="absolute right-2 top-2 text-[9px] font-mono text-white/40 pointer-events-none uppercase">Year</span>
+                </div>
+
+                <span className="text-xs text-white/40 font-medium">or</span>
+
+                {/* Grounding URL Input */}
+                <div className="relative flex-1 min-w-[260px]">
+                  <input
+                    type="url"
+                    value={steerGroundingUrl}
+                    onChange={(e) => setSteerGroundingUrl(e.target.value)}
+                    placeholder="Paste Apple Music / Discogs / MusicBrainz URL for AI Grounding..."
+                    className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-white placeholder:text-white/40 text-xs focus:outline-none focus:border-cyan-400/60"
+                  />
+                  <Link2 className="w-3.5 h-3.5 text-cyan-400 absolute left-2.5 top-2.5 pointer-events-none" />
+                </div>
+
+                {/* Fetch & Anchor Button */}
+                <button
+                  type="submit"
+                  disabled={isSteeringLoading || (!steerAlbum.trim() && !steerGroundingUrl.trim())}
+                  className="px-4 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-black font-semibold text-xs flex items-center gap-1.5 cursor-pointer shadow-md shadow-cyan-500/20 disabled:opacity-50 transition-all shrink-0"
+                >
+                  {isSteeringLoading ? (
+                    <RotateCcw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5" />
+                  )}
+                  <span>Fetch & Anchor</span>
+                </button>
+              </form>
+            )}
 
             {/* Interactive Learned Rule Confirmation Banners */}
             {selectedAlbum.composer.selected &&
