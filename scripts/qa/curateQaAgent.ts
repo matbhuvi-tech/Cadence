@@ -295,16 +295,41 @@ export class CurateMultimodalQaAgent {
   }
 
   private async extractSidebarAlbums(): Promise<Array<{ id: string; title: string; tracks: number }>> {
-    return await this.cdp.evaluate(`
+    let albums = await this.cdp.evaluate(`
       (() => {
-        const items = document.querySelectorAll('div[data-testid^="curate-album-"], button[class*="group flex flex-col"]');
+        const items = document.querySelectorAll('div[data-testid="curate-album-item"], div.cursor-pointer:has(h3)');
         return Array.from(items).map(item => ({
           id: item.getAttribute('data-album-id') || item.textContent.trim().split('\\n')[0],
-          title: item.querySelector('span[class*="font-semibold"], div[class*="font-medium"]')?.textContent?.trim() || item.textContent.trim().split('\\n')[0],
+          title: item.querySelector('h3, span[class*="font-semibold"], div[class*="font-medium"]')?.textContent?.trim() || item.textContent.trim().split('\\n')[0],
           tracks: parseInt(item.textContent?.match(/(\\d+)\\s*tracks/i)?.[1] || '0', 10)
-        }));
+        })).filter(a => a.title && !a.title.includes('Tier ') && !a.title.includes('No albums'));
       })()
     `);
+
+    // If 0 albums found in active tier view, switch to Tier 2: Guided Reconciliation
+    if (albums.length === 0) {
+      console.log('🔄 Current tier tab has 0 albums. Switching to Tier 2 Guided Reconciliation tab...');
+      await this.cdp.evaluate(`
+        (() => {
+          const tier2Btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Tier 2'));
+          if (tier2Btn) tier2Btn.click();
+        })()
+      `);
+      await new Promise((r) => setTimeout(r, 1200));
+
+      albums = await this.cdp.evaluate(`
+        (() => {
+          const items = document.querySelectorAll('div[data-testid="curate-album-item"], div.cursor-pointer:has(h3)');
+          return Array.from(items).map(item => ({
+            id: item.getAttribute('data-album-id') || item.textContent.trim().split('\\n')[0],
+            title: item.querySelector('h3, span[class*="font-semibold"], div[class*="font-medium"]')?.textContent?.trim() || item.textContent.trim().split('\\n')[0],
+            tracks: parseInt(item.textContent?.match(/(\\d+)\\s*tracks/i)?.[1] || '0', 10)
+          })).filter(a => a.title && !a.title.includes('Tier ') && !a.title.includes('No albums'));
+        })()
+      `);
+    }
+
+    return albums;
   }
 
   private async curateAlbumJourney(albumId: string, initialTitle: string) {

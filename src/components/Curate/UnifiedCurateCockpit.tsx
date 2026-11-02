@@ -1527,6 +1527,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             {(activeTier === 'tier1' ? tier1Items : tier2Items).map((alb) => (
               <div
                 key={alb.id}
+                data-testid="curate-album-item"
+                data-album-id={alb.id}
                 onClick={() => setSelectedAlbumId(alb.id)}
                 className={`p-3.5 transition-colors cursor-pointer flex gap-3 ${
                   selectedAlbum?.id === alb.id
