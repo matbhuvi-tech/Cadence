@@ -1199,7 +1199,7 @@ function localLibraryScannerPlugin(): Plugin {
 
         const cleanTerm = (s: string) =>
           s
-            .replace(/\.[^/.]+$/, '')
+            .replace(/\.(mp3|flac|wav|m4a|aac|alac|dsf|dff|ogg|aiff?|wma)$/i, '')
             .replace(/^\d+[\s._-]+/, '')
             .replace(/\(.*?\)/g, ' ')
             .replace(/\[.*?\]/g, ' ')
@@ -1257,12 +1257,34 @@ function localLibraryScannerPlugin(): Plugin {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
                   const norm = cleanAlbum.toLowerCase()
+                  const isRegional = (n: string) => /\[(?:tamil|telugu|kannada|malayalam)\s+version\]|\((?:tamil|telugu|kannada|malayalam)\s+version\)/i.test(n)
+                  const phoneticStem = (str: string) =>
+                    str
+                      .toLowerCase()
+                      .replace(/y/g, 'i')
+                      .replace(/w/g, 'v')
+                      .replace(/[uae]/g, 'o')
+                      .replace(/([a-z])\1+/g, '$1')
+                      .replace(/[^a-z0-9]+/g, '')
+                  const albumMatches = (candName: string, targetAlbum: string) => {
+                    if (!candName || !targetAlbum) return false
+                    const c = candName.toLowerCase()
+                    const t = targetAlbum.toLowerCase()
+                    if (c.includes(t) || t.includes(c)) return true
+                    const stemC = phoneticStem(c)
+                    const stemT = phoneticStem(t)
+                    return Boolean(stemC && stemT && (stemC.includes(stemT) || stemT.includes(stemC)))
+                  }
                   const matched =
                     data.results.find((r: any) => {
                       const name = (r.collectionName || '').toLowerCase()
-                      return name.includes(norm) && !/-\s*single\b/i.test(name)
+                      return albumMatches(name, cleanAlbum) && !/-\s*single\b/i.test(name) && !isRegional(name)
                     }) ||
-                    data.results.find((r: any) => (r.collectionName || '').toLowerCase().includes(norm))
+                    data.results.find((r: any) => {
+                      const name = (r.collectionName || '').toLowerCase()
+                      return albumMatches(name, cleanAlbum) && !/-\s*single\b/i.test(name)
+                    }) ||
+                    data.results.find((r: any) => albumMatches((r.collectionName || '').toLowerCase(), cleanAlbum))
                   if (matched) {
                     foundItem = {
                       artistName: matched.artistName,
@@ -1569,7 +1591,7 @@ function localLibraryScannerPlugin(): Plugin {
 
         const cleanTerm = (s: string) =>
           s
-            .replace(/\.[^/.]+$/, '')
+            .replace(/\.(mp3|flac|wav|m4a|aac|alac|dsf|dff|ogg|aiff?|wma)$/i, '')
             .replace(/^\d+[\s._-]+/, '')
             .replace(/\(.*?\)/g, ' ')
             .replace(/\[.*?\]/g, ' ')
@@ -1586,15 +1608,54 @@ function localLibraryScannerPlugin(): Plugin {
           cleanArtist = ''
         }
 
+        // Canonical alias expansion for authoritative composers/artists (e.g., Illayaraja -> Ilaiyaraaja)
+        if (/^ill?ayara[aj]+a?h?$/i.test(cleanArtist)) {
+          cleanArtist = 'Ilaiyaraaja'
+        }
+        if (/^ill?ayara[aj]+a?h?$/i.test(cleanComposer)) {
+          cleanComposer = 'Ilaiyaraaja'
+        }
+
+        const phoneticStem = (str: string) =>
+          str
+            .toLowerCase()
+            .replace(/y/g, 'i')
+            .replace(/w/g, 'v')
+            .replace(/[uae]/g, 'o')
+            .replace(/([a-z])\1+/g, '$1')
+            .replace(/[^a-z0-9]+/g, '')
+
+        const albumMatches = (candName: string, targetAlbum: string) => {
+          if (!candName || !targetAlbum) return false
+          const c = candName.toLowerCase()
+          const t = targetAlbum.toLowerCase()
+          if (c.includes(t) || t.includes(c)) return true
+          const stemC = phoneticStem(c)
+          const stemT = phoneticStem(t)
+          return Boolean(stemC && stemT && (stemC.includes(stemT) || stemT.includes(stemC)))
+        }
+
         try {
           // --- Tier 1: Release-First Lookup (Gets authentic album tracklist & Cover Art Archive) ---
           if (cleanAlbum && !/^(music|audio|songs|flac|wav|mp3|master|local)$/i.test(cleanAlbum)) {
-            const releaseQueries = [
-              cleanComposer ? `release:"${cleanAlbum}" AND (artist:"${cleanComposer}" OR creditname:"${cleanComposer}")` : null,
-              cleanArtist ? `release:"${cleanAlbum}" AND artist:"${cleanArtist}"` : null,
-              cleanArtist ? `release:"${cleanAlbum}" AND (artist:"${cleanArtist}" OR creditname:"${cleanArtist}")` : null,
-              `release:"${cleanAlbum}"`,
-            ].filter(Boolean) as string[]
+            const targetArtist = cleanComposer || cleanArtist
+            const artistClause = targetArtist
+              ? ` AND (artist:"${targetArtist}" OR creditname:"${targetArtist}" OR artist:${targetArtist.split(/\s+/)[0]})`
+              : ''
+            const fuzzyWords = cleanAlbum
+              .split(/\s+/)
+              .map((w) => (w.length >= 4 ? `${w}~1` : w))
+              .join(' ')
+
+            const releaseQueries: string[] = []
+            if (targetArtist) {
+              releaseQueries.push(`release:"${cleanAlbum}"${artistClause}`)
+              releaseQueries.push(`release:(${fuzzyWords})${artistClause}`)
+              releaseQueries.push(`release:(${cleanAlbum})${artistClause}`)
+            }
+            releaseQueries.push(`release:"${cleanAlbum}"`)
+            releaseQueries.push(`release:(${fuzzyWords})`)
+            releaseQueries.push(`release:(${cleanAlbum})`)
 
             for (const rq of releaseQueries) {
               try {
@@ -1602,11 +1663,13 @@ function localLibraryScannerPlugin(): Plugin {
                 const mbRelRes = await mbFetch(mbReleaseUrl)
                 if (mbRelRes.ok) {
                   const relData = (await mbRelRes.json()) as any
-                  const topRelWithArt = relData.releases?.find((r: any) => r['cover-art-archive']?.front === true)
+                  const matchingReleases = (relData.releases || []).filter((r: any) => albumMatches(r.title, cleanAlbum))
+                  const topRelWithArt = matchingReleases.find((r: any) => r['cover-art-archive']?.front === true)
                   const topRel =
                     topRelWithArt ||
-                    relData.releases?.find((r: any) => r.score >= 80) ||
-                    (relData.releases?.[0]?.score >= 70 ? relData.releases[0] : null)
+                    matchingReleases.find((r: any) => r.score >= 80) ||
+                    matchingReleases[0] ||
+                    null
 
                   if (topRel && topRel.id) {
                     // Fetch full release details with medium tracklist and labels

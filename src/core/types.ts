@@ -608,6 +608,10 @@ export interface TrackCandidateState {
   source: ConsensusFieldSource
   userOverridden?: boolean
   requiresHumanReview?: boolean
+  appleTitle?: string
+  appleArtists?: string
+  mbTitle?: string
+  mbArtists?: string
   aiTitle?: string
   aiArtists?: string
   filePath?: string;

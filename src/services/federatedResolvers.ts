@@ -29,6 +29,7 @@ import {
   normalizeCanonicalAlbumTitle,
   detectSequenceOffset,
   applyConsensusEmptyStateRule,
+  detectLanguage,
 } from '../core/taxonomyUtils'
 import { normalizationService } from './normalizationService'
 import { behavioralLearningService } from './behavioralLearningService'
@@ -1464,7 +1465,7 @@ export class FederatedResolversService {
       this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch),
     ])
 
-    const itunesVerified = this.isProviderCandidateAcceptable(signature, rawItunes, localRelease.releaseYear)
+    const itunesVerified = directAppleCandidate ? true : this.isProviderCandidateAcceptable(signature, rawItunes, localRelease.releaseYear)
     const mbVerified = this.isProviderCandidateAcceptable(signature, rawMb, localRelease.releaseYear)
 
     // Quality check guard: discard online store candidates that fail sanity check against search target
@@ -1485,7 +1486,8 @@ export class FederatedResolversService {
     const earliestYear = calculateEarliestValidYear(
       localRelease.releaseYear,
       itunes?.releaseYear,
-      mb?.releaseYear
+      mb?.releaseYear,
+      aiMaster?.releaseYear
     )
 
     // Field arbitration with Consensus Empty-State Invariant
@@ -1617,7 +1619,54 @@ export class FederatedResolversService {
     const titleArbitration = arbitrateFieldWithEmptyState(sanitizedTitle || rawTitle, itunes?.releaseTitle, mb?.releaseTitle, aiMaster?.releaseTitle, 'artist')
     const artistArbitration = arbitrateFieldWithEmptyState(learnedLocalArtist, learnedItunesArtist, learnedMbArtist, learnedAiArtist, 'artist')
     const composerArbitration = arbitrateFieldWithEmptyState(localComposer, itunes?.composer, mb?.composer, aiMaster?.composer, 'composer')
-    const genreArbitration = arbitrateFieldWithEmptyState(localRelease.genreTags?.[0] || '', itunes?.genre, mb?.genre, aiMaster?.genre, 'genre')
+    const resolvedAlbumArtist = (artistArbitration.fieldResult.value || itunes?.artistCredit || mb?.artistCredit || localRelease.artistCredit || '').trim()
+
+    // Detect language and canonical soundtrack context
+    const detectedLang = detectLanguage({
+      title: sanitizedTitle || rawTitle,
+      artistCredit: resolvedAlbumArtist,
+      composerName: canonicalComp || rawComposer,
+      genreTags: localRelease.genreTags || (itunes?.genre ? [itunes.genre] : []),
+      filePath: localTracks[0]?.filePath,
+    }) || 'Tamil'
+
+    const isSoundtrackRelease = Boolean(
+      canonicalComp ||
+      rawComposer ||
+      localRelease.genreTags?.some(g => /soundtrack|film|score|ost/i.test(g)) ||
+      (itunes?.genre && /soundtrack/i.test(itunes.genre)) ||
+      (aiMaster?.genre && /soundtrack/i.test(aiMaster.genre)) ||
+      /\(original motion picture soundtrack\)|ost|- ep\b/i.test(rawTitle)
+    )
+
+    const defaultCanonicalGenre = isSoundtrackRelease ? `${detectedLang} Film Soundtrack` : undefined
+
+    let genreArbitration = arbitrateFieldWithEmptyState(
+      localRelease.genreTags?.[0] || '',
+      itunes?.genre,
+      mb?.genre,
+      aiMaster?.genre || defaultCanonicalGenre,
+      'genre'
+    )
+
+    // Canonical Fallback: If no provider consensus or local tag is empty, apply <Language> Film Soundtrack
+    if ((!genreArbitration.fieldState.selected || genreArbitration.fieldState.requiresHumanReview) && defaultCanonicalGenre) {
+      genreArbitration = {
+        fieldResult: {
+          value: defaultCanonicalGenre,
+          source: 'canonical_rule',
+          confidence: 0.90,
+          candidates: genreArbitration.fieldResult.candidates,
+        },
+        fieldState: {
+          ...genreArbitration.fieldState,
+          selected: defaultCanonicalGenre,
+          confidence: 0.90,
+          source: 'canonical_rule',
+          requiresHumanReview: false,
+        },
+      }
+    }
     const labelArbitration = arbitrateFieldWithEmptyState(localRelease.label || '', itunes?.label, mb?.label, '', 'artist')
 
     // Check combo releases
@@ -1642,7 +1691,7 @@ export class FederatedResolversService {
     const yearSource: ConsensusFieldSource =
       earliestYear !== undefined && (earliestYear === mb?.releaseYear || earliestYear === itunes?.releaseYear)
         ? 'earliest_year_rule'
-        : 'local_fallback'
+        : (earliestYear !== undefined && earliestYear === aiMaster?.releaseYear ? 'ai_synthesized' : 'local_fallback')
 
     const releaseYearResult: ConsensusFieldResult<number | undefined> = {
       value: earliestYear,
@@ -1693,7 +1742,88 @@ export class FederatedResolversService {
     }> = {}
 
     const trackStates: TrackCandidateState[] = []
-    const resolvedAlbumArtist = (artistArbitration.fieldResult.value || itunes?.artistCredit || mb?.artistCredit || localRelease.artistCredit || '').trim()
+
+    const stemPhonetic = (str: string) =>
+      str
+        .toLowerCase()
+        .replace(/y/g, 'i')
+        .replace(/w/g, 'v')
+        .replace(/[uae]/g, 'o')
+        .replace(/th/g, 't')
+        .replace(/dh/g, 'd')
+        .replace(/([a-z])\1+/g, '$1')
+        .replace(/[^a-z0-9]+/g, '')
+
+    const findCorroboratedTrack = <T extends { trackName: string; trackNumber?: number; artistName?: string }>(
+      localTitle: string,
+      tracks: T[],
+      expectedTrackNum?: number
+    ): T | undefined => {
+      if (!tracks || tracks.length === 0) return undefined
+      const normL = cleanConsensusTitle(localTitle).toLowerCase().trim()
+      if (!normL) return undefined
+
+      // 1. Exact match
+      const exact = tracks.find(t => cleanConsensusTitle(t.trackName).toLowerCase().trim() === normL)
+      if (exact) return exact
+
+      // 2. Substring match
+      const sub = tracks.find(t => {
+        const c = cleanConsensusTitle(t.trackName).toLowerCase().trim()
+        return c && (c.includes(normL) || normL.includes(c))
+      })
+      if (sub) return sub
+
+      // 3. Phonetic & Transliteration stem match
+      const stemL = stemPhonetic(localTitle)
+      if (stemL.length >= 4) {
+        const stemMatch = tracks.find(t => {
+          const stemT = stemPhonetic(t.trackName)
+          return stemT && (stemT.includes(stemL) || stemL.includes(stemT))
+        })
+        if (stemMatch) return stemMatch
+
+        const tokL = localTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, ' ')
+          .split(/\s+/)
+          .filter(w => w.length >= 3)
+        if (tokL.length > 0) {
+          const tokMatch = tracks.find(t => {
+            const tokT = t.trackName
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, ' ')
+              .split(/\s+/)
+              .filter(w => w.length >= 3)
+            let shared = 0
+            for (const wL of tokL) {
+              const sL = stemPhonetic(wL)
+              if (tokT.some(wT => wT === wL || (sL.length >= 3 && stemPhonetic(wT).startsWith(sL.slice(0, 3))))) {
+                shared++
+              }
+            }
+            return shared >= Math.max(1, Math.ceil(tokL.length * 0.5))
+          })
+          if (tokMatch) return tokMatch
+        }
+      }
+
+      // 4. Safe track number fallback ONLY if local is unnamed placeholder or shares phonetic root
+      if (expectedTrackNum && expectedTrackNum > 0) {
+        const byNum = tracks.find(t => (t.trackNumber || (t as any).position) === expectedTrackNum)
+        if (byNum) {
+          const isPlaceholder = isPlaceholderTag(localTitle) || /^(?:track|audio)?\s*\d+$/i.test(localTitle.trim())
+          if (isPlaceholder) return byNum
+          const stemT = stemPhonetic(byNum.trackName)
+          if (stemL.length >= 4 && stemT.length >= 4) {
+            const pL = stemL.slice(0, 4)
+            if (stemT.includes(pL)) return byNum
+          }
+        }
+      }
+
+      return undefined
+    }
 
     for (const lt of localTracks) {
       let matchedArtist: string | null = null
@@ -1710,47 +1840,38 @@ export class FederatedResolversService {
         ? lt.trackNumber - offsetResultMb.detectedOffset
         : lt.trackNumber
 
-      // 1. Check Apple Music tracklist with sequence offset awareness
-      if (itunesTracks.length > 0) {
-        const m = matchTrackArtistFromProviderList(lt.title, itunesTracks, effectiveAppleTrackNum, {
-          albumVerified: itunesVerified,
-        })
-        if (m) {
-          matchedArtist = m.artistName
-          matchedSource = 'single_provider_match'
-          matchedConfidence = Math.max(0.7, m.confidence)
-          matchedTitle = m.matchedTitle
-          providerTrackNum = effectiveAppleTrackNum
-        }
+      const appleTrack = findCorroboratedTrack(lt.title, itunesTracks, effectiveAppleTrackNum)
+      const mbTrack = findCorroboratedTrack(lt.title, mbTracks, effectiveMbTrackNum)
+      const aiTrack = aiMaster?.tracks ? findCorroboratedTrack(lt.title, aiMaster.tracks, lt.trackNumber) : undefined
+
+      // 0. If AI/Grounding tracks are provided, prioritize grounded tracks
+      if (aiTrack && aiTrack.artistName) {
+        matchedArtist = aiTrack.artistName
+        matchedSource = 'ai_synthesized'
+        matchedConfidence = 0.95
+        matchedTitle = aiTrack.trackName
+        providerTrackNum = aiTrack.trackNumber
       }
 
-      // 2. Check MusicBrainz tracklist with sequence offset awareness if no Apple match
-      if (!matchedArtist && mbTracks.length > 0) {
-        const m = matchTrackArtistFromProviderList(lt.title, mbTracks, effectiveMbTrackNum, {
-          albumVerified: mbVerified,
-        })
-        if (m) {
-          matchedArtist = m.artistName
-          matchedSource = 'single_provider_match'
-          matchedConfidence = Math.max(0.7, m.confidence)
-          matchedTitle = m.matchedTitle
-          providerTrackNum = effectiveMbTrackNum
-        }
+      // 1. Check Apple Music tracklist
+      if (!matchedArtist && appleTrack && appleTrack.artistName) {
+        matchedArtist = appleTrack.artistName
+        matchedSource = 'single_provider_match'
+        matchedConfidence = 0.92
+        matchedTitle = appleTrack.trackName
+        providerTrackNum = appleTrack.trackNumber
       }
 
-      // 3. Check AI tracks
-      if (!matchedArtist && aiMaster?.tracks && aiMaster.tracks.length > 0) {
-        const aiTrack = aiMaster.tracks.find(t => t.trackNumber === lt.trackNumber || cleanConsensusTitle(t.trackName).toLowerCase() === cleanConsensusTitle(lt.title).toLowerCase())
-        if (aiTrack && aiTrack.artistName) {
-          matchedArtist = aiTrack.artistName
-          matchedSource = 'ai_synthesized'
-          matchedConfidence = 0.85
-          matchedTitle = aiTrack.trackName
-          providerTrackNum = aiTrack.trackNumber
-        }
+      // 2. Check MusicBrainz tracklist if no match yet
+      if (!matchedArtist && mbTrack && mbTrack.artistName) {
+        matchedArtist = mbTrack.artistName
+        matchedSource = 'single_provider_match'
+        matchedConfidence = 0.90
+        matchedTitle = mbTrack.trackName
+        providerTrackNum = mbTrack.trackNumber
       }
 
-      // 4. Fallback: Defective tag cleanup
+      // 3. Fallback: Defective tag cleanup
       if (!matchedArtist && isDefectiveArtistTag(lt.artistCredit, rawTitle)) {
         if (resolvedAlbumArtist && !isPlaceholderTag(resolvedAlbumArtist)) {
           matchedArtist = resolvedAlbumArtist
@@ -1763,10 +1884,6 @@ export class FederatedResolversService {
       if (matchedArtist) {
         matchedArtist = normalizeWithLearning(matchedArtist, 'artist')
       }
-
-      const appleTrack = itunesTracks.find(t => t.trackNumber === effectiveAppleTrackNum)
-      const mbTrack = mbTracks.find(t => t.trackNumber === effectiveMbTrackNum)
-      const aiTrack = aiMaster?.tracks?.find(t => t.trackNumber === lt.trackNumber)
 
       // Apply Consensus Empty-State rule to track vocalists:
       // If local artist is absent/placeholder and external providers don't have agreement, leave empty!
@@ -1813,6 +1930,12 @@ export class FederatedResolversService {
         providerTrackNumber: providerTrackNum,
         matchedTitle,
         matchedArtists: finalArtistValue,
+        appleTitle: appleTrack?.trackName,
+        appleArtists: appleTrack?.artistName,
+        mbTitle: mbTrack?.trackName,
+        mbArtists: mbTrack?.artistName,
+        aiTitle: aiTrack?.trackName,
+        aiArtists: aiTrack?.artistName,
         sequenceOffset: effectiveSequenceOffset.isConfidentOffset ? effectiveSequenceOffset.detectedOffset : 0,
         confidence: matchedConfidence,
         source: matchedSource,

@@ -184,6 +184,150 @@ async function resolveDirectAppleMusicCandidate(inputUrl: string, steerTitle?: s
   return null
 }
 
+// Direct Wikipedia Tracklist & Metadata Resolver (100% deterministic, zero API quota)
+async function resolveDirectWikipediaCandidate(inputUrl: string): Promise<{
+  releaseTitle: string
+  artistCredit: string
+  composer: string
+  releaseYear?: number
+  genre: string
+  coverArtUrl?: string
+  tracks: Array<{ trackNumber: number; trackName: string; artistName?: string }>
+} | null> {
+  let slug = inputUrl.trim()
+  const m = inputUrl.match(/wiki\/([^#?]+)/)
+  if (m) slug = m[1]
+  if (!slug) return null
+
+  try {
+    const url = `https://en.wikipedia.org/api/rest_v1/page/html/${encodeURIComponent(slug)}`
+    const r = await fetch(url, { headers: { 'User-Agent': 'Cadence/1.0 (Bit-Perfect Music Manager)' } })
+    if (!r.ok) return null
+    const html = await r.text()
+
+    // 1. Parse Composer, Year, Genre, Artist & Poster from Infobox
+    let composer = ''
+    let releaseYear: number | undefined
+    let genre = 'Film Soundtrack'
+    let coverArtUrl = ''
+    let releaseTitle = decodeURIComponent(slug)
+      .replace(/_/g, ' ')
+      .replace(/\(soundtrack\)|\(film\)|\(album\)|\(\d{4}[^)]*\)/gi, '')
+      .trim()
+
+    const infoboxMatch = html.match(/<table[^>]*class=[^>]*infobox[^>]*>([\s\S]*?)<\/table>/i)
+    if (infoboxMatch) {
+      const boxHtml = infoboxMatch[1]
+
+      // Extract Poster Artwork if present
+      const imgMatch = boxHtml.match(/<img[^>]*src=["']([^"']+)["']/i)
+      if (imgMatch) {
+        let src = imgMatch[1].split('?')[0]
+        if (src.startsWith('//')) src = 'https:' + src
+        if (src.includes('/thumb/')) {
+          src = src.replace(/\/thumb(\/archive)?\//, '$1/').replace(/\/[^\/]+$/, '')
+        }
+        coverArtUrl = src
+      }
+
+      // Parse infobox rows
+      const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi
+      let trMatch: RegExpExecArray | null
+      while ((trMatch = trRegex.exec(boxHtml)) !== null) {
+        const tr = trMatch[1]
+        const thMatch = tr.match(/<th[^>]*>([\s\S]*?)<\/th>/i)
+        const tdMatch = tr.match(/<td[^>]*>([\s\S]*?)<\/td>/i)
+        if (thMatch && tdMatch) {
+          const thText = thMatch[1].replace(/<[^>]+>/g, '').toLowerCase().trim()
+          const tdText = tdMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+
+          if (!composer && (thText.includes('music by') || thText.includes('composer'))) {
+            composer = tdText.replace(/–/g, '-')
+          }
+          if (!releaseYear && (thText.includes('release date') || thText.includes('released'))) {
+            const y = tdText.match(/\b(19\d{2}|20\d{2})\b/)
+            if (y) releaseYear = parseInt(y[1], 10)
+          }
+        }
+      }
+    }
+
+    // Fallback release year from slug if not in infobox (e.g. Ranga_(1982_film))
+    if (!releaseYear) {
+      const slugYear = slug.match(/\b(19\d{2}|20\d{2})\b/)
+      if (slugYear) releaseYear = parseInt(slugYear[1], 10)
+    }
+
+    // 2. Parse Tracklist tables (matching class tracklist, wikitable, or tables with song/singer headers)
+    const tracks: Array<{ trackNumber: number; trackName: string; artistName?: string }> = []
+    const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/gi
+    let match: RegExpExecArray | null
+    while ((match = tableRegex.exec(html)) !== null) {
+      const tContent = match[1]
+      const rows = tContent.match(/<tr[\s\S]*?<\/tr>/gi) || []
+      if (rows.length < 2) continue
+
+      let titleIdx = -1
+      let singerIdx = -1
+      const headerRow = rows.find((r) => /<th/i.test(r))
+      if (headerRow) {
+        const thCells = (headerRow.match(/<th[\s\S]*?<\/th>/gi) || []).map((c) =>
+          c.replace(/<[^>]+>/g, '').toLowerCase().trim()
+        )
+        titleIdx = thCells.findIndex((c) => c.includes('title') || c.includes('song') || c.includes('track'))
+        singerIdx = thCells.findIndex((c) => c.includes('singer') || c.includes('artist') || c.includes('performer'))
+      }
+
+      if (titleIdx === -1 && singerIdx === -1) {
+        if (!match[0].includes('class="tracklist') && !match[0].includes("class='tracklist")) continue
+        titleIdx = 1
+        singerIdx = 2
+      }
+
+      if (titleIdx === -1) titleIdx = 0
+      if (singerIdx === -1) singerIdx = 1
+
+      let tNum = 1
+      for (const row of rows) {
+        const cells = (row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map((c) =>
+          c.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"').trim()
+        )
+        if (
+          cells.length >= 2 &&
+          !cells[0].toLowerCase().includes('no') &&
+          !cells[0].toLowerCase().includes('#') &&
+          !cells[0].toLowerCase().includes('total') &&
+          !cells[0].toLowerCase().includes('song')
+        ) {
+          const title = (cells[titleIdx] || `Track ${tNum}`).replace(/^"|"$/g, '').trim()
+          const singers = (cells[singerIdx] || '').replace(/\s+/g, ' ').trim()
+          if (title && !title.toLowerCase().includes('song') && !title.toLowerCase().includes('title')) {
+            tracks.push({
+              trackNumber: tNum++,
+              trackName: title,
+              artistName: singers || undefined,
+            })
+          }
+        }
+      }
+      if (tracks.length > 0) break // Adopt primary soundtrack tracklist table
+    }
+
+    return {
+      releaseTitle,
+      artistCredit: composer || 'Various Artists',
+      composer: composer || 'Various Artists',
+      releaseYear,
+      genre,
+      coverArtUrl: coverArtUrl || undefined,
+      tracks,
+    }
+  } catch (err) {
+    console.warn('[WikipediaResolver] Direct fetch error:', err)
+    return null
+  }
+}
+
 export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   tracks,
   releases,
@@ -338,7 +482,18 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }))
 
         const emptyArtistRule = applyConsensusEmptyStateRule(rawArtist, {})
-        const isClean = !qItem.requiresDisambiguation && qItem.confidenceScore >= 0.85 && !isPlaceholderTag(rawArtist)
+        const albumConfidence = qItem.confidenceScore ?? (qItem.defectSeverity === 'info' || qItem.defectSeverity === 'low' ? 0.90 : 0.60)
+        const isDefectiveArtist = isDefectiveArtistTag(rawArtist, rawTitle)
+        const hasRipNoise = Boolean(rawTitle && cleanRipNoise(rawTitle).toLowerCase() !== rawTitle.toLowerCase())
+        const hasValidYear = Boolean(rawYear && Number(rawYear) >= 1900)
+        const isClean =
+          !qItem.requiresDisambiguation &&
+          albumConfidence >= 0.85 &&
+          !isPlaceholderTag(rawArtist) &&
+          !isPlaceholderTag(rawTitle) &&
+          !isDefectiveArtist &&
+          !hasRipNoise &&
+          hasValidYear
 
         const finalAlbumArtist = conv.albumArtist || (emptyArtistRule.selected !== '' ? learnedArtist : '')
         const finalGenre = conv.genre || rawGenre
@@ -668,9 +823,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
       const updatedTracks = current.tracks.map((t) => {
         let val = t.localArtists
-        if (source === 'apple' && current.albumArtist.apple) val = current.albumArtist.apple
-        if (source === 'musicbrainz' && current.albumArtist.musicbrainz) val = current.albumArtist.musicbrainz
-        if (source === 'ai' && current.albumArtist.ai) val = current.albumArtist.ai
+        if (source === 'apple') val = t.appleArtists || current.albumArtist.apple
+        if (source === 'musicbrainz') val = t.mbArtists || current.albumArtist.musicbrainz
+        if (source === 'ai') val = t.aiArtists || current.albumArtist.ai
 
         return {
           ...t,
@@ -696,9 +851,25 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
     try {
       let aiMasterResult: any = undefined
+      let directWikiMaster: any = null
 
-      // 1. If user supplied a grounding URL or custom search, call compilationCanonicalizerService
-      if (steerGroundingUrl.trim() || steerAlbum.trim()) {
+      // 1. If user supplied a Wikipedia URL, resolve directly and deterministically (zero quota)
+      if (steerGroundingUrl.includes('wikipedia.org')) {
+        directWikiMaster = await resolveDirectWikipediaCandidate(steerGroundingUrl)
+        if (directWikiMaster) {
+          aiMasterResult = {
+            releaseTitle: directWikiMaster.releaseTitle,
+            artistCredit: directWikiMaster.artistCredit,
+            composer: directWikiMaster.composer,
+            releaseYear: directWikiMaster.releaseYear || (Number(steerYear) || undefined),
+            genre: directWikiMaster.genre || `${detectedLanguage} Film Soundtrack`,
+            tracks: directWikiMaster.tracks,
+          }
+        }
+      }
+
+      // 2. If user supplied a grounding URL or custom search, call compilationCanonicalizerService if not already resolved
+      if (!aiMasterResult && (steerGroundingUrl.trim() || steerAlbum.trim())) {
         try {
           const canonicalRes = await compilationCanonicalizerService.resolveCompilationSoundtracks(
             selectedAlbum.rawRelease,
@@ -706,22 +877,32 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             releases,
             {
               referenceUrl: steerGroundingUrl.trim() || undefined,
-              userSearchQuery: steerAlbum.trim() || undefined,
+              userSearchQuery: {
+                albumTitle: steerAlbum.trim() || undefined,
+                artistCredit: steerArtist.trim() || undefined,
+                year: Number(steerYear) || undefined,
+              },
             }
           )
 
           if (canonicalRes && canonicalRes.success && canonicalRes.tracks && canonicalRes.tracks.length > 0) {
             const firstProp = canonicalRes.tracks[0]
+            const cleanRawTitle = cleanConsensusTitle(selectedAlbum.rawRelease.title)
+            const fallbackAlbumTitle = steerAlbum.trim() || cleanRawTitle
+            const fallbackComposer = steerArtist.trim() || selectedAlbum.rawRelease.composerName || selectedAlbum.rawRelease.artistCredit || ''
+
             aiMasterResult = {
-              releaseTitle: isCompilationAlbum ? (steerAlbum.trim() || selectedAlbum.rawRelease.title) : (firstProp?.proposedOriginalAlbum || steerAlbum.trim()),
-              artistCredit: firstProp?.proposedComposer || steerArtist.trim(),
-              composer: firstProp?.proposedComposer || steerArtist.trim(),
-              releaseYear: firstProp?.proposedYear || (Number(steerYear) || undefined),
+              releaseTitle: isCompilationAlbum
+                ? fallbackAlbumTitle
+                : (firstProp?.proposedOriginalAlbum || fallbackAlbumTitle),
+              artistCredit: (firstProp as any)?.composer || (firstProp as any)?.proposedComposer || fallbackComposer,
+              composer: (firstProp as any)?.composer || (firstProp as any)?.proposedComposer || fallbackComposer,
+              releaseYear: (firstProp as any)?.proposedOriginalYear || (firstProp as any)?.proposedYear || (Number(steerYear) || selectedAlbum.rawRelease.releaseYear),
               genre: `${detectedLanguage} Film Soundtrack`,
               tracks: canonicalRes.tracks.map((pt, idx) => ({
-                trackNumber: idx + 1,
-                trackName: pt.proposedTitle || pt.localTitle,
-                artistName: pt.proposedSingers || pt.proposedArtist,
+                trackNumber: pt.trackNumber || idx + 1,
+                trackName: pt.title || (pt as any).proposedTitle || `Track ${idx + 1}`,
+                artistName: (pt as any).primaryVocalists || (pt as any).proposedSingers || (pt as any).proposedArtist || (pt as any).composer,
               })),
             }
           }
@@ -730,7 +911,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }
       }
 
-      // 2. If user gave an Apple Music URL, directly resolve the authentic Apple Music album & tracklist
+      // 3. If user gave an Apple Music URL, directly resolve the authentic Apple Music album & tracklist
       let directAppleMaster: any = null
       if (steerGroundingUrl.includes('music.apple.com') || steerGroundingUrl.includes('itunes.apple.com')) {
         directAppleMaster = await resolveDirectAppleMusicCandidate(steerGroundingUrl, steerAlbum, steerArtist)
@@ -760,10 +941,10 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       // 3. Build steered release for federated provider resolution
       const steeredRelease: Release = {
         ...selectedAlbum.rawRelease,
-        title: directAppleMaster?.releaseTitle || steerAlbum.trim() || selectedAlbum.rawRelease.title,
-        artistCredit: directAppleMaster?.artistCredit || steerArtist.trim() || selectedAlbum.rawRelease.artistCredit,
-        composerName: directAppleMaster?.composer || steerArtist.trim() || selectedAlbum.rawRelease.composerName,
-        releaseYear: directAppleMaster?.releaseYear || Number(steerYear) || selectedAlbum.rawRelease.releaseYear,
+        title: directAppleMaster?.releaseTitle || aiMasterResult?.releaseTitle || steerAlbum.trim() || selectedAlbum.rawRelease.title,
+        artistCredit: directAppleMaster?.artistCredit || aiMasterResult?.artistCredit || steerArtist.trim() || selectedAlbum.rawRelease.artistCredit,
+        composerName: directAppleMaster?.composer || aiMasterResult?.composer || steerArtist.trim() || selectedAlbum.rawRelease.composerName,
+        releaseYear: directAppleMaster?.releaseYear || aiMasterResult?.releaseYear || Number(steerYear) || selectedAlbum.rawRelease.releaseYear,
       }
 
       const consensus = await federatedResolversService.resolve2of3ReleaseConsensus(
@@ -786,11 +967,36 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           offsetApplied: consensus.sequenceOffsetResult?.isConfidentOffset
             ? consensus.sequenceOffsetResult.detectedOffset
             : current.offsetApplied,
-          albumTitle: consensus.albumFieldStates?.albumTitle || current.albumTitle,
-          albumArtist: consensus.albumFieldStates?.albumArtist || current.albumArtist,
-          composer: consensus.albumFieldStates?.composer || current.composer,
-          year: consensus.albumFieldStates?.releaseYear || current.year,
-          genre: consensus.albumFieldStates?.genre || current.genre,
+          albumTitle: {
+            ...current.albumTitle,
+            ...(consensus.albumFieldStates?.albumTitle || {}),
+            ai: aiMasterResult?.releaseTitle || consensus.albumFieldStates?.albumTitle?.ai || current.albumTitle.ai,
+            selected: consensus.albumFieldStates?.albumTitle?.selected || current.albumTitle.selected,
+          },
+          albumArtist: {
+            ...current.albumArtist,
+            ...(consensus.albumFieldStates?.albumArtist || {}),
+            ai: aiMasterResult?.artistCredit || consensus.albumFieldStates?.albumArtist?.ai || current.albumArtist.ai,
+            selected: consensus.albumFieldStates?.albumArtist?.selected || current.albumArtist.selected,
+          },
+          composer: {
+            ...current.composer,
+            ...(consensus.albumFieldStates?.composer || {}),
+            ai: aiMasterResult?.composer || consensus.albumFieldStates?.composer?.ai || current.composer.ai,
+            selected: consensus.albumFieldStates?.composer?.selected || current.composer.selected,
+          },
+          year: {
+            ...current.year,
+            ...(consensus.albumFieldStates?.releaseYear || {}),
+            ai: aiMasterResult?.releaseYear || consensus.albumFieldStates?.releaseYear?.ai || current.year.ai,
+            selected: consensus.albumFieldStates?.releaseYear?.selected || current.year.selected,
+          },
+          genre: {
+            ...current.genre,
+            ...(consensus.albumFieldStates?.genre || {}),
+            ai: aiMasterResult?.genre || consensus.albumFieldStates?.genre?.ai || current.genre.ai,
+            selected: consensus.albumFieldStates?.genre?.selected || current.genre.selected,
+          },
           coverArt: directAppleCandidate?.coverArtUrl ? {
             ...current.coverArt,
             apple: directAppleCandidate.coverArtUrl,
@@ -799,6 +1005,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             ...current.coverArt,
             apple: consensus.albumFieldStates.coverArt.apple || current.coverArt.apple,
             musicbrainz: consensus.albumFieldStates.coverArt.musicbrainz || current.coverArt.musicbrainz,
+            ai: aiMasterResult?.coverArtUrl || consensus.albumFieldStates.coverArt.ai || current.coverArt.ai,
             selected: current.coverArt.selected || consensus.albumFieldStates.coverArt.selected,
           } : current.coverArt),
           tracks: consensus.trackStates && consensus.trackStates.length > 0 ? consensus.trackStates : current.tracks,
@@ -2016,15 +2223,18 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-apple`}
                             onClick={() => {
-                              if (selectedAlbum.albumArtist.apple) {
-                                handleSelectTrackArtist(trk.trackId, selectedAlbum.albumArtist.apple, 'single_provider_match')
+                              const targetArtist = trk.appleArtists || (trk.appleTitle ? selectedAlbum.albumArtist.apple : undefined)
+                              if (targetArtist) {
+                                handleSelectTrackArtist(trk.trackId, targetArtist, 'single_provider_match')
                               }
                             }}
                             className="py-3 px-3 cursor-pointer text-white/70 hover:text-[#D4AF37] transition-colors"
                           >
-                            <div className="font-medium">{trk.matchedTitle}</div>
+                            <div className="font-medium text-white/70">
+                              {trk.appleTitle || (trk.appleArtists ? trk.matchedTitle : '—')}
+                            </div>
                             <div className="text-[10px] text-white/50 mt-0.5">
-                              {selectedAlbum.albumArtist.apple || '—'}
+                              {trk.appleArtists || (trk.appleTitle && selectedAlbum.albumArtist.apple ? selectedAlbum.albumArtist.apple : '—')}
                             </div>
                           </td>
 
@@ -2032,15 +2242,18 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-musicbrainz`}
                             onClick={() => {
-                              if (selectedAlbum.albumArtist.musicbrainz) {
-                                handleSelectTrackArtist(trk.trackId, selectedAlbum.albumArtist.musicbrainz, 'single_provider_match')
+                              const targetArtist = trk.mbArtists || (trk.mbTitle ? selectedAlbum.albumArtist.musicbrainz : undefined)
+                              if (targetArtist) {
+                                handleSelectTrackArtist(trk.trackId, targetArtist, 'single_provider_match')
                               }
                             }}
                             className="py-3 px-3 cursor-pointer text-white/60 hover:text-white transition-colors"
                           >
-                            <div className="font-medium">{trk.matchedTitle}</div>
+                            <div className="font-medium text-white/60">
+                              {trk.mbTitle || (trk.mbArtists ? trk.matchedTitle : '—')}
+                            </div>
                             <div className="text-[10px] text-white/40 mt-0.5">
-                              {selectedAlbum.albumArtist.musicbrainz || '—'}
+                              {trk.mbArtists || (trk.mbTitle && selectedAlbum.albumArtist.musicbrainz ? selectedAlbum.albumArtist.musicbrainz : '—')}
                             </div>
                           </td>
 
@@ -2048,18 +2261,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-ai`}
                             onClick={() => {
-                              const candArtist = trk.aiArtists || trk.matchedArtists;
+                              const candArtist = trk.aiArtists || (trk.aiTitle ? (trk.matchedArtists || selectedAlbum.albumArtist.ai) : undefined)
                               if (candArtist) {
-                                handleSelectTrackArtist(trk.trackId, candArtist, 'ai_synthesized');
+                                handleSelectTrackArtist(trk.trackId, candArtist, 'ai_synthesized')
                               }
                             }}
                             className="py-3 px-3 cursor-pointer text-white/70 hover:text-cyan-300 transition-colors"
                           >
-                            <div className="font-medium text-cyan-300">{trk.aiTitle || trk.matchedTitle}</div>
+                            <div className="font-medium text-cyan-300">
+                              {trk.aiTitle || (trk.aiArtists ? trk.matchedTitle : '—')}
+                            </div>
                             <div className="text-[10px] text-cyan-200/60 mt-0.5">
                               {trk.aiArtists
                                 ? trk.aiArtists
-                                : (trk.matchedArtists ? trk.matchedArtists : (selectedAlbum.albumArtist.ai ? `${selectedAlbum.albumArtist.ai} (Composer)` : '—'))}
+                                : (trk.aiTitle && selectedAlbum.albumArtist.ai ? `${selectedAlbum.albumArtist.ai} (Composer)` : '—')}
                             </div>
                           </td>
 

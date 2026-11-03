@@ -8,6 +8,7 @@
 
 import { Track, Release, AuditIssue, ReleaseConsensusResult } from '../core/types'
 import { auditService } from './auditService'
+import { isPlaceholderTag, isDefectiveArtistTag, cleanRipNoise } from '../core/taxonomyUtils'
 import { tauriBridge } from './tauriBridge'
 import { federatedResolversService, globalMusicBrainzQueue } from './federatedResolvers'
 
@@ -22,6 +23,9 @@ export interface AlbumCurationQueueItem {
   affectedTrackCount: number
   totalTracks: number
   isStaged: boolean
+  confidenceScore?: number
+  requiresDisambiguation?: boolean
+  folderName?: string
 }
 
 /**
@@ -131,24 +135,8 @@ export function computeCurationQueue(
       release.isCompilation ||
       relTracks.some((t) => /\(from\s+['"][^'"]+['"]\)/i.test(t.title))
 
-    if (!issueInfo && !isStaged && !hasMissingArt && !isCompilationConflict) {
-      queueItems.push({
-        albumId: release.id,
-        albumTitle: release.title,
-        artistCredit: release.artistCredit || 'Various Artists',
-        coverArtUrl: release.artwork?.frontCoverUrl || release.coverArtUrl,
-        primaryIssueType: 'untagged',
-        issueBadgeLabel: 'Catalog Album',
-        defectSeverity: 'info',
-        affectedTrackCount: 0,
-        totalTracks: relTracks.length || release.tracksCount || 1,
-        isStaged: false,
-      })
-      continue
-    }
-
     let primaryIssueType: AlbumCurationQueueItem['primaryIssueType'] = 'untagged'
-    let issueBadgeLabel = 'Metadata Review'
+    let issueBadgeLabel = 'Catalog Album'
     let defectSeverity: AlbumCurationQueueItem['defectSeverity'] = 'info'
     let affectedTrackCount = 0
 
@@ -174,6 +162,36 @@ export function computeCurationQueue(
       affectedTrackCount = relTracks.length
     }
 
+    // Determine confidence score and disambiguation requirements
+    const hasPlaceholderTitle = isPlaceholderTag(release.title)
+    const hasPlaceholderArtist = isPlaceholderTag(release.artistCredit)
+    const hasDefectiveArtist = isDefectiveArtistTag(release.artistCredit, release.title)
+    const hasRipNoiseInTitle = Boolean(release.title && cleanRipNoise(release.title).toLowerCase() !== release.title.toLowerCase())
+    const hasMissingYear = !release.releaseYear || release.releaseYear <= 1900
+    const hasMissingComposer = !release.composerName || isPlaceholderTag(release.composerName)
+
+    // Compute confidence score based on completeness and integrity
+    let confidenceScore = 0.95
+    if (hasMissingArt) confidenceScore -= 0.25
+    if (hasPlaceholderTitle || hasPlaceholderArtist || hasDefectiveArtist) confidenceScore -= 0.40
+    if (hasRipNoiseInTitle) confidenceScore -= 0.20
+    if (hasMissingYear) confidenceScore -= 0.25
+    if (hasMissingComposer) confidenceScore -= 0.15
+    if (defectSeverity === 'critical') confidenceScore -= 0.40
+    else if (defectSeverity === 'high') confidenceScore -= 0.25
+    else if (defectSeverity === 'medium') confidenceScore -= 0.15
+
+    confidenceScore = Math.max(0.1, Math.min(1.0, confidenceScore))
+
+    const requiresDisambiguation =
+      isCompilationConflict ||
+      defectSeverity === 'critical' ||
+      hasPlaceholderTitle ||
+      hasPlaceholderArtist ||
+      hasDefectiveArtist ||
+      hasRipNoiseInTitle ||
+      hasMissingYear
+
     queueItems.push({
       albumId: release.id,
       albumTitle: release.title,
@@ -185,6 +203,8 @@ export function computeCurationQueue(
       affectedTrackCount,
       totalTracks: relTracks.length || release.tracksCount || 1,
       isStaged,
+      confidenceScore,
+      requiresDisambiguation,
     })
   }
 

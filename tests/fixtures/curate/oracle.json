@@ -222,6 +222,241 @@
           "expected_file_pattern": ".*(puriyadha).*"
         }
       ]
+    },
+    "guru-2007": {
+      "album_id": "guru-2007",
+      "album_type": "soundtrack",
+      "canonical_title": "Guru",
+      "canonical_artist": "A. R. Rahman",
+      "canonical_composer": "A. R. Rahman",
+      "release_year": 2006,
+      "reissue_year": 2007,
+      "genre": "Hindi Film Soundtrack",
+      "expected_track_count": 8,
+      "tracks": [
+        {
+          "track_number": 1,
+          "title": "Barso Re",
+          "artists": [
+            "Shreya Ghoshal",
+            "Uday Mazumdar",
+            "Uday Majumdar"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 329,
+          "expected_file_pattern": ".*(barso\\s*re|barso).*"
+        },
+        {
+          "track_number": 2,
+          "title": "Tere Bina",
+          "artists": [
+            "A. R. Rahman",
+            "Murtuza Khan",
+            "Qadir Khan",
+            "Chinmayi",
+            "Chinmayi Sripada"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 309,
+          "expected_file_pattern": ".*(tere\\s*bina).*"
+        },
+        {
+          "track_number": 3,
+          "title": "Ek Lo Ek Muft",
+          "artists": [
+            "Bappi Lahiri",
+            "Bappi Lahari",
+            "K. S. Chithra",
+            "K.S. Chithra"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 298,
+          "expected_file_pattern": ".*(ek\\s*lo\\s*ek\\s*muft|muft).*"
+        },
+        {
+          "track_number": 4,
+          "title": "Mayya",
+          "artists": [
+            "Maryem Tollar",
+            "Chinmayi",
+            "Chinmayi Sripada",
+            "Keerthi Sagathia",
+            "Kirti Sagathia"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 362,
+          "expected_file_pattern": ".*(mayya|mayya\\s*mayya).*"
+        },
+        {
+          "track_number": 5,
+          "title": "Baazi Laga",
+          "artists": [
+            "Udit Narayan",
+            "Madhushree",
+            "Swarnalatha",
+            "Shweta Mohan",
+            "Shweta Pandit",
+            "Bhargavi Pillai",
+            "Bhargavee",
+            "Hariharan"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 299,
+          "expected_file_pattern": ".*(baazi\\s*laga|baazi).*"
+        },
+        {
+          "track_number": 6,
+          "title": "Jaage Hain",
+          "artists": [
+            "K. S. Chithra",
+            "K.S. Chithra",
+            "A. R. Rahman",
+            "Madras Choral Group",
+            "Madras Chorale Group"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 415,
+          "expected_file_pattern": ".*(jaage\\s*hain|jaage).*"
+        },
+        {
+          "track_number": 7,
+          "title": "Ey Hairathe",
+          "artists": [
+            "Hariharan",
+            "Alka Yagnik",
+            "A. R. Rahman",
+            "Mohammed Aslam"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 369,
+          "expected_file_pattern": ".*(ey\\s*hairathe|ay\\s*hairathe|hairathe).*"
+        },
+        {
+          "track_number": 8,
+          "title": "Dum Dara Dum",
+          "artists": [
+            "K. S. Chithra",
+            "K.S. Chithra"
+          ],
+          "composer": "A. R. Rahman",
+          "duration_seconds": 253,
+          "expected_file_pattern": ".*(dum\\s*dara\\s*dum|dara\\s*dum).*"
+        }
+      ],
+      "grounding_url": "https://en.wikipedia.org/wiki/Guru_(soundtrack)",
+      "search_parameters": {
+        "album": "Guru",
+        "artist": "A. R. Rahman",
+        "year": 2006
+      },
+      "apple_music_url": "https://music.apple.com/in/album/guru-original-motion-picture-soundtrack/264849882"
+    },
+    "arengetra-velai": {
+      "album_id": "arengetra-velai",
+      "album_type": "soundtrack",
+      "canonical_title": "Arengetra Velai",
+      "canonical_artist": "Various Artists",
+      "canonical_composer": "",
+      "release_year": 1985,
+      "genre": "Tamil Film Soundtrack",
+      "expected_track_count": 9,
+      "tracks": [
+        {
+          "track_number": 1,
+          "title": "Ek Lo Ek Muft",
+          "artists": [
+            "Bappi Lahari",
+            "amp; K. S. Chithra"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(ek).*"
+        },
+        {
+          "track_number": 2,
+          "title": "Tere Bina",
+          "artists": [
+            "A. R. Rahman",
+            "Chinmayi",
+            "Murtuza Khan",
+            "amp; Qadir Khan"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(tere).*"
+        },
+        {
+          "track_number": 3,
+          "title": "Jaage Hain",
+          "artists": [
+            "K.S.Chithra",
+            "A. R. Rahman",
+            "amp; Madras Choral Group"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(jaage).*"
+        },
+        {
+          "track_number": 4,
+          "title": "Ey Hairathe",
+          "artists": [
+            "Hariharan",
+            "Alka Yagnik",
+            "amp; A. R. Rahman"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(ey).*"
+        },
+        {
+          "track_number": 5,
+          "title": "Mayya",
+          "artists": [
+            "Maryem Tollar",
+            "Chinmayi",
+            "amp; Keerthi Sagathia"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(mayya).*"
+        },
+        {
+          "track_number": 6,
+          "title": "Baazi Laga",
+          "artists": [
+            "Udit Narayan",
+            "Madhushree",
+            "Shweta Mohan",
+            "amp; Bhargavi Pillai"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(baazi).*"
+        },
+        {
+          "track_number": 7,
+          "title": "Barso Re",
+          "artists": [
+            "Shreya Ghoshal",
+            "amp; Uday Mazumdar"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(barso).*"
+        },
+        {
+          "track_number": 8,
+          "title": "Shaouk Hai",
+          "artists": [
+            "Sowmya Raoh"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(shaouk).*"
+        },
+        {
+          "track_number": 9,
+          "title": "Guru Theme Music",
+          "artists": [
+            "Chorus"
+          ],
+          "duration_seconds": 270,
+          "expected_file_pattern": ".*(guru).*"
+        }
+      ]
     }
   }
 }

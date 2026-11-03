@@ -38,6 +38,13 @@ export interface AlbumOracleManifest {
   genre: string;
   expected_track_count: number;
   sequence_offset?: number;
+  grounding_url?: string;
+  apple_music_url?: string;
+  search_parameters?: {
+    album?: string;
+    artist?: string;
+    year?: number;
+  };
   tracks: TrackOracle[];
 }
 
@@ -73,6 +80,8 @@ export interface AgentAction {
   targetDescription: string;
   value?: string;
   artistValue?: string;
+  yearValue?: string;
+  urlValue?: string;
   priorityLevel: 'P1' | 'P2' | 'P3' | 'P4';
   reasoning: string;
   detectedBugs?: BugRecord[];
@@ -305,23 +314,32 @@ export class CurateMultimodalQaAgent {
     try {
       await this.navigateToCurateCockpit();
 
-      const sidebarAlbums = await this.extractSidebarAlbums();
-      console.log(`📋 Found ${sidebarAlbums.length} albums pending review in sidebar.`);
+      // If user specified a target query, find which tier tab contains it
+      let activeList: Array<{ id: string; title: string; tracks: number }> = [];
+      let matchedTarget: { id: string; title: string; tracks: number } | null = null;
 
-      const testTargets = targetAlbumQuery
-        ? sidebarAlbums.filter((a) => a.title.toLowerCase().includes(targetAlbumQuery.toLowerCase()))
-        : sidebarAlbums.slice(0, 3);
-
-      if (testTargets.length === 0) {
-        console.log(`⚠️ No albums matching query "${targetAlbumQuery || 'all'}" found in Curate queue.`);
-        return;
+      if (targetAlbumQuery) {
+        console.log(`🔍 Searching for target album: "${targetAlbumQuery}" across Tier 1 and Tier 2...`);
+        matchedTarget = await this.findAlbumInTiers(targetAlbumQuery);
       }
 
-      for (const target of testTargets) {
+      if (matchedTarget) {
+        console.log(`🎯 Found target album in UI: "${matchedTarget.title}"`);
+        activeList = [matchedTarget];
+      } else if (targetAlbumQuery) {
+        console.log(`⚠️ No album matching "${targetAlbumQuery}" found in either Tier 1 or Tier 2 queue.`);
+        return;
+      } else {
+        activeList = await this.extractCurrentSidebarAlbums();
+        console.log(`📋 Found ${activeList.length} albums in current sidebar view.`);
+        activeList = activeList.slice(0, 3);
+      }
+
+      for (const target of activeList) {
         console.log(`\n🎵 ==========================================`);
         console.log(`🎯 Testing Album Curation Journey: "${target.title}"`);
         console.log(`==========================================`);
-        await this.curateAlbumJourney(target.id, target.title);
+        await this.curateAlbumJourney(target.id, target.title, (target as any).tier || 'tier1');
       }
 
       this.generateDefectReport();
@@ -347,8 +365,8 @@ export class CurateMultimodalQaAgent {
     }
   }
 
-  private async extractSidebarAlbums(): Promise<Array<{ id: string; title: string; tracks: number }>> {
-    let albums = await this.cdp.evaluate(`
+  private async extractCurrentSidebarAlbums(): Promise<Array<{ id: string; title: string; tracks: number }>> {
+    const albums = await this.cdp.evaluate(`
       (() => {
         const items = document.querySelectorAll('div[data-testid="curate-album-item"], div.cursor-pointer:has(h3)');
         return Array.from(items).map(item => ({
@@ -358,33 +376,64 @@ export class CurateMultimodalQaAgent {
         })).filter(a => a.title && !a.title.includes('Tier ') && !a.title.includes('No albums'));
       })()
     `);
-
-    if (albums.length === 0) {
-      console.log('🔄 Current tier tab has 0 albums. Switching to Tier 2 Guided Reconciliation tab...');
-      await this.cdp.evaluate(`
-        (() => {
-          const tier2Btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Tier 2'));
-          if (tier2Btn) tier2Btn.click();
-        })()
-      `);
-      await new Promise((r) => setTimeout(r, 1200));
-
-      albums = await this.cdp.evaluate(`
-        (() => {
-          const items = document.querySelectorAll('div[data-testid="curate-album-item"], div.cursor-pointer:has(h3)');
-          return Array.from(items).map(item => ({
-            id: item.getAttribute('data-album-id') || item.textContent.trim().split('\\n')[0],
-            title: item.querySelector('h3, span[class*="font-semibold"], div[class*="font-medium"]')?.textContent?.trim() || item.textContent.trim().split('\\n')[0],
-            tracks: parseInt(item.textContent?.match(/(\\d+)\\s*tracks/i)?.[1] || '0', 10)
-          })).filter(a => a.title && !a.title.includes('Tier ') && !a.title.includes('No albums'));
-        })()
-      `);
-    }
-
-    return albums;
+    return Array.isArray(albums) ? albums : [];
   }
 
-  private async curateAlbumJourney(albumId: string, initialTitle: string) {
+  private async switchTierTab(tier: 'tier1' | 'tier2'): Promise<void> {
+    const label = tier === 'tier1' ? 'Tier 1' : 'Tier 2';
+    await this.cdp.evaluate(`
+      (() => {
+        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('${label}'));
+        if (btn) btn.click();
+      })()
+    `);
+    await new Promise((r) => setTimeout(r, 800));
+  }
+
+  private async findAlbumInTiers(query: string): Promise<{ id: string; title: string; tracks: number } | null> {
+    const qNorm = query.toLowerCase().trim();
+
+    const findMatch = (albums: Array<{ id: string; title: string; tracks: number }>) => {
+      // 1. Exact match (case insensitive)
+      const exact = albums.find(a => a.title.toLowerCase().trim() === qNorm);
+      if (exact) return exact;
+
+      // 2. Exact match before rip/edition tags
+      const exactClean = albums.find(a => {
+        const clean = a.title.replace(/\s*\([^)]*\)/g, '').replace(/\s*\[[^\]]*\]/g, '').replace(/\s*(?:cd|web)?\s*rip/gi, '').trim().toLowerCase();
+        return clean === qNorm;
+      });
+      if (exactClean) return exactClean;
+
+      // 3. Word-boundary match: "\bGuru\b", but NEVER "Guru Sishyan" if searching "Guru"
+      const wordMatch = albums.find(a => {
+        const words = a.title.toLowerCase().split(/[^a-z0-9]+/);
+        return words[0] === qNorm && (words.length === 1 || /^(?:cd|rip|original|soundtrack|ost|flac|19\d\d|20\d\d)$/i.test(words[1]));
+      });
+      return wordMatch || null;
+    };
+
+    // Check Tier 1 first
+    await this.switchTierTab('tier1');
+    const tier1Albums = await this.extractCurrentSidebarAlbums();
+    const t1Match = findMatch(tier1Albums);
+    if (t1Match) {
+      console.log(`📂 Found "${t1Match.title}" (${t1Match.id}) in Tier 1: Auto-Staged tab.`);
+      return { ...t1Match, tier: 'tier1' as const };
+    }
+
+    // Check Tier 2 second
+    await this.switchTierTab('tier2');
+    const tier2Albums = await this.extractCurrentSidebarAlbums();
+    const t2Match = findMatch(tier2Albums);
+    if (t2Match) {
+      console.log(`📂 Found "${t2Match.title}" (${t2Match.id}) in Tier 2: Guided Reconciliation tab.`);
+      return { ...t2Match, tier: 'tier2' as const };
+    }
+
+    return null;
+  }
+  private async curateAlbumJourney(albumId: string, initialTitle: string, targetTier: 'tier1' | 'tier2' = 'tier1') {
     let turn = 1;
     const maxTurns = 12;
     let isStaged = false;
@@ -397,10 +446,18 @@ export class CurateMultimodalQaAgent {
       oracle = await this.promptUserForOracleGrounding(initialTitle);
     }
 
-    // Select album in sidebar
+    // Ensure correct tier tab is active
+    await this.switchTierTab(targetTier);
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Select album in sidebar by unique album ID
     await this.cdp.evaluate(`
       (() => {
-        const item = Array.from(document.querySelectorAll('div[data-testid="curate-album-item"], div.cursor-pointer')).find(el => el.textContent.includes(${JSON.stringify(initialTitle)}));
+        const item = document.querySelector('[data-album-id="${albumId}"]') ||
+                     Array.from(document.querySelectorAll('div[data-testid="curate-album-item"]')).find(el => {
+                       const h3 = el.querySelector('h3')?.textContent?.trim().toLowerCase();
+                       return h3 === ${JSON.stringify(initialTitle.toLowerCase())};
+                     });
         if (item) item.click();
       })()
     `);
@@ -417,7 +474,7 @@ export class CurateMultimodalQaAgent {
       const domSnapshot = await this.extractCockpitState();
 
       // 2. CLASSIFY & ACT: Human-mimicking P1 -> P4 Decision Turn
-      const action = await this.decideNextAction(domSnapshot, screenshotBase64, turn);
+      const action = await this.decideNextAction(domSnapshot, screenshotBase64, turn, oracle);
       console.log(`💡 [Decision]: ${action.priorityLevel} - ${action.targetDescription}`);
       console.log(`   Reasoning: ${action.reasoning}`);
 
@@ -480,22 +537,24 @@ export class CurateMultimodalQaAgent {
           });
         }
         break;
+      } else if (action.action === 'WAIT') {
+        console.log(`⏳ Agent waiting for background async resolution...`);
+        await new Promise((r) => setTimeout(r, 1500));
       } else if (action.action === 'STEER') {
         this.identityEpoch++;
         this.visitedActions.clear();
-        console.log(`🎯 Executing Steer Providers with query: "${action.value}"`);
-        const typed = await this.cdp.typeIntoSelector('input[data-testid="input-steer-album"], input[placeholder*="Steer"]', action.value || '');
-        if (!typed) {
-          this.recordBug({
-            classification: 'UI Interaction Bug',
-            severity: 'MAJOR',
-            albumId,
-            stepNumber: turn,
-            description: 'Failed to type query into Steer Providers input',
-            expected: 'Focusable input for steering',
-            actual: 'Input missing or non-editable',
-            screenshotPath,
-          });
+        console.log(`🎯 Executing Steer Providers: album="${action.value}", artist="${action.artistValue || ''}", url="${action.urlValue || ''}"`);
+        if (action.value) {
+          await this.cdp.typeIntoSelector('input[data-testid="input-steer-album"], input[placeholder*="Steer"]', action.value);
+        }
+        if (action.artistValue) {
+          await this.cdp.typeIntoSelector('input[data-testid="input-steer-artist"]', action.artistValue);
+        }
+        if (action.yearValue) {
+          await this.cdp.typeIntoSelector('input[data-testid="input-steer-year"]', action.yearValue);
+        }
+        if (action.urlValue) {
+          await this.cdp.typeIntoSelector('input[data-testid="input-steer-url"], input[type="url"]', action.urlValue);
         }
         const fetchClicked = await this.cdp.clickSelector('[data-testid="btn-fetch-anchor"]');
         if (!fetchClicked) {
@@ -511,7 +570,14 @@ export class CurateMultimodalQaAgent {
           });
         }
         console.log(`⏳ Awaiting provider fetch & anchor for epoch ${this.identityEpoch}...`);
-        await new Promise((r) => setTimeout(r, 3000));
+        await new Promise((r) => setTimeout(r, 800));
+        const startTime = Date.now();
+        while (Date.now() - startTime < 12000) {
+          const isLoading = await this.cdp.evaluate(`Boolean(document.querySelector('[data-testid="btn-fetch-anchor"] .animate-spin'))`);
+          if (!isLoading) break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        await new Promise((r) => setTimeout(r, 600));
       } else if (action.action === 'EDIT' && action.targetSelector && action.value) {
         console.log(`?? Executing Manual Edit on ${action.targetSelector} with value: "${action.value}"`);
         await this.cdp.clickSelector(action.targetSelector);
@@ -543,6 +609,31 @@ export class CurateMultimodalQaAgent {
   private findMatchingOracle(initialTitle: string): AlbumOracleManifest | null {
     const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
     const initialNorm = norm(initialTitle);
+
+    // Pass 1: Exact canonical_title match or exact slug match
+    for (const k of Object.keys(this.oracleDb.albums)) {
+      const cand = this.oracleDb.albums[k];
+      const kNorm = norm(k);
+      const titleNorm = norm(cand.canonical_title || '');
+      if (initialNorm === titleNorm || initialNorm === kNorm) {
+        return cand;
+      }
+    }
+
+    // Pass 2: Word-boundary / exact prefix match
+    for (const k of Object.keys(this.oracleDb.albums)) {
+      const cand = this.oracleDb.albums[k];
+      const titleNorm = norm(cand.canonical_title || '');
+      const kNorm = norm(k);
+      if (titleNorm && initialNorm.startsWith(titleNorm)) {
+        return cand;
+      }
+      if (kNorm && initialNorm.startsWith(kNorm)) {
+        return cand;
+      }
+    }
+
+    // Pass 3: General substring containment fallback
     const matchedKey = Object.keys(this.oracleDb.albums).find((k) => {
       const cand = this.oracleDb.albums[k];
       const kNorm = norm(k);
@@ -874,6 +965,7 @@ No markdown backticks, just the JSON.`;
           tracks: getTrackRows(),
           steerQuery: document.querySelector('input[data-testid="input-steer-album"]')?.value || '',
           steerArtistQuery: document.querySelector('input[data-testid="input-steer-artist"]')?.value || '',
+          isSteeringLoading: Boolean(document.querySelector('[data-testid="btn-fetch-anchor"] .animate-spin')),
           canFetchAnchor: Boolean(document.querySelector('[data-testid="btn-fetch-anchor"]')),
           canStage: Boolean(document.querySelector('[data-testid="btn-stage-next"]'))
         };
@@ -886,7 +978,7 @@ No markdown backticks, just the JSON.`;
    * 1. If GEMINI_API_KEY is present in env, calls Gemini 2.5 Flash Vision.
    * 2. Otherwise, executes the comprehensive deterministic P1 -> P4 Priority Gate & Consensus Audit.
    */
-  private async decideNextAction(state: any, screenshotBase64: string, turn: number): Promise<AgentAction> {
+  private async decideNextAction(state: any, screenshotBase64: string, turn: number, oracle?: AlbumOracleManifest | null): Promise<AgentAction> {
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (apiKey) {
@@ -898,7 +990,7 @@ No markdown backticks, just the JSON.`;
       }
     }
 
-    return this.decideDeterministicAction(state);
+    return this.decideDeterministicAction(state, oracle);
   }
 
   private async callGeminiVision(apiKey: string, state: any, screenshotBase64: string, turn: number): Promise<AgentAction | null> {
@@ -965,7 +1057,16 @@ Return ONLY JSON matching:
     return null;
   }
 
-  private decideDeterministicAction(state: any): AgentAction {
+  private decideDeterministicAction(state: any, oracle?: AlbumOracleManifest | null): AgentAction {
+    if (state.isSteeringLoading) {
+      return {
+        action: 'WAIT',
+        targetDescription: 'Awaiting provider resolution...',
+        priorityLevel: 'P1',
+        reasoning: 'External provider search is currently in flight.',
+      };
+    }
+
     const master = state.master || {};
     const tracks = state.tracks || [];
     const bugs: BugRecord[] = [];
@@ -1222,16 +1323,66 @@ Return ONLY JSON matching:
         }
       }
 
-      // Check for playback singers
-      if (ai && !ai.includes('(Composer)') && ai !== '—' && !selected.includes(ai)) {
-        return {
-          action: 'CLICK',
-          targetSelector: `[data-testid="track-cell-${i}-ai"]`,
-          targetDescription: `Adopt playback singer for track #${i + 1} from Gemini AI`,
-          priorityLevel: 'P3',
-          reasoning: `Track #${i + 1} has authentic playback singer in Gemini AI column.`,
-        };
+      // Check for authentic playback singers across Apple Music and AI columns
+      const appleSinger = trk.appleArtist || '';
+      const aiSinger = trk.aiArtist || '';
+      const composerName = (master.composer?.selected || master.composer?.local || '').trim();
+
+      // Determine preferred provider column based on grounding or oracle match
+      const isWikiGrounded = Boolean(oracle?.grounding_url && oracle.grounding_url.includes('wikipedia'));
+      const aiMatchesOracle = Boolean(
+        aiSinger && oracle?.tracks?.[i]?.artists?.some((a) => aiSinger.toLowerCase().includes(a.toLowerCase()))
+      );
+      const preferAi = isWikiGrounded || aiMatchesOracle;
+
+      const candidatesToTry = preferAi
+        ? [
+            { singer: aiSinger, selector: `[data-testid="track-cell-${i}-ai"]`, provider: 'Gemini AI / Wikipedia' },
+            { singer: appleSinger, selector: `[data-testid="track-cell-${i}-apple"]`, provider: 'Apple Music' },
+          ]
+        : [
+            { singer: appleSinger, selector: `[data-testid="track-cell-${i}-apple"]`, provider: 'Apple Music' },
+            { singer: aiSinger, selector: `[data-testid="track-cell-${i}-ai"]`, provider: 'Gemini AI / Wikipedia' },
+          ];
+
+      for (const cand of candidatesToTry) {
+        if (
+          cand.singer &&
+          cand.singer !== '—' &&
+          cand.singer !== composerName &&
+          !cand.singer.includes('(Composer)') &&
+          !selected.includes(cand.singer)
+        ) {
+          return {
+            action: 'CLICK',
+            targetSelector: cand.selector,
+            targetDescription: `Adopt playback singer for track #${i + 1} from ${cand.provider} ("${cand.singer}")`,
+            priorityLevel: 'P3',
+            reasoning: `Track #${i + 1} has authentic playback singer in ${cand.provider} column ("${cand.singer}").`,
+          };
+        }
       }
+    }
+
+    // Check if tracks need grounding because authentic singers are missing
+    const composerName = (master.composer?.selected || master.composer?.local || '').trim();
+    const allTracksDefaultToComposer = tracks.length > 0 && tracks.every((t) => {
+      const art = t.selectedArtist || t.selected || '';
+      return !art || art.toLowerCase().includes(composerName.toLowerCase()) || art.includes('—');
+    });
+
+    const hasGroundingAvailable = Boolean(oracle?.grounding_url || oracle?.search_parameters || oracle?.apple_music_url);
+    if (allTracksDefaultToComposer && hasGroundingAvailable && this.identityEpoch === 0) {
+      return {
+        action: 'STEER',
+        value: oracle?.search_parameters?.album || oracle?.canonical_title || master.title?.selected || '',
+        artistValue: oracle?.search_parameters?.artist || oracle?.canonical_artist || composerName,
+        yearValue: oracle?.search_parameters?.year ? String(oracle.search_parameters.year) : (oracle?.release_year ? String(oracle.release_year) : ''),
+        urlValue: oracle?.grounding_url || oracle?.apple_music_url || '',
+        targetDescription: `Steer Providers with Grounding URL "${oracle?.grounding_url || oracle?.canonical_title}" to fetch authentic playback singers`,
+        priorityLevel: 'P1',
+        reasoning: `Tracks currently lack authentic playback singers (defaulting to composer "${composerName}"). Steering with Oracle grounding URL to fetch authentic metadata.`,
+      };
     }
 
     // --- P4: Staging ---
@@ -1301,12 +1452,13 @@ Return ONLY JSON matching:
 
     // Assert Track Singers & Titles
     for (const oracleTrack of oracle.tracks) {
-      const match = tracks.find(
-        (t: any) =>
-          (t.selectedTitle && t.selectedTitle.toLowerCase().includes(oracleTrack.title.toLowerCase())) ||
-          (t.selected && t.selected.toLowerCase().includes(oracleTrack.title.toLowerCase())) ||
-          t.index + 1 === oracleTrack.track_number
-      );
+      const match =
+        tracks.find(
+          (t: any) =>
+            (t.selectedTitle && t.selectedTitle.toLowerCase().includes(oracleTrack.title.toLowerCase())) ||
+            (t.selected && t.selected.toLowerCase().includes(oracleTrack.title.toLowerCase()))
+        ) ||
+        tracks.find((t: any) => t.index + 1 === oracleTrack.track_number);
       if (match) {
         const selectedText = match.selectedArtist || match.selected || '';
         const aiText = match.aiArtist || match.ai || '';

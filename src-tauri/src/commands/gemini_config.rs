@@ -48,18 +48,47 @@ fn read_settings(app: &AppHandle) -> Result<GeminiSettings, String> {
 }
 
 fn clean_json(text: &str) -> Result<Value, String> {
-    let cleaned = text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_end_matches("```")
-        .trim();
-    serde_json::from_str(cleaned).map_err(|e| format!("Gemini returned invalid JSON: {e}"))
+    let mut cleaned = text.trim();
+    if let Some(stripped) = cleaned.strip_prefix("```json") {
+        cleaned = stripped;
+    } else if let Some(stripped) = cleaned.strip_prefix("```") {
+        cleaned = stripped;
+    }
+    if let Some(stripped) = cleaned.strip_suffix("```") {
+        cleaned = stripped;
+    }
+    cleaned = cleaned.trim();
+
+    let first_brace = cleaned.find('{');
+    let first_bracket = cleaned.find('[');
+    let slice_to_parse = match (first_brace, first_bracket) {
+        (Some(b), Some(k)) if b < k => {
+            let last_b = cleaned.rfind('}').unwrap_or(cleaned.len().saturating_sub(1));
+            &cleaned[b..=last_b.min(cleaned.len().saturating_sub(1))]
+        }
+        (Some(_), Some(k)) => {
+            let last_k = cleaned.rfind(']').unwrap_or(cleaned.len().saturating_sub(1));
+            &cleaned[k..=last_k.min(cleaned.len().saturating_sub(1))]
+        }
+        (Some(b), None) => {
+            let last_b = cleaned.rfind('}').unwrap_or(cleaned.len().saturating_sub(1));
+            &cleaned[b..=last_b.min(cleaned.len().saturating_sub(1))]
+        }
+        (None, Some(k)) => {
+            let last_k = cleaned.rfind(']').unwrap_or(cleaned.len().saturating_sub(1));
+            &cleaned[k..=last_k.min(cleaned.len().saturating_sub(1))]
+        }
+        _ => cleaned,
+    };
+
+    serde_json::from_str(slice_to_parse).map_err(|e| format!("Gemini returned invalid JSON: {e}"))
 }
 
 async fn generate(
     app: &AppHandle,
     contents: Value,
     timeout_ms: u64,
+    use_grounding: bool,
 ) -> Result<(Value, String, u64), String> {
     let settings = read_settings(app)?;
     let key = settings.api_key;
@@ -91,8 +120,14 @@ async fn generate(
             continue;
         }
         for attempt in 0..3 {
+            let mut req_body = json!({ "contents": &contents });
+            if use_grounding {
+                req_body["tools"] = json!([{ "google_search": {} }]);
+            } else {
+                req_body["generationConfig"] = json!({ "responseMimeType": "application/json" });
+            }
             let response = client.post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"))
-                .header("x-goog-api-key", &key).json(&json!({"contents": &contents, "generationConfig":{"responseMimeType":"application/json"}})).send().await;
+                .header("x-goog-api-key", &key).json(&req_body).send().await;
             match response {
                 Ok(r) if r.status().is_success() => {
                     let data: Value = r.json().await.map_err(|e| e.to_string())?;
@@ -370,7 +405,7 @@ Instructions:
                 contents.push(json!({"role": if h["role"] == "agent" {"model"} else {"user"}, "parts":[{"text":h["text"]}]}));
             }
             contents.push(json!({"role":"user","parts":[{"text":format!("{sys}\n\nUser Instruction: {prompt}")}]}));
-            let (data, model, delay) = generate(&app, Value::Array(contents), 12_000).await?;
+            let (data, model, delay) = generate(&app, Value::Array(contents), 12_000, false).await?;
             let parsed = clean_json(&text_content(&data)).unwrap_or_else(|_| json!({"response":"I analyzed your library. How would you like me to assist with tagging, filtering, or audio hygiene?","command":null,"suggestedActions":[{"label":"Library Statistics","prompt":"Give me a statistical breakdown of my library"},{"label":"Recommend Actions","prompt":"What actions do you recommend next?"},{"label":"Auto-Resolve Artists","prompt":"Extract missing artists from folder hierarchy"}]}));
             return Ok(
                 json!({"success":true,"response":parsed["response"],"command":parsed["command"],"suggestedActions":parsed["suggestedActions"],"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":0}}),
@@ -379,7 +414,11 @@ Instructions:
         _ => return Err("Unknown Gemini operation".into()),
     };
     let contents = json!([{"role":"user","parts":[{"text":prompt}]}]);
-    let (data, model, delay) = generate(&app, contents, timeout).await?;
+    let use_grounding = operation == "compilation" && (
+        payload["referenceUrl"].as_str().map(|u| !u.trim().is_empty()).unwrap_or(false) ||
+        payload.get("userSearchQuery").is_some()
+    );
+    let (data, model, delay) = generate(&app, contents, timeout, use_grounding).await?;
     let parsed = clean_json(&text_content(&data))?;
     match operation.as_str() {
         "metadata" => {
