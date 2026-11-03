@@ -1256,7 +1256,6 @@ function localLibraryScannerPlugin(): Plugin {
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
-                  const norm = cleanAlbum.toLowerCase()
                   const isRegional = (n: string) => /\[(?:tamil|telugu|kannada|malayalam)\s+version\]|\((?:tamil|telugu|kannada|malayalam)\s+version\)/i.test(n)
                   const phoneticStem = (str: string) =>
                     str

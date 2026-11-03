@@ -1948,10 +1948,11 @@ export class FederatedResolversService {
       localRelease.artwork?.frontCoverUrl ||
       (localRelease as any)?.front_cover_url ||
       (localRelease as any)?.frontCoverUrl ||
-      localTracks[0]?.coverArtUrl ||
-      localTracks[0]?.artworkUrl ||
-      localTracks[0]?.frontCoverUrl ||
-      getCuratedAlbumArtwork(rawTitle, rawComposer || rawArtist) ||
+      (localTracks[0] as any)?.coverArtUrl ||
+      (localTracks[0] as any)?.artworkUrl ||
+      (localTracks[0] as any)?.frontCoverUrl ||
+      (localTracks[0]?.id ? `cadence:cover://${localTracks[0].id}` : '') ||
+      getCuratedAlbumArtwork(rawTitle, rawComposer || resolvedAlbumArtist || localArtist) ||
       ''
 
     const coverArtState: MetadataFieldState<string> = {

@@ -1578,7 +1578,7 @@ export function detectSequenceOffset(
 
     for (const prov of providerTracks) {
       const pNum = prov.trackNumber
-      if (pNum <= 0) continue
+      if (!pNum || pNum <= 0) continue
 
       const offset = lNum - pNum // e.g. 6 - 1 = 5
       let matchScore = 0

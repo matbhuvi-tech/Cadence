@@ -509,6 +509,8 @@ export type ConsensusFieldSource =
   | 'local_fallback'
   | 'single_provider_match'
   | 'manual_override'
+  | 'canonical_rule'
+  | 'none'
 
 export interface ConsensusFieldResult<T = string | number> {
   value: T

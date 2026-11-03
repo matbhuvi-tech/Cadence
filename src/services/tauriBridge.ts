@@ -1243,6 +1243,16 @@ class TauriBridgeService {
     return `mock-undo-${Date.now()}`
   }
 
+  public async commitStagedSidecars(): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('commit_staged_sidecars')
+      } catch (err) {
+        console.warn('[TauriBridge] Native commit_staged_sidecars invocation:', err)
+      }
+    }
+  }
+
   public async commitGetQueuedTrackIds(): Promise<string[]> {
     if (this.isTauri()) {
       return await invoke<string[]>('commit_get_queued_track_ids')

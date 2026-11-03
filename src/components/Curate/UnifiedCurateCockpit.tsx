@@ -55,6 +55,7 @@ import {
   TrackCandidateState,
   LearnedRule,
   SemanticConventions,
+  ConsensusFieldSource,
 } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
 import { curationQueueService, AlbumCurationQueueItem } from '../../services/curationQueueService'
@@ -67,6 +68,7 @@ import { resolveGemini } from '../../services/geminiClient'
 import type { CompilationProvenanceResult } from '../../core/types'
 import {
   cleanRipNoise,
+  cleanConsensusTitle,
   isPlaceholderTag,
   isDefectiveArtistTag,
   detectSequenceOffset,
@@ -91,6 +93,8 @@ export interface UnifiedCurateCockpitProps {
 
 interface AlbumWorkItem {
   id: string
+  userOverridden?: boolean
+  leadTrackId?: string
   folderName: string
   currentTitle: string
   tier: CurateTier
@@ -426,25 +430,26 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }
 
         const rawArtist = resolvedRawArtist
-        const rawYear = rel?.releaseYear || albTracks[0]?.releaseYear
+        const rawYear = rel?.releaseYear || albTracks[0]?.canonicalReleaseYear || albTracks[0]?.originalYear || (albTracks[0] as any)?.releaseYear
         const rawArt =
           rel?.coverArtUrl ||
           rel?.artwork?.frontCoverUrl ||
           (rel as any)?.front_cover_url ||
           (rel as any)?.frontCoverUrl ||
-          albTracks[0]?.coverArtUrl ||
-          albTracks[0]?.artworkUrl ||
-          albTracks[0]?.frontCoverUrl ||
+          (albTracks[0] as any)?.coverArtUrl ||
+          (albTracks[0] as any)?.artworkUrl ||
+          (albTracks[0] as any)?.frontCoverUrl ||
           getCuratedAlbumArtwork(rawTitle, rawComposer || rawArtist) ||
           (albTracks[0]?.id ? `cadence:cover://${albTracks[0].id}` : '')
-        const rawGenre = rel?.genreTags?.[0] || albTracks[0]?.genre || 'Soundtrack'
+        const trackGenre = (albTracks[0]?.pendingSidecarEdits?.genre as string) || (albTracks[0] as any)?.genre
+        const rawGenre = rel?.genreTags?.[0] || trackGenre || 'Soundtrack'
 
         // Detect album primary language for accurate conventions
         const initDetectedLang = detectLanguage({
           title: rawTitle,
           artistCredit: rawArtist,
           composerName: rawComposer,
-          genreTags: rel?.genreTags || (albTracks[0]?.genre ? [albTracks[0].genre] : []),
+          genreTags: rel?.genreTags || (trackGenre ? [trackGenre] : []),
           filePath: albTracks[0]?.filePath,
         }) || 'Hindi'
 
@@ -482,7 +487,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }))
 
         const emptyArtistRule = applyConsensusEmptyStateRule(rawArtist, {})
-        const albumConfidence = qItem.confidenceScore ?? (qItem.defectSeverity === 'info' || qItem.defectSeverity === 'low' ? 0.90 : 0.60)
+        const albumConfidence = qItem.confidenceScore ?? (qItem.defectSeverity === 'info' ? 0.90 : 0.60)
         const isDefectiveArtist = isDefectiveArtistTag(rawArtist, rawTitle)
         const hasRipNoise = Boolean(rawTitle && cleanRipNoise(rawTitle).toLowerCase() !== rawTitle.toLowerCase())
         const hasValidYear = Boolean(rawYear && Number(rawYear) >= 1900)
@@ -500,11 +505,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
         next.set(qItem.albumId, {
           id: qItem.albumId,
-          folderName: qItem.folderName,
+          folderName: qItem.folderName || rel?.folderPath || albTracks[0]?.folderName || '',
           currentTitle: rawTitle,
           tier: isClean ? 'tier1' : 'tier2',
           status: 'staged',
-          confidenceScore: qItem.confidenceScore,
+          confidenceScore: albumConfidence,
           rawRelease: rel,
           rawTracks: albTracks,
           albumTitle: {
@@ -800,7 +805,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           ...t,
           [field === 'title' ? 'matchedTitle' : 'matchedArtists']: trimmed,
           userOverridden: true,
-          source: 'manual_override',
+          source: 'manual_override' as ConsensusFieldSource,
           requiresHumanReview: false,
         }
       })
@@ -823,14 +828,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
       const updatedTracks = current.tracks.map((t) => {
         let val = t.localArtists
-        if (source === 'apple') val = t.appleArtists || current.albumArtist.apple
-        if (source === 'musicbrainz') val = t.mbArtists || current.albumArtist.musicbrainz
-        if (source === 'ai') val = t.aiArtists || current.albumArtist.ai
+        if (source === 'apple') val = t.appleArtists || current.albumArtist.apple || t.localArtists
+        if (source === 'musicbrainz') val = t.mbArtists || current.albumArtist.musicbrainz || t.localArtists
+        if (source === 'ai') val = t.aiArtists || current.albumArtist.ai || t.localArtists
 
         return {
           ...t,
           matchedArtists: val || t.localArtists,
-          source: source === 'local' ? 'local_fallback' : 'single_provider_match',
+          source: (source === 'local' ? 'local_fallback' : (source === 'ai' ? 'ai_synthesized' : 'single_provider_match')) as ConsensusFieldSource,
           requiresHumanReview: false,
         }
       })
@@ -1508,6 +1513,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         {/* Local */}
         <td
           onClick={() => {
+            if (!selectedAlbum) return;
             const fallbackArt = selectedAlbum?.leadTrackId
               ? `cadence:cover://${selectedAlbum.leadTrackId}`
               : (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : null);
@@ -1535,7 +1541,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           {fieldState.local || (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : null) ? (
             <div className="p-0.5 rounded-lg w-fit">
               <img
-                src={fieldState.local || `cadence:cover://${selectedAlbum.tracks[0].trackId}`}
+                src={fieldState.local || (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : '')}
                 alt="Local Art"
                 className="w-12 h-12 rounded object-cover shadow border border-white/10 group-hover:border-emerald-500/50 transition-colors"
               />
