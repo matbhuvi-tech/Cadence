@@ -44,6 +44,7 @@ import {
   Search,
   ArrowLeft,
   Folder,
+  FileText,
 } from 'lucide-react'
 import {
   Track,
@@ -332,6 +333,32 @@ async function resolveDirectWikipediaCandidate(inputUrl: string): Promise<{
   }
 }
 
+function mergeConsensusTrackStates(
+  candTracks: TrackCandidateState[] | undefined,
+  currentTracks: TrackCandidateState[],
+  rawTracks?: Track[]
+): TrackCandidateState[] {
+  if (!candTracks || candTracks.length === 0) return currentTracks
+  return candTracks.map((ts, i) => {
+    const cur = currentTracks.find((t) => t.trackId === ts.trackId) || currentTracks[i]
+    const raw = rawTracks?.find((t) => t.id === ts.trackId) || rawTracks?.[i]
+    const effectiveFilePath = ts.filePath || cur?.filePath || raw?.filePath
+    const effectiveFileName =
+      ts.fileName ||
+      cur?.fileName ||
+      (raw as any)?.fileName ||
+      (effectiveFilePath ? effectiveFilePath.replace(/\\/g, '/').split('/').pop() : undefined)
+    return {
+      ...ts,
+      filePath: effectiveFilePath,
+      fileName: effectiveFileName,
+      format: ts.format || cur?.format || raw?.format,
+      bitDepth: ts.bitDepth || cur?.bitDepth || raw?.bitDepth,
+      sampleRate: ts.sampleRate || cur?.sampleRate || raw?.sampleRate,
+    }
+  })
+}
+
 export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   tracks,
   releases,
@@ -481,6 +508,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           source: 'local_fallback',
           requiresHumanReview: isPlaceholderTag(t.artistCredit || ''),
           filePath: t.filePath,
+          fileName: (t as any).fileName || (t.filePath ? t.filePath.replace(/\\/g, '/').split('/').pop() : undefined),
           format: t.format,
           bitDepth: t.bitDepth,
           sampleRate: t.sampleRate,
@@ -670,7 +698,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             },
             tracks: current.tracks.some(t => t.userOverridden)
               ? current.tracks
-              : (consensus.trackStates && consensus.trackStates.length > 0 ? consensus.trackStates : current.tracks),
+              : mergeConsensusTrackStates(consensus.trackStates, current.tracks, current.rawTracks),
           }
 
           next.set(selectedAlbum.id, updated)
@@ -1013,7 +1041,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             ai: aiMasterResult?.coverArtUrl || consensus.albumFieldStates.coverArt.ai || current.coverArt.ai,
             selected: current.coverArt.selected || consensus.albumFieldStates.coverArt.selected,
           } : current.coverArt),
-          tracks: consensus.trackStates && consensus.trackStates.length > 0 ? consensus.trackStates : current.tracks,
+          tracks: mergeConsensusTrackStates(consensus.trackStates, current.tracks, current.rawTracks),
         }
 
         next.set(selectedAlbum.id, updated)
@@ -2204,25 +2232,34 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           >
                             <div className="font-medium text-white/80">{trk.localTitle}</div>
                             <div className="text-[10px] text-white/40 font-mono">{trk.localArtists || 'Unknown'}</div>
-                            {trk.filePath && (
-                              <div
-                                className="flex items-center gap-1.5 text-[10px] text-neutral-400 font-mono mt-1 max-w-[280px]"
-                                title={trk.filePath}
-                              >
-                                <Folder className="w-3 h-3 text-neutral-500 shrink-0" />
-                                <span className="truncate">
-                                  {(() => {
-                                    const parts = trk.filePath.replace(/\\/g, '/').split('/');
-                                    return parts.slice(-2).join('/');
-                                  })()}
-                                </span>
-                                {(trk.format || trk.bitDepth) && (
-                                  <span className="text-[9px] text-neutral-400 border border-neutral-700 rounded px-1 shrink-0">
-                                    {trk.format?.toUpperCase() || ''}{trk.bitDepth ? ` ${trk.bitDepth}b` : ''}{trk.sampleRate ? `/${Math.round(trk.sampleRate / 1000)}k` : ''}
-                                  </span>
-                                )}
-                              </div>
-                            )}
+                            {(() => {
+                              const rawTrk = selectedAlbum.rawTracks?.find((t) => t.id === trk.trackId);
+                              const effectiveFilePath = trk.filePath || rawTrk?.filePath;
+                              const effectiveFileName =
+                                trk.fileName ||
+                                (rawTrk as any)?.fileName ||
+                                (effectiveFilePath ? effectiveFilePath.replace(/\\/g, '/').split('/').pop() : '');
+                              const effectiveFormat = trk.format || rawTrk?.format;
+                              const effectiveBitDepth = trk.bitDepth || rawTrk?.bitDepth;
+                              const effectiveSampleRate = trk.sampleRate || rawTrk?.sampleRate;
+
+                              if (!effectiveFileName) return null;
+
+                              return (
+                                <div
+                                  className="flex items-center gap-1.5 text-[10px] text-neutral-400 font-mono mt-1 max-w-[280px] select-text"
+                                  title={effectiveFilePath || effectiveFileName}
+                                >
+                                  <FileText className="w-3 h-3 text-neutral-500 shrink-0" />
+                                  <span className="truncate">{effectiveFileName}</span>
+                                  {(effectiveFormat || effectiveBitDepth) && (
+                                    <span className="text-[9px] text-neutral-400 border border-neutral-700 rounded px-1 shrink-0">
+                                      {effectiveFormat?.toUpperCase() || ''}{effectiveBitDepth ? ` ${effectiveBitDepth}b` : ''}{effectiveSampleRate ? `/${Math.round(effectiveSampleRate / 1000)}k` : ''}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </td>
 
                           {/* Apple Music Cell */}

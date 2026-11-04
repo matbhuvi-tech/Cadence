@@ -1940,6 +1940,11 @@ export class FederatedResolversService {
         confidence: matchedConfidence,
         source: matchedSource,
         requiresHumanReview: requiresReview,
+        filePath: lt.filePath,
+        fileName: (lt as any).fileName || (lt.filePath ? lt.filePath.replace(/\\/g, '/').split('/').pop() : undefined),
+        format: lt.format,
+        bitDepth: lt.bitDepth,
+        sampleRate: lt.sampleRate,
       })
     }
 

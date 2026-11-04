@@ -617,6 +617,7 @@ export interface TrackCandidateState {
   aiTitle?: string
   aiArtists?: string
   filePath?: string;
+  fileName?: string;
   format?: string;
   bitDepth?: number;
   sampleRate?: number;
