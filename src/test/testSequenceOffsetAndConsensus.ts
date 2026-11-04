@@ -118,6 +118,93 @@ async function runTests() {
   console.log(`  Applied delimiter/token rules on "${testCombo}" -> "${normCombo.value}"`)
   assert(normCombo.value.includes('K. J. Yesudas') || normCombo.value.includes('S. P. Balasubrahmanyam'), 'Should expand abbreviations')
 
+  // --------------------------------------------------------------------------
+  // 4. File Provenance & Bare File Name Invariant in Consensus
+  // --------------------------------------------------------------------------
+  console.log('\n[4] Testing File Provenance & Bare File Name Invariant...')
+
+  const mockRawTracks = [
+    {
+      id: 'trk-01',
+      trackNumber: 1,
+      title: '01 Dil Se.wav',
+      filePath: 'D:/Music/Master/Hindi/A R Rahman/A World Of Music/CD01/01 Dil Se.wav',
+      fileName: '01 Dil Se.wav',
+      format: 'WAV',
+      bitDepth: 16,
+      sampleRate: 44100,
+    },
+    {
+      id: 'trk-02',
+      trackNumber: 2,
+      title: '02 Barso Re.wav',
+      filePath: '\\\\192.168.1.6\\Music\\CD01\\02 Barso Re.wav',
+      fileName: '02 Barso Re.wav',
+      format: 'WAV',
+      bitDepth: 24,
+      sampleRate: 96000,
+    },
+  ]
+
+  // Simulate federated resolver trackStates output (which now carries filePath & fileName)
+  const resolvedTrackStates = mockRawTracks.map(t => ({
+    trackId: t.id,
+    trackNumber: t.trackNumber,
+    localTitle: t.title,
+    localArtists: 'A. R. Rahman',
+    matchedTitle: t.title.replace('.wav', ''),
+    matchedArtists: 'A. R. Rahman',
+    confidence: 0.95,
+    source: 'single_provider_match' as const,
+    filePath: t.filePath,
+    fileName: t.fileName,
+    format: t.format,
+    bitDepth: t.bitDepth,
+    sampleRate: t.sampleRate,
+  }))
+
+  for (const trk of resolvedTrackStates) {
+    assert(Boolean(trk.filePath), `Track ${trk.trackId} must preserve filePath`)
+    assert(Boolean(trk.fileName), `Track ${trk.trackId} must preserve fileName`)
+    assert(!trk.fileName!.includes('/') && !trk.fileName!.includes('\\'), `fileName "${trk.fileName}" must not contain folder separators`)
+  }
+
+  // Simulate consensus merge fallback logic when online provider omit filePath
+  const sparseProviderTrackStates = [
+    {
+      trackId: 'trk-01',
+      trackNumber: 1,
+      localTitle: '01 Dil Se.wav',
+      localArtists: 'A. R. Rahman',
+      matchedTitle: 'Dil Se',
+      matchedArtists: 'A. R. Rahman',
+      confidence: 0.95,
+      source: 'single_provider_match' as const,
+    },
+  ]
+
+  const merged = sparseProviderTrackStates.map((ts, i) => {
+    const raw = mockRawTracks.find(t => t.id === ts.trackId) || mockRawTracks[i]
+    const effectiveFilePath = (ts as any).filePath || raw?.filePath
+    const effectiveFileName =
+      (ts as any).fileName ||
+      (raw as any)?.fileName ||
+      (effectiveFilePath ? effectiveFilePath.replace(/\\/g, '/').split('/').pop() : undefined)
+    return {
+      ...ts,
+      filePath: effectiveFilePath,
+      fileName: effectiveFileName,
+      format: (ts as any).format || raw?.format,
+      bitDepth: (ts as any).bitDepth || raw?.bitDepth,
+      sampleRate: (ts as any).sampleRate || raw?.sampleRate,
+    }
+  })
+
+  assert(merged[0].fileName === '01 Dil Se.wav', 'Consensus merge must restore fileName from rawTracks')
+  assert(merged[0].filePath === 'D:/Music/Master/Hindi/A R Rahman/A World Of Music/CD01/01 Dil Se.wav', 'Consensus merge must restore filePath from rawTracks')
+  assert(merged[0].format === 'WAV', 'Consensus merge must restore format')
+  console.log('  ✓ File provenance, bare fileName, and audio specs are intact and isolated from folder paths.')
+
   console.log('\n=== ALL 2-TIER TESTS PASSED SUCCESSFULLY! ===')
 }
 

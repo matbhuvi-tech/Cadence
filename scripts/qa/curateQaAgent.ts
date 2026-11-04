@@ -912,18 +912,20 @@ No markdown backticks, just the JSON.`;
           return Array.from(rows).map((row, idx) => {
             const getCell = (col) => {
               const cell = row.querySelector('[data-testid="track-cell-' + idx + '-' + col + '"]');
-              if (!cell) return { text: '', title: '', artist: '' };
+              if (!cell) return { text: '', title: '', artist: '', fileName: '' };
               const titleEl = cell.querySelector('.font-medium');
               const artistEl = cell.querySelector('[class*="text-[10px]"], [class*="text-[11px]"]');
+              const fileEl = cell.querySelector('.select-text');
               const title = titleEl ? titleEl.textContent.trim() : '';
               let artist = artistEl ? artistEl.textContent.trim() : '';
               if (artist.startsWith('??') || artist.includes('Requires Action')) {
                 artist = '';
               }
+              const fileName = fileEl ? fileEl.textContent.trim() : '';
               const text = (title && artist && artist !== '?' && artist !== '-')
                 ? (title + ' // ' + artist)
                 : (title || artist || cell.textContent.trim());
-              return { text, title, artist };
+              return { text, title, artist, fileName };
             };
 
             const localCell = getCell('local');
@@ -937,6 +939,7 @@ No markdown backticks, just the JSON.`;
               local: localCell.text,
               localTitle: localCell.title,
               localArtist: localCell.artist,
+              localFileName: localCell.fileName,
               apple: appleCell.text,
               appleTitle: appleCell.title,
               appleArtist: appleCell.artist,
@@ -1504,6 +1507,51 @@ Return ONLY JSON matching:
               actual: `Selected: ${match.selected}, AI: ${match.ai}`,
               screenshotPath,
             });
+          }
+        }
+
+        // 4. Assert Local File Name in Local File column
+        if (!match.localFileName) {
+          this.recordBug({
+            classification: 'UI Interaction Bug',
+            severity: 'MAJOR',
+            albumId,
+            stepNumber: 0,
+            description: `File name is missing in #Local File column for Track #${oracleTrack.track_number} ("${oracleTrack.title}").`,
+            expected: `Non-empty file name (e.g. pattern "${oracleTrack.expected_file_pattern}")`,
+            actual: `Empty file name`,
+            screenshotPath,
+          });
+        } else {
+          // Verify no redundant folder separators in bare file name
+          if (match.localFileName.includes('/') || match.localFileName.includes('\\')) {
+            this.recordBug({
+              classification: 'UI Interaction Bug',
+              severity: 'MINOR',
+              albumId,
+              stepNumber: 0,
+              description: `File name for Track #${oracleTrack.track_number} contains redundant folder separators: "${match.localFileName}".`,
+              expected: `Bare file name without folder path`,
+              actual: match.localFileName,
+              screenshotPath,
+            });
+          }
+          if (oracleTrack.expected_file_pattern) {
+            try {
+              const regex = new RegExp(oracleTrack.expected_file_pattern, 'i');
+              if (!regex.test(match.localFileName)) {
+                this.recordBug({
+                  classification: 'Identity Resolution Bug',
+                  severity: 'MINOR',
+                  albumId,
+                  stepNumber: 0,
+                  description: `File name "${match.localFileName}" does not match expected pattern "${oracleTrack.expected_file_pattern}" for Track #${oracleTrack.track_number}.`,
+                  expected: oracleTrack.expected_file_pattern,
+                  actual: match.localFileName,
+                  screenshotPath,
+                });
+              }
+            } catch (_) {}
           }
         }
 

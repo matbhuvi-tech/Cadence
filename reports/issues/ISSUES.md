@@ -10,3 +10,4 @@
   - Implemented `mergeConsensusTrackStates` in `UnifiedCurateCockpit.tsx` to prevent consensus resolution from overwriting local file paths.
   - Rendered `effectiveFileName` with `FileText` icon under the local artist credit in the `#Local File` column.
 - **Status:** Verified and Fixed.
+
