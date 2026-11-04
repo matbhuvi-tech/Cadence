@@ -915,7 +915,7 @@ No markdown backticks, just the JSON.`;
               if (!cell) return { text: '', title: '', artist: '', fileName: '' };
               const titleEl = cell.querySelector('.font-medium');
               const artistEl = cell.querySelector('[class*="text-[10px]"], [class*="text-[11px]"]');
-              const fileEl = cell.querySelector('.select-text');
+              const fileEl = cell.querySelector('[data-testid="local-track-filename"]') || cell.querySelector('.select-text span.truncate');
               const title = titleEl ? titleEl.textContent.trim() : '';
               let artist = artistEl ? artistEl.textContent.trim() : '';
               if (artist.startsWith('??') || artist.includes('Requires Action')) {

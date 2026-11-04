@@ -2251,7 +2251,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                   title={effectiveFilePath || effectiveFileName}
                                 >
                                   <FileText className="w-3 h-3 text-neutral-500 shrink-0" />
-                                  <span className="truncate">{effectiveFileName}</span>
+                                  <span data-testid="local-track-filename" className="truncate">{effectiveFileName}</span>
                                   {(effectiveFormat || effectiveBitDepth) && (
                                     <span className="text-[9px] text-neutral-400 border border-neutral-700 rounded px-1 shrink-0">
                                       {effectiveFormat?.toUpperCase() || ''}{effectiveBitDepth ? ` ${effectiveBitDepth}b` : ''}{effectiveSampleRate ? `/${Math.round(effectiveSampleRate / 1000)}k` : ''}
