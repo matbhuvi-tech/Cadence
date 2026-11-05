@@ -5,7 +5,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import type { UpdateArtistEditorialPayload } from '../core/types'
+import type { CurationDecisionTrace, UpdateArtistEditorialPayload } from '../core/types'
 import type { CommitQueueSummary, CommitTelemetryPayload, EnqueueBatchPayload } from '../types/commit'
 
 export interface AudioStreamTelemetry {
@@ -1278,6 +1278,38 @@ class TauriBridgeService {
       }
     }
     return () => {}
+  }
+
+  public async curationSaveTrace(albumId: string, trace: CurationDecisionTrace): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('curation_save_trace', { albumId, trace })
+      } catch (err) {
+        console.warn('[TauriBridge] Native curation_save_trace failed:', err)
+      }
+    }
+  }
+
+  public async curationGetTrace(albumId: string): Promise<CurationDecisionTrace | null> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<CurationDecisionTrace | null>('curation_get_trace', { albumId })
+      } catch (err) {
+        console.warn('[TauriBridge] Native curation_get_trace failed:', err)
+        return null
+      }
+    }
+    return null
+  }
+
+  public async curationClearTrace(albumId: string): Promise<void> {
+    if (this.isTauri()) {
+      try {
+        await invoke('curation_clear_trace', { albumId })
+      } catch (err) {
+        console.warn('[TauriBridge] Native curation_clear_trace failed:', err)
+      }
+    }
   }
 }
 

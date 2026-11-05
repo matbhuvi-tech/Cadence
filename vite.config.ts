@@ -1401,6 +1401,7 @@ function localLibraryScannerPlugin(): Plugin {
           JSON.stringify({
             success: true,
             provider: 'itunes',
+            releaseId: String(foundItem.collectionId || foundItem.trackId || ''),
             confidenceScore: 0.95,
             releaseTitle: foundItem.collectionName || cleanAlbum,
             artistCredit: foundItem.artistName || cleanArtist,
@@ -1709,6 +1710,7 @@ function localLibraryScannerPlugin(): Plugin {
                         JSON.stringify({
                           success: true,
                           provider: 'musicbrainz',
+                          releaseId: topRel.id,
                           confidenceScore: topRel.score >= 90 ? 0.95 : 0.85,
                           releaseTitle: detail.title || topRel.title || cleanAlbum,
                           artistCredit: trackArtist,

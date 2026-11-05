@@ -564,6 +564,7 @@ export interface ReleaseConsensusResult {
   }
   trackStates?: TrackCandidateState[]
   sequenceOffsetResult?: SequenceOffsetDetectionResult
+  decisionTrace?: CurationDecisionTrace
 }
 
 export interface NavigationAnchor {
@@ -665,3 +666,62 @@ export interface SequenceOffsetDetectionResult {
   isConfidentOffset: boolean
 }
 
+
+// ============================================================================
+// Curation Decision Trace & Execution Feedback
+// ============================================================================
+
+export type OutcomeStatus = 
+  | 'matched_applied' 
+  | 'evaluated_unchanged' 
+  | 'incomplete' 
+  | 'paused_playback' 
+  | 'failed'
+
+export type DecisionAction = 'Applied' | 'Retained' | 'Rejected'
+
+export interface FieldDecision {
+  action: DecisionAction
+  chosenValue: string
+  localValue?: string
+  consensusRatio: string
+  plainExplanation: string
+  confidenceScore: number
+}
+
+export interface CandidateTelemetry {
+  provider: string
+  releaseId: string
+  trackCount?: number
+  latencyMs: number
+  httpStatus: number
+  confidenceScore: number
+  rejectionReason?: string
+}
+
+export interface CurationDecisionTrace {
+  albumId: string
+  albumHash: string
+  matchedReleaseId?: string
+  outcomeStatus: OutcomeStatus
+  headlineSummary: string
+  fieldTraces: Record<string, FieldDecision>
+  candidateTelemetry: CandidateTelemetry[]
+  durationMs: number
+  engineVersion: string
+  updatedAt: string
+}
+
+export type ExecutionPhase = 
+  | 'idle'
+  | 'querying_musicbrainz'
+  | 'querying_apple'
+  | 'evaluating_candidates'
+  | 'reconciling_metadata'
+  | 'persisting_trace'
+
+export interface ExecutionProgressEvent {
+  phase: ExecutionPhase
+  message: string
+  elapsedMs: number
+}

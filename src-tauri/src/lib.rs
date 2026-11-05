@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod commands;
+pub mod curation;
 pub mod db;
 pub mod maintenance;
 pub mod remote;
@@ -8,6 +9,7 @@ pub mod scanner;
 use audio::AudioEngine;
 use commands::audio::*;
 use commands::artist_portrait::*;
+use commands::curation::*;
 use commands::gemini_config::*;
 use commands::library::*;
 use commands::maintenance::*;
@@ -281,6 +283,10 @@ pub fn run() {
             db_backfill_artist_credits,
             db_recompute_release_artist_credits,
             db_search_catalog,
+            // Curation Decision Trace commands
+            curation_save_trace,
+            curation_get_trace,
+            curation_clear_trace,
             // Playlists
             db_get_playlists,
             db_get_playlist_details,

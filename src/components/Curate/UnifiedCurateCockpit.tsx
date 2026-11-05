@@ -65,6 +65,9 @@ import { compilationCanonicalizerService } from '../../services/compilationCanon
 import { behavioralLearningService } from '../../services/behavioralLearningService'
 import { tauriBridge } from '../../services/tauriBridge'
 import { provenanceCacheService } from '../../services/provenanceCacheService'
+import { useCurationTrace } from '../../hooks/useCurationTrace'
+import { SteerProgressBar } from './SteerProgressBar'
+import { CurationDecisionTraceDrawer } from './CurationDecisionTraceDrawer'
 import { resolveGemini } from '../../services/geminiClient'
 import type { CompilationProvenanceResult } from '../../core/types'
 import {
@@ -333,6 +336,69 @@ async function resolveDirectWikipediaCandidate(inputUrl: string): Promise<{
   }
 }
 
+async function resolveDirectSpotifyCandidate(inputUrl: string): Promise<{
+  releaseTitle: string
+  artistCredit: string
+  composer: string
+  releaseYear?: number
+  genre: string
+  coverArtUrl?: string
+  tracks: Array<{ trackNumber: number; trackName: string; artistName?: string }>
+} | null> {
+  const m = inputUrl.match(/album\/([a-zA-Z0-9]+)/)
+  if (!m) return null
+  const albumId = m[1]
+
+  try {
+    const res = await fetch(`https://open.spotify.com/embed/album/${albumId}`)
+    if (!res.ok) return null
+    const html = await res.text()
+    const scriptMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+    if (!scriptMatch) return null
+    const data = JSON.parse(scriptMatch[1])
+    const entity = data?.props?.pageProps?.state?.data?.entity
+    if (!entity) return null
+
+    let rawTitle = entity.name || entity.title || ''
+    let artist = 'Various Artists'
+    let title = rawTitle
+    if (rawTitle.includes(' - ')) {
+      const parts = rawTitle.split(' - ')
+      artist = parts[0].trim()
+      title = parts.slice(1).join(' - ').trim()
+    }
+
+    const coverArtUrl = entity.visualIdentity?.image?.reduce((best: any, img: any) => {
+      return (img.maxWidth > (best?.maxWidth || 0)) ? img : best
+    }, null)?.url
+
+    let releaseYear: number | undefined
+    if (entity.releaseDate) {
+      const y = String(entity.releaseDate).match(/\b(19\d{2}|20\d{2})\b/)
+      if (y) releaseYear = parseInt(y[1], 10)
+    }
+
+    const tracks = (entity.trackList || []).map((t: any, idx: number) => ({
+      trackNumber: idx + 1,
+      trackName: t.title || `Track ${idx + 1}`,
+      artistName: (t.subtitle || '').replace(/\u00a0/g, ' ').trim(),
+    }))
+
+    return {
+      releaseTitle: title || rawTitle,
+      artistCredit: artist,
+      composer: artist,
+      releaseYear,
+      genre: 'Soundtrack',
+      coverArtUrl,
+      tracks,
+    }
+  } catch (err) {
+    console.warn('[UnifiedCurateCockpit] Spotify embed parsing error:', err)
+    return null
+  }
+}
+
 function mergeConsensusTrackStates(
   candTracks: TrackCandidateState[] | undefined,
   currentTracks: TrackCandidateState[],
@@ -385,6 +451,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [learnedRules, setLearnedRules] = useState<LearnedRule[]>(() => behavioralLearningService.getLearnedRules())
   const [conventions, setConventions] = useState<SemanticConventions>(() => behavioralLearningService.getConventions())
   const [dismissedPrompts, setDismissedPrompts] = useState<Set<string>>(new Set())
+
 
   // Steer Providers & AI Grounding State
   const [isReQueryOpen, setIsReQueryOpen] = useState(true)
@@ -613,6 +680,24 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     if (!selectedAlbumId) return null
     return albumItems.get(selectedAlbumId) || null
   }, [albumItems, selectedAlbumId])
+
+  // Curation Decision Trace Hook
+  const {
+    status: traceStatus,
+    progressMessage: traceProgressMessage,
+    currentPhase: traceCurrentPhase,
+    trace: curationTrace,
+    outcomeStatus: traceOutcomeStatus,
+    isDrawerOpen: isTraceDrawerOpen,
+    isResuming: isTraceResuming,
+    setIsResuming: setIsTraceResuming,
+    executeFetch: executeTraceFetch,
+    toggleDrawer: toggleTraceDrawer,
+    closeDrawer: closeTraceDrawer,
+    setTrace: setCurationTrace,
+  } = useCurationTrace({
+    albumId: selectedAlbum?.id,
+  })
 
   // Sync steering parameters when active album changes
   useEffect(() => {
@@ -980,13 +1065,23 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         releaseYear: directAppleMaster?.releaseYear || aiMasterResult?.releaseYear || Number(steerYear) || selectedAlbum.rawRelease.releaseYear,
       }
 
-      const consensus = await federatedResolversService.resolve2of3ReleaseConsensus(
-        steeredRelease,
-        selectedAlbum.rawTracks,
-        false,
-        aiMasterResult,
-        directAppleCandidate
-      )
+      const consensus = await executeTraceFetch(selectedAlbum.id, async (signal, onProgress) => {
+        const res = await federatedResolversService.resolve2of3ReleaseConsensus(
+          steeredRelease,
+          selectedAlbum.rawTracks,
+          false,
+          aiMasterResult,
+          directAppleCandidate,
+          onProgress,
+          signal
+        )
+        return { trace: res?.decisionTrace, result: res }
+      })
+
+      if (!consensus) {
+        setIsSteeringLoading(false)
+        return
+      }
 
       // 3. Update album state with fresh candidates and grounded results
       setAlbumItems((prev) => {
@@ -1984,7 +2079,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     type="url"
                     value={steerGroundingUrl}
                     onChange={(e) => setSteerGroundingUrl(e.target.value)}
-                    placeholder="Paste Apple Music / Discogs / MusicBrainz URL for AI Grounding..."
+                    placeholder="Paste Apple Music / Spotify / Discogs / MusicBrainz URL for AI Grounding..."
                     className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-white placeholder:text-white/40 text-xs focus:outline-none focus:border-cyan-400/60"
                   />
                   <Link2 className="w-3.5 h-3.5 text-cyan-400 absolute left-2.5 top-2.5 pointer-events-none" />
@@ -2004,6 +2099,15 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   )}
                   <span>Fetch & Anchor</span>
                 </button>
+
+                <SteerProgressBar
+                  phase={traceCurrentPhase}
+                  message={traceProgressMessage}
+                  outcomeStatus={traceOutcomeStatus}
+                  isFetching={isSteeringLoading || traceStatus === 'fetching'}
+                  onToggleRationale={toggleTraceDrawer}
+                  hasTrace={Boolean(curationTrace)}
+                />
               </form>
             )}
 
@@ -2639,6 +2743,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           </div>
         </div>
       )}
+
+      <CurationDecisionTraceDrawer
+        isOpen={isTraceDrawerOpen}
+        onClose={closeTraceDrawer}
+        trace={curationTrace}
+        onResumeFetch={handleFetchAndAnchor}
+        isResuming={isTraceResuming}
+      />
     </div>
   )
 }

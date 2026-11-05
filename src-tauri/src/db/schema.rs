@@ -343,5 +343,31 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_compilation_cache_created_at ON compilation_provenance_cache(created_at)", []);
 
+    // Ensure curation_decision_traces exists on upgraded databases
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS curation_decision_traces (
+            album_id TEXT PRIMARY KEY,
+            album_hash TEXT,
+            matched_release_id TEXT,
+            outcome_status TEXT NOT NULL,
+            headline_summary TEXT NOT NULL,
+            field_traces_json TEXT NOT NULL,
+            candidate_telemetry_json TEXT NOT NULL,
+            duration_ms INTEGER,
+            engine_version TEXT,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE curation_decision_traces ADD COLUMN album_hash TEXT", []);
+    let _ = conn.execute("ALTER TABLE curation_decision_traces ADD COLUMN headline_summary TEXT", []);
+    let _ = conn.execute("ALTER TABLE curation_decision_traces ADD COLUMN field_traces_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE curation_decision_traces ADD COLUMN candidate_telemetry_json TEXT", []);
+    let _ = conn.execute("ALTER TABLE curation_decision_traces ADD COLUMN duration_ms INTEGER", []);
+    let _ = conn.execute("ALTER TABLE curation_decision_traces ADD COLUMN engine_version TEXT", []);
+    let _ = conn.execute("ALTER TABLE curation_decision_traces ADD COLUMN updated_at TEXT", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_curation_traces_status ON curation_decision_traces(outcome_status)", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_curation_traces_updated_at ON curation_decision_traces(updated_at)", []);
+
     Ok(())
 }
