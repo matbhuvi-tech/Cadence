@@ -8,6 +8,12 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         PRAGMA foreign_keys = ON;
         PRAGMA busy_timeout = 5000;
 
+        CREATE TABLE IF NOT EXISTS curation_drafts (
+            album_id TEXT PRIMARY KEY,
+            draft_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS storage_mounts (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,

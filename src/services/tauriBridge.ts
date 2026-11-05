@@ -6,6 +6,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { CurationDecisionTrace, UpdateArtistEditorialPayload } from '../core/types'
+import type { CurateDraft } from '../core/curateDraft'
 import type { CommitQueueSummary, CommitTelemetryPayload, EnqueueBatchPayload } from '../types/commit'
 
 export interface AudioStreamTelemetry {
@@ -70,6 +71,7 @@ export interface StorageAccessibilityReport {
 }
 
 class TauriBridgeService {
+  private curateDraftWrites = new Map<string, Promise<void>>()
   private browserAudio: HTMLAudioElement | null = null
   private browserPositionInterval: any = null
   private onPositionUpdateCallback: ((pos: number, dur: number) => void) | null = null
@@ -1278,6 +1280,31 @@ class TauriBridgeService {
       }
     }
     return () => {}
+  }
+
+  public async curationGetDraft(albumId: string): Promise<CurateDraft | null> {
+    await this.curateDraftWrites.get(albumId)
+    const draft = this.isTauri()
+      ? await invoke<CurateDraft | null>('curation_get_draft', { albumId })
+      : JSON.parse(localStorage.getItem(`cadence:curate-draft:${albumId}`) ?? 'null') as CurateDraft | null
+    if (draft && draft.version !== 1) throw new Error('Unsupported Curate draft version')
+    return draft
+  }
+
+  public async curationSaveDraft(albumId: string, draft: CurateDraft): Promise<void> {
+    const write = (this.curateDraftWrites.get(albumId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      if (this.isTauri()) {
+        await invoke('curation_save_draft', { albumId, draft })
+      } else {
+        localStorage.setItem(`cadence:curate-draft:${albumId}`, JSON.stringify(draft))
+      }
+    })
+    this.curateDraftWrites.set(albumId, write)
+    try {
+      await write
+    } finally {
+      if (this.curateDraftWrites.get(albumId) === write) this.curateDraftWrites.delete(albumId)
+    }
   }
 
   public async curationSaveTrace(albumId: string, trace: CurationDecisionTrace): Promise<void> {

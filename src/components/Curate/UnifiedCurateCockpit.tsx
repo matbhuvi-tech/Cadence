@@ -59,6 +59,10 @@ import {
   ConsensusFieldSource,
 } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
+import {
+  captureCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields,
+  type CurateDraftTrack,
+} from '../../core/curateDraft'
 import { curationQueueService, AlbumCurationQueueItem } from '../../services/curationQueueService'
 import { federatedResolversService } from '../../services/federatedResolvers'
 import { compilationCanonicalizerService } from '../../services/compilationCanonicalizerService'
@@ -111,10 +115,13 @@ interface AlbumWorkItem {
   year: MetadataFieldState<number | undefined>
   coverArt: MetadataFieldState<string>
   genre: MetadataFieldState<string>
-  tracks: TrackCandidateState[]
+  tracks: CurateDraftTrack[]
+  draftBasedOn?: string
   rawRelease?: Release
   rawTracks: Track[]
 }
+
+const emptyAuditIssues: AuditIssue[] = []
 
 // Direct Apple Music URL and Slug Resolver
 async function resolveDirectAppleMusicCandidate(inputUrl: string, steerTitle?: string, steerArtist?: string): Promise<{
@@ -405,9 +412,12 @@ function mergeConsensusTrackStates(
   rawTracks?: Track[]
 ): TrackCandidateState[] {
   if (!candTracks || candTracks.length === 0) return currentTracks
-  return candTracks.map((ts, i) => {
-    const cur = currentTracks.find((t) => t.trackId === ts.trackId) || currentTracks[i]
-    const raw = rawTracks?.find((t) => t.id === ts.trackId) || rawTracks?.[i]
+  const candidates = new Map(candTracks.map(track => [track.trackId, track]))
+  const rawById = new Map(rawTracks?.map(track => [track.id, track]))
+  return currentTracks.map(cur => {
+    const ts = candidates.get(cur.trackId)
+    if (!ts) return cur
+    const raw = rawById.get(ts.trackId)
     const effectiveFilePath = ts.filePath || cur?.filePath || raw?.filePath
     const effectiveFileName =
       ts.fileName ||
@@ -416,6 +426,12 @@ function mergeConsensusTrackStates(
       (effectiveFilePath ? effectiveFilePath.replace(/\\/g, '/').split('/').pop() : undefined)
     return {
       ...ts,
+      localTitle: cur.localTitle,
+      localArtists: cur.localArtists,
+      trackNumber: cur.trackNumber,
+      originalAlbum: ts.originalAlbum ?? cur.originalAlbum,
+      originalYear: ts.originalYear ?? cur.originalYear,
+      provenanceSource: ts.provenanceSource ?? cur.provenanceSource,
       filePath: effectiveFilePath,
       fileName: effectiveFileName,
       format: ts.format || cur?.format || raw?.format,
@@ -428,7 +444,7 @@ function mergeConsensusTrackStates(
 export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   tracks,
   releases,
-  auditIssues = [],
+  auditIssues = emptyAuditIssues,
   initialSelectedAlbumId,
   navigationAnchor,
   onReturnToAnchor,
@@ -480,9 +496,25 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // 3. Build Rich Album Work Items
   const [albumItems, setAlbumItems] = useState<Map<string, AlbumWorkItem>>(new Map())
+  const previousDraftItems = useRef(albumItems)
+  const loadedDrafts = useRef(new Map<string, {
+    saved: string
+    restored: boolean
+    pending?: { serialized: string; write: Promise<void> }
+  }>())
+  const [draftLoad, setDraftLoad] = useState<{ id: string; failed: boolean } | null>(null)
+  const [draftLoadAttempt, setDraftLoadAttempt] = useState(0)
+  const [draftSaveError, setDraftSaveError] = useState<string | null>(null)
+  const [stagingAlbumId, setStagingAlbumId] = useState<string | null>(null)
 
   // Initialize and populate album items - PRESERVES user edits across library refreshes
   useEffect(() => {
+    const tracksByRelease = new Map<string, Track[]>()
+    for (const track of tracks) {
+      const releaseTracks = tracksByRelease.get(track.releaseId)
+      if (releaseTracks) releaseTracks.push(track)
+      else tracksByRelease.set(track.releaseId, [track])
+    }
     setAlbumItems((prev) => {
       const next = new Map(prev)
 
@@ -493,11 +525,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         }
 
         const rel = releases.find((r) => r.id === qItem.albumId)
-        const albTracks = tracks.filter(
-          (t) =>
-            t.releaseId === qItem.albumId ||
-            (t.albumTitle && t.albumTitle.toLowerCase().trim() === qItem.albumTitle.toLowerCase().trim())
-        ).sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0))
+        const albTracks = (tracksByRelease.get(qItem.albumId) ?? []).sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0))
 
         if (!rel && albTracks.length === 0) continue
 
@@ -535,7 +563,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           (albTracks[0] as any)?.frontCoverUrl ||
           getCuratedAlbumArtwork(rawTitle, rawComposer || rawArtist) ||
           (albTracks[0]?.id ? `cadence:cover://${albTracks[0].id}` : '')
-        const trackGenre = (albTracks[0]?.pendingSidecarEdits?.genre as string) || (albTracks[0] as any)?.genre
+        const trackGenre = (albTracks[0] as any)?.genre
         const rawGenre = rel?.genreTags?.[0] || trackGenre || 'Soundtrack'
 
         // Detect album primary language for accurate conventions
@@ -675,11 +703,79 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     })
   }, [baseQueue, releases, tracks])
 
-  // Active selected album
-  const selectedAlbum = useMemo(() => {
-    if (!selectedAlbumId) return null
-    return albumItems.get(selectedAlbumId) || null
-  }, [albumItems, selectedAlbumId])
+  const activeItem = selectedAlbumId ? albumItems.get(selectedAlbumId) : undefined
+  const activeItemId = activeItem?.id
+
+  // Only the selected album needs a draft read. Resolve it before showing editable output.
+  useEffect(() => {
+    if (!activeItemId || !activeItem) return
+    if (loadedDrafts.current.has(activeItemId)) {
+      setDraftLoad({ id: activeItemId, failed: false })
+      return
+    }
+    let cancelled = false
+    tauriBridge.curationGetDraft(activeItemId).then(draft => {
+      if (cancelled) return
+      const initial = captureCurateDraft(activeItem)
+      const restored = draft ? restoreCurateDraft(activeItem, draft) : activeItem
+      const snapshot = draft ? { ...captureCurateDraft(restored), baseline: draft.baseline } : initial
+      if (draft) {
+        setAlbumItems(prev => {
+          const current = prev.get(activeItemId)
+          if (!current) return prev
+          return new Map(prev).set(activeItemId, {
+            ...restoreCurateDraft(current, draft),
+            draftBasedOn: initial.baseline === draft.baseline ? undefined : draft.baseline,
+          })
+        })
+      }
+      loadedDrafts.current.set(activeItemId, {
+        saved: JSON.stringify(snapshot),
+        restored: Boolean(draft),
+      })
+      setDraftLoad({ id: activeItemId, failed: false })
+    }).catch(err => {
+      if (cancelled) return
+      console.warn('[UnifiedCurateCockpit] Draft load failed:', err)
+      setDraftLoad({ id: activeItemId, failed: true })
+    })
+    return () => { cancelled = true }
+  }, [activeItemId, draftLoadAttempt])
+
+  const selectedAlbum = activeItem && draftLoad?.id === activeItem.id && !draftLoad.failed ? activeItem : null
+
+  const saveAlbumDraft = useCallback(async (album: AlbumWorkItem) => {
+    const state = loadedDrafts.current.get(album.id)
+    if (!state) return
+    const draft = captureCurateDraft(album)
+    draft.baseline = album.draftBasedOn ?? draft.baseline
+    const serialized = JSON.stringify(draft)
+    if (state.pending?.serialized === serialized) return state.pending.write
+    if (!state.pending && state.saved === serialized) return
+    const pending = { serialized, write: tauriBridge.curationSaveDraft(album.id, draft) }
+    state.pending = pending
+    try {
+      await pending.write
+      state.saved = serialized
+      if (state.pending === pending) setDraftSaveError(current => current === album.id ? null : current)
+    } catch (err) {
+      if (state.pending === pending) setDraftSaveError(album.id)
+      throw err
+    } finally {
+      if (state.pending === pending) state.pending = undefined
+    }
+  }, [])
+
+  // Also save edits from a provider operation that finishes after the user selects another album.
+  useEffect(() => {
+    const previous = previousDraftItems.current
+    previousDraftItems.current = albumItems
+    for (const id of loadedDrafts.current.keys()) {
+      const album = albumItems.get(id)
+      if (!album || album === previous.get(id) || album.status === 'committed') continue
+      void saveAlbumDraft(album).catch(err => console.warn('[UnifiedCurateCockpit] Draft save failed:', err))
+    }
+  }, [albumItems, saveAlbumDraft])
 
   // Curation Decision Trace Hook
   const {
@@ -707,7 +803,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       setSteerYear(selectedAlbum.year.selected ? String(selectedAlbum.year.selected) : '')
       setSteerGroundingUrl('')
     }
-  }, [selectedAlbumId])
+  }, [selectedAlbum?.id])
 
   // Count by tier
   const tier1Items = useMemo(() => {
@@ -721,6 +817,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // Asynchronously resolve 4-way consensus for selected album
   useEffect(() => {
     if (!selectedAlbum || !selectedAlbum.rawRelease || !selectedAlbum.rawTracks.length) return
+    if (loadedDrafts.current.get(selectedAlbum.id)?.restored) return
     let isMounted = true
 
     const fetchConsensus = async () => {
@@ -781,12 +878,10 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 ? current.genre.selected
                 : (convRes.genre || preserveField(current.genre, consensus.albumFieldStates?.genre).selected),
             },
-            tracks: current.tracks.some(t => t.userOverridden)
-              ? current.tracks
-              : mergeConsensusTrackStates(consensus.trackStates, current.tracks, current.rawTracks),
+            tracks: mergeConsensusTrackStates(consensus.trackStates, current.tracks, current.rawTracks),
           }
 
-          next.set(selectedAlbum.id, updated)
+          next.set(selectedAlbum.id, mergeCurateProposal(current, updated))
           return next
         })
       } catch (err) {
@@ -799,7 +894,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     return () => {
       isMounted = false
     }
-  }, [selectedAlbumId])
+  }, [selectedAlbum?.id])
 
   // Select provider cell for an album field
   const handleSelectFieldSource = (
@@ -819,6 +914,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       const updatedField: MetadataFieldState<any> = {
         ...field,
         selected: val,
+        userOverridden: true,
         source: source === 'local' ? 'local_fallback' : 'single_provider_match',
         requiresHumanReview: false,
       }
@@ -883,12 +979,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
       const updatedTracks = current.tracks.map((t) => {
         if (t.trackId !== trackId) return t
-        return {
+        return selectCurateTrackFields({
           ...t,
           matchedArtists: artists,
           source: source || 'single_provider_match',
           requiresHumanReview: false,
-        }
+        }, 'matchedArtists')
       })
 
       next.set(selectedAlbum.id, { ...current, tracks: updatedTracks })
@@ -914,13 +1010,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           behavioralLearningService.teachRule(orig, trimmed, 'artist')
           setLearnedRules(behavioralLearningService.getLearnedRules())
         }
-        return {
+        return selectCurateTrackFields({
           ...t,
           [field === 'title' ? 'matchedTitle' : 'matchedArtists']: trimmed,
           userOverridden: true,
           source: 'manual_override' as ConsensusFieldSource,
           requiresHumanReview: false,
-        }
+        }, field === 'title' ? 'matchedTitle' : 'matchedArtists')
       })
 
       next.set(selectedAlbum.id, { ...current, tracks: updatedTracks })
@@ -945,12 +1041,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         if (source === 'musicbrainz') val = t.mbArtists || current.albumArtist.musicbrainz || t.localArtists
         if (source === 'ai') val = t.aiArtists || current.albumArtist.ai || t.localArtists
 
-        return {
+        return selectCurateTrackFields({
           ...t,
           matchedArtists: val || t.localArtists,
           source: (source === 'local' ? 'local_fallback' : (source === 'ai' ? 'ai_synthesized' : 'single_provider_match')) as ConsensusFieldSource,
           requiresHumanReview: false,
-        }
+        }, 'matchedArtists')
       })
 
       next.set(selectedAlbum.id, { ...current, tracks: updatedTracks })
@@ -1099,47 +1195,48 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             ...current.albumTitle,
             ...(consensus.albumFieldStates?.albumTitle || {}),
             ai: aiMasterResult?.releaseTitle || consensus.albumFieldStates?.albumTitle?.ai || current.albumTitle.ai,
-            selected: consensus.albumFieldStates?.albumTitle?.selected || current.albumTitle.selected,
+            selected: consensus.albumFieldStates?.albumTitle?.selected ?? current.albumTitle.selected,
           },
           albumArtist: {
             ...current.albumArtist,
             ...(consensus.albumFieldStates?.albumArtist || {}),
             ai: aiMasterResult?.artistCredit || consensus.albumFieldStates?.albumArtist?.ai || current.albumArtist.ai,
-            selected: consensus.albumFieldStates?.albumArtist?.selected || current.albumArtist.selected,
+            selected: consensus.albumFieldStates?.albumArtist?.selected ?? current.albumArtist.selected,
           },
           composer: {
             ...current.composer,
             ...(consensus.albumFieldStates?.composer || {}),
             ai: aiMasterResult?.composer || consensus.albumFieldStates?.composer?.ai || current.composer.ai,
-            selected: consensus.albumFieldStates?.composer?.selected || current.composer.selected,
+            selected: consensus.albumFieldStates?.composer?.selected ?? current.composer.selected,
           },
           year: {
             ...current.year,
             ...(consensus.albumFieldStates?.releaseYear || {}),
             ai: aiMasterResult?.releaseYear || consensus.albumFieldStates?.releaseYear?.ai || current.year.ai,
-            selected: consensus.albumFieldStates?.releaseYear?.selected || current.year.selected,
+            selected: consensus.albumFieldStates?.releaseYear
+              ? consensus.albumFieldStates.releaseYear.selected : current.year.selected,
           },
           genre: {
             ...current.genre,
             ...(consensus.albumFieldStates?.genre || {}),
             ai: aiMasterResult?.genre || consensus.albumFieldStates?.genre?.ai || current.genre.ai,
-            selected: consensus.albumFieldStates?.genre?.selected || current.genre.selected,
+            selected: consensus.albumFieldStates?.genre?.selected ?? current.genre.selected,
           },
           coverArt: directAppleCandidate?.coverArtUrl ? {
             ...current.coverArt,
             apple: directAppleCandidate.coverArtUrl,
-            selected: current.coverArt.selected || directAppleCandidate.coverArtUrl,
+            selected: consensus.albumFieldStates?.coverArt?.selected || directAppleCandidate.coverArtUrl,
           } : (consensus.albumFieldStates?.coverArt ? {
             ...current.coverArt,
             apple: consensus.albumFieldStates.coverArt.apple || current.coverArt.apple,
             musicbrainz: consensus.albumFieldStates.coverArt.musicbrainz || current.coverArt.musicbrainz,
             ai: aiMasterResult?.coverArtUrl || consensus.albumFieldStates.coverArt.ai || current.coverArt.ai,
-            selected: current.coverArt.selected || consensus.albumFieldStates.coverArt.selected,
+            selected: consensus.albumFieldStates.coverArt.selected,
           } : current.coverArt),
           tracks: mergeConsensusTrackStates(consensus.trackStates, current.tracks, current.rawTracks),
         }
 
-        next.set(selectedAlbum.id, updated)
+        next.set(selectedAlbum.id, mergeCurateProposal(current, updated))
         return next
       })
 
@@ -1183,6 +1280,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // Automatic debounced compilation provenance resolution (500ms, playback guarded, parameter-hashed cache)
   useEffect(() => {
     if (!selectedAlbum || !isCompilationAlbum) return
+    if (loadedDrafts.current.get(selectedAlbum.id)?.restored) return
 
     // Transport Invariant: Defer inference if audio is actively playing or in post-playback cooldown
     if (isPlaying) {
@@ -1224,9 +1322,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               if (match && match.originalAlbum) {
                 return {
                   ...tState,
-                  originalAlbum: tState.userOverridden ? tState.originalAlbum : match.originalAlbum,
-                  originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
-                  provenanceSource: (tState.userOverridden ? 'user_override' : 'consensus') as any,
+                  originalAlbum: tState.selectedOverrides?.includes('originalAlbum') ? tState.originalAlbum : match.originalAlbum,
+                  originalYear: tState.selectedOverrides?.includes('originalYear') ? tState.originalYear : match.originalYear,
+                  provenanceSource: tState.selectedOverrides?.includes('originalAlbum') ? 'user_override' as const : 'consensus' as const,
                   aiTitle: match.title,
                   aiArtists: match.primaryVocalists || (match.primaryVocalists === undefined && (match as any).singers ? (match as any).singers : undefined),
                 }
@@ -1295,9 +1393,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               if (match && match.originalAlbum) {
                 return {
                   ...tState,
-                  originalAlbum: tState.userOverridden ? tState.originalAlbum : match.originalAlbum,
-                  originalYear: tState.userOverridden ? tState.originalYear : match.originalYear,
-                  provenanceSource: (tState.userOverridden ? 'user_override' : 'gemini_ai') as any,
+                  originalAlbum: tState.selectedOverrides?.includes('originalAlbum') ? tState.originalAlbum : match.originalAlbum,
+                  originalYear: tState.selectedOverrides?.includes('originalYear') ? tState.originalYear : match.originalYear,
+                  provenanceSource: tState.selectedOverrides?.includes('originalAlbum') ? 'user_override' as const : 'gemini_ai' as const,
                   aiTitle: match.title,
                   aiArtists: match.primaryVocalists || (match.primaryVocalists === undefined && (match as any).singers ? (match as any).singers : undefined),
                 }
@@ -1340,13 +1438,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       if (!cur) return prev
       const updatedTracks = cur.tracks.map(t => {
         if (t.trackId === trackId) {
-          return {
+          return selectCurateTrackFields({
             ...t,
             originalAlbum: provenanceEditFilm.trim(),
             originalYear: provenanceEditYear.trim() ? parseInt(provenanceEditYear.trim(), 10) : undefined,
             provenanceSource: 'user_override' as any,
             userOverridden: true,
-          }
+          }, 'originalAlbum', 'originalYear')
         }
         return t
       })
@@ -1357,10 +1455,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   }, [selectedAlbum, provenanceEditFilm, provenanceEditYear])
 
   // Stage Album: saves state, keeps in queue with 'staged' badge, and advances
-  const handleStage = useCallback(() => {
-    if (!selectedAlbum) return
+  const handleStage = useCallback(async () => {
+    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId) return
 
-    // 1. Mark as staged in local state so changes are strictly preserved
+    // Advance only after SQLite has acknowledged the staged draft.
+    setStagingAlbumId(selectedAlbum.id)
+    try {
+      await saveAlbumDraft({ ...selectedAlbum, userOverridden: true })
+    } catch (err) {
+      console.warn('[UnifiedCurateCockpit] Stage draft failed:', err)
+      showToast('Could not save the staged draft. Try Stage & Next again.')
+      return
+    } finally {
+      setStagingAlbumId(null)
+    }
     setAlbumItems((prev) => {
       const next = new Map(prev)
       const current = next.get(selectedAlbum.id)
@@ -1394,13 +1502,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     const activeList = (activeTier === 'tier1' ? tier1Items : tier2Items).filter(a => a.status !== 'committed')
     const currIdx = activeList.findIndex((a) => a.id === selectedAlbum.id)
     if (currIdx >= 0 && currIdx < activeList.length - 1) {
-      setSelectedAlbumId(activeList[currIdx + 1].id)
+      setSelectedAlbumId(current => current === selectedAlbum.id ? activeList[currIdx + 1].id : current)
     }
-  }, [selectedAlbum, activeTier, tier1Items, tier2Items, showToast])
+  }, [selectedAlbum, stagingAlbumId, saveAlbumDraft, activeTier, tier1Items, tier2Items, showToast])
 
   // Commit Album: permanently writes to disk and REMOVES it from the queue
   const handleCommitAlbum = useCallback(async () => {
-    if (!selectedAlbum) return
+    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId) return
 
     // Audiophile Transport Guard
     if (isPlaying) {
@@ -1450,11 +1558,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     } else {
       setSelectedAlbumId(null)
     }
-  }, [selectedAlbum, isPlaying, tier2Items, onRefreshLibrary, showToast])
+  }, [selectedAlbum, stagingAlbumId, isPlaying, tier2Items, onRefreshLibrary, showToast])
 
   // Batch commit Tier 1 albums in background with Audiophile Guard
   const handleCommitAllTier1 = async () => {
-    if (tier1Items.length === 0) return
+    if (tier1Items.length === 0 || stagingAlbumId) return
 
     // Audiophile Transport Guard: Check if music is playing
     if (isPlaying) {
@@ -2001,19 +2109,21 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Stage Button (keeps in queue, preserves all changes) */}
                 <button
                   onClick={handleStage}
+                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId)}
                   data-testid="btn-stage-next"
-                  className="px-3.5 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium text-xs border border-white/20 transition-all cursor-pointer flex items-center gap-1.5"
+                  className="px-3.5 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium text-xs border border-white/20 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   title="Save changes and keep in queue for later review"
                 >
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Stage & Next</span>
+                  <span>{stagingAlbumId === selectedAlbum.id ? 'Saving draft…' : 'Stage & Next'}</span>
                 </button>
 
                 {/* Commit Button (saves permanently and removes from queue) */}
                 <button
                   onClick={handleCommitAlbum}
+                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId)}
                   data-testid="btn-commit-album"
-                  className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-md flex items-center gap-1.5"
+                  className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-md flex items-center gap-1.5 disabled:opacity-50"
                   title="Commit permanently to library and remove from queue"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" />
@@ -2022,6 +2132,31 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               </div>
             </div>
 
+            {selectedAlbum.draftBasedOn && (
+              <div role="alert" className="px-4 py-3 text-xs bg-amber-500/10 text-amber-200">
+                Local metadata changed since this draft was saved. Review the Local and Selected columns before staging or committing.
+                <button
+                  className="ml-3 underline"
+                  onClick={() => setAlbumItems(prev => {
+                    const album = prev.get(selectedAlbum.id)
+                    return album ? new Map(prev).set(album.id, { ...album, draftBasedOn: undefined }) : prev
+                  })}
+                >
+                  Keep Selected Output against current tags
+                </button>
+              </div>
+            )}
+            {draftSaveError === selectedAlbum.id && (
+              <div role="alert" className="px-4 py-3 text-xs bg-red-500/10 text-red-200">
+                Curate could not save this draft.
+                <button
+                  className="ml-3 underline"
+                  onClick={() => void saveAlbumDraft(selectedAlbum).catch(() => {})}
+                >
+                  Retry save
+                </button>
+              </div>
+            )}
             {/* Steer Providers & AI Grounding Bar */}
             {isReQueryOpen && (
               <form
@@ -2573,8 +2708,18 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             </section>
           </main>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-white/40 text-sm">
-            Select an album from the left queue to begin reconciliation
+          <div className="flex-1 flex items-center justify-center gap-3 text-white/50 text-sm">
+            {activeItemId ? (
+              draftLoad?.id === activeItemId && draftLoad.failed ? (
+                <>
+                  <span role="alert">Curate could not load the saved draft.</span>
+                  <button className="underline" onClick={() => {
+                    setDraftLoad(null)
+                    setDraftLoadAttempt(attempt => attempt + 1)
+                  }}>Retry</button>
+                </>
+              ) : <span role="status">Loading Selected Output…</span>
+            ) : 'Select an album from the left queue to begin reconciliation'}
           </div>
         )}
       </div>

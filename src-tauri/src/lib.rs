@@ -284,6 +284,8 @@ pub fn run() {
             db_recompute_release_artist_credits,
             db_search_catalog,
             // Curation Decision Trace commands
+            curation_save_draft,
+            curation_get_draft,
             curation_save_trace,
             curation_get_trace,
             curation_clear_trace,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { MetadataFieldState, TrackCandidateState } from '../core/types'
-import { captureCurateDraft, restoreCurateDraft, mergeCurateProposal } from '../core/curateDraft'
+import { captureCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields } from '../core/curateDraft'
 
 const field = (selected: string): MetadataFieldState<string> => ({ selected, local: selected, source: 'local_fallback', confidence: 1 })
 const track: TrackCandidateState = {
@@ -35,15 +35,50 @@ test('uses fresh proposals while preserving explicit field and per-track choices
   const fresh = {
     ...baseline,
     albumTitle: { ...baseline.albumTitle, selected: 'Fresh album title' },
-    genre: { ...baseline.genre, ai: 'Fresh genre', selected: 'Fresh genre' },
+    genre: { ...baseline.genre, local: 'Steered query genre', ai: 'Fresh genre', selected: 'Fresh genre' },
     tracks: [{ ...track, matchedTitle: 'Fresh song title', matchedArtists: 'Fresh singer' }],
   }
   const merged = mergeCurateProposal(current, fresh)
   assert.equal(merged.albumTitle.selected, 'Fresh album title')
   assert.equal(merged.genre.selected, 'Tamil Soundtrack')
   assert.equal(merged.genre.ai, 'Fresh genre')
+  assert.equal(merged.genre.local, 'Tamil Film Soundtrack')
   assert.equal(merged.tracks[0].matchedTitle, 'My title')
   assert.equal(merged.tracks[0].matchedArtists, 'Fresh singer')
+})
+
+test('retains a staged empty proposal without duplicating provider evidence', () => {
+  const draft = captureCurateDraft({
+    ...baseline,
+    userOverridden: true,
+    year: { ...baseline.year, selected: undefined, apple: 1990 },
+    tracks: [{ ...track, appleTitle: 'Provider song', matchedTitle: undefined }],
+  })
+  const stored = JSON.stringify(draft)
+  assert.equal(stored.includes('Provider song'), false)
+  assert.equal(stored.includes('1990'), false)
+  const restored = restoreCurateDraft(baseline, JSON.parse(stored))
+  assert.equal(restored.userOverridden, true)
+  assert.equal(restored.year.selected, undefined)
+  assert.equal(restored.tracks[0].matchedTitle, undefined)
+})
+
+test('tracks separate explicit song and provenance choices without duplicates', () => {
+  const title = selectCurateTrackFields(track, 'matchedTitle')
+  const withProvenance = selectCurateTrackFields({
+    ...title,
+    originalAlbum: 'Film',
+    originalYear: undefined,
+    provenanceSource: 'user_override',
+  }, 'matchedTitle', 'originalAlbum', 'originalYear')
+  assert.deepEqual(withProvenance.selectedOverrides, ['matchedTitle', 'originalAlbum', 'originalYear'])
+  const merged = mergeCurateProposal(
+    { ...baseline, tracks: [withProvenance] },
+    { ...baseline, tracks: [{ ...track, originalAlbum: 'Provider film', originalYear: 1999 }] },
+  )
+  assert.equal(merged.tracks[0].originalAlbum, 'Film')
+  assert.equal(merged.tracks[0].originalYear, undefined)
+  assert.equal(merged.tracks[0].provenanceSource, 'user_override')
 })
 
 test('reopens an older draft against the current baseline by track identity', () => {

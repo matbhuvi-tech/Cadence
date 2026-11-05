@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use parking_lot::Mutex;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use crate::audio::AudioEngine;
 use crate::db::AppDb;
 use super::models::{CandidateTelemetry, CurationDecisionTrace, FieldDecision};
@@ -15,6 +15,28 @@ static MEMORY_BUFFER: LazyLock<Mutex<HashMap<String, CurationDecisionTrace>>> =
 pub struct CurationStorage;
 
 impl CurationStorage {
+    pub fn save_draft(db: &AppDb, album_id: &str, draft: &serde_json::Value) -> Result<(), String> {
+        db.conn.lock().execute(
+            "INSERT INTO curation_drafts (album_id, draft_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(album_id) DO UPDATE SET
+                draft_json = excluded.draft_json, updated_at = excluded.updated_at",
+            params![album_id, draft.to_string(), chrono::Utc::now().to_rfc3339()],
+        ).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_draft(db: &AppDb, album_id: &str) -> Result<Option<serde_json::Value>, String> {
+        let draft: Option<String> = db.conn.lock().query_row(
+            "SELECT draft_json FROM curation_drafts WHERE album_id = ?1",
+            params![album_id],
+            |row| row.get(0),
+        ).optional().map_err(|err| err.to_string())?;
+        draft.map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|err| err.to_string())
+    }
+
     /// Saves a curation decision trace with audiophile idle-guarding and field-level merge semantics.
     pub fn save_trace(
         db: &AppDb,
@@ -228,5 +250,43 @@ impl CurationStorage {
         .map_err(|e| format!("Failed to upsert curation trace for album {}: {}", album_id, e))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn curate_draft_survives_reopening_an_existing_database() {
+        let path = std::env::temp_dir().join(format!("cadence-draft-{}.sqlite", uuid::Uuid::new_v4()));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            crate::db::schema::initialize_schema(&conn).unwrap();
+            conn.execute("DROP TABLE curation_drafts", []).unwrap();
+            conn.execute(
+                "INSERT INTO compilation_provenance_cache VALUES ('legacy', 'album', 'Title', '{}', '{}', 'v1', 0)",
+                [],
+            ).unwrap();
+        }
+        let draft = json!({"version": 1, "staged": true, "fields": {"genre": {"selected": "Tamil Soundtrack"}}});
+        {
+            let db = AppDb::new(path.clone()).unwrap();
+            assert_eq!(CurationStorage::get_draft(&db, "album").unwrap(), None);
+            CurationStorage::save_draft(&db, "album", &json!({"version": 1, "staged": false})).unwrap();
+            CurationStorage::save_draft(&db, "album", &draft).unwrap();
+        }
+        {
+            let db = AppDb::new(path.clone()).unwrap();
+            assert_eq!(CurationStorage::get_draft(&db, "album").unwrap(), Some(draft));
+            assert_eq!(CurationStorage::get_draft(&db, "another-album").unwrap(), None);
+            let preserved: i64 = db.conn.lock().query_row(
+                "SELECT COUNT(*) FROM compilation_provenance_cache WHERE hash_key = 'legacy'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(preserved, 1);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

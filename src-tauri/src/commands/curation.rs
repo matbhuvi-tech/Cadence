@@ -4,6 +4,23 @@ use crate::curation::{CurationDecisionTrace, CurationStorage};
 use crate::db::AppDb;
 
 #[tauri::command]
+pub fn curation_save_draft(
+    db: State<AppDb>,
+    album_id: String,
+    draft: serde_json::Value,
+) -> Result<(), String> {
+    CurationStorage::save_draft(&db, &album_id, &draft)
+}
+
+#[tauri::command]
+pub fn curation_get_draft(
+    db: State<AppDb>,
+    album_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    CurationStorage::get_draft(&db, &album_id)
+}
+
+#[tauri::command]
 pub fn curation_save_trace(
     db: State<AppDb>,
     engine: State<AudioEngine>,
