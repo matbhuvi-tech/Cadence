@@ -45,7 +45,9 @@ import {
   ArrowLeft,
   Folder,
   FileText,
+  Disc,
 } from 'lucide-react'
+import { CurateArtworkThumbnail } from './CurateArtworkThumbnail'
 import {
   Track,
   Release,
@@ -1852,16 +1854,19 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         >
           {fieldState.local || (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : null) ? (
             <div className="p-0.5 rounded-lg w-fit">
-              <img
+              <CurateArtworkThumbnail
                 src={fieldState.local || (selectedAlbum?.tracks?.[0]?.trackId ? `cadence:cover://${selectedAlbum.tracks[0].trackId}` : '')}
                 alt="Local Art"
-                className="w-12 h-12 rounded object-cover shadow border border-white/10 group-hover:border-emerald-500/50 transition-colors"
+                className="w-12 h-12 rounded border border-white/10 group-hover:border-emerald-500/50 transition-colors"
+                fallbackLabel="No Local Art"
+                testId="master-coverArt-local"
               />
               <span className="text-[9px] text-neutral-400 block mt-1">Local Tag</span>
             </div>
           ) : (
-            <div className="w-10 h-10 rounded border border-white/10 bg-black/40 flex items-center justify-center text-white/30 text-[10px]">
-              None
+            <div className="w-12 h-12 rounded border border-white/10 bg-black/40 flex flex-col items-center justify-center text-white/30 text-[10px]">
+              <Disc className="w-5 h-5 text-white/20 mb-0.5" />
+              <span>None</span>
             </div>
           )}
         </td>
@@ -1870,7 +1875,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         <td data-testid="master-cell-coverArt-apple" onClick={() => handleSelectFieldSource('coverArt', 'apple')} className="py-3 px-4 cursor-pointer">
           {fieldState.apple ? (
             <div className="p-0.5 rounded-lg w-fit">
-              <img src={fieldState.apple} alt="Apple Art" className="w-12 h-12 rounded object-cover shadow" />
+              <CurateArtworkThumbnail
+                src={fieldState.apple}
+                alt="Apple Art"
+                className="w-12 h-12 rounded shadow border border-white/10"
+                fallbackLabel="Failed"
+                testId="master-coverArt-apple"
+              />
               <span className="text-[9px] text-[#D4AF37] block mt-1">3000px HD</span>
             </div>
           ) : (
@@ -1882,7 +1893,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         <td data-testid="master-cell-coverArt-musicbrainz" onClick={() => handleSelectFieldSource('coverArt', 'musicbrainz')} className="py-3 px-4 cursor-pointer">
           {fieldState.musicbrainz ? (
             <div className="p-0.5 rounded-lg w-fit">
-              <img src={fieldState.musicbrainz} alt="MB Art" className="w-12 h-12 rounded object-cover shadow opacity-70" />
+              <CurateArtworkThumbnail
+                src={fieldState.musicbrainz}
+                alt="MB Art"
+                className="w-12 h-12 rounded shadow opacity-70 border border-white/10"
+                fallbackLabel="Failed"
+                testId="master-coverArt-musicbrainz"
+              />
               <span className="text-[9px] text-white/50 block mt-1">CAA</span>
             </div>
           ) : (
@@ -1894,7 +1911,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         <td data-testid="master-cell-coverArt-ai" onClick={() => handleSelectFieldSource('coverArt', 'ai')} className="py-3 px-4 cursor-pointer">
           {fieldState.ai ? (
             <div className="p-0.5 rounded-lg w-fit">
-              <img src={fieldState.ai} alt="AI Art" className="w-12 h-12 rounded object-cover shadow" />
+              <CurateArtworkThumbnail
+                src={fieldState.ai}
+                alt="AI Art"
+                className="w-12 h-12 rounded shadow border border-white/10"
+                fallbackLabel="Failed"
+                testId="master-coverArt-ai"
+              />
               <span className="text-[9px] text-cyan-300 block mt-1">AI Verified</span>
             </div>
           ) : (
@@ -1932,14 +1955,18 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           ) : (
             <div className="flex items-center gap-3 group">
               {fieldState.selected ? (
-                <img
+                <CurateArtworkThumbnail
                   src={fieldState.selected}
                   alt="Selected Art"
-                  className="w-14 h-14 rounded-lg object-cover border-2 border-emerald-500/60 shadow-lg"
+                  className="w-14 h-14 rounded-lg border-2 border-emerald-500/60 shadow-lg"
+                  fallbackIconClassName="w-7 h-7 text-white/40"
+                  fallbackLabel="No Art"
+                  testId="master-coverArt-selected"
                 />
               ) : (
-                <div className="w-14 h-14 rounded-lg border-2 border-dashed border-amber-400/40 flex items-center justify-center text-amber-300 text-[10px] text-center p-1">
-                  No Art
+                <div className="w-14 h-14 rounded-lg border-2 border-dashed border-amber-400/40 flex flex-col items-center justify-center text-amber-300 text-[10px] text-center p-1">
+                  <Disc className="w-5 h-5 text-amber-400/50 mb-0.5" />
+                  <span>No Art</span>
                 </div>
               )}
               <div>
@@ -2088,13 +2115,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     : 'hover:bg-white/[0.03]'
                 }`}
               >
-                <img
-                  src={alb.coverArt.selected || alb.coverArt.apple || alb.coverArt.local || 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"/>'}
+                <CurateArtworkThumbnail
+                  src={alb.coverArt.selected || alb.coverArt.apple || alb.coverArt.local || null}
                   alt={alb.currentTitle}
-                  className="w-12 h-12 rounded-lg object-cover border border-white/10 shrink-0 bg-black/40"
-                  onError={(e) => {
-                    ;(e.target as HTMLElement).style.display = 'none'
-                  }}
+                  className="w-12 h-12 rounded-lg shrink-0 border border-white/10"
+                  testId={`curate-rail-cover-${alb.id}`}
                 />
                 <div className="flex-1 min-w-0">
                   <h3 className="text-xs font-medium text-white truncate">{alb.albumTitle.selected || alb.currentTitle}</h3>

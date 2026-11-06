@@ -56,3 +56,16 @@
 - **CodeScene:** Unavailable; user explicitly approved proceeding without it.
 - **Release verification:** Windows NSIS installer build passed on 2026-11-06. User authorized pushing to main after the verification handoff; no separate live-desktop test result was reported.
 - **Status:** Ready for the user-authorized merge and push to main.
+
+## GitHub #7: Broken artwork fallback in UnifiedCurateCockpit
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/7
+- **Reported:** When an album has missing or broken artwork, the Curate rail hides the image with inline `display: none` without rendering an icon fallback, and detail table artwork cells render broken image placeholders.
+- **Cause:** `UnifiedCurateCockpit` lacked dedicated broken-image error handling and icon fallback components; `onError` in the queue rail hid the image element entirely, and the detail table cells lacked `onError` handlers.
+- **Fix:** Implement `CurateArtworkThumbnail` with graceful `<Disc />` fallback on missing or failed images, and integrate it into both the queue rail cards and all detail table artwork candidate cells (Local, Apple, MusicBrainz, AI, Selected).
+- **Scope:** Frontend presentation only; no changes to disk I/O, network transport, or audio engine invariants.
+- **RED:** Automated test suite `src/test/testCurateArtworkFallback.ts` failed initially on missing `CurateArtworkThumbnail` module (checkpoint before implementation).
+- **GREEN:** All 28 tests across `testCurateArtworkFallback.ts`, `testLibraryLocalMetadata.ts`, `testCurateDraft.ts`, `testCurateCommit.ts`, and `testCurateCommitOutcomes.ts` passed.
+- **Verification command:** `npx tsx --tsconfig tsconfig.app.json --test src/test/testCurateArtworkFallback.ts src/test/testLibraryLocalMetadata.ts src/test/testCurateDraft.ts src/test/testCurateCommit.ts src/test/testCurateCommitOutcomes.ts`
+- **Build:** `npm run build` passed cleanly (including PWA build, TypeScript check `tsc -b`, and Vite production bundle). `npx oxlint` passed with 0 errors.
+- **Status:** Awaiting user verification; issue open, branch unmerged.
