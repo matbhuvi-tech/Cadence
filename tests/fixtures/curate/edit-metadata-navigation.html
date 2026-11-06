@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><title>Cadence Curate navigation fixture</title></head>
+<body><div id="root"></div>
+<script type="module">
+import { mockReleases, mockTracks } from '/src/core/mockCatalog.ts'
+import { graphEngine } from '/src/core/graphEngine.ts'
+const target = 'rel-rahman-dil-se'
+const other = 'rel-rahman-delhi-6'
+const ids = new Set([target, other])
+const releases = mockReleases.filter(release => ids.has(release.id))
+  .map(release => ({ ...release, coverArtUrl: undefined, artwork: undefined, variants: undefined }))
+const tracks = mockTracks.filter(track => ids.has(track.releaseId))
+  .map(track => ({ ...track, coverArtUrl: undefined, artwork: undefined }))
+graphEngine.loadCustomLibrary({ tracks, releases, works: [], auditIssues: [] })
+localStorage.setItem('cadence.curate.review-status.v1', JSON.stringify([[target, true]]))
+const fetchLocal = globalThis.fetch
+globalThis.fetch = (input, init) => {
+  const url = new URL(typeof input === 'string' ? input : input.url ?? input, location.href)
+  if (url.pathname.startsWith('/api/') || url.origin !== location.origin) return Promise.resolve(Response.json({}, { status: 404 }))
+  return fetchLocal(input, init)
+}
+await import('/src/main.tsx')
+</script>
+</body></html>
+
