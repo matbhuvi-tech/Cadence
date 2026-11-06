@@ -3,7 +3,7 @@ import type { CurationDecisionTrace, ExecutionProgressEvent, OutcomeStatus, Exec
 import { tauriBridge } from '../services/tauriBridge'
 import type { CurateEvidenceRun, RecordCurateAttempt } from '../services/curateEvidenceService'
 
-export type CurationTraceStatus = 'idle' | 'fetching' | 'completed' | 'paused' | 'error' | 'save_error'
+export type CurationTraceStatus = 'idle' | 'fetching' | 'completed' | 'cancelled' | 'paused' | 'error' | 'save_error'
 
 export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
 
@@ -14,6 +14,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
   const [isResuming, setIsResuming] = useState(false)
   const [lastEvidenceId, setLastEvidenceId] = useState<string>()
+  const [refreshAlbumId, setRefreshAlbumId] = useState<string>()
 
   const abortControllerRef = useRef<AbortController | null>(null)
   const activeAlbumIdRef = useRef<string | undefined>(albumId)
@@ -24,6 +25,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     let isMounted = true
     setTrace(null)
     setStatus('idle')
+    setRefreshAlbumId(undefined)
     if (!albumId) {
       setTrace(null)
       setStatus('idle')
@@ -87,6 +89,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     const active = () => activeAlbumIdRef.current === targetAlbumId && abortControllerRef.current === controller
 
     setStatus('fetching')
+    setRefreshAlbumId(input.trigger === 'user_refresh' ? targetAlbumId : undefined)
     setCurrentPhase('idle')
     setProgressMessage('Initiating steer resolution...')
 
@@ -101,6 +104,8 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
         if (active()) handleProgress(event)
       }, attempt => attempts.push(attempt))
       controller.signal.throwIfAborted()
+      if (!active()) controller.abort('AlbumChanged')
+      controller.signal.throwIfAborted()
       run.outcome = 'completed'
       run.decision = response.trace ?? undefined
       run.trackDecisions = response.trackDecisions
@@ -109,15 +114,19 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
       result = response.result
     } catch (error) {
       run.outcome = controller.signal.aborted ? 'cancelled' : 'failed'
-      if (run.outcome === 'failed') console.warn(`[useCurationTrace] ${failureMessage}`, error)
+      if (run.outcome === 'failed') {
+        console.warn(`[useCurationTrace] ${failureMessage}`, error)
+        if (error instanceof Error) failureMessage = error.message
+      }
     }
+    if (active()) setRefreshAlbumId(undefined)
     run.completedAt = new Date().toISOString()
     try {
       await tauriBridge.curationSaveEvidence(targetAlbumId, run)
       if (active()) {
         setLastEvidenceId(id)
         if (run.decision) setTrace(run.decision)
-        setStatus(run.outcome === 'completed' ? 'completed' : run.outcome === 'failed' ? 'error' : 'idle')
+        setStatus(run.outcome === 'failed' ? 'error' : run.outcome)
         if (run.outcome === 'failed') setProgressMessage(failureMessage)
       }
       return active() && !controller.signal.aborted ? result : null
@@ -132,6 +141,12 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
       if (abortControllerRef.current === controller) abortControllerRef.current = null
     }
   }, [handleProgress])
+
+  const cancelRefresh = useCallback(() => {
+    abortControllerRef.current?.abort('RefreshCancelled')
+    setRefreshAlbumId(undefined)
+    setStatus('cancelled')
+  }, [])
 
   const toggleDrawer = useCallback(() => {
     setIsDrawerOpen((prev) => !prev)
@@ -150,6 +165,8 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     isDrawerOpen,
     isResuming,
     lastEvidenceId,
+    isRefreshing: Boolean(albumId && albumId === refreshAlbumId),
+    cancelRefresh,
     setIsResuming,
     executeFetch,
     toggleDrawer,

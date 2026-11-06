@@ -1,5 +1,7 @@
 import type { CurateMappingCandidate, CurationDecisionTrace, Release, ReleaseConsensusResult, Track } from '../core/types'
 
+export const CURATE_REFRESH_PROVIDER_BUDGET = 12
+
 export interface CurateProviderAttempt {
   provider: 'apple' | 'musicbrainz'
   query: string
@@ -31,11 +33,13 @@ export async function fetchCurateCandidate<T>(
   record?: RecordCurateAttempt,
   signal?: AbortSignal,
   summarize?: (candidate: T) => CurateProviderAttempt['candidate'],
+  options?: { timeoutMs?: number | null; requireResponse?: boolean },
 ): Promise<T | null> {
   const startedAt = new Date().toISOString()
   const started = performance.now()
-  const timeout = AbortSignal.timeout(4000)
-  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
+  const timeout = options?.timeoutMs === null ? undefined : AbortSignal.timeout(options?.timeoutMs ?? 4000)
+  const requestSignal = timeout && signal ? AbortSignal.any([signal, timeout])
+    : timeout ?? signal ?? new AbortController().signal
   let outcome: CurateProviderAttempt['outcome'] = 'network_error'
   let httpStatus: number | undefined
   let summary: CurateProviderAttempt['candidate']
@@ -45,6 +49,11 @@ export async function fetchCurateCandidate<T>(
     httpStatus = response.status
     if (!response.ok) {
       outcome = 'http_error'
+      if (options?.requireResponse && response.status !== 404) {
+        const details = await response.json().catch(() => null)
+        throw new Error(typeof details?.message === 'string'
+          ? details.message : `Apple evidence request failed (HTTP ${response.status}).`)
+      }
       return null
     }
     outcome = 'parse_error'
@@ -52,9 +61,10 @@ export async function fetchCurateCandidate<T>(
     outcome = candidate === null ? 'empty' : 'success'
     if (candidate !== null) summary = summarize?.(candidate)
     return candidate
-  } catch {
+  } catch (error) {
     if (signal?.aborted) outcome = 'cancelled'
-    else if (timeout.aborted) outcome = 'timeout'
+    else if (timeout?.aborted) outcome = 'timeout'
+    if (options?.requireResponse && !signal?.aborted) throw error
     return null
   } finally {
     record?.({

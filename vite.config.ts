@@ -4,6 +4,8 @@ import tailwindcss from '@tailwindcss/vite'
 import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
+import { setTimeout as delay } from 'node:timers/promises'
+import { fetchAppleWithQuota } from './src/services/appleQuota.ts'
 
 const uncHostReachability = new Map<string, { reachable: boolean; checkedAt: number }>()
 
@@ -1194,11 +1196,17 @@ function localLibraryScannerPlugin(): Plugin {
       server.middlewares.use('/api/itunes-search', async (req, res) => {
         const url = new URL(req.url || '', `http://${req.headers.host}`)
         const limit = Number(url.searchParams.get('maxRequests'))
-        let remaining = limit > 0 ? Math.min(2, limit) : Infinity
-        const appleFetch: typeof fetch = (input, init) => {
-          if (remaining < 1 || res.destroyed) return Promise.resolve(new Response(null, { status: 429 }))
-          remaining--
-          return fetch(input, limit > 0 ? { ...init, redirect: 'error' } : init)
+        const refresh = url.searchParams.get('refresh') === '1'
+        const controller = new AbortController()
+        res.once('close', () => controller.abort())
+        const appleFetch = (endpoint: string, timeoutMs: number) => {
+          controller.signal.throwIfAborted()
+          return refresh
+            ? fetchAppleWithQuota(endpoint, controller.signal, timeoutMs)
+            : fetch(endpoint, {
+              signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
+              redirect: limit > 0 ? 'error' : 'follow',
+            })
         }
         const artist = url.searchParams.get('artist') || ''
         const composer = url.searchParams.get('composer') || ''
@@ -1208,6 +1216,23 @@ function localLibraryScannerPlugin(): Plugin {
 
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Access-Control-Allow-Origin', '*')
+
+        const releaseId = refresh ? url.searchParams.get('releaseId') : null
+        if (releaseId && /^\d+$/.test(releaseId)) {
+          try {
+            const lookup = await appleFetch(`https://itunes.apple.com/lookup?id=${releaseId}&country=in&entity=song`, 6000)
+            if (lookup.ok) {
+              const evidence = await lookup.json()
+              if (!controller.signal.aborted) res.end(JSON.stringify(evidence))
+              return
+            }
+          } catch {}
+          if (!controller.signal.aborted) {
+            res.statusCode = 502
+            res.end(JSON.stringify({ message: 'The Apple release lookup did not complete.' }))
+          }
+          return
+        }
 
         const cleanTerm = (s: string) =>
           s
@@ -1261,10 +1286,18 @@ function localLibraryScannerPlugin(): Plugin {
             albumQueries.push(alb)
           }
 
-          for (const q of limit > 0 ? albumQueries.slice(0, 1) : albumQueries) {
+          // Reserve the track lookup independently of the number of search queries.
+          const searchLimit = limit > 0 ? Math.max(1, Math.min(6, limit) - 1) : albumQueries.length
+          for (const q of [...new Set(albumQueries)].slice(0, searchLimit)) {
+            if (controller.signal.aborted) return
             try {
               const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&country=in&entity=album&limit=8`
-              const itunesRes = await appleFetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+              const itunesRes = await appleFetch(itunesUrl, 6000)
+              if (refresh && !itunesRes.ok) {
+                res.statusCode = 502
+                res.end(JSON.stringify({ success: false, message: 'Apple album search failed.' }))
+                return
+              }
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
@@ -1311,7 +1344,14 @@ function localLibraryScannerPlugin(): Plugin {
                   }
                 }
               }
-            } catch {}
+            } catch {
+              if (controller.signal.aborted) return
+              if (refresh) {
+                res.statusCode = 502
+                res.end(JSON.stringify({ success: false, message: 'Apple album search did not complete.' }))
+                return
+              }
+            }
           }
         }
 
@@ -1329,7 +1369,7 @@ function localLibraryScannerPlugin(): Plugin {
           for (const q of searchQueries) {
             try {
               const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=5`
-              const itunesRes = await appleFetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+              const itunesRes = await appleFetch(itunesUrl, 6000)
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
@@ -1346,7 +1386,7 @@ function localLibraryScannerPlugin(): Plugin {
           try {
             for (const albName of albumVariants) {
               const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(albName)}&entity=album&limit=5`
-              const itunesRes = await appleFetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+              const itunesRes = await appleFetch(itunesUrl, 6000)
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
@@ -1378,6 +1418,7 @@ function localLibraryScannerPlugin(): Plugin {
           } catch {}
         }
 
+        if (controller.signal.aborted) return
         if (!foundItem) {
           res.statusCode = 404
           res.end(JSON.stringify({ success: false, message: 'No iTunes match found' }))
@@ -1387,8 +1428,8 @@ function localLibraryScannerPlugin(): Plugin {
         let providerTracks: any[] = []
         if (foundItem.collectionId) {
           try {
-            const lookupUrl = `https://itunes.apple.com/lookup?id=${foundItem.collectionId}&entity=song`
-            const lookupRes = await appleFetch(lookupUrl, { signal: AbortSignal.timeout(4000) })
+            const lookupUrl = `https://itunes.apple.com/lookup?id=${foundItem.collectionId}&country=in&entity=song`
+            const lookupRes = await appleFetch(lookupUrl, 4000)
             if (lookupRes.ok) {
               const lookupData = (await lookupRes.json()) as any
               if (lookupData.results && lookupData.results.length > 1) {
@@ -1403,6 +1444,12 @@ function localLibraryScannerPlugin(): Plugin {
               }
             }
           } catch {}
+        }
+        if (controller.signal.aborted) return
+        if (refresh && providerTracks.length === 0) {
+          res.statusCode = 502
+          res.end(JSON.stringify({ success: false, message: 'Apple matched the release, but the track lookup did not return songs.' }))
+          return
         }
 
         const highResArt = foundItem.artworkUrl100
@@ -1434,11 +1481,11 @@ function localLibraryScannerPlugin(): Plugin {
 
       // 5. MusicBrainz Search API with 1-Req/Sec Rate Limiter & Multi-Tier Fuzzy Fallback
       let lastMbTime = 0
-      const mbFetch = async (endpoint: string, cancelled: () => boolean, bounded: boolean) => {
+      const mbFetch = async (endpoint: string, signal: AbortSignal, bounded: boolean) => {
         const now = Date.now()
         const wait = Math.max(0, 1100 - (now - lastMbTime))
-        if (wait > 0) await new Promise((r) => setTimeout(r, wait))
-        if (cancelled()) return new Response(null, { status: 429 })
+        if (wait > 0) await delay(wait, undefined, { signal })
+        signal.throwIfAborted()
         lastMbTime = Date.now()
         return fetch(endpoint, {
           headers: {
@@ -1446,7 +1493,7 @@ function localLibraryScannerPlugin(): Plugin {
             Accept: 'application/json',
           },
           redirect: bounded ? 'error' : 'follow',
-          signal: AbortSignal.timeout(7000),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(7000)]),
         })
       }
 
@@ -1596,11 +1643,13 @@ function localLibraryScannerPlugin(): Plugin {
       server.middlewares.use('/api/musicbrainz-search', async (req, res) => {
         const url = new URL(req.url || '', `http://${req.headers.host}`)
         const limit = Number(url.searchParams.get('maxRequests'))
-        let remaining = limit > 0 ? Math.min(2, limit) : Infinity
+        const controller = new AbortController()
+        res.once('close', () => controller.abort())
+        let remaining = limit > 0 ? Math.min(6, limit) : Infinity
         const releaseFetch = (endpoint: string) => {
           if (remaining < 1 || res.destroyed) return Promise.resolve(new Response(null, { status: 429 }))
           remaining--
-          return mbFetch(endpoint, () => res.destroyed, limit > 0)
+          return mbFetch(endpoint, controller.signal, limit > 0)
         }
         const artist = url.searchParams.get('artist') || ''
         const composer = url.searchParams.get('composer') || ''
@@ -1756,6 +1805,7 @@ function localLibraryScannerPlugin(): Plugin {
                   }
                 }
               } catch (err) {
+                if (controller.signal.aborted) return
                 console.warn('[MusicBrainz Release Query Error]:', err)
               }
             }
@@ -1810,6 +1860,7 @@ function localLibraryScannerPlugin(): Plugin {
                   }
                 }
               } catch (err) {
+                if (controller.signal.aborted) return
                 console.warn('[MusicBrainz Recording Query Error]:', err)
               }
             }
@@ -1819,6 +1870,7 @@ function localLibraryScannerPlugin(): Plugin {
         }
 
         // Return clean 404 so UI does not display false hallucinations
+        if (controller.signal.aborted) return
         res.statusCode = 404
         res.end(JSON.stringify({ success: false, message: 'No confident MusicBrainz archival match found' }))
       })

@@ -671,3 +671,11 @@ Track titles and singer credits are evaluated separately. A generated title can 
 The first headless run failed when the resolver selected `Overture` instead of local `Track 1` in the seven-local/eight-provider fixture. The same test now passes and checks the retained evidence and a manual singer edit across refresh and draft restoration. The positive case selects an exact title correction and keeps the local singer. The Curate suite passed 31 checks, the native library and identity suites passed 24 checks, and `npm run build` passed. Node reported 67.23% line coverage across files loaded by the focused headless suite. The desktop QA agent requires a live CDP target, so this checkpoint uses the synthetic headless fixture.
 
 The remaining milestone work includes persisting the exact field revision dependencies, revalidating stored decisions after catalog or mapping changes, covering release and source-group fields, and verifying the regroup and bonus-edition cases.
+
+#### Explicit evidence refresh request budget
+
+Explicit Refresh Evidence can spend up to 12 provider calls on the selected album before quota retries, tripling the earlier four-call allowance. Automatic selected-album retrieval retains its four-call budget. A fresh Apple album search reserves the track lookup after a match. When the steering inputs are unchanged and accepted evidence already identifies the Apple release, refresh looks up that ID directly. An explicit Apple link also goes straight to lookup.
+
+An Apple rate-limit response defers and retries the same request using `Retry-After` when available. Cancel refresh or leave the album to stop the wait and record the attempt as cancelled. An Apple album match followed by a failed track lookup produces a failed refresh with a reason. Other Cadence features, including background artwork and batch metadata, have independent Apple callers.
+
+The middleware fixture first reproduced zero tracks after a successful one-call search. It now verifies the required lookup, retry after HTTP 429, cancellation during the wait, and an explicit failure if the lookup fails. The evidence fixture verifies a direct lookup with stable track IDs. A live lookup for Dharmapathini returned all five tracks with credits. The 32 Curate checks and frontend build passed. Desktop interaction remains pending verification.

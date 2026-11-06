@@ -1,5 +1,11 @@
 # Issue Log
 
+## Issue #10 — Curate refresh skips Apple track lookup
+
+- **Reproduction:** Refresh evidence for an Apple match while the refresh allocates one Apple call. The saved result shows the album with zero tracks.
+- **Resolution:** Use a 12-call budget for explicit refresh, reserve the Apple track lookup after a match, and make Apple rate-limit waits cancellable. Leaving the album cancels its refresh.
+- **Status:** Pending desktop verification. [GitHub issue #10](https://github.com/matbhuvi-tech/Cadence/issues/10)
+
 ## Issue #9: Curate evaluation fails on the early identity schema
 - **Reproduction:** Open an existing database created by an early Identity foundation build, select Sivaa, and refresh evidence. Identity lookup fails before provider retrieval.
 - **Fix:** Migrate the missing identity column at startup while preserving existing identity rows. Show which step failed in the evaluation badge tooltip.

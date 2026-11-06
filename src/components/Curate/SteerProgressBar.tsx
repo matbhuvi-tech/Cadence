@@ -7,6 +7,8 @@ interface SteerProgressBarProps {
   outcomeStatus?: OutcomeStatus | null
   isFetching: boolean
   evidenceSaveFailed?: boolean
+  cancelled?: boolean
+  onCancel?: () => void
   onToggleRationale?: () => void
   hasTrace?: boolean
 }
@@ -16,6 +18,8 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
   outcomeStatus,
   isFetching,
   evidenceSaveFailed,
+  cancelled,
+  onCancel,
   onToggleRationale,
   hasTrace
 }) => {
@@ -26,12 +30,21 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
   // Active fetch stage feedback
   if (isFetching) {
     return (
-      <div 
-        className="flex items-center gap-2 px-2.5 py-1 rounded bg-zinc-900/90 border border-cyan-500/30 text-xs font-mono text-cyan-400 select-none max-w-[280px] h-[26px] overflow-hidden"
-        title={message || 'Processing curation intelligence...'}
-      >
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-        <span className="truncate">{message || 'Curating candidate metadata...'}</span>
+      <div className="flex items-center gap-2">
+        <div
+          role="status"
+          className="flex items-center gap-2 px-2.5 py-1 rounded bg-zinc-900/90 border border-cyan-500/30 text-xs font-mono text-cyan-400 select-none max-w-[280px] h-[26px] overflow-hidden"
+          title={message || 'Processing curation intelligence...'}
+        >
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+          <span className="truncate">{message || 'Curating candidate metadata...'}</span>
+        </div>
+        {onCancel && (
+          <button type="button" data-testid="cancel-evidence-refresh" onClick={onCancel}
+            className="px-2.5 py-1 rounded border border-zinc-700 text-zinc-300 text-xs hover:bg-zinc-800">
+            Cancel refresh
+          </button>
+        )}
       </div>
     )
   }
@@ -55,6 +68,10 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
   } else if (outcomeStatus === 'failed') {
     badgeColor = 'bg-red-950/80 text-red-400 border-red-700/50 hover:bg-red-900/80'
     label = 'Evaluation Failed'
+  }
+  if (cancelled) {
+    badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700'
+    label = 'Refresh cancelled'
   }
   if (evidenceSaveFailed) {
     badgeColor = 'bg-red-950/80 text-red-400 border-red-700/50 hover:bg-red-900/80'

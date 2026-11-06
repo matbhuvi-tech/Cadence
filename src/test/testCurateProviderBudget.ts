@@ -67,6 +67,11 @@ async function run() {
     assert.equal(oneSearch.tracks.length, 1)
     assert.equal(calls.length, 2, 'track lookup is required after a successful search')
 
+    calls.length = 0
+    const knownRelease = await request('/api/itunes-search', 'releaseId=123&refresh=1')
+    assert.equal(knownRelease.results.filter((row: { wrapperType: string }) => row.wrapperType === 'track').length, 1)
+    assert.deepEqual(calls.map(url => new URL(url).pathname), ['/lookup'])
+
     const successfulApple = globalThis.fetch
     let limited = false
     globalThis.fetch = async (input, init) => {
@@ -94,6 +99,13 @@ async function run() {
     calls.length = 0
     assert.equal(await request('/api/itunes-search', 'album=Found&artist=Test&maxRequests=6&refresh=1', undefined, controller.signal), null)
     assert.deepEqual(calls.map(url => new URL(url).pathname), ['/search', '/lookup'])
+
+    globalThis.fetch = async (input, init) => String(input).includes('/lookup?')
+      ? new Response(null, { status: 503 })
+      : successfulApple(input, init)
+    const incomplete = await request('/api/itunes-search', 'album=Found&artist=Test&maxRequests=6&refresh=1')
+    assert.equal(incomplete.success, false)
+    assert.match(incomplete.message, /track lookup/)
   } finally {
     globalThis.fetch = previousFetch
     if (previousKey === undefined) delete process.env.GEMINI_API_KEY

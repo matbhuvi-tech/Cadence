@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { fetchCurateCandidate, type CurateProviderAttempt, type RecordCurateAttempt } from './curateEvidenceService'
+import { fetchAppleWithQuota } from './appleQuota'
 import {
   DiffField,
   DiffSource,
@@ -1251,11 +1252,36 @@ export class FederatedResolversService {
     record?: RecordCurateAttempt,
     signal?: AbortSignal,
     maxRequests?: number,
+    refresh?: { appleReleaseId?: string },
   ): Promise<ProviderResult | null> {
+    const releaseId = refresh?.appleReleaseId
     const url = `${this.getBaseUrl()}/api/itunes-search?album=${encodeURIComponent(
         signature.sanitizedTitle
-      )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&composer=${encodeURIComponent(signature.sanitizedComposer || '')}${maxRequests ? `&maxRequests=${maxRequests}` : ''}`
-    return fetchCurateCandidate('apple', signature.sanitizedTitle, signal => fetch(url, { signal }), data => {
+      )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&composer=${encodeURIComponent(signature.sanitizedComposer || '')}${maxRequests ? `&maxRequests=${maxRequests}` : ''}${refresh ? '&refresh=1' : ''}`
+    const request = (requestSignal: AbortSignal) => {
+      if (!releaseId) return fetch(url, { signal: requestSignal })
+      const id = encodeURIComponent(releaseId)
+      // The proxy can read Apple's Retry-After even when CORS hides it from the browser.
+      if (import.meta.env?.DEV) return fetch(`${url}&releaseId=${id}`, { signal: requestSignal })
+      return fetchAppleWithQuota(`https://itunes.apple.com/lookup?id=${id}&country=in&entity=song`, requestSignal, 6000)
+    }
+    return fetchCurateCandidate('apple', releaseId ?? signature.sanitizedTitle, request, response => {
+      let data = response
+      if (releaseId) {
+        const rows: any[] = Array.isArray(response.results) ? response.results : []
+        const album = rows.find(row => row.wrapperType === 'collection' && String(row.collectionId) === releaseId)
+        const tracks = rows.filter(row => row.wrapperType === 'track' && String(row.collectionId) === releaseId)
+          .map(({ trackId, trackNumber, trackName, artistName }) => ({
+            trackId: trackId == null ? undefined : String(trackId), trackNumber, trackName, artistName,
+          }))
+        if (!album || tracks.length === 0) throw new Error('Apple did not return the requested release and its tracks.')
+        data = {
+          success: true, releaseId, tracks,
+          releaseTitle: album.collectionName, artistCredit: album.artistName,
+          releaseYear: album.releaseDate ? Number(album.releaseDate.slice(0, 4)) : undefined,
+          genre: album.primaryGenreName, coverArtUrl: album.artworkUrl100?.replace('100x100bb', '3000x3000bb'),
+        }
+      }
       if (!data.success) return null
 
       return normalizationService.applyToCandidate<ProviderResult>({
@@ -1275,7 +1301,8 @@ export class FederatedResolversService {
         genre: data.genre || 'Soundtrack',
         tracks: data.tracks || [],
       })
-    }, record, signal, candidate => this.summarizeEvidenceCandidate(candidate))
+    }, record, signal, candidate => this.summarizeEvidenceCandidate(candidate),
+    refresh && { timeoutMs: null, requireResponse: true })
   }
 
   /**
@@ -1287,6 +1314,7 @@ export class FederatedResolversService {
     record?: RecordCurateAttempt,
     signal?: AbortSignal,
     maxRequests?: number,
+    timeoutMs?: number,
   ): Promise<ProviderResult | null> {
     const execute = async () => {
       if (isPrefetch) {
@@ -1317,7 +1345,7 @@ export class FederatedResolversService {
           genre: data.genre,
           tracks: data.tracks || [],
         })
-      }, record, signal, candidate => this.summarizeEvidenceCandidate(candidate))
+      }, record, signal, candidate => this.summarizeEvidenceCandidate(candidate), { timeoutMs })
     }
 
     if (isPrefetch) {
@@ -1460,6 +1488,7 @@ export class FederatedResolversService {
     recordAttempt?: RecordCurateAttempt,
     appleRequests = 2,
     musicbrainzRequests = 2,
+    refresh = false,
   ): Promise<ReleaseConsensusResult> {
     const startTime = Date.now()
     onProgress?.({ phase: 'querying_musicbrainz', message: 'Querying MusicBrainz & Apple Music...', elapsedMs: 0 })
@@ -1486,13 +1515,21 @@ export class FederatedResolversService {
       measured.set(attempt.provider, attempt)
       recordAttempt?.(attempt)
     }
-    const [rawItunes, rawMb] = await Promise.all([
+    if (refresh && !directAppleCandidate) {
+      onProgress?.({ phase: 'querying_apple', message: 'Fetching the Apple release and tracklist…', elapsedMs: Date.now() - startTime })
+    }
+    const [apple, musicbrainz] = await Promise.allSettled([
       directAppleCandidate || (!isPrefetch && appleRequests === 0)
         ? Promise.resolve(directAppleCandidate ?? null)
-        : this.fetchItunesAlbumCandidate(signature, record, abortSignal, isPrefetch ? undefined : appleRequests),
-      this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch, record, abortSignal, isPrefetch ? undefined : musicbrainzRequests),
+        : this.fetchItunesAlbumCandidate(signature, record, abortSignal, isPrefetch ? undefined : appleRequests, refresh ? {} : undefined),
+      this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch, record, abortSignal,
+        isPrefetch ? undefined : musicbrainzRequests, refresh ? 55_000 : undefined),
     ])
     abortSignal?.throwIfAborted()
+    if (apple.status === 'rejected') throw apple.reason
+    if (musicbrainz.status === 'rejected') throw musicbrainz.reason
+    const rawItunes = apple.value
+    const rawMb = musicbrainz.value
 
     const itunesVerified = directAppleCandidate ? true : this.isProviderCandidateAcceptable(signature, rawItunes, localRelease.releaseYear)
     const mbVerified = this.isProviderCandidateAcceptable(signature, rawMb, localRelease.releaseYear)

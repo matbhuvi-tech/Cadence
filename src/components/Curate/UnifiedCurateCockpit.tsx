@@ -69,13 +69,13 @@ import {
   type CurateDraftTrack,
 } from '../../core/curateDraft'
 import { curationQueueService, AlbumCurationQueueItem } from '../../services/curationQueueService'
-import { federatedResolversService } from '../../services/federatedResolvers'
+import { federatedResolversService, type ProviderResult } from '../../services/federatedResolvers'
 import { compilationCanonicalizerService } from '../../services/compilationCanonicalizerService'
 import { behavioralLearningService } from '../../services/behavioralLearningService'
 import { tauriBridge } from '../../services/tauriBridge'
 import { provenanceCacheService } from '../../services/provenanceCacheService'
 import { useCurationTrace } from '../../hooks/useCurationTrace'
-import { captureTrackDecisions, curateMatchingContext, sourceCandidatesFromGrouping, type CurateSourceCandidate } from '../../services/curateEvidenceService'
+import { CURATE_REFRESH_PROVIDER_BUDGET, captureTrackDecisions, curateMatchingContext, sourceCandidatesFromGrouping, type CurateSourceCandidate } from '../../services/curateEvidenceService'
 import { SteerProgressBar } from './SteerProgressBar'
 import { CurationDecisionTraceDrawer } from './CurationDecisionTraceDrawer'
 import { resolveGemini } from '../../services/geminiClient'
@@ -141,40 +141,6 @@ function SelectedChangeNote({ change, label }: { change: CurateValueChange | nul
       {change.previous === undefined ? 'Added · No local value' : `Was: ${change.previous}`}
     </span>
   )
-}
-
-// Direct Apple Music URL and Slug Resolver
-async function resolveDirectAppleMusicCandidate(collectionId: string, signal: AbortSignal): Promise<{
-  releaseTitle: string
-  artistCredit: string
-  composer: string
-  releaseYear?: number
-  genre: string
-  coverArtUrl: string
-  tracks: Array<{ trackNumber: number; trackName: string; artistName?: string }>
-} | null> {
-  const parseResults = (results: any[]) => {
-    const coll = results.find(r => r.wrapperType === 'collection') || results[0]
-    const songs = results.filter(r => r.wrapperType === 'track')
-    return {
-      releaseTitle: coll.collectionName,
-      artistCredit: coll.artistName,
-      composer: coll.artistName,
-      releaseYear: coll.releaseDate ? parseInt(coll.releaseDate.slice(0, 4), 10) : undefined,
-      genre: coll.primaryGenreName || 'Soundtrack',
-      coverArtUrl: coll.artworkUrl100 ? coll.artworkUrl100.replace('100x100bb', '3000x3000bb') : '',
-      tracks: songs.map(s => ({
-        trackNumber: s.trackNumber,
-        trackName: s.trackName,
-        artistName: s.artistName,
-      })),
-    }
-  }
-
-  const res = await fetch(`https://itunes.apple.com/lookup?id=${collectionId}&country=in&entity=song`, { signal, redirect: 'error' })
-  if (!res.ok) return null
-  const data = await res.json()
-  return data.resultCount > 0 ? parseResults(data.results) : null
 }
 
 // Direct Wikipedia Tracklist & Metadata Resolver (100% deterministic, zero API quota)
@@ -456,7 +422,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [steerArtist, setSteerArtist] = useState('')
   const [steerYear, setSteerYear] = useState('')
   const [steerGroundingUrl, setSteerGroundingUrl] = useState('')
-  const [isSteeringLoading, setIsSteeringLoading] = useState(false)
 
   // Inline editing state
   const [editingFieldKey, setEditingFieldKey] = useState<string | null>(null)
@@ -491,7 +456,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [draftLoadAttempt, setDraftLoadAttempt] = useState(0)
   const [draftSaveError, setDraftSaveError] = useState<string | null>(null)
   const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<string | null>(null)
-  const [savedAppleEvidence, setSavedAppleEvidence] = useState<{ title?: string; artist?: string; composer?: string; year?: number; genre?: string; trackCount?: number; releaseId?: string; rejectionReason?: string } | null>(null)
+  const [savedAppleEvidence, setSavedAppleEvidence] = useState<{ albumId: string; title?: string; artist?: string; composer?: string; year?: number; genre?: string; trackCount?: number; releaseId?: string; rejectionReason?: string } | null>(null)
+  const initialSteering = useRef<{ albumId: string; title: string; artist: string; year: string }>(undefined)
   const [stagingAlbumId, setStagingAlbumId] = useState<string | null>(null)
   const [queuingAlbumId, setQueuingAlbumId] = useState<string | null>(null)
 
@@ -872,6 +838,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     isResuming: isTraceResuming,
     setIsResuming: setIsTraceResuming,
     executeFetch: executeTraceFetch,
+    isRefreshing: isSteeringLoading,
+    cancelRefresh,
     lastEvidenceId,
     toggleDrawer: toggleTraceDrawer,
     closeDrawer: closeTraceDrawer,
@@ -894,7 +862,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       const run = await tauriBridge.curationGetEvidence(albumId, current.id)
       const candidate = run?.attempts.find(attempt => attempt.provider === 'apple' && attempt.outcome === 'success')?.candidate
       const telemetry = run?.decision?.candidateTelemetry?.find(item => item.provider === 'apple')
-      if (!cancelled && candidate) setSavedAppleEvidence({ ...candidate, releaseId: telemetry?.releaseId,
+      if (!cancelled && candidate) setSavedAppleEvidence({ ...candidate, albumId, releaseId: candidate.releaseId ?? telemetry?.releaseId,
         rejectionReason: telemetry?.rejectionReason })
     }).catch(err => console.warn('[Curate] Evidence restore failed:', err))
     return () => { cancelled = true }
@@ -938,9 +906,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // Sync steering parameters when active album changes
   useEffect(() => {
     if (selectedAlbum) {
-      setSteerAlbum(selectedAlbum.albumTitle.selected || selectedAlbum.currentTitle || '')
-      setSteerArtist(selectedAlbum.composer.selected || selectedAlbum.albumArtist.selected || '')
-      setSteerYear(selectedAlbum.year.selected ? String(selectedAlbum.year.selected) : '')
+      const title = selectedAlbum.albumTitle.selected || selectedAlbum.currentTitle || ''
+      const artist = selectedAlbum.composer.selected || selectedAlbum.albumArtist.selected || ''
+      const year = selectedAlbum.year.selected ? String(selectedAlbum.year.selected) : ''
+      initialSteering.current = { albumId: selectedAlbum.id, title, artist, year }
+      setSteerAlbum(title)
+      setSteerArtist(artist)
+      setSteerYear(year)
       setSteerGroundingUrl('')
     }
   }, [selectedAlbum?.id])
@@ -1219,12 +1191,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     if (e) e.preventDefault()
     if (!selectedAlbum || !selectedAlbum.rawRelease || isSteeringLoading) return
 
-    setIsSteeringLoading(true)
     showToast(`Searching providers for "${steerAlbum || selectedAlbum.currentTitle}"...`)
 
     try {
       let aiMasterResult: any = undefined
-      let directAppleCandidate: any = null
+      let directAppleCandidate: ProviderResult | null = null
       const localRelease = selectedAlbum.rawRelease
       const consensus = await executeTraceFetch(selectedAlbum.id, {
         trigger: 'user_refresh', context: curateMatchingContext(localRelease, selectedAlbum.rawTracks),
@@ -1299,48 +1270,33 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
       // 3. If user gave an Apple Music URL, directly resolve the authentic Apple Music album & tracklist
       signal.throwIfAborted()
-      let directAppleMaster: any = null
-      const appleId = /^https:\/\/(?:music|itunes)\.apple\.com\//i.test(steerGroundingUrl.trim())
+      const linkedAppleId = /^https:\/\/(?:music|itunes)\.apple\.com\//i.test(steerGroundingUrl.trim())
         ? steerGroundingUrl.match(/(?:album\/[^/]+\/|album\/|id=?)(\d{8,12})/)?.[1]
         : undefined
+      const initial = initialSteering.current
+      const savedAppleId = !steerGroundingUrl.trim() && initial?.albumId === selectedAlbum.id &&
+        initial.title === steerAlbum && initial.artist === steerArtist && initial.year === steerYear &&
+        savedAppleEvidence?.albumId === selectedAlbum.id && !savedAppleEvidence.rejectionReason &&
+        /^\d+$/.test(savedAppleEvidence.releaseId ?? '') ? savedAppleEvidence.releaseId : undefined
+      const appleId = linkedAppleId ?? savedAppleId
       if (appleId) {
-        directAppleMaster = await resolveDirectAppleMusicCandidate(appleId, signal).catch(error => {
-          signal.throwIfAborted()
-          console.warn('[AppleMusicResolver] Direct ID lookup failed:', error)
-          return null
-        })
+        onProgress({ phase: 'querying_apple', message: 'Fetching the Apple release and tracklist…', elapsedMs: 0 })
+        directAppleCandidate = await federatedResolversService.fetchItunesAlbumCandidate({
+          sanitizedTitle: localRelease.title,
+          sanitizedArtist: localRelease.artistCredit || '',
+          trackCount: selectedAlbum.rawTracks.length,
+        }, record, signal, 1, { appleReleaseId: appleId })
+        signal.throwIfAborted()
+        if (!directAppleCandidate) throw new Error('Apple could not find the linked release.')
       }
-
-      directAppleCandidate = directAppleMaster ? {
-        provider: 'itunes',
-        confidenceScore: 0.99,
-        releaseTitle: directAppleMaster.releaseTitle,
-        trackTitle: directAppleMaster.tracks[0]?.trackName || '',
-        artistCredit: directAppleMaster.artistCredit,
-        composer: directAppleMaster.composer,
-        releaseYear: directAppleMaster.releaseYear,
-        releaseId: appleId,
-        catalogNumber: '',
-        label: 'Apple Music Catalog',
-        barcodeUpc: '',
-        coverArtUrl: directAppleMaster.coverArtUrl,
-        coverResolution: '3000x3000px (Apple Music Master Scan)',
-        genre: directAppleMaster.genre,
-        tracks: directAppleMaster.tracks.map((t: any) => ({
-          trackId: t.trackId,
-          trackNumber: t.trackNumber,
-          trackName: t.trackName,
-          artistName: t.artistName || '',
-        })),
-      } : null
 
       // 3. Build steered release for federated provider resolution
       const steeredRelease: Release = {
         ...localRelease,
-        title: directAppleMaster?.releaseTitle || aiMasterResult?.releaseTitle || steerAlbum.trim() || localRelease.title,
-        artistCredit: directAppleMaster?.artistCredit || aiMasterResult?.artistCredit || steerArtist.trim() || localRelease.artistCredit,
-        composerName: directAppleMaster?.composer || aiMasterResult?.composer || steerArtist.trim() || localRelease.composerName,
-        releaseYear: directAppleMaster?.releaseYear || aiMasterResult?.releaseYear || Number(steerYear) || localRelease.releaseYear,
+        title: directAppleCandidate?.releaseTitle || aiMasterResult?.releaseTitle || steerAlbum.trim() || localRelease.title,
+        artistCredit: directAppleCandidate?.artistCredit || aiMasterResult?.artistCredit || steerArtist.trim() || localRelease.artistCredit,
+        composerName: directAppleCandidate?.composer || aiMasterResult?.composer || steerArtist.trim() || localRelease.composerName,
+        releaseYear: directAppleCandidate?.releaseYear || aiMasterResult?.releaseYear || Number(steerYear) || localRelease.releaseYear,
       }
 
         signal.throwIfAborted()
@@ -1353,16 +1309,15 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           onProgress,
           signal,
           record,
-          appleId ? 0 : (useWikipedia || useAi ? 1 : 2),
+          appleId ? 0 : CURATE_REFRESH_PROVIDER_BUDGET / 2,
+          CURATE_REFRESH_PROVIDER_BUDGET / 2 - Number(useWikipedia || useAi),
+          true,
         )
         return { trace: res.decisionTrace, result: res, trackDecisions: captureTrackDecisions(res),
           identityMappings: res.identityMappings, sourceCandidates: sourceCandidates.length ? sourceCandidates : sourceCandidatesFromGrouping(res) }
       })
 
-      if (!consensus) {
-        setIsSteeringLoading(false)
-        return
-      }
+      if (!consensus) return
 
       // 3. Update album state with fresh candidates and grounded results
       setAlbumItems((prev) => {
@@ -1429,8 +1384,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     } catch (err) {
       console.error('[UnifiedCurateCockpit] Fetch & Anchor error:', err)
       showToast('⚠️ Failed to re-query providers. Check search inputs.')
-    } finally {
-      setIsSteeringLoading(false)
     }
   }
 
@@ -2461,6 +2414,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   outcomeStatus={traceOutcomeStatus}
                   isFetching={isSteeringLoading || traceStatus === 'fetching'}
                   evidenceSaveFailed={traceStatus === 'save_error'}
+                  cancelled={traceStatus === 'cancelled'}
+                  onCancel={isSteeringLoading ? cancelRefresh : undefined}
                   onToggleRationale={toggleTraceDrawer}
                   hasTrace={Boolean(selectedAlbum)}
                 />
