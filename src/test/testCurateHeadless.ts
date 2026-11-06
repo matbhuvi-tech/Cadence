@@ -73,7 +73,7 @@ test('a stale seven-track draft retires after a full write and reopening require
   assert.deepEqual(actionable(reconcileCurateReviewState(reopened, tracks, fresh)), [])
 })
 
-test('seven local tracks and eight MusicBrainz tracks preserve provider evidence and expose the current match behavior', async t => {
+test('seven local tracks and eight MusicBrainz tracks preserve provider evidence without selecting conflicted titles or unverified singers', async t => {
   const providerTracks = ['Overture', 'Departure', 'Crossing', 'Homeward', 'Reunion', 'Finale', 'Epilogue', 'Bonus'].map(
     (trackName, i) => ({ trackId: `mb-track-${i + 1}`, trackNumber: i + 1, trackName, artistName: 'Provider Singer' }),
   )
@@ -114,10 +114,11 @@ test('seven local tracks and eight MusicBrainz tracks preserve provider evidence
   ])
   const decisions = captureTrackDecisions(result)!
   assert.deepEqual(decisions.map(track => track.trackId), tracks.map(track => track.id))
-  // Characterization. The edition contract will require an explicit mapping
-  // before an eight-track candidate can supply Selected Output for this edition.
-  assert.equal(decisions[0].selectedTitle, 'Overture')
-  assert.equal(decisions[0].selectedArtists, 'Provider Singer')
+  assert.equal(decisions[0].selectedTitle, tracks[0].title)
+  assert.equal(decisions[0].selectedArtists, tracks[0].artistCredit)
+  assert.equal(decisions[0].requiresHumanReview, true)
+  assert.equal(result.trackStates?.[0].mbTitle, 'Overture')
+  assert.equal(result.trackStates?.[0].mbArtists, 'Provider Singer')
 })
 
 test('edit, confirm, refresh, and edit preserve the draft and confirmed value as separate layers', () => {
