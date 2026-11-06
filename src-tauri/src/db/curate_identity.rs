@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension, Result, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Result, Transaction, TransactionBehavior};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -28,6 +28,17 @@ pub(crate) fn snapshot(
     ids: &[String],
     seed: bool,
 ) -> Result<Vec<serde_json::Value>> {
+    // Seeding any track can advance the revisions shared by other tracks in this album.
+    if seed {
+        let mut exists = tx.prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM curate_identity_tracks WHERE local_track_id = ?1)",
+        )?;
+        for id in ids {
+            if !exists.query_row([id], |row| row.get::<_, bool>(0))? {
+                sync_track(tx, id, None)?;
+            }
+        }
+    }
     let mut rows = Vec::with_capacity(ids.len());
     let mut stmt = tx.prepare_cached(
         "SELECT e.id, e.revision, d.id, d.revision, d.order_revision, g.id, g.revision
@@ -39,16 +50,6 @@ pub(crate) fn snapshot(
          WHERE t.local_track_id = ?1",
     )?;
     for id in ids {
-        if seed {
-            let exists = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM curate_identity_tracks WHERE local_track_id = ?1)",
-                [id],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if !exists {
-                sync_track(tx, id, None)?;
-            }
-        }
         if let Some(row) = stmt
             .query_row([id], |row| {
                 Ok(serde_json::json!({
@@ -171,7 +172,21 @@ pub(crate) fn record_draft_edits(
 }
 
 pub(super) fn initialize(conn: &Connection) -> Result<()> {
-    conn.execute_batch(include_str!("curate_identity.sql"))?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    tx.execute_batch(include_str!("curate_identity.sql"))?;
+    let has_catalog_source_key = tx.query_row(
+        "SELECT EXISTS (
+            SELECT 1 FROM pragma_table_info('curate_identity_tracks') WHERE name = 'catalog_source_key'
+        )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_catalog_source_key {
+        tx.execute(
+            "ALTER TABLE curate_identity_tracks ADD COLUMN catalog_source_key TEXT",
+            [],
+        )?;
+    }
     // Field clocks cover all catalog update paths, including completed tag writes.
     for (table, fields) in [
         (
@@ -213,7 +228,7 @@ pub(super) fn initialize(conn: &Connection) -> Result<()> {
             } else {
                 String::new()
             };
-            conn.execute_batch(&format!(
+            tx.execute_batch(&format!(
                 "CREATE TRIGGER IF NOT EXISTS curate_identity_{table}_{column}
                  AFTER UPDATE OF {column} ON {table}
                  WHEN NEW.{column} IS NOT OLD.{column}
@@ -225,7 +240,7 @@ pub(super) fn initialize(conn: &Connection) -> Result<()> {
             ))?;
         }
     }
-    Ok(())
+    tx.commit()
 }
 
 #[derive(Clone, Copy, Deserialize)]

@@ -1,5 +1,10 @@
 # Issue Log
 
+## Issue #9: Curate evaluation fails on the early identity schema
+- **Reproduction:** Open an existing database created by an early Identity foundation build, select Sivaa, and refresh evidence. Identity lookup fails before provider retrieval.
+- **Fix:** Migrate the missing identity column at startup while preserving existing identity rows. Show which step failed in the evaluation badge tooltip.
+- **Status:** Pending user verification. [GitHub issue #9](https://github.com/matbhuvi-tech/Cadence/issues/9)
+
 ## Curate identity foundation
 - **Scope:** Persist release edition, disc, local track lineage, source-group candidates, provider mappings, and independent revisions.
 - **Status:** Implemented on `feat/curate-identity-foundation`, pending user verification. See the [Milestone A checkpoint](../../docs/designs/CurateArchitecture.md#milestone-a-implementation-checkpoint).

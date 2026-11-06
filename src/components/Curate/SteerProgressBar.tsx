@@ -67,7 +67,9 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
         type="button"
         onClick={onToggleRationale}
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-mono font-medium transition-colors shadow-sm cursor-pointer ${badgeColor}`}
-        title={evidenceSaveFailed ? message : 'Click or press Ctrl+I to inspect curation decision rationale and evidence'}
+        title={evidenceSaveFailed || outcomeStatus === 'failed'
+          ? message || label
+          : 'Click or press Ctrl+I to inspect curation decision rationale and evidence'}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-current opacity-80" />
         <span>{label}</span>

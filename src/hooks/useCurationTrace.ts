@@ -92,9 +92,11 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
 
     const run: CurateEvidenceRun = { ...input, id, requestedAt, completedAt: requestedAt, attempts, outcome: 'failed' }
     let result: T | null = null
+    let failureMessage = 'Could not load album identity.'
     try {
       run.identity = await tauriBridge.curationGetIdentity(input.context.tracks.map(track => track.id))
       controller.signal.throwIfAborted()
+      failureMessage = 'Candidate resolution failed.'
       const response = await fetchFn(controller.signal, event => {
         if (active()) handleProgress(event)
       }, attempt => attempts.push(attempt))
@@ -105,8 +107,9 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
       run.identityMappings = response.identityMappings
       run.sourceCandidates = response.sourceCandidates
       result = response.result
-    } catch {
+    } catch (error) {
       run.outcome = controller.signal.aborted ? 'cancelled' : 'failed'
+      if (run.outcome === 'failed') console.warn(`[useCurationTrace] ${failureMessage}`, error)
     }
     run.completedAt = new Date().toISOString()
     try {
@@ -115,7 +118,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
         setLastEvidenceId(id)
         if (run.decision) setTrace(run.decision)
         setStatus(run.outcome === 'completed' ? 'completed' : run.outcome === 'failed' ? 'error' : 'idle')
-        if (run.outcome === 'failed') setProgressMessage('Candidate resolution failed.')
+        if (run.outcome === 'failed') setProgressMessage(failureMessage)
       }
       return active() && !controller.signal.aborted ? result : null
     } catch (err) {
