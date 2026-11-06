@@ -24,7 +24,7 @@ import {
 } from 'lucide-react'
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope, NavigationAnchor } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
-import { projectCurateCommits, type CurateCommitRow } from './core/curateCommit'
+import { curateReviewKeys, projectCurateCommits, reconcileCurateReviewState, type CurateCommitRow, type CurateReviewState } from './core/curateCommit'
 import { auditService } from './services/auditService'
 import { storagePersistence } from './core/storagePersistence'
 import { IngestionResult } from './services/libraryImporter'
@@ -74,18 +74,53 @@ import { CadenceLogo } from './components/common/CadenceLogo'
 import { useStagedChanges } from './hooks/useStagedChanges'
 import { GeminiSetupScreen } from './components/GeminiSetupScreen'
 
+const curateReviewStorageKey = 'cadence.curate.review-status.v1'
+
+function loadCurateReviewState(): CurateReviewState {
+  try {
+    return new Map(JSON.parse(localStorage.getItem(curateReviewStorageKey) ?? '[]'))
+  } catch {
+    return new Map()
+  }
+}
+
 function AppContent() {
   // Primary Graph State
   const [catalogTracks, setTracks] = useState<Track[]>(() => graphEngine.getAllTracks())
   const [catalogReleases, setReleases] = useState<Release[]>(() => graphEngine.getAllReleases())
   const [curateCommits, setCurateCommits] = useState<CurateCommitRow[]>([])
-  const [curateReviewCount, setCurateReviewCount] = useState<number | null>(null)
+  const [savedCurateReviews, setSavedCurateReviews] = useState(loadCurateReviewState)
+  const [curateHistoryReady, setCurateHistoryReady] = useState(() => !tauriBridge.isTauri())
+  const curateReviews = useMemo(
+    () => reconcileCurateReviewState(savedCurateReviews, catalogTracks, curateCommits),
+    [savedCurateReviews, catalogTracks, curateCommits],
+  )
+  useEffect(() => {
+    if (curateReviews !== savedCurateReviews) setSavedCurateReviews(curateReviews)
+    try {
+      localStorage.setItem(curateReviewStorageKey, JSON.stringify(Array.from(curateReviews)))
+    } catch (err) {
+      console.warn('[Curate] Could not persist album review status:', err)
+    }
+  }, [curateReviews, savedCurateReviews])
+  const curateReleases = useMemo(
+    () => curateHistoryReady ? catalogReleases.filter(release => curateReviews.get(release.id) !== true) : [],
+    [catalogReleases, curateReviews, curateHistoryReady],
+  )
+  const supersededCurateRows = useMemo(() => {
+    const ids = new Set<string>()
+    for (const value of curateReviews.values()) {
+      if (value !== true) for (const id of value) ids.add(id)
+    }
+    return ids
+  }, [curateReviews])
   const commitReadVersion = useRef(0)
   const refreshCurateCommits = useCallback(async () => {
     const version = ++commitReadVersion.current
     try {
       const rows = await tauriBridge.commitGetCurateProjection()
       if (version === commitReadVersion.current) {
+        setCurateHistoryReady(true)
         setCurateCommits(current => JSON.stringify(current) === JSON.stringify(rows) ? current : rows)
       }
     } catch (err) {
@@ -165,7 +200,7 @@ function AppContent() {
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set())
 
   // Canonical staged mutations hook
-  const { stagedAlbumsCount, stagedTracksCount, triageAlbumsCount, hasPendingCommits } = useStagedChanges(tracks, releases)
+  const { stagedAlbumsCount, stagedTracksCount, hasPendingCommits } = useStagedChanges(tracks, releases)
 
   // View & Filter State
   const [viewMode, setViewMode] = useState<CanvasViewMode>('cover_grid')
@@ -1591,11 +1626,7 @@ function AppContent() {
   ]
 
   const uncommittedCount = tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
-  const allAffectedTrackIds = new Set(auditIssues.flatMap((i) => i.sampleTrackIds || []))
-  const impactedAlbumsCount = new Set(
-    tracks.filter((t) => allAffectedTrackIds.has(t.id)).map((t) => t.releaseId).filter(Boolean)
-  ).size
-  const curateBadgeCount = curateReviewCount ?? (triageAlbumsCount + impactedAlbumsCount)
+  const curateBadgeCount = curateReleases.length
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0D0E12] text-[#F1F5F9] select-none font-sans">
@@ -1887,10 +1918,10 @@ function AppContent() {
         ) : topMode === 'curate' ? (
           <UnifiedCurateCockpit
             tracks={catalogTracks}
-            releases={catalogReleases}
+            releases={curateReleases}
             commitRows={curateCommits}
             onCommitQueued={refreshCurateCommits}
-            onReviewCountChange={setCurateReviewCount}
+            supersededCommitIds={supersededCurateRows}
             auditIssues={auditIssues}
             initialSelectedAlbumId={selectedAlbumId}
             navigationAnchor={navigationAnchor}
@@ -2096,7 +2127,17 @@ function AppContent() {
                 onSelectAllTracks={handleSelectAllTracks}
                 onSelectVariant={handleSelectVariant}
                 onInspectRelease={handleInspectRelease}
-                onCustomizeRelease={(rel) => handleInspectRelease(rel.id)}
+                onCustomizeRelease={(rel, reopenReview) => {
+                  if (reopenReview && topMode === 'library' && curateReviews.get(rel.id) === true) {
+                    const albumTracks = catalogTracks.filter(track => track.releaseId === rel.id)
+                    const trackIds = new Set(albumTracks.map(track => track.id))
+                    const ignored = curateCommits.filter(row => trackIds.has(row.trackId)).map(row => row.id)
+                    const next = new Map(curateReviews)
+                    for (const key of curateReviewKeys(rel.id, albumTracks)) next.set(key, ignored)
+                    setSavedCurateReviews(next)
+                  }
+                  handleInspectRelease(rel.id)
+                }}
                 onUpdateReleaseDetails={handleUpdateReleaseDetails}
                 onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
                 onApplyBatchEdits={handleApplyBatchEdits}

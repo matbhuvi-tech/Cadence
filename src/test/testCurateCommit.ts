@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Release, Track } from '../core/types'
-import { getCurateChange, isReconciledCurateDraft, makeCurateCommitItems, prepareTier1Commit, projectCurateCommits } from '../core/curateCommit'
+import { getCurateChange, isReconciledCurateDraft, makeCurateCommitItems, prepareTier1Commit, projectCurateCommits, reconcileCurateReviewState } from '../core/curateCommit'
 import type { CurateDraft } from '../core/curateDraft'
 
 test('shows proposed replacements and additions without treating missing selections as clears', () => {
@@ -115,4 +115,39 @@ test('projects the persisted cover and reconciles only a verified artwork write'
   assert.equal(projectCurateCommits(tracks, releases, [{ ...row, status: 'failed' }]).releases[0].artwork.frontCoverUrl, source)
   draft.fields.coverArt.selected = 'https://example.test/replacement.png'
   assert.equal(isReconciledCurateDraft(draft, new Map([['one', written]])), false)
+})
+
+test('human commit exclusion survives changed tags, and reopening requires a fresh complete write', () => {
+  const tracks = [{ id: 'one', releaseId: 'album' }, { id: 'two', releaseId: 'album' }] as Track[]
+  const completed = tracks.map(track => ({
+    id: 'old-' + track.id, trackId: track.id, status: 'completed' as const, applies: false,
+    payloadJson: JSON.stringify({ curate: true, curateTrackCount: 2 }),
+  }))
+  const closed = reconcileCurateReviewState(new Map(), tracks, completed)
+  assert.equal(closed.get('album'), true)
+  assert.equal(reconcileCurateReviewState(closed, tracks, []).get('album'), true)
+  const reopened = new Map([['album', completed.map(row => row.id)]])
+  assert.deepEqual(reconcileCurateReviewState(reopened, tracks, completed), reopened)
+  const fresh = completed.map(row => ({
+    ...row, id: 'new-' + row.trackId,
+    payloadJson: JSON.stringify({ curate: true, curateTrackCount: 2, curateReviewId: 'fresh' }),
+  }))
+  assert.equal(reconcileCurateReviewState(reopened, tracks, [fresh[0], completed[1]]).get('album') === true, false)
+  assert.equal(reconcileCurateReviewState(reopened, tracks, [fresh[0], { ...fresh[1], status: 'failed' }]).get('album') === true, false)
+  assert.equal(reconcileCurateReviewState(reopened, tracks, fresh).get('album'), true)
+})
+
+test('keeps a committed album excluded when a rescan recreates its catalog IDs', () => {
+  const original = [{ id: 'old-track', releaseId: 'old-album', filePath: 'D:/Music/Album/01.flac' }] as Track[]
+  const closed = reconcileCurateReviewState(new Map(), original, [{
+    id: 'commit', trackId: 'old-track', status: 'completed',
+    payloadJson: JSON.stringify({ curate: true, curateTrackCount: 1 }),
+  }])
+  const rescanned = [
+    { id: 'new-track', releaseId: 'new-album', filePath: 'd:/music/album/01.flac' },
+    { id: 'other-track', releaseId: 'other-album', filePath: 'D:/Music/Other/01.flac' },
+  ] as Track[]
+  const next = reconcileCurateReviewState(closed, rescanned, [])
+  assert.equal(next.get('new-album'), true)
+  assert.equal(next.get('other-album'), undefined)
 })

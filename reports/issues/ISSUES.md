@@ -1,5 +1,9 @@
 # Issue Log
 
+## Curate queue includes albums after a human commit
+- **Expected:** A successfully committed album stays out of both Curate queues and the badge count. Only the Listen album card's “Curate Album Metadata & Artwork” action reopens it.
+- **Status:** Implementation pending verification.
+
 ## Issue #3: Missing File Name in Curate Local File Column
 - **ID:** #3
 - **Title:** fix(curate): display filename under local track artist and preserve filepath in consensus

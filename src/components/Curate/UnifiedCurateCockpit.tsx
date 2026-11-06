@@ -101,7 +101,7 @@ export interface UnifiedCurateCockpitProps {
   showToast: (msg: string) => void
   commitRows?: CurateCommitRow[]
   onCommitQueued?: () => Promise<void>
-  onReviewCountChange?: (count: number) => void
+  supersededCommitIds?: ReadonlySet<string>
   isPlaying?: boolean
 }
 
@@ -428,7 +428,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   showToast,
   commitRows,
   onCommitQueued,
-  onReviewCountChange,
+  supersededCommitIds,
   isPlaying = false,
 }) => {
   // 1. Compute Base Queue from Curation Queue Service
@@ -676,16 +676,26 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         })
       }
 
-      if (!selectedAlbumId && next.size > 0) {
-        const firstTier2 = Array.from(next.values()).find((a) => a.tier === 'tier2' && a.status !== 'committed')
-        if (firstTier2) setSelectedAlbumId(firstTier2.id)
+      if (initialSelectedAlbumId && !prev.has(initialSelectedAlbumId)) {
+        const requested = next.get(initialSelectedAlbumId)
+        if (requested) setActiveTier(requested.tier)
       }
 
       return next
     })
   }, [baseQueue, releases, tracks])
 
-  const activeItem = selectedAlbumId ? albumItems.get(selectedAlbumId) : undefined
+  const eligibleIds = useMemo(() => new Set(baseQueue.map(item => item.albumId)), [baseQueue])
+  const activeItem = selectedAlbumId && eligibleIds.has(selectedAlbumId) ? albumItems.get(selectedAlbumId) : undefined
+  useEffect(() => {
+    if (activeItem || eligibleIds.size === 0) return
+    const eligible = Array.from(albumItems.values()).filter(item => eligibleIds.has(item.id))
+    const first = eligible.find(item => item.tier === activeTier) ?? eligible[0]
+    if (first) {
+      setSelectedAlbumId(first.id)
+      setActiveTier(first.tier)
+    }
+  }, [activeItem, activeTier, albumItems, eligibleIds])
   const activeItemId = activeItem?.id
 
   // Only the selected album needs a draft read. Resolve it before showing editable output.
@@ -747,8 +757,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     }
   }, [selectedAlbum])
   const selectedTrackIds = new Set(selectedAlbum?.tracks.map(track => track.trackId))
-  const selectedCommitRows = commitRows?.filter(row => selectedTrackIds.has(row.trackId)) ?? []
-  const commitsByTrack = useMemo(() => new Map(commitRows?.map(row => [row.trackId, row])), [commitRows])
+  const selectedCommitRows = commitRows?.filter(row => selectedTrackIds.has(row.trackId) && !supersededCommitIds?.has(row.id)) ?? []
+  const commitsByTrack = useMemo(() => new Map(commitRows?.filter(row => !supersededCommitIds?.has(row.id)).map(row => [row.trackId, row])), [commitRows, supersededCommitIds])
   const reconciledAlbumIds = useMemo(() => {
     const ids = new Set<string>()
     for (const id of loadedDrafts.current.keys()) {
@@ -872,18 +882,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // Count by tier
   const tier1Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier1' && a.status !== 'committed' && !reconciledAlbumIds.has(a.id))
-  }, [albumItems, reconciledAlbumIds])
+    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier1' && a.status !== 'committed' && eligibleIds.has(a.id))
+  }, [albumItems, eligibleIds])
 
   const tier2Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status !== 'committed' && !reconciledAlbumIds.has(a.id))
-  }, [albumItems, reconciledAlbumIds])
-
-  // Publish the same remaining albums shown in the review queues, including
-  // completed-commit reconciliation, rather than counting persistent defects.
-  useEffect(() => {
-    onReviewCountChange?.(tier1Items.length + tier2Items.length)
-  }, [onReviewCountChange, tier1Items.length, tier2Items.length])
+    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status !== 'committed' && eligibleIds.has(a.id))
+  }, [albumItems, eligibleIds])
 
   const isCompilationAlbum = useMemo(() => {
     if (!selectedAlbum) return false
@@ -1638,7 +1642,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     setIsBatchCommitting(true)
     try {
       if (!tauriBridge.isTauri()) throw new Error('Open the desktop app to queue tag writes.')
-      const rows = new Map((await tauriBridge.commitGetCurateProjection()).map(row => [row.trackId, row]))
+      const rows = new Map((await tauriBridge.commitGetCurateProjection()).filter(row => !supersededCommitIds?.has(row.id)).map(row => [row.trackId, row]))
       const items: EnqueueBatchPayload['items'] = []
       const drafts: NonNullable<EnqueueBatchPayload['curateDrafts']> = []
       for (const album of tier1Items) {

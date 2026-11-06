@@ -28,6 +28,46 @@ export interface CurateCommitRow {
   errorMessage?: string | null
 }
 
+export type CurateReviewState = ReadonlyMap<string, true | string[]>
+
+// The album ID covers ordinary catalog updates. The file set also survives a
+// rescan that recreates release and track IDs after a tag change.
+export function curateReviewKeys(releaseId: string, tracks: Pick<Track, 'filePath'>[]): string[] {
+  const paths = tracks.map(track => track.filePath?.replace(/\\/g, '/').toLowerCase())
+  return paths.length && paths.every(Boolean)
+    ? [releaseId, JSON.stringify(paths.sort())]
+    : [releaseId]
+}
+
+export function reconcileCurateReviewState(
+  state: CurateReviewState, tracks: Track[], rows: CurateCommitRow[],
+): CurateReviewState {
+  const byRelease = new Map<string, Track[]>()
+  for (const track of tracks) {
+    const album = byRelease.get(track.releaseId)
+    if (album) album.push(track)
+    else byRelease.set(track.releaseId, [track])
+  }
+  const byTrack = new Map(rows.map(row => [row.trackId, row]))
+  const next = new Map(state)
+  for (const [releaseId, album] of byRelease) {
+    const keys = curateReviewKeys(releaseId, album)
+    const previous = keys.map(key => state.get(key)).find(value => value !== undefined)
+    const albumRows = album.map(track => byTrack.get(track.id))
+    let reviewId: string | undefined
+    const completed = previous === true || albumRows.every((row, index) => {
+      if (row?.status !== 'completed' || (previous && previous.includes(row.id))) return false
+      const payload = JSON.parse(row.payloadJson)
+      if (index === 0) reviewId = payload.curateReviewId
+      return payload.curate === true && payload.curateTrackCount === album.length &&
+        payload.curateReviewId === reviewId
+    })
+    if (completed) for (const key of keys) next.set(key, true)
+  }
+  return next.size === state.size && Array.from(next).every(([key, value]) => state.get(key) === value)
+    ? state : next
+}
+
 interface Tags {
   title?: string
   artist?: string
@@ -50,6 +90,7 @@ export function makeCurateCommitItems(
       cover !== draft.localCoverArt && !coverSource(draft)) {
     throw new Error('Choose a JPEG or PNG cover from an HTTP(S) URL or image data URL.')
   }
+  const curateReviewId = crypto.randomUUID()
   return draft.tracks.map(selection => {
     const track = byId.get(selection.trackId)
     if (!track?.filePath || !track.storageMountId) throw new Error('A selected track has no file path or storage mount.')
@@ -59,7 +100,7 @@ export function makeCurateCommitItems(
       filePath: track.filePath,
       mountId: track.storageMountId,
       payloadJson: JSON.stringify({
-        ...selectedTags(draft, selection), curate: true, curateTrackCount: draft.tracks.length, destination: 'embedded',
+        ...selectedTags(draft, selection), curate: true, curateTrackCount: draft.tracks.length, curateReviewId, destination: 'embedded',
       }),
       backupJson: JSON.stringify({
         title: track.title,
