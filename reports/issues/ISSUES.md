@@ -3,11 +3,11 @@
 ## Issue #9: Curate evaluation fails on the early identity schema
 - **Reproduction:** Open an existing database created by an early Identity foundation build, select Sivaa, and refresh evidence. Identity lookup fails before provider retrieval.
 - **Fix:** Migrate the missing identity column at startup while preserving existing identity rows. Show which step failed in the evaluation badge tooltip.
-- **Status:** Pending user verification. [GitHub issue #9](https://github.com/matbhuvi-tech/Cadence/issues/9)
+- **Status:** Verified by the user on 2026-11-06. [GitHub issue #9](https://github.com/matbhuvi-tech/Cadence/issues/9)
 
 ## Curate identity foundation
 - **Scope:** Persist release edition, disc, local track lineage, source-group candidates, provider mappings, and independent revisions.
-- **Status:** Implemented on `feat/curate-identity-foundation`, pending user verification. See the [Milestone A checkpoint](../../docs/designs/CurateArchitecture.md#milestone-a-implementation-checkpoint).
+- **Status:** Implemented and user-verified on 2026-11-06. See the [Milestone A checkpoint](../../docs/designs/CurateArchitecture.md#milestone-a-implementation-checkpoint).
 
 ## Curate queue includes albums after a human commit
 - **Expected:** A successfully committed album stays out of both Curate queues and the badge count. Only the Listen album card's “Curate Album Metadata & Artwork” action reopens it.

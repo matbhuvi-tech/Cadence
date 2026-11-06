@@ -570,7 +570,7 @@ Phases 2, 4, and 5 are intentionally not restated as approved target architectur
 
 ## Identity, decision validity, and actionable queue contract
 
-**Status: Milestone A implementation is on `feat/curate-identity-foundation`, pending user verification. Milestones B–E remain design contracts.** This section addresses the observed case where a 7-track local edition received singer and title proposals from an 8-track MusicBrainz candidate while Apple supplied no tracklist. It also addresses completed albums returning to Curate through stale drafts or queue classification. Existing compilation identification, disc grouping, version grouping, and original-album inference remain candidate generators. They do not by themselves establish a confirmed identity or authorize a tag change.
+**Status: Milestone A is implemented and user-verified on 2026-11-06. Milestones B–E remain design contracts.** This section addresses the observed case where a 7-track local edition received singer and title proposals from an 8-track MusicBrainz candidate while Apple supplied no tracklist. It also addresses completed albums returning to Curate through stale drafts or queue classification. Existing compilation identification, disc grouping, version grouping, and original-album inference remain candidate generators. They do not by themselves establish a confirmed identity or authorize a tag change.
 
 ### Identity hierarchy and revisions
 
