@@ -28,3 +28,11 @@
 - **Status:** Verified and Fixed.
 
 
+## GitHub #4: Curate badge remains unchanged after album commits
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/4
+- **Reported:** Curate badge stays at 130 while albums are committed.
+- **Cause:** Header adds legacy defect and audit counts instead of using the cockpit's remaining review queues.
+- **Change:** Publish the combined Tier 1 and Tier 2 review count to the header, using the existing completed-commit reconciliation logic. Retain the last reported count when navigating away; before the first cockpit visit, retain the existing estimate.
+- **Status:** Verified by the user. Frontend/PWA build, 15 curation tests (using tsconfig.app.json), and NSIS installer build passed on 2026-11-06.
+

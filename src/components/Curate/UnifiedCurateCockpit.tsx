@@ -101,6 +101,7 @@ export interface UnifiedCurateCockpitProps {
   showToast: (msg: string) => void
   commitRows?: CurateCommitRow[]
   onCommitQueued?: () => Promise<void>
+  onReviewCountChange?: (count: number) => void
   isPlaying?: boolean
 }
 
@@ -427,6 +428,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   showToast,
   commitRows,
   onCommitQueued,
+  onReviewCountChange,
   isPlaying = false,
 }) => {
   // 1. Compute Base Queue from Curation Queue Service
@@ -876,6 +878,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const tier2Items = useMemo(() => {
     return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status !== 'committed' && !reconciledAlbumIds.has(a.id))
   }, [albumItems, reconciledAlbumIds])
+
+  // Publish the same remaining albums shown in the review queues, including
+  // completed-commit reconciliation, rather than counting persistent defects.
+  useEffect(() => {
+    onReviewCountChange?.(tier1Items.length + tier2Items.length)
+  }, [onReviewCountChange, tier1Items.length, tier2Items.length])
 
   const isCompilationAlbum = useMemo(() => {
     if (!selectedAlbum) return false

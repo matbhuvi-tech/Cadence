@@ -79,6 +79,7 @@ function AppContent() {
   const [catalogTracks, setTracks] = useState<Track[]>(() => graphEngine.getAllTracks())
   const [catalogReleases, setReleases] = useState<Release[]>(() => graphEngine.getAllReleases())
   const [curateCommits, setCurateCommits] = useState<CurateCommitRow[]>([])
+  const [curateReviewCount, setCurateReviewCount] = useState<number | null>(null)
   const commitReadVersion = useRef(0)
   const refreshCurateCommits = useCallback(async () => {
     const version = ++commitReadVersion.current
@@ -1594,6 +1595,7 @@ function AppContent() {
   const impactedAlbumsCount = new Set(
     tracks.filter((t) => allAffectedTrackIds.has(t.id)).map((t) => t.releaseId).filter(Boolean)
   ).size
+  const curateBadgeCount = curateReviewCount ?? (triageAlbumsCount + impactedAlbumsCount)
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0D0E12] text-[#F1F5F9] select-none font-sans">
@@ -1657,9 +1659,9 @@ function AppContent() {
             }`}
           >
             <span>Curate</span>
-            {(triageAlbumsCount > 0 || impactedAlbumsCount > 0) && (
+            {curateBadgeCount > 0 && (
               <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-[#D4AF37]/20 text-[#D4AF37] font-mono font-medium">
-                {triageAlbumsCount + impactedAlbumsCount}
+                {curateBadgeCount}
               </span>
             )}
             <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘2</span>
@@ -1888,6 +1890,7 @@ function AppContent() {
             releases={catalogReleases}
             commitRows={curateCommits}
             onCommitQueued={refreshCurateCommits}
+            onReviewCountChange={setCurateReviewCount}
             auditIssues={auditIssues}
             initialSelectedAlbumId={selectedAlbumId}
             navigationAnchor={navigationAnchor}
