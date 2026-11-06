@@ -1194,10 +1194,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       if (!current) return prev
 
       const updatedTracks = current.tracks.map((t) => {
-        let val = t.localArtists
-        if (source === 'apple') val = t.appleArtists || current.albumArtist.apple || t.localArtists
-        if (source === 'musicbrainz') val = t.mbArtists || current.albumArtist.musicbrainz || t.localArtists
-        if (source === 'ai') val = t.aiArtists || current.albumArtist.ai || t.localArtists
+        const val = source === 'apple' ? t.appleArtists
+          : source === 'musicbrainz' ? t.mbArtists
+          : source === 'ai' ? t.aiArtists
+          : t.localArtists
+        if (val === undefined) return t
 
         return selectCurateTrackFields({
           ...t,
@@ -1287,7 +1288,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               tracks: canonicalRes.tracks.map((pt, idx) => ({
                 trackNumber: pt.trackNumber || idx + 1,
                 trackName: pt.title || (pt as any).proposedTitle || `Track ${idx + 1}`,
-                artistName: (pt as any).primaryVocalists || (pt as any).proposedSingers || (pt as any).proposedArtist || (pt as any).composer,
+                artistName: (pt as any).primaryVocalists || (pt as any).proposedSingers,
               })),
             }
           }
@@ -2680,14 +2681,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   </h2>
                   {selectedAlbum.offsetApplied !== undefined && (
                     <span className="text-[10px] px-2 py-0.5 rounded bg-[#D4AF37]/20 text-[#D4AF37] font-mono border border-[#D4AF37]/30">
-                      Sequence Offset Applied: {selectedAlbum.offsetApplied > 0 ? `+${selectedAlbum.offsetApplied}` : selectedAlbum.offsetApplied}
+                      Candidate Sequence Offset {selectedAlbum.offsetApplied > 0 ? `+${selectedAlbum.offsetApplied}` : selectedAlbum.offsetApplied}
                     </span>
                   )}
                 </div>
 
                 {/* Bulk Adoption Actions */}
                 <div className="flex items-center gap-1.5 text-[11px]">
-                  <span className="text-white/40 mr-1">Adopt Tracklist:</span>
+                  <span className="text-white/40 mr-1">Use Track Artist Credits</span>
                   <button
                     onClick={() => handleAdoptAllTracks('apple')}
                     className="px-2 py-1 rounded bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/30 cursor-pointer"
@@ -2779,7 +2780,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-apple`}
                             onClick={() => {
-                              const targetArtist = trk.appleArtists || (trk.appleTitle ? selectedAlbum.albumArtist.apple : undefined)
+                              const targetArtist = trk.appleArtists
                               if (targetArtist) {
                                 handleSelectTrackArtist(trk.trackId, targetArtist, 'single_provider_match')
                               }
@@ -2790,7 +2791,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                               {trk.appleTitle || (trk.appleArtists ? trk.matchedTitle : '—')}
                             </div>
                             <div className="text-[10px] text-white/50 mt-0.5">
-                              {trk.appleArtists || (trk.appleTitle && selectedAlbum.albumArtist.apple ? selectedAlbum.albumArtist.apple : '—')}
+                              {trk.appleArtists || '—'}
                             </div>
                           </td>
 
@@ -2798,7 +2799,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-musicbrainz`}
                             onClick={() => {
-                              const targetArtist = trk.mbArtists || (trk.mbTitle ? selectedAlbum.albumArtist.musicbrainz : undefined)
+                              const targetArtist = trk.mbArtists
                               if (targetArtist) {
                                 handleSelectTrackArtist(trk.trackId, targetArtist, 'single_provider_match')
                               }
@@ -2809,7 +2810,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                               {trk.mbTitle || (trk.mbArtists ? trk.matchedTitle : '—')}
                             </div>
                             <div className="text-[10px] text-white/40 mt-0.5">
-                              {trk.mbArtists || (trk.mbTitle && selectedAlbum.albumArtist.musicbrainz ? selectedAlbum.albumArtist.musicbrainz : '—')}
+                              {trk.mbArtists || '—'}
                             </div>
                           </td>
 
@@ -2817,7 +2818,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-ai`}
                             onClick={() => {
-                              const candArtist = trk.aiArtists || (trk.aiTitle ? (trk.matchedArtists || selectedAlbum.albumArtist.ai) : undefined)
+                              const candArtist = trk.aiArtists
                               if (candArtist) {
                                 handleSelectTrackArtist(trk.trackId, candArtist, 'ai_synthesized')
                               }
@@ -2901,6 +2902,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                     <Edit2 className="w-3 h-3" />
                                   </button>
                                 </div>
+
+                                {trk.providerDecisions?.filter(decision => decision.status === 'needs_review').map((decision, index) => (
+                                  <p key={index} className="mt-1 text-[10px] text-amber-300">
+                                    {decision.proposedValue} · {decision.reason}
+                                  </p>
+                                ))}
 
                                 {/* Progressive Disclosure Compilation Provenance Sub-Row */}
                                 {(isCompilationAlbum || change?.originalAlbum || change?.originalYear) && (

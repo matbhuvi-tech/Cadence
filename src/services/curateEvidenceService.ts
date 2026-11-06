@@ -135,5 +135,6 @@ export function captureTrackDecisions(result: ReleaseConsensusResult) {
     requiresHumanReview: track.requiresHumanReview,
     matchedProviderTrack: track.providerTrackNumber,
     sequenceOffset: track.sequenceOffset,
+    providerDecisions: track.providerDecisions,
   }))
 }

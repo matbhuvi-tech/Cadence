@@ -543,6 +543,14 @@ export interface CurateMappingCandidate {
   status: 'inferred' | 'unmapped' | 'conflicted'
 }
 
+export interface CurateTrackProviderDecision {
+  field: 'title' | 'artist'
+  proposedValue: string
+  mapping?: CurateMappingCandidate
+  status: 'valid' | 'needs_review'
+  reason?: string
+}
+
 export interface ReleaseConsensusResult {
   identityMappings?: CurateMappingCandidate[]
   releaseId: string
@@ -611,6 +619,7 @@ export interface TrackCandidateState {
   localArtists: string
   localDuration?: number
   providerTrackNumber?: number
+  providerDecisions?: CurateTrackProviderDecision[]
   matchedTitle?: string
   matchedArtists?: string
   matchedComposer?: string

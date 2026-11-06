@@ -19,7 +19,8 @@ type Proposal = {
 type FieldSelection = Pick<MetadataFieldState<string | number | undefined>,
   'selected' | 'userOverridden' | 'source' | 'confidence' | 'requiresHumanReview'>
 type TrackSelection = Pick<CurateDraftTrack, CurateTrackField |
-  'trackId' | 'source' | 'confidence' | 'requiresHumanReview' | 'selectedOverrides' | 'userOverridden' | 'provenanceSource'>
+  'trackId' | 'source' | 'confidence' | 'requiresHumanReview' | 'selectedOverrides' | 'userOverridden' |
+  'provenanceSource' | 'providerDecisions'>
 
 export interface CurateDraft {
   version: 1
@@ -48,9 +49,9 @@ export function captureCurateDraft(album: Proposal): CurateDraft {
     fields: Object.fromEntries(albumFields.map(key => [key, selection(album[key])])) as CurateDraft['fields'],
     tracks: album.tracks.map(t => {
       const { trackId, matchedTitle, matchedArtists, originalAlbum, originalYear, provenanceSource,
-        source, confidence, requiresHumanReview, selectedOverrides, userOverridden } = t
+        source, confidence, requiresHumanReview, selectedOverrides, userOverridden, providerDecisions } = t
       return { trackId, matchedTitle, matchedArtists, originalAlbum, originalYear, provenanceSource,
-        source, confidence, requiresHumanReview, selectedOverrides, userOverridden }
+        source, confidence, requiresHumanReview, selectedOverrides, userOverridden, providerDecisions }
     }),
   }
 }

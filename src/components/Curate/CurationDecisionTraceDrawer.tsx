@@ -83,10 +83,15 @@ function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: st
                 <p key={field} className="mt-1">{field} · {decision.chosenValue} · {decision.plainExplanation}</p>
               ))}
               {selected.trackDecisions?.map(track => (
-                <p key={track.trackId} className="mt-1">
-                  {track.trackNumber} · {track.selectedTitle || track.localTitle} · {track.selectedArtists || track.localArtists}
-                  {track.titleAction === 'Applied' || track.artistsAction === 'Applied' ? ' · Updated' : ' · Retained'}
-                </p>
+                <div key={track.trackId} className="mt-1">
+                  <p>
+                    {track.trackNumber} · {track.selectedTitle || track.localTitle} · {track.selectedArtists || track.localArtists}
+                    {track.titleAction === 'Applied' || track.artistsAction === 'Applied' ? ' · Updated' : ' · Retained'}
+                  </p>
+                  {track.providerDecisions?.filter(decision => decision.reason).map((decision, index) => (
+                    <p key={index} className="ml-3 text-amber-300">{decision.proposedValue} · {decision.reason}</p>
+                  ))}
+                </div>
               ))}
             </details>
           )}

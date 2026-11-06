@@ -29,7 +29,6 @@ import {
   isPlaceholderTag,
   calculateEarliestValidYear,
   disambiguateComboTitle,
-  isDefectiveArtistTag,
   matchTrackArtistFromProviderList,
   canonicalizeComposer,
   generateSearchTitleVariants,
@@ -1785,22 +1784,24 @@ export class FederatedResolversService {
         .replace(/([a-z])\1+/g, '$1')
         .replace(/[^a-z0-9]+/g, '')
 
+    const normalizeTrackTitle = (title: string) => cleanConsensusTitle(title).toLowerCase().trim()
+    const comparableTitle = (title: string) => title.normalize('NFC').trim().toLowerCase()
     const findCorroboratedTrack = <T extends { trackId?: string; trackName: string; trackNumber?: number; artistName?: string }>(
       localTitle: string,
       tracks: T[],
       expectedTrackNum?: number
     ): { track: T; method: 'title' | 'position' } | undefined => {
       if (!tracks || tracks.length === 0) return undefined
-      const normL = cleanConsensusTitle(localTitle).toLowerCase().trim()
+      const normL = normalizeTrackTitle(localTitle)
       if (!normL) return undefined
 
       // 1. Exact match
-      const exact = tracks.find(t => cleanConsensusTitle(t.trackName).toLowerCase().trim() === normL)
+      const exact = tracks.find(t => normalizeTrackTitle(t.trackName) === normL)
       if (exact) return { track: exact, method: 'title' }
 
       // 2. Substring match
       const sub = tracks.find(t => {
-        const c = cleanConsensusTitle(t.trackName).toLowerCase().trim()
+        const c = normalizeTrackTitle(t.trackName)
         return c && (c.includes(normL) || normL.includes(c))
       })
       if (sub) return { track: sub, method: 'title' }
@@ -1856,26 +1857,31 @@ export class FederatedResolversService {
       return undefined
     }
 
-    for (const lt of localTracks) {
-      let matchedArtist: string | null = null
-      let matchedSource: ConsensusFieldSource = 'consensus_all'
-      let matchedConfidence = 0.95
-      let matchedTitle = lt.title
-      let providerTrackNum: number | undefined = undefined
+    const matches = localTracks.map(lt => {
+      const expected = (offset: typeof offsetResultApple) => offset.isConfidentOffset && lt.trackNumber
+        ? lt.trackNumber - offset.detectedOffset : lt.trackNumber
+      return {
+        apple: findCorroboratedTrack(lt.title, itunesTracks, expected(offsetResultApple)),
+        musicbrainz: findCorroboratedTrack(lt.title, mbTracks, expected(offsetResultMb)),
+      }
+    })
+    const matchCounts = new Map<object, number>()
+    for (const { apple, musicbrainz } of matches) {
+      for (const match of [apple, musicbrainz]) {
+        if (match) matchCounts.set(match.track, (matchCounts.get(match.track) ?? 0) + 1)
+      }
+    }
 
-      const effectiveAppleTrackNum = (offsetResultApple.isConfidentOffset && lt.trackNumber)
-        ? lt.trackNumber - offsetResultApple.detectedOffset
-        : lt.trackNumber
-
-      const effectiveMbTrackNum = (offsetResultMb.isConfidentOffset && lt.trackNumber)
-        ? lt.trackNumber - offsetResultMb.detectedOffset
-        : lt.trackNumber
-
-      const appleMatch = findCorroboratedTrack(lt.title, itunesTracks, effectiveAppleTrackNum)
-      const mbMatch = findCorroboratedTrack(lt.title, mbTracks, effectiveMbTrackNum)
+    for (const [index, lt] of localTracks.entries()) {
+      const { apple: appleMatch, musicbrainz: mbMatch } = matches[index]
       const appleTrack = appleMatch?.track
       const mbTrack = mbMatch?.track
       const aiTrack = aiMaster?.tracks ? findCorroboratedTrack(lt.title, aiMaster.tracks, lt.trackNumber)?.track : undefined
+      let matchedTitle = lt.title
+      const finalArtistValue = lt.artistCredit || ''
+      const decisions: NonNullable<TrackCandidateState['providerDecisions']> = []
+      let providerTrackNum: number | undefined
+
       for (const [provider, candidate, match] of [
         ['apple', rawItunes, appleMatch], ['musicbrainz', rawMb, mbMatch],
       ] as const) {
@@ -1883,10 +1889,10 @@ export class FederatedResolversService {
         if (!candidate?.releaseId) continue
         const positional = match?.method === 'position'
         const countMismatch = (candidate.tracks?.length ?? 0) !== localTracks.length
-        const competingTrack = match && candidate.tracks?.some(track => track !== match.track &&
-          (match.track.trackId ? track.trackId === match.track.trackId :
-            track.trackNumber === match.track.trackNumber))
-        identityMappings.push({
+        const competingTrack = match && ((matchCounts.get(match.track) ?? 0) > 1 || candidate.tracks?.some(track =>
+          track !== match.track && (comparableTitle(track.trackName) === comparableTitle(match.track.trackName) ||
+            (match.track.trackId ? track.trackId === match.track.trackId : track.trackNumber === match.track.trackNumber))))
+        const mapping: CurateMappingCandidate = {
           localTrackId: lt.id,
           provider,
           releaseId: candidate.releaseId,
@@ -1895,84 +1901,61 @@ export class FederatedResolversService {
           method: match?.method ?? 'none',
           positional,
           status: !match ? 'unmapped' : (positional && countMismatch) || competingTrack ? 'conflicted' : 'inferred',
+        }
+        identityMappings.push(mapping)
+        if (!match) continue
+
+        const exactTitle = comparableTitle(lt.title) === comparableTitle(match.track.trackName)
+        const titleReason = countMismatch ? 'The provider track count differs from this edition.'
+          : mapping.status === 'conflicted' ? 'The provider track matches more than one possible target.'
+          : !mapping.providerTrackId ? 'The provider did not supply a stable track ID.'
+          : !(exactTitle && !positional) ? 'The title match needs confirmation.'
+          : undefined
+
+        if (match.track.trackName && match.track.trackName !== lt.title) {
+          decisions.push({
+            field: 'title', proposedValue: match.track.trackName, mapping,
+            status: titleReason ? 'needs_review' : 'valid', reason: titleReason,
+          })
+          if (!titleReason && matchedTitle === lt.title) {
+            matchedTitle = match.track.trackName
+            providerTrackNum = match.track.trackNumber
+          }
+        }
+        if (match.track.artistName && match.track.artistName !== finalArtistValue) {
+          decisions.push({
+            field: 'artist', proposedValue: match.track.artistName, mapping, status: 'needs_review',
+            reason: titleReason ?? 'The provider track artist credit does not identify the singers.',
+          })
+        }
+      }
+
+      if (aiTrack) {
+        if (aiTrack.trackName !== lt.title) decisions.push({
+          field: 'title', proposedValue: aiTrack.trackName, status: 'needs_review',
+          reason: 'The grounded candidate does not have a verified track mapping.',
+        })
+        if (aiTrack.artistName && aiTrack.artistName !== finalArtistValue) decisions.push({
+          field: 'artist', proposedValue: aiTrack.artistName, status: 'needs_review',
+          reason: 'The grounded candidate does not have a verified singer credit for this track.',
         })
       }
 
-      // 0. If AI/Grounding tracks are provided, prioritize grounded tracks
-      if (aiTrack && aiTrack.artistName) {
-        matchedArtist = aiTrack.artistName
-        matchedSource = 'ai_synthesized'
-        matchedConfidence = 0.95
-        matchedTitle = aiTrack.trackName
-        providerTrackNum = aiTrack.trackNumber
-      }
+      const matchedSource = matchedTitle === lt.title ? 'local_fallback' : 'single_provider_match'
+      // Inferred title matches are eligible for selection but still have limited evidence.
+      const matchedConfidence = matchedTitle === lt.title ? 1 : 0.7
+      const requiresReview = decisions.some(decision => decision.status === 'needs_review') ||
+        isPlaceholderTag(matchedTitle) || isPlaceholderTag(finalArtistValue)
 
-      // 1. Check Apple Music tracklist
-      if (!matchedArtist && appleTrack && appleTrack.artistName) {
-        matchedArtist = appleTrack.artistName
-        matchedSource = 'single_provider_match'
-        matchedConfidence = 0.92
-        matchedTitle = appleTrack.trackName
-        providerTrackNum = appleTrack.trackNumber
-      }
-
-      // 2. Check MusicBrainz tracklist if no match yet
-      if (!matchedArtist && mbTrack && mbTrack.artistName) {
-        matchedArtist = mbTrack.artistName
-        matchedSource = 'single_provider_match'
-        matchedConfidence = 0.90
-        matchedTitle = mbTrack.trackName
-        providerTrackNum = mbTrack.trackNumber
-      }
-
-      // 3. Fallback: Defective tag cleanup
-      if (!matchedArtist && isDefectiveArtistTag(lt.artistCredit, rawTitle)) {
-        if (resolvedAlbumArtist && !isPlaceholderTag(resolvedAlbumArtist)) {
-          matchedArtist = resolvedAlbumArtist
-          matchedSource = artistArbitration.fieldResult.source
-          matchedConfidence = artistArbitration.fieldResult.confidence
-        }
-      }
-
-      // Apply behavioral learned rules to track artist
-      if (matchedArtist) {
-        matchedArtist = normalizeWithLearning(matchedArtist, 'artist')
-      }
-
-      // Apply Consensus Empty-State rule to track vocalists:
-      // If local artist is absent/placeholder and external providers don't have agreement, leave empty!
-      const trackEmptyState = applyConsensusEmptyStateRule(lt.artistCredit, {
-        apple: appleTrack?.artistName,
-        musicbrainz: mbTrack?.artistName,
-        ai: aiTrack?.artistName,
-      })
-
-      const finalArtistValue = matchedArtist || (trackEmptyState.selected ? String(trackEmptyState.selected) : '')
-      const requiresReview = !finalArtistValue || trackEmptyState.requiresHumanReview || matchedConfidence < 0.75
-
-      if (finalArtistValue) {
-        trackConsensus[lt.id] = {
-          title: {
-            value: matchedTitle,
-            source: matchedTitle !== lt.title ? matchedSource : 'single_provider_match',
-            confidence: matchedConfidence,
-            candidates: {
-              local: lt.title,
-            },
-          },
-          artists: {
-            value: finalArtistValue,
-            source: matchedSource,
-            confidence: matchedConfidence,
-            candidates: {
-              local: lt.artistCredit,
-              itunes: appleTrack?.artistName,
-              musicbrainz: mbTrack?.artistName,
-              ai: aiTrack?.artistName,
-            },
-          },
-          trackNumber: lt.trackNumber,
-        }
+      trackConsensus[lt.id] = {
+        title: { value: matchedTitle, source: matchedSource, confidence: matchedConfidence, candidates: { local: lt.title } },
+        artists: {
+          value: finalArtistValue,
+          source: 'local_fallback',
+          confidence: isPlaceholderTag(finalArtistValue) ? 0 : 1,
+          candidates: { local: lt.artistCredit, itunes: appleTrack?.artistName, musicbrainz: mbTrack?.artistName, ai: aiTrack?.artistName },
+        },
+        trackNumber: lt.trackNumber,
       }
 
       trackStates.push({
@@ -1982,6 +1965,7 @@ export class FederatedResolversService {
         localArtists: lt.artistCredit || '',
         localDuration: lt.duration,
         providerTrackNumber: providerTrackNum,
+        providerDecisions: decisions,
         matchedTitle,
         matchedArtists: finalArtistValue,
         appleTitle: appleTrack?.trackName,

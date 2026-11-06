@@ -5,7 +5,7 @@ import {
   curateReviewKeys, isReconciledCurateDraft, makeCurateCommitItems, projectCurateCommits,
   reconcileCurateReviewState, type CurateCommitRow, type CurateReviewState,
 } from '../core/curateCommit'
-import { captureCurateDraft, mergeCurateProposal, restoreCurateDraft } from '../core/curateDraft'
+import { captureCurateDraft, mergeCurateProposal, restoreCurateDraft, selectCurateTrackFields } from '../core/curateDraft'
 import { computeCurationQueue } from '../services/curationQueueService'
 import { captureTrackDecisions, type CurateProviderAttempt } from '../services/curateEvidenceService'
 import { FederatedResolversService } from '../services/federatedResolvers'
@@ -119,6 +119,49 @@ test('seven local tracks and eight MusicBrainz tracks preserve provider evidence
   assert.equal(decisions[0].requiresHumanReview, true)
   assert.equal(result.trackStates?.[0].mbTitle, 'Overture')
   assert.equal(result.trackStates?.[0].mbArtists, 'Provider Singer')
+  assert.deepEqual(decisions[0].providerDecisions?.map(decision => [
+    decision.field, decision.mapping?.providerTrackId, decision.mapping?.positional, decision.status,
+  ]), [
+    ['title', 'mb-track-1', true, 'needs_review'],
+    ['artist', 'mb-track-1', true, 'needs_review'],
+  ])
+
+  const generated = { ...baseline, tracks: result.trackStates! }
+  const manual = {
+    ...baseline,
+    tracks: baseline.tracks.map((track, i) => i === 0
+      ? selectCurateTrackFields({ ...track, matchedArtists: 'Reviewed Singer' }, 'matchedArtists')
+      : track),
+  }
+  const saved = captureCurateDraft(mergeCurateProposal(manual, generated))
+  const reopened = restoreCurateDraft(baseline, JSON.parse(JSON.stringify(saved)))
+  assert.equal(reopened.tracks[0].matchedArtists, 'Reviewed Singer')
+  assert.equal(reopened.tracks[0].matchedTitle, tracks[0].title)
+  assert.equal(reopened.tracks[0].providerDecisions?.[0].reason, 'The provider track count differs from this edition.')
+})
+
+test('a stable exact title match can update the title independently of the singer credit', async t => {
+  const local = [{ ...tracks[0], title: 'overture' }]
+  t.mock.method(globalThis, 'fetch', async (input: string) => {
+    const url = new URL(input)
+    const candidate = { success: true, releaseTitle: release.title, artistCredit: release.artistCredit }
+    return url.pathname === '/api/musicbrainz-search'
+      ? Response.json({ ...candidate, releaseId: 'mb-one', tracks: [
+        { trackId: 'recording-1', trackNumber: 1, trackName: 'Overture', artistName: 'Provider Artist' },
+      ] })
+      : Response.json({ ...candidate, releaseId: 'apple-empty', tracks: [] })
+  })
+  const result = await new FederatedResolversService().resolve2of3ReleaseConsensus(
+    release, local, false, undefined, undefined, undefined, undefined, undefined, 2, 1,
+  )
+  const [decision] = captureTrackDecisions(result)!
+  assert.equal(decision.selectedTitle, 'Overture')
+  assert.equal(decision.selectedArtists, 'Local Singer')
+  assert.deepEqual(decision.providerDecisions?.map(({ field, status, mapping }) =>
+    [field, status, mapping?.positional]), [
+    ['title', 'valid', false],
+    ['artist', 'needs_review', false],
+  ])
 })
 
 test('edit, confirm, refresh, and edit preserve the draft and confirmed value as separate layers', () => {
