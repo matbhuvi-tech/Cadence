@@ -240,3 +240,53 @@ fn editions_discs_and_cross_disc_source_survive_restart_and_rescan() {
     std::fs::remove_file(dir.join("cadence.db")).unwrap();
     std::fs::remove_dir(dir).unwrap();
 }
+#[test]
+fn legacy_identity_table_upgrades_before_curate_loads_existing_and_new_tracks() {
+    use cadence_core_lib::curation::CurationStorage;
+
+    let path = std::env::temp_dir().join(format!(
+        "cadence-identity-upgrade-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let ids = ["existing".to_owned(), "unseen".to_owned()];
+    let original = {
+        let db = AppDb::new(path.clone()).unwrap();
+        {
+            let mut conn = db.conn.lock();
+            conn.execute(
+                "INSERT INTO releases (id,title,folder_path,folder_name,artist_credit,created_at)
+                 VALUES ('album','Sivaa','library/Sivaa','Sivaa','Various Artists','2026-11-06')",
+                [],
+            )
+            .unwrap();
+            let tracks = [
+                track("existing", "album", "library/Sivaa", "one.flac", 1),
+                track("unseen", "album", "library/Sivaa", "two.flac", 2),
+            ];
+            DbOperations::upsert_tracks_batch(&mut conn, &tracks).unwrap();
+            conn.execute_batch(
+                "DELETE FROM curate_identity_sources WHERE local_track_id = 'unseen';
+                 DELETE FROM curate_identity_tracks WHERE local_track_id = 'unseen';
+                 ALTER TABLE curate_identity_tracks DROP COLUMN catalog_source_key;",
+            )
+            .unwrap();
+        }
+        CurationStorage::get_identity(&db, &ids[..1]).unwrap()
+    };
+
+    let upgraded = {
+        let db = AppDb::new(path.clone()).unwrap();
+        let rows = CurationStorage::get_identity(&db, &ids).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["editionId"], original[0]["editionId"]);
+        assert_eq!(rows[0]["discId"], original[0]["discId"]);
+        assert_eq!(rows[1]["editionId"], original[0]["editionId"]);
+        assert_eq!(rows[0]["sourceGroupId"], original[0]["sourceGroupId"]);
+        assert_eq!(rows[1]["sourceGroupId"], original[0]["sourceGroupId"]);
+        rows
+    };
+    let db = AppDb::new(path.clone()).unwrap();
+    assert_eq!(CurationStorage::get_identity(&db, &ids).unwrap(), upgraded);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+}
