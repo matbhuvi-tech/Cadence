@@ -457,9 +457,9 @@ Curate lookahead checks transport before dispatch, cancels in-flight lookahead w
 
 ### Implementation checkpoint — Selected-album provider calls
 
-The mounted Curate cockpit permits focused retrieval during playback and cancels stale frontend work on album change. Automatic selection allocates one Apple call, two MusicBrainz calls, and one compilation inference when needed. Explicit Refresh Evidence starts its own operation. Grounded refresh allocates one Apple call, two MusicBrainz calls, and one Gemini or Wikipedia call. A direct Apple lookup uses the Apple allocation. An ungrounded refresh can use two Apple calls and two MusicBrainz calls.
+The mounted Curate cockpit permits focused retrieval during playback and cancels stale frontend work on album change. Automatic selection allocates two Apple calls (album search and track lookup), one MusicBrainz call, and one compilation inference when needed. Explicit Refresh Evidence starts its own operation. Grounded refresh allocates one Apple call, two MusicBrainz calls, and one Gemini or Wikipedia call. A direct Apple lookup uses the Apple allocation. An ungrounded refresh can use two Apple calls and two MusicBrainz calls.
 
-The Vite provider handlers enforce the Apple and MusicBrainz limits at upstream dispatch. Bounded Gemini requests in Vite and Tauri use one model attempt. A one-call Apple search can return album metadata without the full tracklist. Mocked upstream tests cover a four-call grounded lookup under provider misses and Gemini rate limiting. Live desktop verification is pending.
+The Vite provider handlers enforce the Apple and MusicBrainz limits at upstream dispatch. Bounded Gemini requests in Vite and Tauri use one model attempt. A one-call Apple search can return album metadata without the full tracklist, so automatic selected-album retrieval now reserves two Apple calls. Mocked upstream tests cover a four-call grounded lookup under provider misses and Gemini rate limiting. Live desktop verification is pending.
 
 ### Implementation checkpoint — Selected Output change preview
 

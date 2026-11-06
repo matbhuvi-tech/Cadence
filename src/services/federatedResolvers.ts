@@ -1458,6 +1458,7 @@ export class FederatedResolversService {
     abortSignal?: AbortSignal,
     recordAttempt?: RecordCurateAttempt,
     appleRequests = 2,
+    musicbrainzRequests = 2,
   ): Promise<ReleaseConsensusResult> {
     const startTime = Date.now()
     onProgress?.({ phase: 'querying_musicbrainz', message: 'Querying MusicBrainz & Apple Music...', elapsedMs: 0 })
@@ -1488,7 +1489,7 @@ export class FederatedResolversService {
       directAppleCandidate || (!isPrefetch && appleRequests === 0)
         ? Promise.resolve(directAppleCandidate ?? null)
         : this.fetchItunesAlbumCandidate(signature, record, abortSignal, isPrefetch ? undefined : appleRequests),
-      this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch, record, abortSignal, isPrefetch ? undefined : 2),
+      this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch, record, abortSignal, isPrefetch ? undefined : musicbrainzRequests),
     ])
     abortSignal?.throwIfAborted()
 

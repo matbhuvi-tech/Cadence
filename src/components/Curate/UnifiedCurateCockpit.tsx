@@ -980,7 +980,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           trigger: 'initial', context: curateMatchingContext(release, selectedAlbum.rawTracks),
         }, async (signal, onProgress, record) => {
           const result = await federatedResolversService.resolve2of3ReleaseConsensus(
-            release, selectedAlbum.rawTracks, false, undefined, undefined, onProgress, signal, record, 1,
+            release, selectedAlbum.rawTracks, false, undefined, undefined, onProgress, signal, record, 2, 1,
           )
           return { result, trace: result.decisionTrace, trackDecisions: captureTrackDecisions(result) }
         })

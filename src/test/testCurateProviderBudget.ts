@@ -42,12 +42,16 @@ async function run() {
     calls.length = 0
     globalThis.fetch = async input => {
       calls.push(String(input))
-      return Response.json({ results: [{ wrapperType: 'collection', collectionId: 123, collectionName: 'Found', artistName: 'Test' }] })
+      return Response.json({ results: String(input).includes('/lookup?')
+        ? [{ wrapperType: 'collection', collectionId: 123, collectionName: 'Found', artistName: 'Test' },
+          { wrapperType: 'track', trackNumber: 1, trackName: 'First song', artistName: 'Singer' }]
+        : [{ wrapperType: 'collection', collectionId: 123, collectionName: 'Found', artistName: 'Test' }] })
     }
     const result = await request('/api/itunes-search', 'album=Found&artist=Test&maxRequests=2')
     assert.equal(result.success, true)
     assert.equal(calls.length, 2)
     assert.match(calls[1], /\/lookup\?id=123/)
+    assert.deepEqual(result.tracks, [{ trackNumber: 1, trackName: 'First song', artistName: 'Singer' }])
   } finally {
     globalThis.fetch = previousFetch
     if (previousKey === undefined) delete process.env.GEMINI_API_KEY
