@@ -10,6 +10,8 @@ Last completed: **Phase 3 — Curate page load and lazy hydration; Raw Candidate
 Current review: **Review pass complete; implementation scope remains separate**
 Decision status: **All reviewed behavior and proposals accepted; queue-to-library overlay approved for implementation; no other code changes authorized by this review pass**
 
+The **Identity, decision validity, and actionable queue contract** at the end of this document is the next phased implementation design. It records the November 2026 review direction; its phases are not claims that the current application implements the contract.
+
 ### Agreed invariants
 
 These are review constraints and must remain true in every accepted design:
@@ -533,6 +535,116 @@ Computer Use successfully inspected the installed Cadence Core window (`%LOCALAP
 
 **Disposition:** the populated native workflow and restart test are complete. Phase 2 does not pass: screenshots demonstrate that the committed filesystem value survives, but the durable Selected Output projection and post-commit queue reconciliation do not.
 
+### Headless verification of the completed-album fix — 2026-11-06
+
+The current fix passes the service-level completion checks. A seven-track album stays actionable if one write fails. Seven completed rows from the same review retire the matching saved draft and exclude the album from the queue, even when those rows no longer apply to the catalog. The exclusion survives serialized review-state reload. Explicit reopening makes the album actionable and preserves the old rows as proof that the stale draft was written. A mix of old and new rows cannot complete the reopened review.
+
+Native tests reopened temporary SQLite databases, checked persisted draft and evidence history, and verified pending-intent recovery after restarting the commit worker. With a synthetic playback gate set, the WAV stayed byte-for-byte unchanged. After the gate cleared, the worker wrote the expected tags and artwork, updated SQLite, and marked the item complete. The seven-track fixture uses in-memory queue rows. The native file-write test uses one WAV. The installed desktop route, including the wiring that restores archived Apple evidence into the cockpit, remains unverified.
+
+#### Headless service interfaces
+
+Use these entry points from the test runner with a synthetic album, recorded provider responses, and fresh test stores. The existing Curate QA agent uses CDP. The headless checks run via Node and Rust and inspect the data directly.
+
+| Operation | Callable interface | What to inspect |
+| --- | --- | --- |
+| Open or reopen a review | `curationGetDraft`, `isReconciledCurateDraft`, `restoreCurateDraft`, `reconcileCurateReviewState`, `computeCurationQueue` | Saved draft JSON, Selected Output by local track ID, persisted review state, actionable album IDs. Keep historical completion rows available for draft reconciliation when reopening excludes those rows from the active review. |
+| Edit or refresh | `captureCurateDraft`, `curationSaveDraft`, `FederatedResolversService.resolve2of3ReleaseConsensus`, `mergeCurateProposal`, `curationSaveEvidence`, `curationListEvidence`, `curationGetEvidence` | Stub provider HTTP responses and record attempts. Inspect candidate IDs, track counts, decisions, the current evidence pointer, and the saved draft separately. Native tests call `CurationStorage` directly against temporary SQLite. |
+| Confirm and inspect outcomes | `makeCurateCommitItems`, `commitEnqueueBatch`, `commitGetCurateProjection`, `projectCurateCommits` | Native tests use `DbOperations` and the worker's injected playback gate to check queue rows, frozen payloads, catalog baseline, and test-file tags. TypeScript tests assert the effective projection from returned-row shapes in memory. |
+| Restart | Reopen `AppDb`, reload saved draft, queue projection and serialized review state, then re-run projection | Compare the local catalog, confirmed effective values, editable draft, and queue classification independently. |
+
+#### Fixture definitions
+
+All three fixtures use **Harbor Lights**, a synthetic local edition with seven tracks and stable local IDs.
+
+| Fixture | Seed and actions | Assertions and scope |
+| --- | --- | --- |
+| Stale draft after completion | Persist the exact pre-write draft for genre A. Mark six of seven items complete and one failed, then complete all seven under one review ID. Reload review state with a changed catalog genre. Explicitly reopen with the old item IDs superseded, then supply a fresh review. | A partial write leaves work actionable. A full write suppresses the old draft and queue entry. Reopening can use old rows to recognize the obsolete draft, while only a full fresh review closes the new entry. A later draft with a different genre remains distinguishable from the written draft. |
+| Seven local versus eight provider tracks | Return a successful Apple album response with zero tracks and a same-title MusicBrainz edition with eight tracks, including a bonus at position 8. Use placeholder local titles to exercise position fallback. | Today the evidence retains the zero- and eight-track inventories and the resolver can select MusicBrainz titles and singers for the seven local tracks. The characterization test records that behavior. The edition-contract acceptance case keeps the evidence, marks unresolved mappings for review, and blocks generated selections or writes from position alone. Add a separately confirmed bonus-edition mapping as the positive control. |
+| Edit → confirm → refresh → edit | Edit genre A and freeze it. Refresh with a competing genre and a new generated title. Edit genre B, serialize the draft, and reload it while A is pending, in flight, or failed. | The generated title can change, the manual genre survives refresh, A stays effective until B is confirmed, the local genre stays separate, and A's completion cannot reconcile draft B. This verifies the service primitives. The full revision acceptance case must also run B confirmation before and after A enters flight, check pending replacement or immutable in-flight A, complete A after confirming B, and reopen the database with B still effective. Exercise a delayed refresh returning after edit B, plus cancellation and partial-write variants. |
+
+The focused fixtures passed as part of 30 TypeScript checks. All 21 native library tests and `npm run build` passed. Run the focused fixture suite with `npx tsx --tsconfig tsconfig.app.json --test src/test/testCurateHeadless.ts`. Run the native tests with `cargo test --manifest-path src-tauri/Cargo.toml --lib`.
+
 ## Later phases
 
 Phases 2, 4, and 5 are intentionally not restated as approved target architecture in this review record. Their current behavior and proposed changes should be documented only when that phase is under review, using the same distinction between observed code, proposal, and accepted decision.
+
+## Identity, decision validity, and actionable queue contract
+
+**Status: design contract for phased implementation; not implemented.** This section addresses the observed case where a 7-track local edition received singer and title proposals from an 8-track MusicBrainz candidate while Apple supplied no tracklist. It also addresses completed albums returning to Curate through stale drafts or queue classification. Existing compilation identification, disc grouping, version grouping, and original-album inference remain candidate generators. They do not by themselves establish a confirmed identity or authorize a tag change.
+
+### Identity hierarchy and revisions
+
+The structural hierarchy is **Release Edition → Disc → Local Track**. A multi-CD release can have several discs within one edition. Several editions may belong to the same display/master family but retain separate identity and commit history. **Source Album Groups** (films, original albums, or works represented on a compilation) are separate associations from local tracks; they are not children of a disc and may cross disc boundaries.
+
+Persist stable lineage IDs and independently increasing revisions:
+
+| Revision | Changes when | Does not change for |
+| --- | --- | --- |
+| `editionRev(editionId)` | Edition membership, split/merge, edition designation, or disc membership changes | Spelling, genre, composer, or provider response changes |
+| `discRev(discId)` | Local track membership or disc identity changes | A tag or display order change alone |
+| `trackOrderRev(discId)` | Positions/order change | Track identity or membership remains unchanged |
+| `sourceGroupRev(groupId)` | A local track joins/leaves a source album group, or that group's confirmed identity changes | A candidate source title spelling changes |
+| `mappingRev(localTrackId, provider)` | The provider release/edition or provider track association changes, including mapped → unmapped | A provider corrects a field on the same identified track |
+| `metadataRev(entityId, field)` | A local tag or explicit user selection changes | Identity or mapping changes alone |
+
+Revisions are assigned by the authoritative store in an ordered transaction. IDs must not be derived solely from title, track number, or path. If a rescan replaces local IDs, establish explicit old-to-new lineage or mark the association unresolved. A provider track mapping records provider, release ID, track ID where available, matching method, positional dependence, and status (`inferred`, `user_confirmed`, `unmapped`, or `conflicted`). Source-group assignments carry the same confirmation distinction. Equal track slicing is only an inference candidate; it never confirms source identity.
+
+Each evidence set records the identity and mapping revisions against which it was evaluated. Each generated **field decision** records the exact dependencies it used: local entity and field revision, provider release and track IDs, mapping revision, source-group revision where relevant, and `trackOrderRev` only if matching used position. Preserve the original decision and reason in history when applicability changes.
+
+### Decision revalidation and selection policy
+
+On a revision change, evaluate only decisions whose dependency set intersects the changed revisions. A decision becomes `valid`, `revalidated` (same evidence still applies under new revisions), `needs_review` (applicability or credit meaning uncertain), or `invalid` (wrong/missing target). `needs_review` and `invalid` generated values cannot silently remain as active Selected Output. Keep the local value selected and display the prior proposal and reason. User edits remain attached to their stable local track or edition; if that target cannot be traced, hold the edit for review rather than moving it by track number.
+
+| Change | Required response |
+| --- | --- |
+| Edition regroup/split/merge | Revalidate release evidence and mappings for affected editions; preserve decisions on unaffected tracks with still-valid dependencies. |
+| Track moves between discs or source groups | Update both old and new memberships. Revalidate dependent provider mapping and original-album/year decisions; retain a manual edit on the same local track. |
+| Track order changes | Revalidate mappings that depended on position; preserve ID-grounded mappings and unrelated fields. |
+| Provider track mapping changes | Revalidate title, performer, composer, and other generated fields that cite the old mapping. |
+| Metadata-only change | Revalidate decisions depending on that field; do not revise structural identity. |
+| Evidence refresh | Append evidence, reevaluate affected decisions, and preserve explicit user choices with their target and conflict notice. |
+| Completed commit | Keep the frozen payload and per-track write outcomes historical. A later identity change may create new review work but cannot make the old completed write pending again. |
+
+**Refresh recommendation — needs implementation.** After revalidation, recommend the existing **Refresh Evidence** action when a corrected release/edition identity leaves relevant evidence absent, tied to the old identity, or insufficient to resolve a provider mapping. Explain which evidence is affected and why; do not treat an HTTP success or an old release link as current proof. A metadata-only title or composer correction does not by itself require a refresh if the evidence still applies. Refresh is initiated by the user, adds a new evidence set, and reevaluates affected decisions without discarding the old history or manual edits. Until the gap is resolved, affected generated values remain out of active Selected Output and the queue shows the applicable review/attention reason. Focused refresh remains subject to the selected-album provider budget and playback policy.
+
+An album-level match or provider HTTP success never authorizes a track credit. A track-count mismatch is a **structural mismatch requiring resolution**, not automatic candidate rejection: bonus tracks and editions may differ. Compare mapped track identities and coverage within the relevant edition or source group. A fuzzy title/position match can display a candidate but cannot alone replace a non-placeholder local title or singer. Preserve distinct credit roles (release artist, track artist, composer, vocalist); a provider's generic `artistName` is not automatically a vocalist. Confidence for album identity, track mapping, and each proposed field must be separate and based on recorded evidence, not a fixed single-provider percentage.
+
+### Persisted queue classification and priority
+
+One authoritative service classifies each edition from catalog defects, identity/mapping validity, draft, evidence, and commit outcomes. Classification and prioritization are separate functions. Persist a compact projection row with `editionId`, classification, reason codes, relevant revision vector, draft/evidence/commit references, projection schema version, source event sequence, and update time. The UI loads indexed projection rows; it does not hydrate every album or infer queue eligibility from catalog existence.
+
+| Precedence | Condition | Classification |
+| --- | --- | --- |
+| 1 | Failed/partial write requiring intervention, identity conflict, orphaned user edit, or invalid decision with unresolved effects | **Needs Attention** |
+| 2 | Saved draft requiring action, or pending/in-flight commit without a higher-precedence conflict | **In Progress** |
+| 3 | Unresolved catalog defect, structural mismatch, or generated proposal requiring review | **Needs Review** |
+| 4 | Recorded Curate review/commit completed and no outstanding issue | **Completed** |
+| 5 | No known issue and no completed Curate workflow | **No Action Required** |
+
+Keep secondary facts visible: a pending commit with an identity conflict is `Needs Attention` and still reports its pending write. A completed commit with a newly detected defect remains completed in history while the current classification becomes actionable. Merely viewing an album creates no work. A clean album is `No Action Required`, not `Completed`. The actionable queue contains the first three classifications; a separate priority function orders them by severity, blocked action, and age without changing classification.
+
+Update the projection for the **complete affected set** in one transaction: moving a track from A to B changes both edition revisions, dependent decisions, and both queue rows atomically. Events that cross stores need an ordered outbox/event sequence and detectable stale marker; a stale or unknown projection must never be guessed to be `Completed`.
+
+**Queue transition rules still needing implementation detail before a stability guarantee:** define exactly when a saved draft is actionable versus merely persisted; the event that records a review as completed when no tag write is needed; the per-file boundary between pending, partially written, completed, and reconciled catalog state; and when a stale draft/evidence projection is retired after a successful commit. Specify idempotent, ordered projection updates across restart and cross-store delivery. Reentry after completion must cite a new defect, identity change, conflict, or failed write with its event/revision; opening an album or replaying an old event cannot create new work. A queue change must update the visible selection and explain why the album moved. These transitions and their restart/race cases require tests before claiming completed albums will stay out of actionable queues.
+
+**Pending-write edit/refresh authority — needs implementation.** Treat the physical tag/catalog baseline, newest confirmed commit intent, and newer unconfirmed Curate draft as three distinct, revision-linked values per field. The library's effective value is the newest confirmed, non-cancelled intent (including pending, in-flight, or failed work), falling back to the reconciled baseline only when no such intent applies. Curate's editable Selected Output is the latest draft; a post-confirmation edit creates a new draft revision and does not change the effective library value until the user confirms it. Refresh appends evidence and may recompute only Cadence-owned draft fields against the draft's recorded identity and effective confirmed baseline; it preserves explicit user edits, never mutates a frozen commit, and shows any changed proposal with its evidence. A later confirmation replaces same-track work that has not started or queues behind immutable in-flight work; the latest confirmed intent becomes the effective value even if an older physical write finishes first. Show the draft value, effective confirmed value, physical/catalog value, and per-file write status with distinct labels whenever they differ. Reconcile by revision and item outcome, not by value equality alone, so an older completion or late refresh cannot erase a newer edit or reinstate stale evidence.
+
+Before coding this contract, specify the per-field read/merge order for refresh versus concurrent edits, the atomic transaction boundary for draft confirmation and queue replacement, and how cancellation, failure, and partial batches affect each layer. Test edit A → confirm A → refresh → edit B, both before and after A enters flight; then confirm B, complete A out of order, restart, and verify that B remains the effective intent while its draft and write status remain accurate.
+
+### Performance and audio hygiene
+
+Startup reads only the compact indexed projection. Do not synchronously reopen every draft, recompute every evidence set, scan the music library, or dispatch provider calls. Maintain rows incrementally from draft, mapping, catalog, audit, and commit events. Repair missing or old-schema rows in bounded idle work; show `Needs Attention`/projection-stale state until repaired. During playback, do not run library scans, music-drive I/O, bulk reconciliation, or lookahead. Focused selected-album evidence and app-data reads remain subject to the agreed playback policy and provider-call budget. Revision/projection logic runs outside the streaming thread and does not touch pinned audio buffers.
+
+### Identity and queue implementation milestones and acceptance gates
+
+Milestones **A–E** below are future work for this identity/queue contract. They are separate from the earlier numbered Phase 1–3 review and verification sections; in particular, completed **Phase 1 — Domain State & Service Layer** does not imply that **Milestone A — Identity foundation** is implemented.
+
+| Milestone | Scope | Exit test |
+| --- | --- | --- |
+| A. Identity foundation | Persist edition, disc, track lineage, source-group association, mapping status, and independent revisions. Adapt existing grouping/inference outputs without treating them as confirmations. | Multi-CD one edition, two editions of one album, and compilation tracks across discs retain distinct stable identities across restart/rescan. |
+| B. Decision dependencies | Persist evidence-to-field dependencies and revalidation outcomes. Gate generated Selected Output on validity and credit role. | Regrouping, order change, edition mismatch, and provider remap invalidate only dependent proposals; manual overrides remain attached to the same local track. |
+| C. Queue projection | Centralize classification, persist compact rows, separate priority, and update all affected rows atomically. | Restart and Curate reopen yield the same actionable queue without per-album hydration; clean albums are `No Action Required`; A → B move updates both rows together. |
+| D. Commit and migration integration | Tie frozen commit revisions and outcomes to identity lineage; implement separate baseline, confirmed intent, and newer draft projections; migrate old drafts/evidence conservatively as unverified where dependencies are missing. | Completed writes stay completed; failed/partial writes remain visible; legacy proposals cannot silently become valid; no duplicate write is offered solely because an old draft was restored; edit → confirm → refresh → edit/confirm survives replacement, out-of-order completion, and restart with the correct effective value. |
+| E. Native QA and performance | Exercise real and synthetic editions, compilations, playback transitions, restart, and provider mismatch. | No full-catalog startup reconciliation or playback music-drive I/O; bounded UI load and provider calls; every invalidation has a visible reason. |
+
+Do not promote a milestone merely because its build passes. Review its recorded cases and user-visible behavior before beginning the next milestone. The 7-local/8-provider track case, bonus-track edition, track regroup A → B, position-only remap, cross-disc source group, user override, and completed seven-track commit are mandatory regression fixtures.
