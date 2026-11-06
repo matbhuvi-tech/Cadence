@@ -88,7 +88,7 @@ test('resolves only the completed confirmation and leaves a later edit open', ()
   const completed = { ...item, status: 'completed' as const, applies: true }
   assert.equal(isReconciledCurateDraft(draft, new Map([['one', completed]])), true)
   assert.equal(isReconciledCurateDraft(draft, new Map([['one', { ...completed, status: 'failed' }]])), false)
-  assert.equal(isReconciledCurateDraft(draft, new Map([['one', { ...completed, applies: false }]])), false)
+  assert.equal(isReconciledCurateDraft(draft, new Map([['one', { ...completed, applies: false }]])), true)
   draft.fields.genre.selected = 'New genre'
   assert.equal(isReconciledCurateDraft(draft, new Map([['one', completed]])), false)
 })

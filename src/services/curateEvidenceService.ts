@@ -12,7 +12,11 @@ export interface CurateProviderAttempt {
     releaseId?: string
     title?: string
     artist?: string
+    composer?: string
     year?: number
+    genre?: string
+    artworkUrl?: string
+    tracks?: Array<{ number?: number; title?: string; artist?: string }>
     trackCount?: number
   }
 }

@@ -1329,7 +1329,10 @@ export class FederatedResolversService {
   private summarizeEvidenceCandidate(candidate: ProviderResult): CurateProviderAttempt['candidate'] {
     return {
       releaseId: candidate.releaseId, title: candidate.releaseTitle, artist: candidate.artistCredit,
-      year: candidate.releaseYear, trackCount: candidate.tracks?.length,
+      composer: candidate.composer, year: candidate.releaseYear, genre: candidate.genre,
+      artworkUrl: candidate.coverArtUrl, trackCount: candidate.tracks?.length,
+      tracks: candidate.tracks?.slice(0, 100).map(track => ({ number: track.trackNumber,
+        title: track.trackName, artist: track.artistName })),
     }
   }
 

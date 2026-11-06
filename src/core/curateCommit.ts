@@ -149,7 +149,9 @@ function selectedTags(draft: CurateDraft, selection: CurateDraft['tracks'][numbe
 export function isReconciledCurateDraft(draft: CurateDraft, rows: ReadonlyMap<string, CurateCommitRow>) {
   return draft.tracks.length > 0 && draft.tracks.every(selection => {
     const row = rows.get(selection.trackId)
-    if (row?.status !== 'completed' || row.applies !== true) return false
+    // A completed write can precede catalog reconciliation. `applies` describes
+    // whether the catalog currently mirrors the payload, not whether the write ran.
+    if (row?.status !== 'completed') return false
     const confirmed: Tags & { curateTrackCount?: number } = JSON.parse(row.payloadJson)
     if (confirmed.curateTrackCount !== undefined && confirmed.curateTrackCount !== draft.tracks.length) return false
     const expected = selectedTags(draft, selection)

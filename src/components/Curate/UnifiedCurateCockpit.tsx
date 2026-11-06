@@ -488,6 +488,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [draftLoad, setDraftLoad] = useState<{ id: string; failed: boolean } | null>(null)
   const [draftLoadAttempt, setDraftLoadAttempt] = useState(0)
   const [draftSaveError, setDraftSaveError] = useState<string | null>(null)
+  const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<string | null>(null)
+  const [savedAppleEvidence, setSavedAppleEvidence] = useState<{ title?: string; artist?: string; composer?: string; year?: number; genre?: string; trackCount?: number; releaseId?: string; rejectionReason?: string } | null>(null)
   const [stagingAlbumId, setStagingAlbumId] = useState<string | null>(null)
   const [queuingAlbumId, setQueuingAlbumId] = useState<string | null>(null)
 
@@ -711,9 +713,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     tauriBridge.curationGetDraft(activeItemId).then(draft => {
       if (cancelled) return
       const initial = captureCurateDraft(activeItem)
-      const restored = draft ? restoreCurateDraft(activeItem, draft) : activeItem
-      const snapshot = draft ? { ...captureCurateDraft(restored), baseline: draft.baseline } : initial
-      if (draft) {
+      const rows = new Map((commitRows ?? []).filter(row => !supersededCommitIds?.has(row.id)).map(row => [row.trackId, row]))
+      const completedDraft = draft && isReconciledCurateDraft(draft, rows)
+      const restored = draft && !completedDraft ? restoreCurateDraft(activeItem, draft) : activeItem
+      const snapshot = draft && !completedDraft ? { ...captureCurateDraft(restored), baseline: draft.baseline } : initial
+      if (draft && !completedDraft) {
         setAlbumItems(prev => {
           const current = prev.get(activeItemId)
           if (!current) return prev
@@ -725,7 +729,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       }
       loadedDrafts.current.set(activeItemId, {
         saved: JSON.stringify(snapshot),
-        restored: Boolean(draft),
+        restored: Boolean(draft && !completedDraft),
       })
       setDraftLoad({ id: activeItemId, failed: false })
     }).catch(err => {
@@ -734,7 +738,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       setDraftLoad({ id: activeItemId, failed: true })
     })
     return () => { cancelled = true }
-  }, [activeItemId, draftLoadAttempt])
+  }, [activeItemId, draftLoadAttempt, commitRows, supersededCommitIds])
 
   const selectedAlbum = activeItem && draftLoad?.id === activeItem.id && !draftLoad.failed ? activeItem : null
   const selectedChanges = useMemo(() => {
@@ -871,6 +875,58 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   } = useCurationTrace({
     albumId: selectedAlbum?.id,
   })
+
+  // Evidence is independent of the editable draft. Restore the compact provider
+  // identity even when a completed commit makes the old draft obsolete.
+  useEffect(() => {
+    const albumId = selectedAlbum?.id
+    setSavedAppleEvidence(null)
+    setDiagnosticSnapshot(null)
+    if (!albumId) return
+    let cancelled = false
+    void tauriBridge.curationListEvidence(albumId).then(async runs => {
+      const current = runs.find(run => run.current)
+      if (!current) return
+      const run = await tauriBridge.curationGetEvidence(albumId, current.id)
+      const candidate = run?.attempts.find(attempt => attempt.provider === 'apple' && attempt.outcome === 'success')?.candidate
+      const telemetry = run?.decision?.candidateTelemetry?.find(item => item.provider === 'apple')
+      if (!cancelled && candidate) setSavedAppleEvidence({ ...candidate, releaseId: telemetry?.releaseId,
+        rejectionReason: telemetry?.rejectionReason })
+    }).catch(err => console.warn('[Curate] Evidence restore failed:', err))
+    return () => { cancelled = true }
+  }, [selectedAlbum?.id, lastEvidenceId])
+
+  const captureDiagnosticSnapshot = () => {
+    if (!selectedAlbum) return
+    const fields = Object.fromEntries(albumReviewFields.map(key => [key, {
+      local: key === 'coverArt' ? Boolean(selectedAlbum.coverArt.local) : selectedAlbum[key].local,
+      selected: key === 'coverArt' ? Boolean(selectedAlbum.coverArt.selected) : selectedAlbum[key].selected,
+      source: selectedAlbum[key].source,
+      confidence: selectedAlbum[key].confidence,
+      requiresHumanReview: selectedAlbum[key].requiresHumanReview === true,
+    }]))
+    // Deliberate allowlist: no paths, artwork URLs, tokens, raw responses, or audio buffers.
+    setDiagnosticSnapshot(JSON.stringify({
+      schema: 1,
+      capturedAt: new Date().toISOString(),
+      albumId: selectedAlbum.id,
+      title: selectedAlbum.currentTitle,
+      activeTier,
+      calculatedTier: selectedAlbum.tier,
+      queueIssue: baseQueue.find(item => item.albumId === selectedAlbum.id)?.issueBadgeLabel,
+      draft: { restored: loadedDrafts.current.get(selectedAlbum.id)?.restored === true,
+        baselineChanged: Boolean(selectedAlbum.draftBasedOn), staged: selectedAlbum.userOverridden === true },
+      trace: { status: traceStatus, outcome: curationTrace?.outcomeStatus, evidenceId: lastEvidenceId },
+      fields,
+      trackCount: selectedAlbum.tracks.length,
+      tracks: selectedAlbum.tracks.slice(0, 100).map(track => ({ id: track.trackId, number: track.trackNumber,
+        localTitle: track.localTitle, selectedTitle: track.matchedTitle,
+        localArtists: track.localArtists, selectedArtists: track.matchedArtists,
+        requiresHumanReview: track.requiresHumanReview === true })),
+      commits: selectedCommitRows.map(row => ({ trackId: row.trackId, status: row.status,
+        applies: row.applies === true, error: Boolean(row.errorMessage) })),
+    }, null, 2))
+  }
 
   // Sync steering parameters when active album changes
   useEffect(() => {
@@ -1714,6 +1770,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     const isEditing = editingFieldKey === fieldKey
     const selectedVal = fieldState.selected
     const change = selectedChanges?.album[fieldKey]
+    const archivedApple = fieldKey === 'albumTitle' ? savedAppleEvidence?.title
+      : fieldKey === 'albumArtist' ? savedAppleEvidence?.artist
+      : fieldKey === 'composer' ? savedAppleEvidence?.composer
+      : fieldKey === 'year' ? savedAppleEvidence?.year
+      : fieldKey === 'genre' ? savedAppleEvidence?.genre : undefined
+    const appleValue = fieldState.apple ?? archivedApple
 
     return (
       <tr key={fieldKey} data-testid={`master-row-${fieldKey}`} className="hover:bg-white/[0.015] transition-colors">
@@ -1732,11 +1794,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
         {/* Apple */}
         <td
-          onClick={() => handleSelectFieldSource(fieldKey, 'apple')}
+          onClick={() => { if (fieldState.apple !== undefined) handleSelectFieldSource(fieldKey, 'apple') }}
           data-testid={`master-cell-${fieldKey}-apple`}
           className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-[#D4AF37] transition-colors"
         >
-          {String(fieldState.apple ?? '—')}
+          {String(appleValue ?? '—')}
+          {fieldState.apple === undefined && archivedApple !== undefined && (
+            <span className="block text-[10px] text-amber-300">Saved evidence · inspect before adopting</span>
+          )}
         </td>
 
         {/* MusicBrainz */}
@@ -2371,7 +2436,44 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   onToggleRationale={toggleTraceDrawer}
                   hasTrace={Boolean(selectedAlbum)}
                 />
+                <button type="button" onClick={captureDiagnosticSnapshot}
+                  className="px-2.5 py-1 rounded border border-zinc-700 text-zinc-300 text-xs hover:bg-zinc-800"
+                  title="Capture this album's current Curate state in memory; no files or network requests">
+                  Capture Snapshot
+                </button>
               </form>
+            )}
+
+            {diagnosticSnapshot && (
+              <section className="rounded-lg border border-cyan-700/50 bg-zinc-950 p-3" aria-label="Curate diagnostic snapshot">
+                <div className="flex items-center justify-between mb-2 text-xs text-cyan-300">
+                  <span>Selected-album memory snapshot · local only</span>
+                  <div className="flex gap-3">
+                    <button type="button" onClick={() => void navigator.clipboard.writeText(diagnosticSnapshot)
+                      .then(() => showToast('Snapshot copied. Paste it only where you choose.'))
+                      .catch(() => showToast('Could not copy snapshot; select the text manually.'))}
+                      className="text-cyan-300 hover:text-white">Copy</button>
+                    <button type="button" onClick={() => setDiagnosticSnapshot(null)} className="text-zinc-400 hover:text-white">Close</button>
+                  </div>
+                </div>
+                <textarea readOnly value={diagnosticSnapshot} className="w-full h-48 bg-zinc-900 p-2 text-xs font-mono text-zinc-200" />
+              </section>
+            )}
+
+            {savedAppleEvidence && (
+              <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2 text-xs text-zinc-300" data-testid="saved-apple-evidence">
+                <span className="font-semibold text-amber-300">Saved Apple evidence:</span>{' '}
+                {savedAppleEvidence.title || 'Untitled release'} · {savedAppleEvidence.artist || 'Unknown artist'}
+                {savedAppleEvidence.year ? ` · ${savedAppleEvidence.year}` : ''}
+                {` · ${savedAppleEvidence.trackCount ?? 0} tracks returned`}
+                {savedAppleEvidence.releaseId && /^\d+$/.test(savedAppleEvidence.releaseId) && (
+                  <a href={`https://music.apple.com/album/${savedAppleEvidence.releaseId}`} target="_blank" rel="noopener noreferrer"
+                    className="ml-2 text-cyan-300 underline">Open Apple release</a>
+                )}
+                <span className="block text-zinc-400">{savedAppleEvidence.rejectionReason
+                  ? `Candidate excluded: ${savedAppleEvidence.rejectionReason}`
+                  : 'Saved retrieval result. Values retained locally may already match this candidate; provider track details may be unavailable.'}</span>
+              </div>
             )}
 
             {/* Interactive Learned Rule Confirmation Banners */}
