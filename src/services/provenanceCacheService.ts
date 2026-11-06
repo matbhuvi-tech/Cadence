@@ -9,6 +9,7 @@
 
 import { CompilationProvenanceResult, Track } from '../core/types'
 import { cleanConsensusTitle } from '../core/taxonomyUtils'
+import type { CurateIdentityTrack } from './curateEvidenceService'
 import { tauriBridge } from './tauriBridge'
 
 // In-memory LRU cache fallback for browser preview mode or before IPC resolves
@@ -87,7 +88,8 @@ export class ProvenanceCacheService {
     albumTitle: string,
     inputParams: any,
     result: CompilationProvenanceResult,
-    modelVersion: string = 'gemini-1.5-flash'
+    modelVersion: string = 'gemini-1.5-flash',
+    identity?: CurateIdentityTrack[],
   ): Promise<void> {
     if (!hashKey || !result) return
 
@@ -109,6 +111,7 @@ export class ProvenanceCacheService {
           inputParamsJson: JSON.stringify(inputParams),
           responseJson: JSON.stringify(result),
           modelVersion,
+          identity,
         })
       } catch (err) {
         // Native command may not be mounted yet; silently fallback to in-memory

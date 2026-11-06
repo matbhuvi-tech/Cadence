@@ -1318,6 +1318,10 @@ class TauriBridgeService {
     }
   }
 
+  public async curationGetIdentity(trackIds: string[]): Promise<import('./curateEvidenceService').CurateIdentityTrack[]> {
+    return this.isTauri() ? invoke('curation_get_identity', { trackIds }) : []
+  }
+
   public async curationSaveEvidence(albumId: string, run: CurateEvidenceRun): Promise<void> {
     if (this.isTauri()) await invoke('curation_save_evidence', { albumId, run })
   }

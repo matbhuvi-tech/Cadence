@@ -75,7 +75,7 @@ test('a stale seven-track draft retires after a full write and reopening require
 
 test('seven local tracks and eight MusicBrainz tracks preserve provider evidence and expose the current match behavior', async t => {
   const providerTracks = ['Overture', 'Departure', 'Crossing', 'Homeward', 'Reunion', 'Finale', 'Epilogue', 'Bonus'].map(
-    (trackName, i) => ({ trackNumber: i + 1, trackName, artistName: 'Provider Singer' }),
+    (trackName, i) => ({ trackId: `mb-track-${i + 1}`, trackNumber: i + 1, trackName, artistName: 'Provider Singer' }),
   )
   const requests: string[] = []
   t.mock.method(globalThis, 'fetch', async (input: string) => {
@@ -83,7 +83,7 @@ test('seven local tracks and eight MusicBrainz tracks preserve provider evidence
     requests.push(url.pathname)
     const candidate = { success: true, releaseTitle: release.title, artistCredit: release.artistCredit }
     switch (url.pathname) {
-      case '/api/itunes-search': return Response.json({ ...candidate, tracks: [] })
+      case '/api/itunes-search': return Response.json({ ...candidate, releaseId: 'apple-empty', tracks: [] })
       case '/api/musicbrainz-search': return Response.json({ ...candidate, releaseId: 'mb-eight', tracks: providerTracks })
       default: assert.fail(`Unexpected provider request ${url.pathname}`)
     }
@@ -106,6 +106,12 @@ test('seven local tracks and eight MusicBrainz tracks preserve provider evidence
   assert.equal(musicbrainz.trackCount, 8)
   assert.equal(musicbrainz.tracks?.[7]?.title, 'Bonus')
   assert.equal(archived.decision?.candidateTelemetry?.find(item => item.provider === 'musicbrainz')?.trackCount, 8)
+  assert.deepEqual(result.identityMappings?.slice(0, 2), [
+    { localTrackId: tracks[0].id, provider: 'apple', releaseId: 'apple-empty',
+      providerTrackId: undefined, providerPosition: undefined, method: 'none', positional: false, status: 'unmapped' },
+    { localTrackId: tracks[0].id, provider: 'musicbrainz', releaseId: 'mb-eight',
+      providerTrackId: 'mb-track-1', providerPosition: 1, method: 'position', positional: true, status: 'conflicted' },
+  ])
   const decisions = captureTrackDecisions(result)!
   assert.deepEqual(decisions.map(track => track.trackId), tracks.map(track => track.id))
   // Characterization. The edition contract will require an explicit mapping

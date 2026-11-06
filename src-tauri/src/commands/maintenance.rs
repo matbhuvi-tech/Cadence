@@ -149,17 +149,39 @@ pub fn db_set_provenance_cache(
     input_params_json: String,
     response_json: String,
     model_version: String,
+    identity: Option<Vec<serde_json::Value>>,
 ) -> Result<(), String> {
-    let conn = db.conn.lock();
+    use crate::db::curate_identity;
+    let mut conn = db.conn.lock();
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    if let Some(identity) = identity {
+        if let Some(ids) = curate_identity::matching_snapshot_ids(&tx, &identity)
+            .map_err(|err| err.to_string())? {
+            let result: serde_json::Value = serde_json::from_str(&response_json).map_err(|err| err.to_string())?;
+            if let Some(tracks) = result["tracks"].as_array() {
+                for track in tracks {
+                    if let (Some(id), Some(title)) = (track["trackId"].as_str(), track["originalAlbum"].as_str()) {
+                        if ids.contains(id) {
+                            curate_identity::record_source(&tx, &curate_identity::SourceCandidate {
+                                local_track_id: id.to_owned(), title: title.to_owned(),
+                                year: track["originalYear"].as_i64().and_then(|year| i32::try_from(year).ok()),
+                            }).map_err(|err| err.to_string())?;
+                        }
+                    }
+                }
+            }
+        }
+    }
     crate::db::DbOperations::set_provenance_cache(
-        &conn,
+        &tx,
         &hash_key,
         &album_id,
         &album_title,
         &input_params_json,
         &response_json,
         &model_version,
-    ).map_err(|e| e.to_string())
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|err| err.to_string())
 }
 
 // Background Commit Queue IPC Commands

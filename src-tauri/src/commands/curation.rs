@@ -28,6 +28,11 @@ pub fn curation_export_snapshot(app: tauri::AppHandle, snapshot: String) -> Resu
 }
 
 #[tauri::command]
+pub fn curation_get_identity(db: State<AppDb>, track_ids: Vec<String>) -> Result<Vec<serde_json::Value>, String> {
+    CurationStorage::get_identity(&db, &track_ids)
+}
+
+#[tauri::command]
 pub fn curation_save_evidence(db: State<AppDb>, album_id: String, run: serde_json::Value) -> Result<(), String> {
     CurationStorage::save_evidence(&db, &album_id, &run)
 }

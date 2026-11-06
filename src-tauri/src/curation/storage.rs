@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use parking_lot::Mutex;
 use rusqlite::{params, OptionalExtension};
 use crate::audio::AudioEngine;
-use crate::db::AppDb;
+use crate::db::{curate_identity, AppDb};
 use super::models::{CandidateTelemetry, CurationDecisionTrace, FieldDecision};
 
 /// In-memory trace buffer to ensure Bit-Perfect Storage Bus Silence during active playback.
@@ -15,6 +15,14 @@ static MEMORY_BUFFER: LazyLock<Mutex<HashMap<String, CurationDecisionTrace>>> =
 pub struct CurationStorage;
 
 impl CurationStorage {
+    pub fn get_identity(db: &AppDb, track_ids: &[String]) -> Result<Vec<serde_json::Value>, String> {
+        let mut conn = db.conn.lock();
+        let tx = conn.transaction().map_err(|err| err.to_string())?;
+        let rows = curate_identity::snapshot(&tx, track_ids, true).map_err(|err| err.to_string())?;
+        tx.commit().map_err(|err| err.to_string())?;
+        Ok(rows)
+    }
+
     pub fn save_evidence(
         db: &AppDb, album_id: &str, run: &serde_json::Value,
     ) -> Result<(), String> {
@@ -30,6 +38,7 @@ impl CurationStorage {
         }
         let mut conn = db.conn.lock();
         let tx = conn.transaction().map_err(|err| err.to_string())?;
+        let mut run = run.clone();
         let inserted = tx.execute(
             "INSERT INTO curation_evidence_runs
                 (id, album_id, requested_at, completed_at, trigger, outcome, payload_json)
@@ -43,6 +52,43 @@ impl CurationStorage {
                 [album_id], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional().map_err(|err| err.to_string())?;
             if current.is_none_or(|(date, current_id)| (requested_at, id) >= (date.as_str(), current_id.as_str())) {
+
+                if let Some(identity) = run["identity"].as_array() {
+                    if let Some(ids) = curate_identity::matching_snapshot_ids(&tx, identity)
+                        .map_err(|err| err.to_string())? {
+                        let mut revisions = Vec::new();
+                        if let Some(candidates) = run["identityMappings"].as_array() {
+                            for candidate in candidates {
+                                let mapping: curate_identity::MappingCandidate = serde_json::from_value(candidate.clone())
+                                    .map_err(|err| err.to_string())?;
+                                if !ids.contains(mapping.local_track_id.as_str()) {
+                                    continue;
+                                }
+                                curate_identity::record_mapping(&tx, &mapping).map_err(|err| err.to_string())?;
+                                let revision: i64 = tx.query_row(
+                                    "SELECT revision FROM curate_identity_mappings WHERE local_track_id = ?1 AND provider = ?2",
+                                    params![mapping.local_track_id, mapping.provider], |row| row.get(0),
+                                ).map_err(|err| err.to_string())?;
+                                revisions.push(serde_json::json!({
+                                    "localTrackId": mapping.local_track_id, "provider": mapping.provider,
+                                    "mappingRev": revision,
+                                }));
+                            }
+                        }
+                        if let Some(candidates) = run["sourceCandidates"].as_array() {
+                            for candidate in candidates {
+                                let source: curate_identity::SourceCandidate = serde_json::from_value(candidate.clone())
+                                    .map_err(|err| err.to_string())?;
+                                if ids.contains(source.local_track_id.as_str()) {
+                                    curate_identity::record_source(&tx, &source).map_err(|err| err.to_string())?;
+                                }
+                            }
+                        }
+                        run["mappingRevisions"] = serde_json::json!(revisions);
+                        tx.execute("UPDATE curation_evidence_runs SET payload_json = ?1 WHERE id = ?2",
+                            params![run.to_string(), id]).map_err(|err| err.to_string())?;
+                    }
+                }
                 Self::persist_trace(&tx, album_id, trace, false)?;
                 tx.execute(
                     "INSERT INTO curation_current_evidence (album_id, run_id) VALUES (?1, ?2)
@@ -83,14 +129,24 @@ impl CurationStorage {
     }
 
     pub fn save_draft(db: &AppDb, album_id: &str, draft: &serde_json::Value) -> Result<(), String> {
-        db.conn.lock().execute(
+
+        let mut conn = db.conn.lock();
+        let tx = conn.transaction().map_err(|err| err.to_string())?;
+        let previous: Option<String> = tx.query_row(
+            "SELECT draft_json FROM curation_drafts WHERE album_id = ?1",
+            [album_id], |row| row.get(0),
+        ).optional().map_err(|err| err.to_string())?;
+        let previous = previous.as_deref().and_then(|json| serde_json::from_str(json).ok()).unwrap_or_default();
+        curate_identity::record_draft_edits(&tx, album_id, &previous, draft).map_err(|err| err.to_string())?;
+        tx.execute(
             "INSERT INTO curation_drafts (album_id, draft_json, updated_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(album_id) DO UPDATE SET
                 draft_json = excluded.draft_json, updated_at = excluded.updated_at",
             params![album_id, draft.to_string(), chrono::Utc::now().to_rfc3339()],
         ).map_err(|err| err.to_string())?;
-        Ok(())
+
+        tx.commit().map_err(|err| err.to_string())
     }
 
     pub fn get_draft(db: &AppDb, album_id: &str) -> Result<Option<serde_json::Value>, String> {

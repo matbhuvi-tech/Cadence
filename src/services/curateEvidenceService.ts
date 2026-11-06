@@ -1,4 +1,4 @@
-import type { CurationDecisionTrace, Release, ReleaseConsensusResult, Track } from '../core/types'
+import type { CurateMappingCandidate, CurationDecisionTrace, Release, ReleaseConsensusResult, Track } from '../core/types'
 
 export interface CurateProviderAttempt {
   provider: 'apple' | 'musicbrainz'
@@ -92,6 +92,32 @@ export interface CurateEvidenceRun extends Omit<CurateEvidenceSummary, 'current'
   attempts: CurateProviderAttempt[]
   decision?: CurationDecisionTrace
   trackDecisions?: ReturnType<typeof captureTrackDecisions>
+  identityMappings?: CurateMappingCandidate[]
+  identity?: CurateIdentityTrack[]
+  sourceCandidates?: CurateSourceCandidate[]
+}
+
+export interface CurateIdentityTrack {
+  localTrackId: string
+  editionId: string
+  editionRev: number
+  discId: string
+  discRev: number
+  trackOrderRev: number
+  sourceGroupId: string | null
+  sourceGroupRev: number | null
+}
+
+export interface CurateSourceCandidate {
+  localTrackId: string
+  title: string
+  year?: number
+}
+
+export function sourceCandidatesFromGrouping(result: ReleaseConsensusResult): CurateSourceCandidate[] {
+  return result.subReleaseGroupings?.flatMap(group => group.trackIds?.map(localTrackId => ({
+    localTrackId, title: group.subTitle, year: group.originalYear,
+  })) ?? []) ?? []
 }
 
 export function captureTrackDecisions(result: ReleaseConsensusResult) {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
+pub(crate) mod curate_identity;
 pub mod operations;
 pub mod schema;
 

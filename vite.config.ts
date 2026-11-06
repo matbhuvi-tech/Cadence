@@ -1395,6 +1395,7 @@ function localLibraryScannerPlugin(): Plugin {
                 providerTracks = lookupData.results
                   .filter((item: any) => item.wrapperType === 'track')
                   .map((t: any) => ({
+                    trackId: t.trackId == null ? undefined : String(t.trackId),
                     trackNumber: t.trackNumber,
                     trackName: t.trackName,
                     artistName: t.artistName,
@@ -1721,6 +1722,7 @@ function localLibraryScannerPlugin(): Plugin {
                       const releaseYear = detail.date ? parseInt(detail.date.slice(0, 4), 10) : undefined
 
                       const mbTracks = (tracks || []).map((t: any) => ({
+                        trackId: t.id,
                         trackNumber: parseInt(t.position, 10),
                         trackName: t.title,
                         artistName: t['artist-credit']?.map((a: any) => a.name).join(', ') || releaseArtist,

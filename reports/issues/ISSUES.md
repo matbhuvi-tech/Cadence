@@ -1,5 +1,9 @@
 # Issue Log
 
+## Curate identity foundation
+- **Scope:** Persist release edition, disc, local track lineage, source-group candidates, provider mappings, and independent revisions.
+- **Status:** Implemented on `feat/curate-identity-foundation`, pending user verification. See the [Milestone A checkpoint](../../docs/designs/CurateArchitecture.md#milestone-a-implementation-checkpoint).
+
 ## Curate queue includes albums after a human commit
 - **Expected:** A successfully committed album stays out of both Curate queues and the badge count. Only the Listen album card's “Curate Album Metadata & Artwork” action reopens it.
 - **Status:** Implementation pending verification.

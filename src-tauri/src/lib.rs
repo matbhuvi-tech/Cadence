@@ -289,6 +289,7 @@ pub fn run() {
             curation_save_draft,
             curation_get_draft,
             curation_save_trace,
+            curation_get_identity,
             curation_save_evidence,
             curation_list_evidence,
             curation_get_evidence,

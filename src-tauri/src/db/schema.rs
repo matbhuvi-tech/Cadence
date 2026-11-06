@@ -414,5 +414,13 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_curation_traces_status ON curation_decision_traces(outcome_status)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_curation_traces_updated_at ON curation_decision_traces(updated_at)", []);
 
+    let has_disc_number = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('tracks') WHERE name = 'disc_number')",
+        [], |row| row.get::<_, bool>(0),
+    )?;
+    if !has_disc_number {
+        conn.execute("ALTER TABLE tracks ADD COLUMN disc_number INTEGER", [])?;
+    }
+    super::curate_identity::initialize(conn)?;
     Ok(())
 }

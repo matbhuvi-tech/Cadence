@@ -570,7 +570,7 @@ Phases 2, 4, and 5 are intentionally not restated as approved target architectur
 
 ## Identity, decision validity, and actionable queue contract
 
-**Status: design contract for phased implementation; not implemented.** This section addresses the observed case where a 7-track local edition received singer and title proposals from an 8-track MusicBrainz candidate while Apple supplied no tracklist. It also addresses completed albums returning to Curate through stale drafts or queue classification. Existing compilation identification, disc grouping, version grouping, and original-album inference remain candidate generators. They do not by themselves establish a confirmed identity or authorize a tag change.
+**Status: Milestone A implementation is on `feat/curate-identity-foundation`, pending user verification. Milestones B–E remain design contracts.** This section addresses the observed case where a 7-track local edition received singer and title proposals from an 8-track MusicBrainz candidate while Apple supplied no tracklist. It also addresses completed albums returning to Curate through stale drafts or queue classification. Existing compilation identification, disc grouping, version grouping, and original-album inference remain candidate generators. They do not by themselves establish a confirmed identity or authorize a tag change.
 
 ### Identity hierarchy and revisions
 
@@ -646,5 +646,20 @@ Milestones **A–E** below are future work for this identity/queue contract. The
 | C. Queue projection | Centralize classification, persist compact rows, separate priority, and update all affected rows atomically. | Restart and Curate reopen yield the same actionable queue without per-album hydration; clean albums are `No Action Required`; A → B move updates both rows together. |
 | D. Commit and migration integration | Tie frozen commit revisions and outcomes to identity lineage; implement separate baseline, confirmed intent, and newer draft projections; migrate old drafts/evidence conservatively as unverified where dependencies are missing. | Completed writes stay completed; failed/partial writes remain visible; legacy proposals cannot silently become valid; no duplicate write is offered solely because an old draft was restored; edit → confirm → refresh → edit/confirm survives replacement, out-of-order completion, and restart with the correct effective value. |
 | E. Native QA and performance | Exercise real and synthetic editions, compilations, playback transitions, restart, and provider mismatch. | No full-catalog startup reconciliation or playback music-drive I/O; bounded UI load and provider calls; every invalidation has a visible reason. |
+
+#### Milestone A implementation checkpoint
+
+The app database stores UUIDs for editions, discs, and inferred source groups. The local catalog track ID anchors lineage. Catalog ingestion updates identity in the track upsert transaction and preserves the stored track ID on same-path rescans. A removed track retains an unresolved lineage record. A replacement ID starts without the old associations.
+
+The initial edition candidates join explicitly numbered sibling disc directories within one mount and format. Other directories use the catalog release ID and format. A numbered disc directory takes precedence over a tag. For flat folders, the disc tag distinguishes discs. Source candidates are scoped to the edition and may include tracks from several discs. Legacy catalog rows are populated on import, a scan that writes the catalog row, or focused Curate identity access. A flat-folder rescan that assigns a different catalog release ID is a regroup under this initial policy.
+
+Selected-album evidence snapshots edition, disc, order, and source-group revisions before retrieval. Current, structurally applicable evidence can record inferred, unmapped, or conflicted track mappings. A late response can still be archived when those revisions have changed. Local tag changes and explicit draft selections increment separate field revisions. Field-decision revalidation and the user confirmation workflow belong to Milestone B and later work.
+
+The first native fixture reproduced the missing identity table before implementation. Run both the SQLite fixture and the existing headless provider fixture to check restart, same-path rescan, replacement IDs, independent revisions, and the seven-local/eight-provider mismatch:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib --test curate_identity
+npx tsx --tsconfig tsconfig.app.json --test src/test/testCurateHeadless.ts
+```
 
 Do not promote a milestone merely because its build passes. Review its recorded cases and user-visible behavior before beginning the next milestone. The 7-local/8-provider track case, bonus-track edition, track regroup A → B, position-only remap, cross-disc source group, user override, and completed seven-track commit are mandatory regression fixtures.

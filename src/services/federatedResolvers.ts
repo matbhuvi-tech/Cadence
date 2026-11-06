@@ -12,6 +12,7 @@ import {
   Release,
   Track,
   CurateTier,
+  CurateMappingCandidate,
   MetadataFieldState,
   TrackCandidateState,
   SequenceOffsetDetectionResult,
@@ -158,7 +159,7 @@ export interface ProviderResult {
   coverResolution: string
   genre?: string
   movementDesignations?: { trackIndex: number; movement: string; title: string }[]
-  tracks?: Array<{ trackNumber?: number; trackName: string; artistName: string }>
+  tracks?: Array<{ trackId?: string; trackNumber?: number; trackName: string; artistName: string }>
 }
 
 export interface BatchItem {
@@ -1260,6 +1261,7 @@ export class FederatedResolversService {
 
       return normalizationService.applyToCandidate<ProviderResult>({
         provider: 'itunes',
+        releaseId: data.releaseId || String(data.collectionId || ''),
         confidenceScore: data.confidenceScore || 0.95,
         releaseTitle: data.releaseTitle || signature.sanitizedTitle,
         trackTitle: data.trackTitle || signature.firstTrackTitle,
@@ -1770,6 +1772,7 @@ export class FederatedResolversService {
     }> = {}
 
     const trackStates: TrackCandidateState[] = []
+    const identityMappings: CurateMappingCandidate[] = []
 
     const stemPhonetic = (str: string) =>
       str
@@ -1782,25 +1785,25 @@ export class FederatedResolversService {
         .replace(/([a-z])\1+/g, '$1')
         .replace(/[^a-z0-9]+/g, '')
 
-    const findCorroboratedTrack = <T extends { trackName: string; trackNumber?: number; artistName?: string }>(
+    const findCorroboratedTrack = <T extends { trackId?: string; trackName: string; trackNumber?: number; artistName?: string }>(
       localTitle: string,
       tracks: T[],
       expectedTrackNum?: number
-    ): T | undefined => {
+    ): { track: T; method: 'title' | 'position' } | undefined => {
       if (!tracks || tracks.length === 0) return undefined
       const normL = cleanConsensusTitle(localTitle).toLowerCase().trim()
       if (!normL) return undefined
 
       // 1. Exact match
       const exact = tracks.find(t => cleanConsensusTitle(t.trackName).toLowerCase().trim() === normL)
-      if (exact) return exact
+      if (exact) return { track: exact, method: 'title' }
 
       // 2. Substring match
       const sub = tracks.find(t => {
         const c = cleanConsensusTitle(t.trackName).toLowerCase().trim()
         return c && (c.includes(normL) || normL.includes(c))
       })
-      if (sub) return sub
+      if (sub) return { track: sub, method: 'title' }
 
       // 3. Phonetic & Transliteration stem match
       const stemL = stemPhonetic(localTitle)
@@ -1809,7 +1812,7 @@ export class FederatedResolversService {
           const stemT = stemPhonetic(t.trackName)
           return stemT && (stemT.includes(stemL) || stemL.includes(stemT))
         })
-        if (stemMatch) return stemMatch
+        if (stemMatch) return { track: stemMatch, method: 'title' }
 
         const tokL = localTitle
           .toLowerCase()
@@ -1832,7 +1835,7 @@ export class FederatedResolversService {
             }
             return shared >= Math.max(1, Math.ceil(tokL.length * 0.5))
           })
-          if (tokMatch) return tokMatch
+          if (tokMatch) return { track: tokMatch, method: 'title' }
         }
       }
 
@@ -1841,11 +1844,11 @@ export class FederatedResolversService {
         const byNum = tracks.find(t => (t.trackNumber || (t as any).position) === expectedTrackNum)
         if (byNum) {
           const isPlaceholder = isPlaceholderTag(localTitle) || /^(?:track|audio)?\s*\d+$/i.test(localTitle.trim())
-          if (isPlaceholder) return byNum
+          if (isPlaceholder) return { track: byNum, method: 'position' }
           const stemT = stemPhonetic(byNum.trackName)
           if (stemL.length >= 4 && stemT.length >= 4) {
             const pL = stemL.slice(0, 4)
-            if (stemT.includes(pL)) return byNum
+            if (stemT.includes(pL)) return { track: byNum, method: 'position' }
           }
         }
       }
@@ -1868,9 +1871,32 @@ export class FederatedResolversService {
         ? lt.trackNumber - offsetResultMb.detectedOffset
         : lt.trackNumber
 
-      const appleTrack = findCorroboratedTrack(lt.title, itunesTracks, effectiveAppleTrackNum)
-      const mbTrack = findCorroboratedTrack(lt.title, mbTracks, effectiveMbTrackNum)
-      const aiTrack = aiMaster?.tracks ? findCorroboratedTrack(lt.title, aiMaster.tracks, lt.trackNumber) : undefined
+      const appleMatch = findCorroboratedTrack(lt.title, itunesTracks, effectiveAppleTrackNum)
+      const mbMatch = findCorroboratedTrack(lt.title, mbTracks, effectiveMbTrackNum)
+      const appleTrack = appleMatch?.track
+      const mbTrack = mbMatch?.track
+      const aiTrack = aiMaster?.tracks ? findCorroboratedTrack(lt.title, aiMaster.tracks, lt.trackNumber)?.track : undefined
+      for (const [provider, candidate, match] of [
+        ['apple', rawItunes, appleMatch], ['musicbrainz', rawMb, mbMatch],
+      ] as const) {
+        // A transport failure or skipped provider has no new association to record.
+        if (!candidate?.releaseId) continue
+        const positional = match?.method === 'position'
+        const countMismatch = (candidate.tracks?.length ?? 0) !== localTracks.length
+        const competingTrack = match && candidate.tracks?.some(track => track !== match.track &&
+          (match.track.trackId ? track.trackId === match.track.trackId :
+            track.trackNumber === match.track.trackNumber))
+        identityMappings.push({
+          localTrackId: lt.id,
+          provider,
+          releaseId: candidate.releaseId,
+          providerTrackId: match?.track.trackId,
+          providerPosition: match?.track.trackNumber,
+          method: match?.method ?? 'none',
+          positional,
+          status: !match ? 'unmapped' : (positional && countMismatch) || competingTrack ? 'conflicted' : 'inferred',
+        })
+      }
 
       // 0. If AI/Grounding tracks are provided, prioritize grounded tracks
       if (aiTrack && aiTrack.artistName) {
@@ -2157,6 +2183,7 @@ export class FederatedResolversService {
       requiresHumanReview: !isTier1,
       albumFieldStates,
       trackStates,
+      identityMappings,
       sequenceOffsetResult: effectiveSequenceOffset,
       decisionTrace,
     }

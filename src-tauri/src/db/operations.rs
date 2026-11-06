@@ -73,6 +73,8 @@ pub struct DbTrack {
     pub album_title: String,
     pub release_year: Option<i32>,
     pub track_number: Option<i32>,
+    #[serde(default)]
+    pub disc_number: Option<u32>,
     pub genre: Option<String>,
     pub composer: Option<String>,
     pub duration_secs: f64,
@@ -782,7 +784,7 @@ impl DbOperations {
                     dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
                     work_title, movement_number, movement_title,
                     is_compilation, album_artist, original_album, original_year,
-                    acoustid_fingerprint, musicbrainz_recording_id, created_at
+                    acoustid_fingerprint, musicbrainz_recording_id, created_at, disc_number
              FROM tracks {} ORDER BY album_title ASC, track_number ASC {}",
             where_clause, pagination_clause
         );
@@ -804,6 +806,7 @@ impl DbOperations {
                 album_title: row.get(11)?,
                 release_year: row.get(12)?,
                 track_number: row.get(13)?,
+                disc_number: row.get("disc_number")?,
                 genre: row.get(14)?,
                 composer: row.get(15)?,
                 duration_secs: row.get(16)?,
@@ -869,10 +872,10 @@ impl DbOperations {
                     dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
                     work_title, movement_number, movement_title,
                     is_compilation, album_artist, original_album, original_year,
-                    acoustid_fingerprint, musicbrainz_recording_id, created_at
+                    acoustid_fingerprint, musicbrainz_recording_id, created_at, disc_number
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                           ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                          ?31, ?32, ?33, ?34, ?35, ?36)
+                          ?31, ?32, ?33, ?34, ?35, ?36, ?37)
                 ON CONFLICT(file_path) DO UPDATE SET
                     release_id=excluded.release_id,
                     mount_id=excluded.mount_id,
@@ -885,6 +888,7 @@ impl DbOperations {
                     album_title=excluded.album_title,
                     release_year=excluded.release_year,
                     track_number=excluded.track_number,
+                    disc_number=COALESCE(excluded.disc_number, tracks.disc_number),
                     genre=excluded.genre,
                     composer=excluded.composer,
                     duration_secs=excluded.duration_secs,
@@ -947,7 +951,9 @@ impl DbOperations {
                     t.acoustid_fingerprint,
                     t.musicbrainz_recording_id,
                     t.created_at,
+                    t.disc_number,
                 ])?;
+                super::curate_identity::sync_track(&tx, &t.id, Some(&t.file_path))?;
             }
         }
         tx.commit()?;
@@ -2077,7 +2083,7 @@ impl DbOperations {
                         dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online,
                         work_title, movement_number, movement_title,
                         is_compilation, album_artist, original_album, original_year,
-                        acoustid_fingerprint, musicbrainz_recording_id, created_at
+                        acoustid_fingerprint, musicbrainz_recording_id, created_at, disc_number
                  FROM tracks
                  WHERE title LIKE ?1 OR artist_credit LIKE ?1 OR composer LIKE ?1 OR work_title LIKE ?1 OR movement_title LIKE ?1
                  LIMIT ?2"
@@ -2098,6 +2104,7 @@ impl DbOperations {
                     album_title: row.get(11)?,
                     release_year: row.get(12)?,
                     track_number: row.get(13)?,
+                    disc_number: row.get("disc_number")?,
                     genre: row.get(14)?,
                     composer: row.get(15)?,
                     duration_secs: row.get(16)?,
@@ -2256,7 +2263,7 @@ impl DbOperations {
                     t.sidecar_status, t.sidecar_edits_json, t.is_online,
                     t.work_title, t.movement_number, t.movement_title,
                     t.is_compilation, t.album_artist, t.original_album, t.original_year,
-                    t.acoustid_fingerprint, t.musicbrainz_recording_id, t.created_at
+                    t.acoustid_fingerprint, t.musicbrainz_recording_id, t.created_at, t.disc_number
              FROM playlist_tracks pt
              JOIN tracks t ON t.id = pt.track_id
              WHERE pt.playlist_id = ?1
@@ -2279,6 +2286,7 @@ impl DbOperations {
                 album_title: row.get(11)?,
                 release_year: row.get(12)?,
                 track_number: row.get(13)?,
+                disc_number: row.get("disc_number")?,
                 genre: row.get(14)?,
                 composer: row.get(15)?,
                 duration_secs: row.get(16)?,

@@ -75,7 +75,7 @@ import { behavioralLearningService } from '../../services/behavioralLearningServ
 import { tauriBridge } from '../../services/tauriBridge'
 import { provenanceCacheService } from '../../services/provenanceCacheService'
 import { useCurationTrace } from '../../hooks/useCurationTrace'
-import { captureTrackDecisions, curateMatchingContext } from '../../services/curateEvidenceService'
+import { captureTrackDecisions, curateMatchingContext, sourceCandidatesFromGrouping, type CurateSourceCandidate } from '../../services/curateEvidenceService'
 import { SteerProgressBar } from './SteerProgressBar'
 import { CurationDecisionTraceDrawer } from './CurationDecisionTraceDrawer'
 import { resolveGemini } from '../../services/geminiClient'
@@ -982,7 +982,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           const result = await federatedResolversService.resolve2of3ReleaseConsensus(
             release, selectedAlbum.rawTracks, false, undefined, undefined, onProgress, signal, record, 2, 1,
           )
-          return { result, trace: result.decisionTrace, trackDecisions: captureTrackDecisions(result) }
+          return { result, trace: result.decisionTrace, trackDecisions: captureTrackDecisions(result),
+            identityMappings: result.identityMappings, sourceCandidates: sourceCandidatesFromGrouping(result) }
         })
 
         if (!isMounted || !consensus) return
@@ -1248,6 +1249,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       }
 
       // 2. If user supplied a grounding URL or custom search, call compilationCanonicalizerService if not already resolved
+      let sourceCandidates: CurateSourceCandidate[] = []
       if (useAi) {
         try {
           const canonicalRes = await compilationCanonicalizerService.resolveCompilationSoundtracks(
@@ -1266,6 +1268,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           )
 
           if (canonicalRes && canonicalRes.success && canonicalRes.tracks && canonicalRes.tracks.length > 0) {
+            sourceCandidates = canonicalRes.tracks.flatMap(track => track.trackId && track.proposedOriginalAlbum ? [{
+              localTrackId: track.trackId, title: track.proposedOriginalAlbum, year: track.proposedOriginalYear,
+            }] : [])
             const firstProp = canonicalRes.tracks[0]
             const cleanRawTitle = cleanConsensusTitle(localRelease.title)
             const fallbackAlbumTitle = steerAlbum.trim() || cleanRawTitle
@@ -1313,6 +1318,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         artistCredit: directAppleMaster.artistCredit,
         composer: directAppleMaster.composer,
         releaseYear: directAppleMaster.releaseYear,
+        releaseId: appleId,
         catalogNumber: '',
         label: 'Apple Music Catalog',
         barcodeUpc: '',
@@ -1320,6 +1326,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         coverResolution: '3000x3000px (Apple Music Master Scan)',
         genre: directAppleMaster.genre,
         tracks: directAppleMaster.tracks.map((t: any) => ({
+          trackId: t.trackId,
           trackNumber: t.trackNumber,
           trackName: t.trackName,
           artistName: t.artistName || '',
@@ -1347,7 +1354,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           record,
           appleId ? 0 : (useWikipedia || useAi ? 1 : 2),
         )
-        return { trace: res.decisionTrace, result: res, trackDecisions: captureTrackDecisions(res) }
+        return { trace: res.decisionTrace, result: res, trackDecisions: captureTrackDecisions(res),
+          identityMappings: res.identityMappings, sourceCandidates: sourceCandidates.length ? sourceCandidates : sourceCandidatesFromGrouping(res) }
       })
 
       if (!consensus) {
@@ -1526,6 +1534,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           }))
         }
 
+        const identity = await tauriBridge.curationGetIdentity(payload.tracks.map(track => track.id))
         controller.signal.throwIfAborted()
         if (provenanceAttempted.current === selectedAlbum.id) return
         provenanceAttempted.current = selectedAlbum.id
@@ -1551,7 +1560,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           }
 
           // Save to parameter-hashed cache
-          await provenanceCacheService.set(hashKey, selectedAlbum.id, albumTitleStr, payload, provenanceResult)
+          await provenanceCacheService.set(hashKey, selectedAlbum.id, albumTitleStr, payload, provenanceResult, undefined, identity)
 
           // Update tracks and Gemini AI Master column in UI state
           setAlbumItems(prev => {

@@ -158,9 +158,16 @@ pub fn db_get_releases(
 #[tauri::command]
 pub fn db_save_tracks_batch(
     db: State<'_, AppDb>,
+
     tracks: Vec<DbTrack>,
     releases: Vec<DbRelease>,
+    engine: State<'_, crate::audio::AudioEngine>,
 ) -> Result<(), String> {
+    let _scan_permit = if tracks.is_empty() {
+        None
+    } else {
+        Some(engine.try_library_scan_io().ok_or("Track import requires idle playback.")?)
+    };
     let mut conn = db.conn.lock();
     if !releases.is_empty() {
         DbOperations::upsert_releases_batch(&mut conn, &releases).map_err(|e| e.to_string())?;

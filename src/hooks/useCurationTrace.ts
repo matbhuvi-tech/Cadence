@@ -76,7 +76,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     targetAlbumId: string,
     input: Pick<CurateEvidenceRun, 'trigger' | 'context'>,
     fetchFn: (signal: AbortSignal, onProgress: (event: ExecutionProgressEvent) => void, record: RecordCurateAttempt) =>
-      Promise<{ trace?: CurationDecisionTrace | null; result: T; trackDecisions?: CurateEvidenceRun['trackDecisions'] }>,
+      Promise<{ trace?: CurationDecisionTrace | null; result: T; trackDecisions?: CurateEvidenceRun['trackDecisions']; identityMappings?: CurateEvidenceRun['identityMappings']; sourceCandidates?: CurateEvidenceRun['sourceCandidates'] }>,
   ): Promise<T | null> => {
     abortControllerRef.current?.abort('NewSteerInitiated')
     const controller = new AbortController()
@@ -93,7 +93,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     const run: CurateEvidenceRun = { ...input, id, requestedAt, completedAt: requestedAt, attempts, outcome: 'failed' }
     let result: T | null = null
     try {
-      await Promise.resolve()
+      run.identity = await tauriBridge.curationGetIdentity(input.context.tracks.map(track => track.id))
       controller.signal.throwIfAborted()
       const response = await fetchFn(controller.signal, event => {
         if (active()) handleProgress(event)
@@ -102,6 +102,8 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
       run.outcome = 'completed'
       run.decision = response.trace ?? undefined
       run.trackDecisions = response.trackDecisions
+      run.identityMappings = response.identityMappings
+      run.sourceCandidates = response.sourceCandidates
       result = response.result
     } catch {
       run.outcome = controller.signal.aborted ? 'cancelled' : 'failed'

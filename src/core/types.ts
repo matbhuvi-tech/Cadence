@@ -532,7 +532,19 @@ export interface SubReleaseGrouping {
   composer?: string
 }
 
+export interface CurateMappingCandidate {
+  localTrackId: string
+  provider: 'apple' | 'musicbrainz'
+  releaseId?: string
+  providerTrackId?: string
+  providerPosition?: number
+  method: 'title' | 'position' | 'none'
+  positional: boolean
+  status: 'inferred' | 'unmapped' | 'conflicted'
+}
+
 export interface ReleaseConsensusResult {
+  identityMappings?: CurateMappingCandidate[]
   releaseId: string
   albumTitle: ConsensusFieldResult<string>
   albumArtist: ConsensusFieldResult<string>

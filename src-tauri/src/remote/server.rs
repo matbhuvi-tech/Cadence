@@ -409,7 +409,7 @@ async fn get_tracks(
     let conn = state.db.conn.lock();
     let tracks = if let Some(ref rel_id) = q.release_id {
         let mut stmt = conn
-            .prepare("SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name, file_size, mtime, title, artist_credit, album_title, release_year, track_number, genre, composer, duration_secs, format, sample_rate, bit_depth, channels, dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online, work_title, movement_number, movement_title, is_compilation, album_artist, original_album, original_year, acoustid_fingerprint, musicbrainz_recording_id, created_at FROM tracks WHERE release_id = ?1 ORDER BY track_number ASC")
+            .prepare("SELECT id, release_id, mount_id, folder_path, folder_name, file_path, file_name, file_size, mtime, title, artist_credit, album_title, release_year, track_number, genre, composer, duration_secs, format, sample_rate, bit_depth, channels, dr_score, has_embedded_art, sidecar_status, sidecar_edits_json, is_online, work_title, movement_number, movement_title, is_compilation, album_artist, original_album, original_year, acoustid_fingerprint, musicbrainz_recording_id, created_at, disc_number FROM tracks WHERE release_id = ?1 ORDER BY track_number ASC")
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let rows = stmt
             .query_map(rusqlite::params![rel_id], |row| {
@@ -428,6 +428,7 @@ async fn get_tracks(
                     album_title: row.get(11)?,
                     release_year: row.get(12)?,
                     track_number: row.get(13)?,
+                    disc_number: row.get("disc_number")?,
                     genre: row.get(14)?,
                     composer: row.get(15)?,
                     duration_secs: row.get(16)?,
