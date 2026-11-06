@@ -50,16 +50,6 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
     return backgroundArtworkService.subscribe((s) => setBgArtState(s))
   }, [isOpen])
 
-  const [playbackPolicy, setPlaybackPolicy] = useState<'purist' | 'paced' | 'unthrottled'>(() => {
-    return (localStorage.getItem('cadence_scan_playback_policy') as any) || 'purist'
-  })
-
-  const handlePolicySwitch = (policy: 'purist' | 'paced' | 'unthrottled') => {
-    setPlaybackPolicy(policy)
-    localStorage.setItem('cadence_scan_playback_policy', policy)
-    tauriBridge.setScannerPlaybackPolicy(policy).catch(() => {})
-  }
-
   useEffect(() => {
     if (!isOpen) return
     let isMounted = true
@@ -154,15 +144,9 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
           <div className="flex items-center gap-2 text-amber-300">
             <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
             <span className="font-medium text-[11px]">
-              Transport Purity: Scan paused during playback to guarantee zero disk/NIC jitter.
+              Scan paused. It resumes when playback stops.
             </span>
           </div>
-          <button
-            onClick={() => handlePolicySwitch('paced')}
-            className="text-[10px] font-mono underline text-amber-200 hover:text-white cursor-pointer shrink-0 ml-2"
-          >
-            Switch to Paced
-          </button>
         </div>
       )}
 
@@ -522,30 +506,6 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
               />
             ))}
           </div>
-        </div>
-      </div>
-
-      {/* Audiophile Playback Policy Selector */}
-      <div className="mb-3 pt-2 border-t border-white/[0.06] flex items-center justify-between">
-        <span className="text-[11px] text-white/50">Playback Scan Policy:</span>
-        <div className="flex items-center gap-1 bg-white/[0.04] p-0.5 rounded-lg border border-white/[0.06]">
-          {(['purist', 'paced', 'unthrottled'] as const).map(p => (
-            <button
-              key={p}
-              onClick={() => handlePolicySwitch(p)}
-              className={`px-2 py-0.5 rounded text-[10px] font-medium capitalize transition-all ${
-                playbackPolicy === p
-                  ? p === 'purist'
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                    : p === 'paced'
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                  : 'text-white/40 hover:text-white/70'
-              }`}
-            >
-              {p}
-            </button>
-          ))}
         </div>
       </div>
 

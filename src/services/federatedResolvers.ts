@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { fetchCurateCandidate, type CurateProviderAttempt, type RecordCurateAttempt } from './curateEvidenceService'
 import {
   DiffField,
   DiffSource,
@@ -1246,19 +1247,15 @@ export class FederatedResolversService {
    * Fetches real album-level candidate from Apple iTunes Search API.
    */
   public async fetchItunesAlbumCandidate(
-    signature: AlbumSignature
+    signature: AlbumSignature,
+    record?: RecordCurateAttempt,
+    signal?: AbortSignal,
+    maxRequests?: number,
   ): Promise<ProviderResult | null> {
-    try {
-      const url = `${this.getBaseUrl()}/api/itunes-search?album=${encodeURIComponent(
+    const url = `${this.getBaseUrl()}/api/itunes-search?album=${encodeURIComponent(
         signature.sanitizedTitle
-      )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&composer=${encodeURIComponent(signature.sanitizedComposer || '')}`
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 4000)
-
-      const res = await fetch(url, { signal: controller.signal })
-      clearTimeout(timeoutId)
-      if (!res.ok) return null
-      const data = await res.json()
+      )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&composer=${encodeURIComponent(signature.sanitizedComposer || '')}${maxRequests ? `&maxRequests=${maxRequests}` : ''}`
+    return fetchCurateCandidate('apple', signature.sanitizedTitle, signal => fetch(url, { signal }), data => {
       if (!data.success) return null
 
       return normalizationService.applyToCandidate<ProviderResult>({
@@ -1277,9 +1274,7 @@ export class FederatedResolversService {
         genre: data.genre || 'Soundtrack',
         tracks: data.tracks || [],
       })
-    } catch {
-      return null
-    }
+    }, record, signal, candidate => this.summarizeEvidenceCandidate(candidate))
   }
 
   /**
@@ -1287,20 +1282,21 @@ export class FederatedResolversService {
    */
   public async fetchMusicBrainzReleaseCandidate(
     signature: AlbumSignature,
-    isPrefetch = false
+    isPrefetch = false,
+    record?: RecordCurateAttempt,
+    signal?: AbortSignal,
+    maxRequests?: number,
   ): Promise<ProviderResult | null> {
     const execute = async () => {
-      try {
-        const url = `${this.getBaseUrl()}/api/musicbrainz-search?album=${encodeURIComponent(
+      if (isPrefetch) {
+        const status = await tauriBridge.getPlaybackStatus().catch(() => null)
+        if (signal?.aborted || !status || status.isPlaying || status.isPaused ||
+            ['Loading', 'Playing', 'Paused'].includes(status.playbackState ?? '')) return null
+      }
+      const url = `${this.getBaseUrl()}/api/musicbrainz-search?album=${encodeURIComponent(
           signature.sanitizedTitle
-        )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&trackNum=1`
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), 4000)
-
-        const res = await fetch(url, { signal: controller.signal })
-        clearTimeout(timeoutId)
-        if (!res.ok) return null
-        const data = await res.json()
+        )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&trackNum=1${maxRequests ? `&maxRequests=${maxRequests}` : ''}`
+      return fetchCurateCandidate('musicbrainz', signature.sanitizedTitle, signal => fetch(url, { signal }), data => {
         if (!data.success) return null
 
         return normalizationService.applyToCandidate<ProviderResult>({
@@ -1320,15 +1316,20 @@ export class FederatedResolversService {
           genre: data.genre,
           tracks: data.tracks || [],
         })
-      } catch {
-        return null
-      }
+      }, record, signal, candidate => this.summarizeEvidenceCandidate(candidate))
     }
 
     if (isPrefetch) {
       return globalMusicBrainzQueue.enqueuePrefetch(execute)
     } else {
       return globalMusicBrainzQueue.enqueueActive(execute)
+    }
+  }
+
+  private summarizeEvidenceCandidate(candidate: ProviderResult): CurateProviderAttempt['candidate'] {
+    return {
+      releaseId: candidate.releaseId, title: candidate.releaseTitle, artist: candidate.artistCredit,
+      year: candidate.releaseYear, trackCount: candidate.tracks?.length,
     }
   }
 
@@ -1451,7 +1452,9 @@ export class FederatedResolversService {
     },
     directAppleCandidate?: ProviderResult | null,
     onProgress?: (event: ExecutionProgressEvent) => void,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    recordAttempt?: RecordCurateAttempt,
+    appleRequests = 2,
   ): Promise<ReleaseConsensusResult> {
     const startTime = Date.now()
     onProgress?.({ phase: 'querying_musicbrainz', message: 'Querying MusicBrainz & Apple Music...', elapsedMs: 0 })
@@ -1473,10 +1476,18 @@ export class FederatedResolversService {
       firstTrackTitle: localTracks[0]?.title,
     }
 
+    const measured = new Map<string, CurateProviderAttempt>()
+    const record: RecordCurateAttempt = attempt => {
+      measured.set(attempt.provider, attempt)
+      recordAttempt?.(attempt)
+    }
     const [rawItunes, rawMb] = await Promise.all([
-      directAppleCandidate ? Promise.resolve(directAppleCandidate) : this.fetchItunesAlbumCandidate(signature),
-      this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch),
+      directAppleCandidate || (!isPrefetch && appleRequests === 0)
+        ? Promise.resolve(directAppleCandidate ?? null)
+        : this.fetchItunesAlbumCandidate(signature, record, abortSignal, isPrefetch ? undefined : appleRequests),
+      this.fetchMusicBrainzReleaseCandidate(signature, isPrefetch, record, abortSignal, isPrefetch ? undefined : 2),
     ])
+    abortSignal?.throwIfAborted()
 
     const itunesVerified = directAppleCandidate ? true : this.isProviderCandidateAcceptable(signature, rawItunes, localRelease.releaseYear)
     const mbVerified = this.isProviderCandidateAcceptable(signature, rawMb, localRelease.releaseYear)
@@ -2070,8 +2081,8 @@ export class FederatedResolversService {
         provider: 'apple',
         releaseId: rawItunes.releaseId || (rawItunes.catalogNumber ? rawItunes.catalogNumber.replace(/^ITUNES-/, '') : undefined) || rawItunes.releaseTitle || 'itunes-match',
         trackCount: rawItunes.tracks?.length,
-        latencyMs: 120,
-        httpStatus: 200,
+        latencyMs: measured.get('apple')?.durationMs,
+        httpStatus: measured.get('apple')?.httpStatus,
         confidenceScore: itunesVerified ? (rawItunes.confidenceScore || 0.9) : 0.3,
         rejectionReason: !itunesVerified ? 'Failed track count or title sanity check against local release.' : undefined,
       })
@@ -2081,8 +2092,8 @@ export class FederatedResolversService {
         provider: 'musicbrainz',
         releaseId: rawMb.releaseId || (rawMb.coverArtUrl ? rawMb.coverArtUrl.match(/release\/([a-f0-9-]+)/)?.[1] : undefined) || rawMb.releaseTitle || 'mb-match',
         trackCount: rawMb.tracks?.length,
-        latencyMs: 340,
-        httpStatus: 200,
+        latencyMs: measured.get('musicbrainz')?.durationMs,
+        httpStatus: measured.get('musicbrainz')?.httpStatus,
         confidenceScore: mbVerified ? (rawMb.confidenceScore || 0.9) : 0.3,
         rejectionReason: !mbVerified ? 'Failed track count or title sanity check against local release.' : undefined,
       })

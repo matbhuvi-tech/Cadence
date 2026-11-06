@@ -2521,7 +2521,41 @@ impl DbOperations {
         batch: &DbCommitQueueBatch,
         items: &[NewCommitItem],
     ) -> Result<()> {
-        let tx = conn.transaction()?;
+        Self::insert_commit_with_curate_drafts(conn, batch, items, &[], false).map(|_| ())
+    }
+
+    pub fn insert_commit_with_curate_drafts(
+        conn: &mut Connection,
+        batch: &DbCommitQueueBatch,
+        items: &[NewCommitItem],
+        drafts: &[(String, serde_json::Value)],
+        preserve_existing_intents: bool,
+    ) -> Result<bool> {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if preserve_existing_intents {
+            for item in items {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM commit_queue_items
+                     WHERE track_id = ?1 AND status IN ('pending', 'in_flight', 'failed')
+                       AND rowid = (SELECT i.rowid FROM commit_queue_items i
+                           JOIN commit_queue_batches b ON b.id = i.batch_id
+                           WHERE i.track_id = ?1 AND i.status <> 'cancelled'
+                           ORDER BY b.rowid DESC, i.rowid DESC LIMIT 1))",
+                    [&item.track_id],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    return Ok(false);
+                }
+            }
+        }
+        for (album_id, draft) in drafts {
+            tx.execute(
+                "INSERT INTO curation_drafts (album_id, draft_json, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(album_id) DO NOTHING",
+                params![album_id, draft.to_string(), batch.created_at],
+            )?;
+        }
 
         tx.execute(
             "INSERT INTO commit_queue_batches (id, description, total_tracks, destination, force_override, status, created_at, completed_at)
@@ -2548,7 +2582,8 @@ impl DbOperations {
                 batch_id = excluded.batch_id,
                 file_path = excluded.file_path,
                 mount_id = excluded.mount_id,
-                expected_crc = excluded.expected_crc",
+                expected_crc = excluded.expected_crc,
+                artwork_result_id = NULL",
         )?;
 
         for item in items {
@@ -2575,7 +2610,20 @@ impl DbOperations {
         )?;
 
         tx.commit()?;
-        Ok(())
+        Ok(true)
+    }
+
+    pub fn claim_next_commit_item(
+        conn: &Connection,
+        excluded_mounts: &[String],
+    ) -> Result<Option<(DbCommitQueueItem, CommitQueueSummary)>> {
+        let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let Some(item) = Self::fetch_next_pending_commit_item(&tx, excluded_mounts)? else {
+            return Ok(None);
+        };
+        let summary = Self::mark_commit_item_in_flight_and_get_summary(&tx, &item.id)?;
+        tx.commit()?;
+        Ok(Some((item, summary)))
     }
 
     pub fn fetch_next_pending_commit_item(
@@ -2734,12 +2782,26 @@ impl DbOperations {
         drop(stmt);
 
         if !inflight_items.is_empty() {
-            conn.execute(
+            let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+            for item in &inflight_items {
+                let newer_pending: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM commit_queue_items WHERE track_id = ?1 AND status = 'pending')",
+                    [&item.track_id],
+                    |row| row.get(0),
+                )?;
+                if newer_pending {
+                    Self::update_commit_item_status(
+                        &tx, &item.id, "cancelled", Some("Superseded during startup recovery"), 0,
+                    )?;
+                }
+            }
+            tx.execute(
                 "UPDATE commit_queue_items
                  SET status = 'pending', retry_count = retry_count + 1, error_message = 'Reset during startup recovery'
                  WHERE status = 'in_flight'",
                 [],
             )?;
+            tx.commit()?;
         }
 
         Ok(inflight_items)
@@ -2981,6 +3043,48 @@ mod tests {
     use crate::db::schema::initialize_schema;
 
     #[test]
+    fn tier1_batch_saves_new_drafts_and_preserves_existing_queue_intent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO curation_drafts VALUES ('existing', '{\"version\":1,\"staged\":true}', 'before')",
+            [],
+        ).unwrap();
+        let mut batch = DbCommitQueueBatch {
+            id: "first".into(), description: Some("Tier 1".into()), total_tracks: 1,
+            destination: "embedded".into(), force_override: false, status: "pending".into(),
+            created_at: "2026-01-01".into(), completed_at: None,
+        };
+        let mut item = NewCommitItem {
+            id: "first-item".into(), track_id: "track".into(), file_path: "track.wav".into(),
+            mount_id: "disk".into(), payload_json: r#"{"curate":true,"genre":"Confirmed"}"#.into(),
+            backup_json: "{}".into(), expected_crc: None,
+        };
+        let new_draft = serde_json::json!({"version": 1, "staged": false});
+        assert!(DbOperations::insert_commit_with_curate_drafts(
+            &mut conn, &batch, std::slice::from_ref(&item),
+            &[("existing".into(), new_draft.clone()), ("new".into(), new_draft.clone())],
+            true,
+        ).unwrap());
+        let staged: bool = conn.query_row(
+            "SELECT json_extract(draft_json, '$.staged') FROM curation_drafts WHERE album_id = 'existing'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(staged);
+        batch.id = "conflicting".into();
+        item.id = "second-item".into();
+        item.payload_json = "{}".into();
+        assert!(!DbOperations::insert_commit_with_curate_drafts(
+            &mut conn, &batch, &[item], &[("unconfirmed".into(), new_draft)], true,
+        ).unwrap());
+        let draft_count: i64 = conn.query_row("SELECT COUNT(*) FROM curation_drafts", [], |r| r.get(0)).unwrap();
+        assert_eq!(draft_count, 2);
+        let queued = DbOperations::fetch_next_pending_commit_item(&conn, &[]).unwrap().unwrap();
+        assert_eq!(queued.id, "first-item");
+        assert!(queued.payload_json.contains("Confirmed"));
+    }
+
+    #[test]
     fn test_commit_queue_operations_and_coalescence() {
         let mut conn = Connection::open_in_memory().unwrap();
         initialize_schema(&conn).unwrap();
@@ -3061,7 +3165,8 @@ mod tests {
         assert_eq!(fetched.backup_json, r#"{"title":"Song 1 Original"}"#);
 
         // 3. Mark in_flight
-        DbOperations::update_commit_item_status(&conn, &fetched.id, "in_flight", None, 0).unwrap();
+        let (claimed, _) = DbOperations::claim_next_commit_item(&conn, &[]).unwrap().unwrap();
+        assert_eq!(claimed.id, fetched.id);
         let summary3 = DbOperations::get_commit_queue_summary(&conn).unwrap();
         assert_eq!(summary3.pending_items, 1);
         assert_eq!(summary3.inflight_items, 1);
@@ -3087,5 +3192,21 @@ mod tests {
         let undo_items = DbOperations::fetch_completed_items_for_undo(&conn, &fetched.batch_id).unwrap();
         assert_eq!(undo_items.len(), 1);
         assert_eq!(undo_items[0].backup_json, r#"{"title":"Song 1 Original"}"#);
+
+        // Recovery preserves the newer confirmation if a crash interrupted an older write.
+        let (interrupted, _) = DbOperations::claim_next_commit_item(&conn, &[]).unwrap().unwrap();
+        let newer_batch = DbCommitQueueBatch { id: "batch-3".to_string(), ..batch };
+        DbOperations::insert_commit_batch_and_items(&mut conn, &newer_batch, &[NewCommitItem {
+            id: "item-4".to_string(),
+            track_id: interrupted.track_id.clone(),
+            file_path: interrupted.file_path.clone(),
+            mount_id: interrupted.mount_id.clone(),
+            payload_json: r#"{"title":"Newest intent"}"#.to_string(),
+            backup_json: interrupted.backup_json.clone(),
+            expected_crc: None,
+        }]).unwrap();
+        DbOperations::requeue_inflight_commit_items_sweep(&conn).unwrap();
+        let (next, _) = DbOperations::claim_next_commit_item(&conn, &[]).unwrap().unwrap();
+        assert_eq!(next.payload_json, r#"{"title":"Newest intent"}"#);
     }
 }

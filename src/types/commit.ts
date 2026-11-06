@@ -200,5 +200,7 @@ export interface EnqueueBatchPayload {
   description?: string
   destination?: 'sidecar' | 'embedded'
   forceOverride?: boolean
+  requireIdle?: boolean
+  curateDrafts?: { albumId: string; draft: import('../core/curateDraft').CurateDraft }[]
   items: NewCommitItemPayload[]
 }

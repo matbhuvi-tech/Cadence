@@ -13,7 +13,6 @@ import {
   RotateCcw,
   ArrowRight,
   Database,
-  ShieldCheck,
   FolderOpen,
   Server,
   RotateCw,
@@ -49,16 +48,6 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
 }) => {
   const [activeMounts, setActiveMounts] = useState<StorageMount[]>(storageMounts)
   const [activeWatchedFolders, setActiveWatchedFolders] = useState<WatchedFolder[]>(watchedFolders)
-  const [playbackPolicy, setPlaybackPolicy] = useState<'purist' | 'paced' | 'unthrottled'>(() => {
-    return (localStorage.getItem('cadence_scan_playback_policy') as any) || 'purist'
-  })
-
-  const handlePolicyChange = (newPolicy: 'purist' | 'paced' | 'unthrottled') => {
-    setPlaybackPolicy(newPolicy)
-    localStorage.setItem('cadence_scan_playback_policy', newPolicy)
-    tauriBridge.setScannerPlaybackPolicy(newPolicy).catch(() => {})
-  }
-
   // Sync props when updated from parent
   useEffect(() => {
     if (storageMounts.length > 0) setActiveMounts(storageMounts)
@@ -223,7 +212,7 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
           if (onTriggerScan) {
             onTriggerScan(selected, false)
           } else {
-            await tauriBridge.startLibraryScan(selected, undefined, false, playbackPolicy)
+            await tauriBridge.startLibraryScan(selected)
           }
         }
       } catch (err: any) {
@@ -456,7 +445,7 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
       if (onTriggerScan) {
         onTriggerScan(cleaned, false)
       } else {
-        await tauriBridge.startLibraryScan(cleaned, undefined, false, playbackPolicy)
+        await tauriBridge.startLibraryScan(cleaned)
       }
       return
     }
@@ -659,84 +648,7 @@ export const ImportLibraryModal: React.FC<ImportLibraryModalProps> = ({
                 </div>
               </div>
 
-              {/* AUDIOPHILE SCAN BEHAVIOR DURING PLAYBACK POLICY */}
-              <div className="flex flex-col gap-2 p-3 rounded-xl bg-white/[0.02] border border-white/[0.08]">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 text-xs font-mono text-white/90">
-                    <ShieldCheck className="w-3.5 h-3.5 text-[#00F5FF]" />
-                    <span className="font-semibold">Scan Behavior During Playback:</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-[#64748B]">
-                    SMB/UNC & Local I/O Purity
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handlePolicyChange('purist')}
-                    className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex flex-col gap-1 ${
-                      playbackPolicy === 'purist'
-                        ? 'bg-emerald-500/10 border-emerald-500/50 text-white shadow-sm shadow-emerald-500/10'
-                        : 'bg-[#161A26] border-white/[0.06] text-[#94A3B8] hover:border-white/[0.15]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-mono font-bold flex items-center gap-1">
-                        <span className={playbackPolicy === 'purist' ? 'text-emerald-400' : 'text-[#64748B]'}>●</span>
-                        Purist
-                      </span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 font-mono">0 Noise</span>
-                    </div>
-                    <span className="text-[10px] text-[#64748B] leading-tight">
-                      Auto-suspends when music is playing. Resumes when stopped.
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handlePolicyChange('paced')}
-                    className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex flex-col gap-1 ${
-                      playbackPolicy === 'paced'
-                        ? 'bg-[#00F5FF]/10 border-[#00F5FF]/50 text-white shadow-sm shadow-[#00F5FF]/10'
-                        : 'bg-[#161A26] border-white/[0.06] text-[#94A3B8] hover:border-white/[0.15]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-mono font-bold flex items-center gap-1">
-                        <span className={playbackPolicy === 'paced' ? 'text-[#00F5FF]' : 'text-[#64748B]'}>●</span>
-                        Paced
-                      </span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#00F5FF]/20 text-[#00F5FF] font-mono">15ms Sleep</span>
-                    </div>
-                    <span className="text-[10px] text-[#64748B] leading-tight">
-                      15ms inter-file sleep during playback prevents NIC bursts.
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handlePolicyChange('unthrottled')}
-                    className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex flex-col gap-1 ${
-                      playbackPolicy === 'unthrottled'
-                        ? 'bg-amber-500/10 border-amber-500/50 text-white shadow-sm shadow-amber-500/10'
-                        : 'bg-[#161A26] border-white/[0.06] text-[#94A3B8] hover:border-white/[0.15]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-mono font-bold flex items-center gap-1">
-                        <span className={playbackPolicy === 'unthrottled' ? 'text-amber-400' : 'text-[#64748B]'}>●</span>
-                        Unthrottled
-                      </span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-400 font-mono">Full Speed</span>
-                    </div>
-                    <span className="text-[10px] text-[#64748B] leading-tight">
-                      Full background speed regardless of playback state.
-                    </span>
-                  </button>
-                </div>
-              </div>
-
+              <p className="text-xs text-white/60">Stop playback to start a scan. If playback starts during a scan, it resumes when playback stops.</p>
               {/* EXISTING IMPORTED DIRECTORIES & MOUNTS */}
               {activeWatchedFolders && activeWatchedFolders.length > 0 && (
                 <div className="flex flex-col gap-2.5 pt-3 border-t border-white/[0.08]">

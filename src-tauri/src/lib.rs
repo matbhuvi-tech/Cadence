@@ -225,6 +225,8 @@ pub fn run() {
             // Asynchronous Background Commit Queue commands
             commit_enqueue_batch,
             commit_get_queue_summary,
+            commit_get_curate_projection,
+            commit_retry_curate_items,
             commit_get_telemetry,
             commit_set_override,
             commit_toggle_pause,
@@ -287,6 +289,9 @@ pub fn run() {
             curation_save_draft,
             curation_get_draft,
             curation_save_trace,
+            curation_save_evidence,
+            curation_list_evidence,
+            curation_get_evidence,
             curation_get_trace,
             curation_clear_trace,
             // Playlists

@@ -1,26 +1,114 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import type { CurationDecisionTrace, OutcomeStatus } from '../../core/types'
+import type { CurateEvidenceRun, CurateEvidenceSummary } from '../../services/curateEvidenceService'
+import { tauriBridge } from '../../services/tauriBridge'
 
 interface CurationDecisionTraceDrawerProps {
   isOpen: boolean
   onClose: () => void
   trace: CurationDecisionTrace | null
+  albumId?: string
+  lastEvidenceId?: string
   onResumeFetch?: () => void
   isResuming?: boolean
+}
+
+function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: string }) {
+  const [runs, setRuns] = useState<CurateEvidenceSummary[]>([])
+  const [selectedId, setSelectedId] = useState<string>()
+  const [detail, setDetail] = useState<CurateEvidenceRun | null>(null)
+  const [error, setError] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  useEffect(() => {
+    let active = true
+    void tauriBridge.curationListEvidence(albumId).then(rows => {
+      if (!active) return
+      setRuns(rows)
+      setLoaded(true)
+      setError('')
+    }).catch(() => { if (active) setError('Could not load evidence history.') })
+    return () => { active = false }
+  }, [albumId, revision])
+  const activeId = selectedId ?? runs.find(row => row.current)?.id ?? runs[0]?.id
+  useEffect(() => {
+    if (!activeId) return
+    let active = true
+    void tauriBridge.curationGetEvidence(albumId, activeId).then(run => {
+      if (active) setDetail(run)
+    }).catch(() => { if (active) setError('Could not load this evidence run.') })
+    return () => { active = false }
+  }, [albumId, activeId])
+  const selected = detail?.id === activeId ? detail : null
+  return (
+    <section className="space-y-2 rounded border border-zinc-800 p-3 text-xs">
+      <h3 className="font-semibold text-zinc-100">Evidence history</h3>
+      {error && <p role="alert" className="text-amber-300">{error}</p>}
+      {!loaded && !error && <p className="text-zinc-400">Loading evidence…</p>}
+      {loaded && !runs.length && <p className="text-zinc-400">No saved retrievals yet.</p>}
+      {runs.length > 0 && (
+        <select aria-label="Inspect evidence run" value={activeId} onChange={e => setSelectedId(e.target.value)}
+          className="w-full rounded border border-zinc-700 bg-zinc-900 p-2 text-zinc-200">
+          {runs.map(run => (
+            <option key={run.id} value={run.id}>
+              {run.current ? 'Current' : 'Previous'} · {new Date(run.requestedAt).toLocaleString()} · {run.outcome}
+            </option>
+          ))}
+        </select>
+      )}
+      {selected && (
+        <>
+          <p className="text-zinc-400">
+            {selected.trigger === 'initial' ? 'Initial retrieval' : 'User refresh'} · Ended {new Date(selected.completedAt).toLocaleTimeString()}
+          </p>
+          {selected.attempts.map((attempt, index) => (
+            <div key={`${attempt.provider}-${index}`} className="text-zinc-300">
+              <div className="flex flex-wrap justify-between gap-1">
+                <span>{attempt.provider === 'apple' ? 'Apple' : 'MusicBrainz'} · {attempt.outcome.replaceAll('_', ' ')}</span>
+                <span>{attempt.durationMs} ms{attempt.httpStatus ? ` · HTTP ${attempt.httpStatus}` : ''}</span>
+              </div>
+              {attempt.candidate && (
+                <p className="text-zinc-400">
+                  {[attempt.candidate.title, attempt.candidate.artist, attempt.candidate.year].filter(Boolean).join(' · ')}
+                  {attempt.candidate.trackCount ? ` · ${attempt.candidate.trackCount} tracks` : ''}
+                </p>
+              )}
+            </div>
+          ))}
+          {selected.decision && (
+            <details className="text-zinc-300">
+              <summary className="cursor-pointer">Decision snapshot</summary>
+              <p className="mt-2">{selected.decision.headlineSummary}</p>
+              {Object.entries(selected.decision.fieldTraces).map(([field, decision]) => (
+                <p key={field} className="mt-1">{field} · {decision.chosenValue} · {decision.plainExplanation}</p>
+              ))}
+              {selected.trackDecisions?.map(track => (
+                <p key={track.trackId} className="mt-1">
+                  {track.trackNumber} · {track.selectedTitle || track.localTitle} · {track.selectedArtists || track.localArtists}
+                  {track.titleAction === 'Applied' || track.artistsAction === 'Applied' ? ' · Updated' : ' · Retained'}
+                </p>
+              ))}
+            </details>
+          )}
+        </>
+      )}
+    </section>
+  )
 }
 
 export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerProps> = ({
   isOpen,
   onClose,
   trace,
+  albumId,
+  lastEvidenceId,
   onResumeFetch,
   isResuming = false
 }) => {
   const [showTelemetry, setShowTelemetry] = useState(false)
   const [copied, setCopied] = useState(false)
 
-  if (!isOpen || !trace) {
+  if (!isOpen || (!trace && !albumId)) {
     return null
   }
 
@@ -121,7 +209,7 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
     }
   }
 
-  const fieldEntries = Object.entries(trace.fieldTraces || {})
+  const fieldEntries = Object.entries(trace?.fieldTraces || {})
 
   return (
     <div
@@ -133,7 +221,7 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
       <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-800 bg-zinc-900/60">
         <div className="flex items-center gap-2.5">
           <span className="text-sm font-semibold text-zinc-100">Curation Rationale</span>
-          {formatOutcomeBadge(trace.outcomeStatus)}
+          {trace && formatOutcomeBadge(trace.outcomeStatus)}
         </div>
         <button
           type="button"
@@ -149,6 +237,8 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        {albumId && <EvidenceHistory key={albumId} albumId={albumId} revision={lastEvidenceId} />}
+        {trace && <>
         {/* Headline Summary */}
         <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800/80">
           <p className="text-xs text-zinc-300 leading-relaxed font-sans">
@@ -279,7 +369,7 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
                           <td className="px-2.5 py-1.5 text-cyan-400">
                             {Math.round(cand.confidenceScore * 100)}%
                           </td>
-                          <td className="px-2.5 py-1.5 text-zinc-400">{cand.latencyMs}ms</td>
+                          <td className="px-2.5 py-1.5 text-zinc-400">{cand.latencyMs === undefined ? '—' : `${cand.latencyMs}ms`}</td>
                         </tr>
                       )
                     })}
@@ -301,12 +391,13 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
             </div>
           )}
         </div>
+        </>}
       </div>
 
       {/* Footer Info */}
       <div className="px-5 py-2.5 border-t border-zinc-800/80 bg-zinc-900/40 flex items-center justify-between text-[11px] text-zinc-500 font-mono">
-        <span>Album: {trace.albumId}</span>
-        <span>{new Date(trace.updatedAt).toLocaleTimeString()}</span>
+        <span>Album: {albumId ?? trace?.albumId}</span>
+        <span>{trace?.updatedAt ? new Date(trace.updatedAt).toLocaleTimeString() : ''}</span>
       </div>
     </div>
   )

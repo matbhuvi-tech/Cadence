@@ -214,28 +214,24 @@ pub fn start_library_scan(
     force_full: Option<bool>,
     playback_policy: Option<String>,
 ) -> Result<(), String> {
-    if let Some(ref policy) = playback_policy {
-        let mode = crate::scanner::engine::PlaybackScanMode::from_str(policy);
-        scanner.set_playback_mode(mode);
-    }
+    let _ = playback_policy; // Legacy callers may still send this preference.
     scanner.start_scan(app, (*db).clone(), folder_path, mount_id, force_full.unwrap_or(false))
 }
 
 #[tauri::command]
 pub fn set_scan_playback_policy(
-    scanner: State<'_, ScannerController>,
     policy: String,
 ) -> Result<(), String> {
-    let mode = crate::scanner::engine::PlaybackScanMode::from_str(&policy);
-    scanner.set_playback_mode(mode);
-    Ok(())
+    if policy.eq_ignore_ascii_case("purist") {
+        Ok(())
+    } else {
+        Err("Library scans always suspend during playback.".into())
+    }
 }
 
 #[tauri::command]
-pub fn get_scan_playback_policy(
-    scanner: State<'_, ScannerController>,
-) -> Result<String, String> {
-    Ok(scanner.get_playback_mode().as_str().to_string())
+pub fn get_scan_playback_policy() -> Result<String, String> {
+    Ok("purist".into())
 }
 
 #[tauri::command]

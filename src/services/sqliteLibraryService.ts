@@ -417,8 +417,9 @@ export class SqliteLibraryService {
           originalYear: t.originalYear || undefined,
           acoustidFingerprint: t.acoustidFingerprint || undefined,
           musicbrainzRecordingId: t.musicbrainzRecordingId || undefined,
-          releaseTitle: (t as any).album_title || t.folderName,
-          albumTitle: (t as any).album_title || t.folderName,
+          releaseTitle: t.albumTitle || t.folderName,
+          albumTitle: t.albumTitle || t.folderName,
+          canonicalReleaseYear: t.releaseYear || undefined,
           credits: [],
           masterReleaseId: t.releaseId,
         }

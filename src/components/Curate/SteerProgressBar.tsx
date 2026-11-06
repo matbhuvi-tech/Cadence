@@ -6,6 +6,7 @@ interface SteerProgressBarProps {
   message: string
   outcomeStatus?: OutcomeStatus | null
   isFetching: boolean
+  evidenceSaveFailed?: boolean
   onToggleRationale?: () => void
   hasTrace?: boolean
 }
@@ -14,10 +15,11 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
   message,
   outcomeStatus,
   isFetching,
+  evidenceSaveFailed,
   onToggleRationale,
   hasTrace
 }) => {
-  if (!isFetching && !outcomeStatus && !hasTrace) {
+  if (!isFetching && !outcomeStatus && !hasTrace && !evidenceSaveFailed) {
     return null
   }
 
@@ -36,7 +38,7 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
 
   // Completed outcome badge with click to inspect
   let badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700'
-  let label = 'Evaluated'
+  let label = 'Evidence history'
 
   if (outcomeStatus === 'matched_applied') {
     badgeColor = 'bg-emerald-950/80 text-emerald-400 border-emerald-700/50 hover:bg-emerald-900/80'
@@ -54,6 +56,10 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
     badgeColor = 'bg-red-950/80 text-red-400 border-red-700/50 hover:bg-red-900/80'
     label = 'Evaluation Failed'
   }
+  if (evidenceSaveFailed) {
+    badgeColor = 'bg-red-950/80 text-red-400 border-red-700/50 hover:bg-red-900/80'
+    label = 'Evidence Save Failed'
+  }
 
   return (
     <div className="flex items-center gap-1.5 select-none h-[26px]">
@@ -61,7 +67,7 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
         type="button"
         onClick={onToggleRationale}
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-mono font-medium transition-colors shadow-sm cursor-pointer ${badgeColor}`}
-        title="Click or press Ctrl+I to inspect curation decision rationale and evidence"
+        title={evidenceSaveFailed ? message : 'Click or press Ctrl+I to inspect curation decision rationale and evidence'}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-current opacity-80" />
         <span>{label}</span>

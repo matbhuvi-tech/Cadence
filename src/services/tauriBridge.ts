@@ -7,6 +7,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import type { CurationDecisionTrace, UpdateArtistEditorialPayload } from '../core/types'
 import type { CurateDraft } from '../core/curateDraft'
+import type { CurateEvidenceRun, CurateEvidenceSummary } from './curateEvidenceService'
+import type { CurateCommitRow } from '../core/curateCommit'
 import type { CommitQueueSummary, CommitTelemetryPayload, EnqueueBatchPayload } from '../types/commit'
 
 export interface AudioStreamTelemetry {
@@ -117,6 +119,7 @@ class TauriBridgeService {
     onPositionUpdate?: (pos: number, dur: number) => void,
     onEnded?: () => void
   ): Promise<AudioStreamTelemetry | null> {
+    this.notifyPlaybackState('Loading')
     this.onPositionUpdateCallback = onPositionUpdate || null
     this.onEndedCallback = onEnded || null
 
@@ -1179,6 +1182,14 @@ class TauriBridgeService {
     return `mock-batch-${Date.now()}`
   }
 
+  public async commitGetCurateProjection(): Promise<CurateCommitRow[]> {
+    return this.isTauri() ? invoke<CurateCommitRow[]>('commit_get_curate_projection') : []
+  }
+
+  public async commitRetryCurateItems(itemIds: string[]): Promise<number> {
+    return invoke<number>('commit_retry_curate_items', { itemIds })
+  }
+
   public async commitGetQueueSummary(): Promise<CommitQueueSummary> {
     if (this.isTauri()) {
       return await invoke<CommitQueueSummary>('commit_get_queue_summary')
@@ -1305,6 +1316,18 @@ class TauriBridgeService {
     } finally {
       if (this.curateDraftWrites.get(albumId) === write) this.curateDraftWrites.delete(albumId)
     }
+  }
+
+  public async curationSaveEvidence(albumId: string, run: CurateEvidenceRun): Promise<void> {
+    if (this.isTauri()) await invoke('curation_save_evidence', { albumId, run })
+  }
+
+  public async curationListEvidence(albumId: string): Promise<CurateEvidenceSummary[]> {
+    return this.isTauri() ? invoke('curation_list_evidence', { albumId }) : []
+  }
+
+  public async curationGetEvidence(albumId: string, id: string): Promise<CurateEvidenceRun | null> {
+    return this.isTauri() ? invoke('curation_get_evidence', { albumId, id }) : null
   }
 
   public async curationSaveTrace(albumId: string, trace: CurationDecisionTrace): Promise<void> {

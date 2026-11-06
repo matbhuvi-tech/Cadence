@@ -5,7 +5,7 @@ Houses the native music library filesystem scanner and metadata extraction engin
 
 ## Interface
 - `ScannerController`: Orchestrator managing scanner threads, pause/resume state, cancellation tokens, and batch database ingestion.
-- `PlaybackScanMode`: Guard mode ensuring scanner pauses or drops I/O priority during active audio playback.
+- The scanner shares an I/O gate with playback startup. New scans are rejected during playback and an existing scan resumes when playback stops.
 - `ScanProgressPayload` & `ScanCompletePayload`: Event structures streaming file counts, processed tracks, and errors to the UI.
 - `engine.rs`: Multi-threaded directory walker and ground-truth container parser for PCM and DSD audio formats.
 

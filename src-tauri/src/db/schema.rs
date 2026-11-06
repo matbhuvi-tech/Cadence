@@ -14,6 +14,22 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS curation_evidence_runs (
+            id TEXT PRIMARY KEY,
+            album_id TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            trigger TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_curation_evidence_album
+            ON curation_evidence_runs(album_id, requested_at DESC);
+        CREATE TABLE IF NOT EXISTS curation_current_evidence (
+            album_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES curation_evidence_runs(id)
+        );
+
         CREATE TABLE IF NOT EXISTS storage_mounts (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -232,6 +248,12 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             completed_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS commit_artwork_results (
+            id TEXT PRIMARY KEY,
+            thumbnail_url TEXT NOT NULL,
+            jpeg BLOB
+        );
+
         CREATE TABLE IF NOT EXISTS commit_queue_items (
             id TEXT PRIMARY KEY,
             batch_id TEXT NOT NULL REFERENCES commit_queue_batches(id) ON DELETE CASCADE,
@@ -246,7 +268,8 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             error_message TEXT,
             written_bytes INTEGER DEFAULT 0,
             started_at TEXT,
-            completed_at TEXT
+            completed_at TEXT,
+            artwork_result_id TEXT REFERENCES commit_artwork_results(id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_commit_queue_status ON commit_queue_items(status, batch_id);
@@ -329,6 +352,22 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         [],
     );
     let _ = conn.execute("ALTER TABLE commit_queue_items ADD COLUMN expected_crc TEXT", []);
+    let has_artwork_result: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('commit_queue_items') WHERE name = 'artwork_result_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_artwork_result {
+        conn.execute("ALTER TABLE commit_queue_items ADD COLUMN artwork_result_id TEXT REFERENCES commit_artwork_results(id)", [])?;
+    }
+    let has_artwork_jpeg: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('commit_artwork_results') WHERE name = 'jpeg')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_artwork_jpeg {
+        conn.execute("ALTER TABLE commit_artwork_results ADD COLUMN jpeg BLOB", [])?;
+    }
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_status ON commit_queue_items(status, batch_id)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_mount ON commit_queue_items(mount_id, status)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_commit_queue_track ON commit_queue_items(track_id)", []);

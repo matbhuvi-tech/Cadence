@@ -4,6 +4,21 @@ use crate::curation::{CurationDecisionTrace, CurationStorage};
 use crate::db::AppDb;
 
 #[tauri::command]
+pub fn curation_save_evidence(db: State<AppDb>, album_id: String, run: serde_json::Value) -> Result<(), String> {
+    CurationStorage::save_evidence(&db, &album_id, &run)
+}
+
+#[tauri::command]
+pub fn curation_list_evidence(db: State<AppDb>, album_id: String) -> Result<Vec<serde_json::Value>, String> {
+    CurationStorage::list_evidence(&db, &album_id)
+}
+
+#[tauri::command]
+pub fn curation_get_evidence(db: State<AppDb>, album_id: String, id: String) -> Result<Option<serde_json::Value>, String> {
+    CurationStorage::get_evidence(&db, &album_id, &id)
+}
+
+#[tauri::command]
 pub fn curation_save_draft(
     db: State<AppDb>,
     album_id: String,

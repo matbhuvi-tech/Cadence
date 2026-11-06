@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use lofty::config::WriteOptions;
 use lofty::file::TaggedFileExt;
+use lofty::picture::{Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagExt, TagItem};
 use parking_lot::Mutex;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
@@ -41,14 +43,69 @@ pub struct CommitTelemetryPayload {
     pub error_message: Option<String>,
 }
 
+type TelemetrySink = Arc<dyn Fn(&CommitTelemetryPayload) + Send + Sync>;
+
+struct PreparedCover {
+    id: String,
+    source: String,
+    jpeg: Vec<u8>,
+    thumbnail_url: String,
+}
+
+const MAX_COVER_BYTES: usize = 8 * 1024 * 1024;
+
+fn load_cover_bytes(source: &str) -> Result<Vec<u8>, String> {
+    if source.starts_with("data:") {
+        let (kind, encoded) = source.split_once(";base64,")
+            .ok_or_else(|| "Invalid cover image data.".to_string())?;
+        if !matches!(kind.to_ascii_lowercase().as_str(), "data:image/jpeg" | "data:image/png") {
+            return Err("Only JPEG and PNG cover images are supported.".into());
+        }
+        if encoded.len() > MAX_COVER_BYTES.div_ceil(3) * 4 {
+            return Err("The selected cover exceeds 8 MiB.".into());
+        }
+        let bytes = BASE64_STANDARD.decode(encoded).map_err(|_| "Invalid cover image data.".to_string())?;
+        if bytes.len() > MAX_COVER_BYTES {
+            return Err("The selected cover exceeds 8 MiB.".into());
+        }
+        return Ok(bytes);
+    }
+
+    let url = reqwest::Url::parse(source).map_err(|_| "Invalid cover URL.".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
+        return Err("The cover URL must be HTTP or HTTPS without embedded credentials.".into());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+        .map_err(|err| format!("Could not start cover download: {err}"))?;
+    runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build().map_err(|err| format!("Could not start cover download: {}", err.without_url()))?;
+        let mut response = client.get(url).send().await.and_then(|response| response.error_for_status())
+            .map_err(|err| format!("Could not download the selected cover: {}", err.without_url()))?;
+        if response.content_length().is_some_and(|size| size > MAX_COVER_BYTES as u64) {
+            return Err("The selected cover exceeds 8 MiB.".into());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await
+            .map_err(|err| format!("The cover download was interrupted: {}", err.without_url()))? {
+            if chunk.len() > MAX_COVER_BYTES - bytes.len() {
+                return Err("The selected cover exceeds 8 MiB.".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    })
+}
+
 #[derive(Clone)]
 pub struct CommitQueueWorker {
-    engine: AudioEngine,
+    playback_active: Arc<dyn Fn() -> bool + Send + Sync>,
     db: AppDb,
     is_running: Arc<AtomicBool>,
     user_paused: Arc<AtomicBool>,
-    app_handle: Arc<Mutex<Option<AppHandle>>>,
-    last_playback_activity: Arc<Mutex<std::time::Instant>>,
+    telemetry_sink: Arc<Mutex<Option<TelemetrySink>>>,
     last_telemetry_emit: Arc<Mutex<std::time::Instant>>,
     last_emitted_state: Arc<Mutex<String>>,
     offline_mounts: Arc<Mutex<HashSet<String>>>,
@@ -56,18 +113,22 @@ pub struct CommitQueueWorker {
     active_item_info: Arc<Mutex<Option<(String, String, String)>>>, // (track_id, title, file_path)
     processed_in_window: Arc<Mutex<Vec<std::time::Instant>>>,
     written_artwork_dirs: Arc<Mutex<HashSet<std::path::PathBuf>>>,
+    prepared_cover: Arc<Mutex<Option<Arc<PreparedCover>>>>,
     current_active_batch_id: Arc<Mutex<Option<String>>>,
 }
 
 impl CommitQueueWorker {
     pub fn new(engine: AudioEngine, db: AppDb) -> Self {
+        Self::with_playback_gate(db, move || engine.is_playing() || engine.is_paused())
+    }
+
+    fn with_playback_gate(db: AppDb, playback_active: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
-            engine,
+            playback_active: Arc::new(playback_active),
             db,
             is_running: Arc::new(AtomicBool::new(false)),
             user_paused: Arc::new(AtomicBool::new(false)),
-            app_handle: Arc::new(Mutex::new(None)),
-            last_playback_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+            telemetry_sink: Arc::new(Mutex::new(None)),
             last_telemetry_emit: Arc::new(Mutex::new(std::time::Instant::now() - Duration::from_secs(1))),
             last_emitted_state: Arc::new(Mutex::new(String::new())),
             offline_mounts: Arc::new(Mutex::new(HashSet::new())),
@@ -75,6 +136,7 @@ impl CommitQueueWorker {
             active_item_info: Arc::new(Mutex::new(None)),
             processed_in_window: Arc::new(Mutex::new(Vec::new())),
             written_artwork_dirs: Arc::new(Mutex::new(HashSet::new())),
+            prepared_cover: Arc::new(Mutex::new(None)),
             current_active_batch_id: Arc::new(Mutex::new(None)),
         }
     }
@@ -139,7 +201,9 @@ impl CommitQueueWorker {
     }
 
     pub fn set_app_handle(&self, handle: AppHandle) {
-        *self.app_handle.lock() = Some(handle);
+        *self.telemetry_sink.lock() = Some(Arc::new(move |payload| {
+            let _ = handle.emit("commit://telemetry", payload);
+        }));
     }
 
     pub fn toggle_pause(&self) -> bool {
@@ -224,15 +288,6 @@ impl CommitQueueWorker {
             }
 
             // 2. Audio Engine Transport Preemption Guard
-            let is_playback_active = self.engine.is_playing() || self.engine.is_paused();
-            if is_playback_active {
-                *self.last_playback_activity.lock() = std::time::Instant::now();
-            }
-
-            let last_active = *self.last_playback_activity.lock();
-            let elapsed_since_active = last_active.elapsed();
-            let in_cooldown = !is_playback_active && elapsed_since_active < Duration::from_secs(30);
-
             // Fetch summary to check if there is work to do
             let summary = {
                 let conn = self.lock_db();
@@ -247,30 +302,9 @@ impl CommitQueueWorker {
                 continue;
             }
 
-            // Check if active batch allows force override
-            let active_batch_id = summary.as_ref().and_then(|s| s.active_batch_id.clone());
-            let is_override_allowed = if let Some(ref bid) = active_batch_id {
-                let conn = self.lock_db();
-                DbOperations::is_batch_override_allowed(&conn, bid).unwrap_or(false)
-            } else {
-                false
-            };
-
-            // Purity Mode check: If Purity Mode is active, NEVER allow override during playback
-            let is_purity_mode = self.engine.get_purity_mode();
-            let can_override = is_override_allowed && !is_purity_mode;
-
-            if is_playback_active && !can_override {
+            if (self.playback_active)() {
                 *self.active_item_info.lock() = None;
                 self.emit_state_telemetry("paused_playback", None, None);
-                thread::sleep(Duration::from_millis(250));
-                continue;
-            }
-
-            if in_cooldown && !can_override {
-                let remaining = 30u64.saturating_sub(elapsed_since_active.as_secs());
-                *self.active_item_info.lock() = None;
-                self.emit_state_telemetry("cooldown", Some(remaining), None);
                 thread::sleep(Duration::from_millis(250));
                 continue;
             }
@@ -278,15 +312,20 @@ impl CommitQueueWorker {
             // 3. Excluded mounts check
             let excluded: Vec<String> = self.offline_mounts.lock().iter().cloned().collect();
 
-            // 4. Fetch next pending item
+            // Fetch and claim under one transaction so edits cannot replace a claimed payload.
             let next_item = {
                 let conn = self.lock_db();
-                DbOperations::fetch_next_pending_commit_item(&conn, &excluded).ok().flatten()
+                DbOperations::claim_next_commit_item(&conn, &excluded)
             };
 
-            let item = match next_item {
-                Some(i) => i,
-                None => {
+            let (item, inflight_summary) = match next_item {
+                Ok(Some(claimed)) => claimed,
+                Err(err) => {
+                    eprintln!("[CommitQueueWorker] Could not claim next item: {}", err);
+                    thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                Ok(None) => {
                     // All pending items may be on offline mounts
                     if !excluded.is_empty() {
                         self.emit_state_telemetry("paused_mount_offline", None, None);
@@ -304,14 +343,9 @@ impl CommitQueueWorker {
                 if current_batch.as_deref() != Some(&item.batch_id) {
                     *current_batch = Some(item.batch_id.clone());
                     self.written_artwork_dirs.lock().clear();
+                    *self.prepared_cover.lock() = None;
                 }
             }
-
-            // 5. Mark item as in_flight and query updated summary atomically in single lock
-            let inflight_summary_res = {
-                let conn = self.lock_db();
-                DbOperations::mark_commit_item_in_flight_and_get_summary(&conn, &item.id)
-            };
 
             // Parse payload for track info
             let payload: serde_json::Value = serde_json::from_str(&item.payload_json).unwrap_or_default();
@@ -323,15 +357,7 @@ impl CommitQueueWorker {
 
             *self.active_item_info.lock() = Some((item.track_id.clone(), track_title.clone(), item.file_path.clone()));
 
-            match inflight_summary_res {
-                Ok(summary) => {
-                    self.emit_telemetry_with_summary(&summary, "writing", None, None, true);
-                }
-                Err(e) => {
-                    eprintln!("[CommitQueueWorker] Critical: Failed to mark item {} in_flight: {}", item.id, e);
-                    self.emit_state_telemetry("writing", None, None);
-                }
-            }
+            self.emit_telemetry_with_summary(&inflight_summary, "writing", None, None, true);
 
             // 6. Execute atomic write
             let write_result = self.process_commit_item(&item, &payload);
@@ -407,6 +433,18 @@ impl CommitQueueWorker {
         item: &crate::db::DbCommitQueueItem,
         payload: &serde_json::Value,
     ) -> Result<i64, String> {
+        let curate = payload.get("curate").and_then(|value| value.as_bool()).unwrap_or(false);
+        if curate {
+            let conn = self.lock_db();
+            let locked = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_mounts WHERE id = ?1 AND is_readonly_locked = 1)",
+                [&item.mount_id],
+                |row| row.get::<_, bool>(0),
+            ).map_err(|err| err.to_string())?;
+            if locked {
+                return Err("This storage mount is locked read-only.".to_string());
+            }
+        }
         let destination = payload.get("destination").and_then(|d| d.as_str()).unwrap_or("embedded");
         let target_path = Path::new(&item.file_path);
 
@@ -465,6 +503,23 @@ impl CommitQueueWorker {
 
             let bytes = fs::metadata(&sidecar_path).map(|m| m.len() as i64).unwrap_or(0);
             return Ok(bytes);
+        }
+
+        let artwork = if curate {
+            payload.get("coverArtUrl").and_then(|value| value.as_str())
+                .map(|source| self.prepare_cover(source, &item.batch_id)).transpose()?
+        } else {
+            None
+        };
+
+        // Artwork retrieval can take several seconds. Re-check playback before touching the file.
+        while (self.playback_active)() || self.user_paused.load(Ordering::Relaxed) {
+            if !self.is_running.load(Ordering::Relaxed) {
+                return Err("The worker stopped before the file write.".into());
+            }
+            let state = if (self.playback_active)() { "paused_playback" } else { "user_paused" };
+            self.emit_state_telemetry(state, None, None);
+            thread::sleep(Duration::from_millis(250));
         }
 
         // Embedded tags write
@@ -531,10 +586,26 @@ impl CommitQueueWorker {
             if let Some(orig_year) = payload.get("originalYear").and_then(|v| v.as_i64()) {
                 tag.insert(TagItem::new(ItemKey::OriginalReleaseDate, ItemValue::Text(orig_year.to_string())));
             }
+            if let Some(cover) = &artwork {
+                let mut picture = Picture::from_reader(&mut cover.jpeg.as_slice())
+                    .map_err(|err| format!("Could not prepare the embedded cover: {err}"))?;
+                picture.set_pic_type(PictureType::CoverFront);
+                tag.remove_picture_type(PictureType::CoverFront);
+                tag.push_picture(picture);
+            }
 
             tag.save_to_path(&temp_path, WriteOptions::default())
                 .map_err(|e| format!("Lofty save_to_path failed: {}", e))?;
 
+            if let Some(cover) = &artwork {
+                let verified = Probe::open(&temp_path).and_then(|probe| probe.read())
+                    .map_err(|err| format!("Could not verify the embedded cover: {err}"))?;
+                if !verified.primary_tag().or_else(|| verified.first_tag()).is_some_and(|tag| {
+                    tag.pictures().iter().any(|pic| pic.pic_type() == PictureType::CoverFront && pic.data() == cover.jpeg)
+                }) {
+                    return Err("The audio format did not retain the selected front cover.".into());
+                }
+            }
             Ok(())
         })();
 
@@ -550,7 +621,7 @@ impl CommitQueueWorker {
         }
 
         // Write cover.jpg to album directory if staged artwork data URL is provided (deduplicated per batch)
-        if let Some(cover_data) = payload.get("coverArtUrl").and_then(|s| s.as_str()) {
+        if let Some(cover_data) = payload.get("coverArtUrl").and_then(|s| s.as_str()).filter(|_| !curate) {
             if cover_data.starts_with("data:image/") {
                 let parent_dir_buf = parent_dir.to_path_buf();
                 let already_written = self.written_artwork_dirs.lock().contains(&parent_dir_buf);
@@ -576,7 +647,8 @@ impl CommitQueueWorker {
         // Update SQLite track cache so UI reflects tags immediately
         {
             let conn = self.lock_db();
-            if let Err(e) = conn.execute(
+            let update_cache = |conn: &rusqlite::Connection| -> rusqlite::Result<()> {
+                conn.execute(
                 "UPDATE tracks SET
                     title = COALESCE(?1, title),
                     artist_credit = COALESCE(?2, artist_credit),
@@ -603,13 +675,106 @@ impl CommitQueueWorker {
                     payload.get("originalYear").and_then(|v| v.as_i64()),
                     item.track_id,
                 ],
-            ) {
-                eprintln!("[CommitQueueWorker] Warning: Failed to update track cache for {}: {}", item.track_id, e);
+                )?;
+                if curate {
+                    conn.execute(
+                        "UPDATE releases SET title = COALESCE(?1, title),
+                            artist_credit = COALESCE(?2, artist_credit),
+                            composer_name = COALESCE(?3, composer_name),
+                            release_year = COALESCE(?4, release_year),
+                            genre_tags = CASE WHEN ?5 IS NULL THEN genre_tags
+                                WHEN json_valid(genre_tags) THEN json_set(genre_tags, '$[0]', ?5)
+                                ELSE json_array(?5) END,
+                            front_cover_url = COALESCE(?6, front_cover_url)
+                         WHERE id = (SELECT release_id FROM tracks WHERE id = ?7)",
+                        rusqlite::params![
+                            payload.get("album").and_then(|v| v.as_str()),
+                            payload.get("albumArtist").and_then(|v| v.as_str()),
+                            payload.get("composer").and_then(|v| v.as_str()),
+                            payload.get("year").and_then(|v| v.as_i64()),
+                            payload.get("genre").and_then(|v| v.as_str()),
+                            artwork.as_ref().map(|cover| cover.thumbnail_url.as_str()),
+                            item.track_id,
+                        ],
+                    )?;
+                    if let Some(cover) = &artwork {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO commit_artwork_results (id, thumbnail_url, jpeg) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![cover.id, cover.thumbnail_url, cover.jpeg],
+                        )?;
+                        conn.execute(
+                            "UPDATE commit_queue_items SET artwork_result_id = ?1 WHERE id = ?2",
+                            rusqlite::params![cover.id, item.id],
+                        )?;
+                    }
+                }
+                Ok(())
+            };
+            if curate {
+                let tx = conn.unchecked_transaction().map_err(|err| err.to_string())?;
+                update_cache(&tx).and_then(|()| tx.commit()).map_err(|err| {
+                    format!("File tags were written, but updating the catalog failed: {err}")
+                })?;
+            } else if let Err(err) = update_cache(&conn) {
+                eprintln!("[CommitQueueWorker] Warning: Failed to update track cache for {}: {}", item.track_id, err);
             }
         }
 
         let written_bytes = fs::metadata(target_path).map(|m| m.len() as i64).unwrap_or(0);
         Ok(written_bytes)
+    }
+
+    fn prepare_cover(&self, source: &str, batch_id: &str) -> Result<Arc<PreparedCover>, String> {
+        if let Some(cover) = self.prepared_cover.lock().as_ref().filter(|cover| cover.source == source).cloned() {
+            return Ok(cover);
+        }
+        let saved = self.lock_db().query_row(
+            "SELECT a.id, a.thumbnail_url, a.jpeg FROM commit_artwork_results a
+             JOIN commit_queue_items i ON i.artwork_result_id = a.id
+             WHERE i.batch_id = ?1 AND a.jpeg IS NOT NULL
+                AND CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json, '$.coverArtUrl') END = ?2
+             LIMIT 1",
+            rusqlite::params![batch_id, source],
+            |row| Ok(PreparedCover {
+                id: row.get(0)?,
+                thumbnail_url: row.get(1)?,
+                jpeg: row.get(2)?,
+                source: source.to_owned(),
+            }),
+        ).optional().map_err(|err| format!("Could not load previously saved artwork: {err}"))?;
+        if let Some(cover) = saved {
+            let cover = Arc::new(cover);
+            *self.prepared_cover.lock() = Some(cover.clone());
+            return Ok(cover);
+        }
+        let bytes = load_cover_bytes(source)?;
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+            .map_err(|err| format!("Could not identify the cover image: {err}"))?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(6000);
+        limits.max_image_height = Some(6000);
+        limits.max_alloc = Some(160 * 1024 * 1024);
+        reader.limits(limits);
+        let decoded = reader.decode().map_err(|err| format!("Invalid JPEG or PNG cover: {err}"))?;
+        let encode = |size, quality| -> Result<Vec<u8>, String> {
+            let mut output = Vec::new();
+            let resized = if decoded.width().max(decoded.height()) > size {
+                decoded.thumbnail(size, size).into_rgb8()
+            } else {
+                decoded.to_rgb8()
+            };
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality)
+                .encode_image(&resized).map_err(|err| format!("Could not encode the cover: {err}"))?;
+            Ok(output)
+        };
+        let cover = Arc::new(PreparedCover {
+            id: Uuid::new_v4().to_string(),
+            source: source.to_owned(),
+            jpeg: encode(1500, 90)?,
+            thumbnail_url: format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(encode(240, 75)?)),
+        });
+        *self.prepared_cover.lock() = Some(cover.clone());
+        Ok(cover)
     }
 
     fn atomic_replace_file(src: &Path, dest: &Path) -> Result<(), String> {
@@ -659,22 +824,18 @@ impl CommitQueueWorker {
     }
 
     pub fn emit_telemetry(&self, force: bool) {
-        let (state, cooldown) = {
-            let is_playback_active = self.engine.is_playing() || self.engine.is_paused();
-            let last_active = *self.last_playback_activity.lock();
-            let elapsed = last_active.elapsed();
+        let state = {
+            let is_playback_active = (self.playback_active)();
             if self.user_paused.load(Ordering::Relaxed) {
-                ("user_paused", None)
+                "user_paused"
             } else if is_playback_active {
-                ("paused_playback", None)
-            } else if elapsed < Duration::from_secs(30) {
-                ("cooldown", Some(30u64.saturating_sub(elapsed.as_secs())))
+                "paused_playback"
             } else {
-                ("writing", None)
+                "writing"
             }
         };
 
-        self.emit_telemetry_with_state(state, cooldown, None, force);
+        self.emit_telemetry_with_state(state, None, None, force);
     }
 
     fn emit_telemetry_with_summary(
@@ -692,9 +853,9 @@ impl CommitQueueWorker {
         *last_emit = std::time::Instant::now();
         drop(last_emit);
 
-        let app_handle_opt = self.app_handle.lock().clone();
-        let app = match app_handle_opt {
-            Some(a) => a,
+        let telemetry_sink = self.telemetry_sink.lock().clone();
+        let emit = match telemetry_sink {
+            Some(emit) => emit,
             None => return,
         };
 
@@ -745,7 +906,7 @@ impl CommitQueueWorker {
             error_message,
         };
 
-        let _ = app.emit("commit://telemetry", &payload);
+        emit(&payload);
     }
 
     fn emit_telemetry_with_state(
@@ -781,27 +942,15 @@ impl CommitQueueWorker {
             100.0
         };
 
-        let is_playback_active = self.engine.is_playing() || self.engine.is_paused();
-        let last_active = *self.last_playback_activity.lock();
-        let elapsed = last_active.elapsed();
-        let in_cooldown = !is_playback_active && elapsed < Duration::from_secs(30);
-
+        let is_playback_active = (self.playback_active)();
         let state = if self.user_paused.load(Ordering::Relaxed) {
             "user_paused".to_string()
         } else if total_items == 0 || (pending_items == 0 && inflight_items == 0) {
             "idle".to_string()
         } else if is_playback_active {
             "paused_playback".to_string()
-        } else if in_cooldown {
-            "cooldown".to_string()
         } else {
             "writing".to_string()
-        };
-
-        let cooldown_remaining_secs = if in_cooldown {
-            Some(30u64.saturating_sub(elapsed.as_secs()))
-        } else {
-            None
         };
 
         let history = self.processed_in_window.lock();
@@ -830,9 +979,143 @@ impl CommitQueueWorker {
             total_items,
             percent,
             throughput_items_per_sec: throughput,
-            cooldown_remaining_secs,
+            cooldown_remaining_secs: None,
             offline_mounts: offline,
             error_message: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{DbCommitQueueBatch, NewCommitItem};
+
+    fn wav_fixture() -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend(196u32.to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes()); // PCM
+        bytes.extend(1u16.to_le_bytes()); // Mono
+        bytes.extend(8000u32.to_le_bytes());
+        bytes.extend(16000u32.to_le_bytes());
+        bytes.extend(2u16.to_le_bytes());
+        bytes.extend(16u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(160u32.to_le_bytes());
+        bytes.extend([0; 160]);
+        bytes
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    #[test]
+    fn curate_confirmation_survives_worker_restart_and_writes_wav_after_playback() {
+        let folder = std::env::temp_dir().join(format!("cadence-curate-{}", Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        let song = folder.join("fixture.wav");
+        let database = folder.join("cadence.db");
+        let wav = wav_fixture();
+        fs::write(&song, &wav).unwrap();
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([48, 94, 150])))
+            .write_to(&mut image, image::ImageFormat::Png).unwrap();
+        let cover_source = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(image.into_inner()));
+        let playing = Arc::new(AtomicBool::new(true));
+        {
+            let db = AppDb::new(database.clone()).unwrap();
+            let mut conn = db.conn.lock();
+            conn.execute_batch(
+                "INSERT INTO storage_mounts (id, name, mount_path, mount_type, file_system, last_seen_timestamp)
+                 VALUES ('disk', 'Fixture', 'fixture', 'local', 'NTFS', '2026-01-01');
+                 INSERT INTO releases (id, title, folder_path, folder_name, artist_credit, genre_tags, created_at)
+                 VALUES ('album', 'Fixture Album', 'fixture', 'fixture', 'Singer', '[\"Soundtrack\"]', '2026-01-01');",
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO tracks (id, release_id, mount_id, folder_path, folder_name, file_path,
+                    file_name, file_size, mtime, title, artist_credit, album_title, genre, format, created_at)
+                 VALUES ('track', 'album', 'disk', 'fixture', 'fixture', ?1, 'fixture.wav', 204, 0,
+                    'Fixture Song', 'Singer', 'Fixture Album', 'Soundtrack', 'WAV', '2026-01-01')",
+                [song.to_str().unwrap()],
+            ).unwrap();
+            let batch = DbCommitQueueBatch {
+                id: "batch".into(), description: Some("Curate fixture".into()), total_tracks: 1,
+                destination: "embedded".into(), force_override: false, status: "pending".into(),
+                created_at: "2026-01-01".into(), completed_at: None,
+            };
+            let item = NewCommitItem {
+                id: "item".into(), track_id: "track".into(), file_path: song.to_str().unwrap().into(),
+                mount_id: "disk".into(), payload_json: serde_json::json!({
+                    "curate": true, "genre": "Tamil Soundtrack", "coverArtUrl": cover_source,
+                }).to_string(),
+                backup_json: r#"{"genre":"Soundtrack"}"#.into(), expected_crc: None,
+            };
+            DbOperations::insert_commit_batch_and_items(&mut conn, &batch, &[item]).unwrap();
+            drop(conn);
+            let gate = playing.clone();
+            let worker = CommitQueueWorker::with_playback_gate(db, move || gate.load(Ordering::SeqCst));
+            let handle = worker.start().unwrap();
+            let paused = wait_until(|| *worker.last_emitted_state.lock() == "paused_playback");
+            worker.stop();
+            handle.join().unwrap();
+            assert!(paused, "worker never observed the playback gate");
+            assert_eq!(fs::read(&song).unwrap(), wav);
+        }
+        {
+            let db = AppDb::new(database.clone()).unwrap();
+            let gate = playing.clone();
+            let worker = CommitQueueWorker::with_playback_gate(db, move || gate.load(Ordering::SeqCst));
+            let handle = worker.start().unwrap();
+            let paused = wait_until(|| *worker.last_emitted_state.lock() == "paused_playback");
+            let while_playing = fs::read(&song).unwrap();
+            let pending = worker.get_telemetry().pending_items;
+            playing.store(false, Ordering::SeqCst);
+            let finished = wait_until(|| {
+                let status = worker.get_telemetry();
+                status.completed_items == 1 || status.failed_items == 1
+            });
+            worker.stop();
+            handle.join().unwrap();
+            assert!(paused && finished, "worker did not resume promptly after playback stopped");
+            assert_eq!(pending, 1);
+            assert_eq!(while_playing, wav);
+            let conn = worker.lock_db();
+            let (status, error): (String, Option<String>) = conn.query_row(
+                "SELECT status, error_message FROM commit_queue_items WHERE id = 'item'", [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(status, "completed", "{error:?}");
+            let (track_genre, release_genre, thumbnail): (String, String, String) = conn.query_row(
+                "SELECT tracks.genre, json_extract(releases.genre_tags, '$[0]'), releases.front_cover_url
+                 FROM tracks JOIN releases ON releases.id = tracks.release_id WHERE tracks.id = 'track'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(track_genre, "Tamil Soundtrack");
+            assert_eq!(release_genre, "Tamil Soundtrack");
+            assert!(thumbnail.starts_with("data:image/jpeg;base64,"));
+            drop(conn);
+            *worker.prepared_cover.lock() = None;
+            let saved = worker.prepare_cover(&cover_source, "batch").unwrap();
+            assert_eq!(saved.thumbnail_url, thumbnail);
+            assert!(worker.prepare_cover("data:image/png;base64,SGVsbG8=", "batch").is_err());
+        }
+        let written = Probe::open(&song).unwrap().read().unwrap();
+        let tag = written.primary_tag().or_else(|| written.first_tag()).unwrap();
+        assert_eq!(tag.genre().as_deref(), Some("Tamil Soundtrack"));
+        let front_cover = tag.pictures().iter().find(|pic| pic.pic_type() == PictureType::CoverFront).unwrap();
+        assert_eq!(image::load_from_memory(front_cover.data()).unwrap().width(), 8);
+        fs::remove_file(&song).unwrap();
+        fs::remove_file(&database).unwrap();
+        fs::remove_dir(&folder).unwrap();
     }
 }

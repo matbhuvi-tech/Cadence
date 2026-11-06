@@ -59,6 +59,7 @@ class CompilationCanonicalizerService {
     tracks: Track[],
     allReleases: Release[] = [],
     options?: {
+      selectedAlbumSignal?: AbortSignal
       referenceUrl?: string
       userSearchQuery?: { albumTitle?: string; artistCredit?: string; year?: number }
     }
@@ -72,7 +73,7 @@ class CompilationCanonicalizerService {
     const ambientState = ambientCurationService.getState().state
     const isCoolingDown = ambientState === 'cooldown'
 
-    if (isPlaying || isPaused || isPlaybackStateLoading || isCoolingDown) {
+    if (!options?.selectedAlbumSignal && (isPlaying || isPaused || isPlaybackStateLoading || isCoolingDown)) {
       return {
         success: false,
         albumTitle: release.title,
@@ -123,7 +124,7 @@ class CompilationCanonicalizerService {
         })),
       }
 
-      const json = await resolveGemini('compilation', payload)
+      const json = await resolveGemini('compilation', payload, options?.selectedAlbumSignal, Boolean(options?.selectedAlbumSignal))
       const rawResults: any[] = Array.isArray(json.results) ? json.results : []
 
       // 4. Map results and cross-reference with local library

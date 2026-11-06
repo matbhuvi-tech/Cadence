@@ -169,15 +169,6 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
     }
   }
 
-  const handleForceOverride = async () => {
-    if (!activeBatchId) return
-    try {
-      await tauriBridge.commitSetOverride(activeBatchId, true)
-    } catch (err) {
-      console.warn('Failed to set override:', err)
-    }
-  }
-
   // Label text for top pill
   let pillText = `Saving ${completedItems}/${totalItems || 1}`
   if (state === 'paused_playback') {
@@ -327,15 +318,8 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
                 Listening Quietness Active
               </div>
               <p className="text-[11px] text-amber-300/80 leading-relaxed mb-2">
-                Storage Bus Silence is protected during audio playback. Saving will resume after 30
-                seconds of quietness.
+                Tag writing resumes when playback stops.
               </p>
-              <button
-                onClick={handleForceOverride}
-                className="text-[10px] font-semibold text-amber-200 underline hover:text-white cursor-pointer"
-              >
-                Force Save Now (Shared mode only · may impact playback)
-              </button>
             </div>
           )}
 

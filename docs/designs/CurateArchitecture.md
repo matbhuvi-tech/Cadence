@@ -6,8 +6,9 @@ This document is the working record for reviewing the existing Curate design aga
 
 Review status: **in progress**  
 Last completed: **Phase 3 — Curate page load and lazy hydration; Raw Candidate Provenance; Decision Trace history scope; Selected Output persistence; Commit queue authority/projection; Commit replacement/cancellation semantics; Outcome reconciliation/restart behavior**
-Current review: **Playback-policy convergence**
-Decision status: **Phase 3, Raw Candidate Provenance, decision-history scope, durable Selected Output drafts, durable commit intent, queue-authoritative UI projection, replacement/cancellation semantics, and outcome/restart behavior accepted; playback-policy implementation remains to review**
+Last completed: **Phase 3 — Curate page load and lazy hydration; Raw Candidate Provenance; Decision Trace history scope; Selected Output persistence; Commit queue authority/projection; Commit replacement/cancellation semantics; Outcome reconciliation/restart behavior; Playback-policy convergence**
+Current review: **Review pass complete; implementation scope remains separate**
+Decision status: **All reviewed behavior and proposals accepted; queue-to-library overlay approved for implementation; no other code changes authorized by this review pass**
 
 ### Agreed invariants
 
@@ -32,6 +33,7 @@ This refines the earlier strict-quiescence interpretation. Selected-album trace/
 | Commit queue authority and UI projection | Approved for implementation — layout delegated | Once the user confirms commit, the durable queue is authoritative across restarts, writes when playback permits, and its payload overrides the album's older on-disk tags shown to the user until the file reflects it. Pending, in-flight, and failed intents remain visible; cancellation removes an intent from the effective projection. |
 | Commit replacement and cancellation semantics | Accepted | A newer edit replaces same-track work that has not started; if prior work is in flight, it remains immutable and the newer edit queues behind it. Cancellation stops work not yet started; in-flight work is not claimed cancelled unless safely stopped. Failed intent remains visible/retryable until replaced or explicitly cancelled. |
 | Commit outcome reconciliation | Accepted | Confirmed commit freezes a durable revision immediately; physical completion is tracked per file. Partial outcomes remain explicit, successful items stay successful, failed intents remain retryable/authoritative, and restart restores queue/draft/effective values. Keep completed queue payload effective until the loaded catalog baseline reflects it. |
+| Playback-policy convergence | Accepted | No library scans or bulk/lookahead album work during playback. Focused selected-album retrieval/refresh is allowed, with duplicate automatic paths sharing a maximum of four provider calls per operation. Remove post-playback cooldown; resume eligible work immediately when playback stops. Commit intent remains queued while writes wait for playback to stop. |
 
 ## Phase 3 — Curate page load and lazy hydration
 
@@ -235,6 +237,14 @@ Status: **accepted for implementation.** A separate, append-only evidence histor
 
 ## Next review — Decision Trace schema
 
+### Implementation checkpoint — Retrieval history foundation
+
+The active cockpit appends initial retrievals and explicit **Refresh Evidence** actions to SQLite, with requested and completed times, local matching context, and Cadence’s album and track decision snapshot. Apple and MusicBrainz proxy lookups record measured adapter duration and HTTP status, including empty, failed, and cancelled attempts. The current trace advances with the newest completed decision in the same transaction. The Rationale drawer loads history for the selected album and lets the user inspect an older run without applying it.
+
+The history payload excludes raw bodies and promotional artwork references. [Apple’s iTunes Search API documentation](https://developer.apple.com/library/archive/documentation/AudioVideo/Conceptual/iTuneSearchAPI/) restricts promotional content, [Google’s Gemini terms](https://ai.google.dev/gemini-api/terms) restrict Search-grounded results, and [MusicBrainz’s license](https://musicbrainz.org/doc/About/Data_License) distinguishes core CC0 data from supplementary data. Upstream raw-body capture requires review by endpoint. Direct-link and Gemini request instrumentation, refreshed-field highlights, and live desktop verification remain open.
+
+An upgraded catalog can retain required columns from the original trace schema. The trace save now populates those columns when present, so a refresh can append its evidence and update the current trace on both legacy and fresh catalogs. The regression reproduced the legacy `timestamp` constraint and now verifies inserts and updates. The cockpit distinguishes an evidence save failure from an evaluation failure.
+
 ### Current behavior
 
 - `curation_decision_traces` keeps one current record per album. Its `field_traces_json` stores a map keyed by field name, with action, chosen/local value, consensus source text, rationale, and confidence (`src/core/types.ts`; `src-tauri/src/curation/models.rs`).
@@ -286,7 +296,56 @@ Persist the latest Selected Output as a recoverable album-scoped draft, separate
 
 **Accepted.** An uncommitted Selected Output, including user edits that have not yet been staged, must survive leaving Curate and restarting Cadence. Persist it as an album-scoped draft distinct from permanent provider evidence and committed tags. Restore it on return; refresh updates Cadence-generated values while preserving explicit user edits. SQL layout remains delegated.
 
+### Implementation checkpoint — Selected Output drafts
+
+The active Unified Curate cockpit loads the selected album's draft from SQLite before showing editable output. An additive `curation_drafts` table stores one timestamped draft per album. It stores selected values and explicit choices separately from provider responses. The migration runs when the existing database opens.
+
+- Manual edits and provider choices persist before staging. Stage & Next waits for the draft save before advancing. On reopening, the cockpit restores the draft and prompts for review if the local metadata it was based on has changed.
+- Fetch & Anchor updates generated values and retains explicit album-field and per-track choices. The Local column continues to reflect the catalog baseline during a steered fetch.
+- The Phase 2 desktop restart and commit checks remain open for the new build. This checkpoint covers draft persistence in Curate. Commit queue linkage, the library overlay, outcome reconciliation, and evidence history are follow-up implementation work.
+
+TDD evidence from the Selected Output persistence and refresh decisions above:
+
+| Check | Result |
+| --- | --- |
+| `node_modules/.bin/tsx.cmd --test src/test/testCurateDraft.ts` before implementation | Failed on the missing draft module. |
+| `node --import tsx --experimental-test-coverage --test-coverage-include=src/core/curateDraft.ts --test src/test/testCurateDraft.ts` | Five passing tests. Draft core coverage was 100% lines and functions, 96.15% branches. |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib` | 15 passing tests, including SQLite reopen, album isolation, draft replacement, and preservation of a pre-existing record. |
+| `npm run build`, `npm run test:commit`, and `npm run test:trace` | Passed. |
+
 ## Next review — Commit recovery
+
+### Implementation checkpoint — Single-album commit queue
+
+Commit Album freezes the selected album and track tags in SQLite and reports the queue handoff. Listen overlays the latest confirmed values from the queue on its loaded catalog. Curate restores the saved proposal and shows the last write status. The worker claims each item transactionally and updates the track and release caches after the write. Failed rows stay visible and can be retried without requeuing completed tracks. The worker waits during playback and resumes on stop.
+
+The regression tests exercise payload isolation, queue projection, cancelled intents, and startup recovery when a newer confirmation follows an interrupted write. Live Tauri playback, restart, and tag-write verification are pending. Artwork-file persistence and the separate Tier 1 batch action still need verification and implementation work.
+
+### Implementation checkpoint — Reconcile completed drafts
+
+When Curate loads a draft, it checks that every track's latest queue record completed, SQLite reflects the written tags, and the saved selection still matches the confirmed payload. A matching draft adopts the written tags as its baseline and leaves the pending review list. A failed, partial, or superseded confirmation leaves the draft open. New edits remain available from the current detail and return the draft to review. Artwork overrides stay open for separate artwork persistence work.
+
+Draft reconciliation follows selected-album hydration. After restarting, a completed album can appear in the review list until its draft is opened and checked. The regression suite covers matching completion, failed or diverged results, and later edits. Live desktop verification remains pending.
+
+### Verification checkpoint — Playback gate, restart, and physical WAV write
+
+The native regression `curate_confirmation_survives_worker_restart_and_writes_wav_after_playback` uses a generated WAV and a temporary SQLite catalog. It starts the actual commit worker with a controlled playback flag, stops the worker, and reopens the database. The pending item survives, and the WAV stays byte-for-byte unchanged while playback is marked active. Clearing the flag lets the worker finish within the five-second test deadline. The test reopens the WAV and reads back `Tamil Soundtrack`, and checks the same genre in the track and release rows.
+
+The live desktop check reached **En Bommukutti Amavuku** and found an existing draft with a different title and cover artwork. Curate displayed the baseline-change warning. The draft was left in place. The desktop Commit Album click and the Listen view across a full app restart remain to be verified.
+
+**Manual verification pending.** The isolated `Cadence Curate QA` catalog has one synthetic silent WAV. During playback, commit the fixture draft and verify the queued title in Listen and Curate while the file hash stays unchanged. Restart with the item still pending, let the worker finish, then read the WAV tags and check that Curate reconciles the completed draft. On the real catalog, the separate **Refresh Evidence** retest passed for **Kaalamellam Kadhal Vaazhga**. Rationale showed the new completed run as Current, and SQLite retained the earlier run.
+
+### Implementation checkpoint — Tier 1 batch handoff
+
+Tier 1 Commit All prepares an idle-only batch from the current selections, including saved drafts for unopened albums. It skips albums with stale drafts, unresolved queue items, completed matching selections, or explicit artwork changes that still require separate handling. Playback interrupts preparation, and the native enqueue command checks playback again before accepting the batch.
+
+SQLite saves the new drafts and queue items together and preserves existing drafts. If a track acquires an unresolved intent before enqueue, the transaction rejects the batch. The native worker owns the file writes and the UI reports queue handoff separately from completion. The production build and regression suites passed. Live Tier 1 verification on an isolated catalog is pending.
+
+### Implementation checkpoint — Queued front covers
+
+An eligible changed cover is included in the confirmed queue payload. The worker accepts JPEG and PNG over HTTP(S) or as image data, with download size, time, and decoded dimension limits. It embeds a normalized JPEG as the front cover in the staged audio file, preserves other picture types, and reads back the new cover before replacing the original file. Failed downloads, invalid images, and formats that cannot retain the cover fail the item and leave it retryable.
+
+The catalog stores a thumbnail and links a verified artwork result to each completed track. Subsequent tracks in the same batch can reuse the prepared image after restart. Listen shows the queued preview and then the saved thumbnail. Curate reconciles the artwork selection only when the result is present and the selected draft still matches. The temporary WAV test verified embedded artwork and catalog thumbnail readback. Live desktop cover rendering, additional audio formats, and artwork undo remain open.
 
 ### Current behavior
 
@@ -363,6 +422,12 @@ Status: **partially approved for implementation**. The queue-to-library overlay 
 
 ## Outcome reconciliation and restart behavior
 
+### Implementation checkpoint — Per-track write outcomes
+
+The selected album now has an expandable **Track write outcomes** panel beside its last-commit status. It counts and lists complete, waiting, writing, and failed tracks, with each failed track's own error. It uses the existing queue projection, preserves the failed-only retry action, and distinguishes confirmed writes from later draft edits. Tracks missing from the projection are labeled **No current commit**; this is not proof of cancellation. Cancelled-item history and resumed-after-restart indicators still require richer queue data.
+
+Verification: `npx tsx --tsconfig tsconfig.app.json --test src/test/testCurateCommitOutcomes.ts src/test/testCurateCommit.ts` passed all 10 tests, including rendered mixed outcomes, escaped failure messages, album isolation, and latest-record selection. `npm run build` passed with existing bundle warnings. Native desktop layout and interaction verification remain pending.
+
 The approved overlay makes queued values visible. This review should settle how the album/draft status tracks per-item completion, failure, cancellation, retry, and restart recovery—especially when only some tracks in a multi-track album have finished writing.
 
 ### Current behavior
@@ -384,8 +449,90 @@ Retain the effective queue payload after worker completion until the app's loade
 
 ## Next review — Playback-policy convergence
 
+### Implementation checkpoint — Scan and lookahead gates
+
+The native scanner rejects new scans before probing their paths while playback is loading, playing, or paused. A scan already underway shares an I/O gate with Cadence playback starts. Playback waits for the current scan operation, and the scanner suspends before further discovery, extraction, or SQLite work. It resumes when playback stops. Import and Activity Center show this policy and no longer offer playback overrides.
+
+Curate lookahead checks transport before dispatch, cancels in-flight lookahead when Cadence starts or detects playback, and can resume without a cooldown. Live scanner and lookahead checks are pending.
+
+### Implementation checkpoint — Selected-album provider calls
+
+The mounted Curate cockpit permits focused retrieval during playback and cancels stale frontend work on album change. Automatic selection allocates one Apple call, two MusicBrainz calls, and one compilation inference when needed. Explicit Refresh Evidence starts its own operation. Grounded refresh allocates one Apple call, two MusicBrainz calls, and one Gemini or Wikipedia call. A direct Apple lookup uses the Apple allocation. An ungrounded refresh can use two Apple calls and two MusicBrainz calls.
+
+The Vite provider handlers enforce the Apple and MusicBrainz limits at upstream dispatch. Bounded Gemini requests in Vite and Tauri use one model attempt. A one-call Apple search can return album metadata without the full tracklist. Mocked upstream tests cover a four-call grounded lookup under provider misses and Gemini rate limiting. Live desktop verification is pending.
+
+### Implementation checkpoint — Selected Output change preview
+
+The Selected Output header counts changed album fields and affected tracks against the displayed local metadata. Changed cells show their previous value or indicate an addition. Artwork uses a short change label. Empty proposals do not appear as deletions. The comparison updates with the current selection and has no effect on staging or file writes.
+
 Review the remaining mismatch between accepted playback rules and current gates: no library scans or bulk album work during playback; focused selected-album work is allowed with at most four total provider calls for that album; no 30-second cooldown after playback stops. Confirm that worker/lookahead behavior and duplicate selected-album fetch paths should be brought under that single policy.
+
+### Current behavior
+
+- The native scanner command accepts scan requests without a playback-active rejection/defer gate. Its default `Purist` mode lets a scan start and suspends per-file scanning I/O while `AudioEngine::is_playing()` is true; the `Paced` and `Unthrottled` modes continue scanning during playback. This is weaker than the accepted rule that library scans do not run during playback (`src-tauri/src/commands/library.rs`; `src-tauri/src/scanner/engine.rs`).
+- The Curate lookahead prefetcher is restricted to quiet transport, so it does not process the next two albums during active playback. However, its quiet check also blocks while paused and for 30 seconds after stop (`src/services/curationQueueService.ts`).
+- Selected-album reconciliation is not governed by one shared request coordinator. `UnifiedCurateCockpit` automatically starts consensus on selection with no playback guard; `CurationReconciliationStage` has a separate fetch path that blocks unless forced. Each consensus call can request Apple Music and MusicBrainz in parallel, and another candidate-resolution path may make additional provider calls. No shared per-album counter enforces the accepted maximum of four provider calls.
+- The native commit worker waits during playing or paused playback and then applies a 30-second cooldown. It has a force-override exception when Purity Mode is off. Therefore queued writes may not resume immediately after playback ends, contrary to the accepted no-cooldown rule (`src-tauri/src/maintenance/commit_worker.rs`).
+
+### Proposed behavior for review
+
+Use one playback/work-scope policy across scanner start, Curate provider work, lookahead, and commit worker. During playback, reject or defer library scan jobs before they perform scan/database work; do not rely on scan pausing or I/O throttling as equivalent to “no scan.” Block all cross-album lookahead/bulk Curate work. Allow only the selected album's trace/database access and explicitly focused provider retrieval, with a shared per-operation budget of at most four provider requests across Apple Music, MusicBrainz, and AI. Deduplicate concurrent selection/fetch paths so they share the same in-flight result and cannot each spend a separate budget. Once playback is no longer active, resume eligible work immediately, without a 30-second cooldown. Commit intent remains queued while playback prevents its file writes.
+
+The implementation should make deferred work visible and should re-check playback at dispatch time, not only when a component first mounts. A playback transition during an operation must not allow a scan or bulk request to begin afterward. Explicit user refresh is a new selected-album operation, not lookahead; it uses the same bounded provider budget.
+
+**Accepted.** The provider-call limit is per selected-album retrieval/explicit refresh operation, with concurrent automatic paths sharing one budget of at most four calls. No library scans or bulk/lookahead work during playback; selected-album trace/database and focused provider work are allowed. Remove the 30-second cooldown and resume eligible work immediately when playback stops.
+
+## Review pass outcome
+
+The reviewed behavioral contract is complete. The queue-to-library effective-metadata overlay is approved for implementation. Other accepted requirements are recorded for implementation planning but were not implemented or separately authorized as code changes in this review pass.
+
+## Phase 1 — Domain State & Service Layer: formal verification
+
+### Verification results
+
+| Phase 1 deliverable/checkpoint | Result | Evidence / notes |
+| --- | --- | --- |
+| Curate scope resolution has no arbitrary `tracks[0]` fallback and returns `null` when no target is in scope | **Pass, with stale comment** | `resolveCurateTargetTrack` returns `null`; `App` uses queue initialization. Its function comment still lists a global `tracks[0]` fallback, which is no longer accurate (`src/core/scopeUtils.ts`; `src/App.tsx`). |
+| Domain queue discovery and deterministic initial album selection | **Pass** | `computeCurationQueue` and `resolveCurateInitialAlbum` exist and are used by `CurationWorkbench`; the queue is built from the loaded track/release graph without eager soundtrack clustering (`src/services/curationQueueService.ts`; `src/components/Curate/CurationWorkbench.tsx`). |
+| Active-item provider resolution and compilation canonicalization | **Pass with accepted-policy update and layering variation** | `resolveActiveItemCandidate` exists with abort/error results and a playback guard. Compilation canonicalization is called from Curate orchestration (`UnifiedCurateCockpit`) rather than integrated inside `federatedResolvers` as the old plan described. The old rule to defer every provider lookup during playback is superseded: selected-album work is now allowed within the shared four-call budget. One existing lifecycle test still asserts the superseded behavior and must be updated with playback-policy implementation (`src/services/federatedResolvers.ts`; `src/components/Curate/UnifiedCurateCockpit.tsx`; `src/test/testCurationLifecycle.ts`). |
+| Shared staged-change counts | **Pass** | `useStagedChanges` derives staged albums/tracks/tag/artwork and triage counts from the current `tracks`/`releases` inputs; `App` consumes the shared hook (`src/hooks/useStagedChanges.ts`; `src/App.tsx`). |
+| Phase 1 checkpoint: production build | **Pass** | `npm run build` completed successfully, including PWA build, TypeScript project build, and Vite production build. Vite emitted existing non-blocking chunk/dynamic-import warnings. |
+
+**Phase 1 outcome: verified complete against its functional scope and stated build checkpoint.** The two documentation/test mismatches above are recorded for cleanup during later implementation; they do not reopen the domain-state design. No code changes were made during verification.
+
+## Phase 2 — Master-Detail Curation Workbench UI: verification
+
+### Static verification findings
+
+| Phase 2 area | Result | Evidence / notes |
+| --- | --- | --- |
+| Curate route and workbench | **Diverges from plan; needs product/design disposition** | `App.tsx` renders `UnifiedCurateCockpit` for `topMode === 'curate'`. `CurationWorkbench` is imported but has no render/use site in the app. The planned `CurationQueueRail` and `CurationReconciliationStage` are only composed by that unused workbench. The live cockpit provides an album rail and reconciliation UI, but it is a different implementation. |
+| Navigation rail | **Partial** | `App.tsx` passes `isIconOnly={topMode === 'curate'}`; `LeftRail` uses 64px in Curate and fixed 260px otherwise. There is no observed user-adjustable width to preserve/restore, so the plan's “restore prior manual width” behavior is not present. |
+| Queue content and filters | **Partial / planned filters absent in live route** | Live `UnifiedCurateCockpit` presents Tier 1 and Tier 2 album lists, album identity, artwork, track count, staged/action-required badges, and click selection. It does not expose the planned All/Soundtracks/Artwork/Staged filter pills or the defect-severity/affected-track queue-card model. The unused `CurationQueueRail` implements those filters and a 280px width, but is not the UI users reach from App. Its live counterpart in Unified is `w-72` (288px). Broken-image handling in Unified hides the `<img>` rather than rendering the planned icon fallback. |
+| Reconciliation layout and editing | **Present in live cockpit; runtime appearance unverified** | The active `UnifiedCurateCockpit` contains the provider reconciliation table, artwork selection, inline track editing, compilation-provenance handling, and separate Tier 1/Tier 2 flows. Case/layout behavior is implemented in this cockpit, not the planned `CurationReconciliationStage` path. Static inspection cannot confirm viewport fit, visual hierarchy, or interaction quality. |
+| Stage & Next and commit projection | **Session navigation pass; durable projection fail** | In the native app, a manual Selected Output genre change for `En Bommukutti Amavuku` from `Tamil Film Soundtrack` to `Tamil Soundtrack` was saved, staged, and remained visible after navigating to another album and back while Curate stayed mounted. Commit wrote `Tamil Soundtrack` into the local-file/catalog baseline, but after leaving Curate and returning—and again after an app restart—the Selected Output reverted to `Tamil Film Soundtrack`, the album reappeared in Tier 2, and Commit Album was offered again. The durable post-commit projection therefore does not treat the committed value as authoritative. |
+| Empty, scope, and keyboard navigation | **Mostly present by inspection** | Unified has an empty-catalog state, initial album selection, keyboard previous/next handlers, and a queue-selection prompt. Runtime cold-start, filter/scope edge cases, and actual shortcut behavior were not exercised. |
+| Build checkpoint | **Pass** | `npm run build` passed during Phase 1 verification; it includes TypeScript build and production Vite bundling. This verifies compilation, not Phase 2 user interactions. |
+| Browser/UI verification | **Partial runtime pass** | The browser asset-server check rendered the empty Curate route, tier switching, and route-navigation round trip without console errors. A subsequent native populated-library check exercised album selection, manual editing, staging, commit, navigation, and restart; its persistence failure is recorded below. Responsive layout remains **inconclusive** because 375px and 768px captures were questionable/clipped. No network-status audit, axe scan, or visual baseline comparison was performed. |
+
+### Phase 2 outcome
+
+**Formally failed pending correction.** Runtime verification confirms that the live Curate route renders and that manual Selected Output editing plus Stage & Next work across album navigation within the same Curate mount. The durable commit contract fails: after Commit Album, the physical/local baseline contains the committed genre, but leaving Curate or restarting restores a stale AI-selected genre as Selected Output, returns the album to Tier 2, and permits another commit. This is incompatible with the accepted rule that committed or queued intent is the authoritative UI projection until it has been reconciled into the baseline. The designated `CurationWorkbench` also remains unused, planned queue filters are absent from the live route, and responsive behavior is inconclusive. No application code was changed during verification.
+
+### Native desktop render verification — 2026-11-05
+
+Computer Use successfully inspected the installed Cadence Core window (`%LOCALAPPDATA%/Cadence Core/cadence-core.exe`, `http://tauri.localhost/`). This is the installed build; equivalence to the current workspace build was not established. The native library showed 1,904 tracks and 280 albums. The earlier browser-only empty library is not evidence of a native database failure.
+
+- **Verified:** library artwork renders; Curate opens the populated Unified cockpit; navigation collapses to icons; Tier 1/Tier 2 show counts and album cards; selecting a different album updates its query, metadata and Selected Output after settling; the independently scrolling detail pane renders track titles, performers, filenames and provider/Selected Output columns.
+- **Verified manual edit and stage behavior:** on `En Bommukutti Amavuku`, Selected Output genre was manually changed from `Tamil Film Soundtrack` to `Tamil Soundtrack` and saved. Stage & Next advanced to another album, added the staged indicator, and the edited value remained when navigating back during the same Curate session.
+- **Observed commit behavior:** Commit Album immediately advanced away from the album and reduced Tier 2 from 257 to 256. No confirmation dialog was visible. The subsequent local-file value proves that the commit wrote `Tamil Soundtrack` to the album metadata.
+- **Critical persistence/projection defect:** after navigating to Listen and back, `En Bommukutti Amavuku CD RIP` reappeared in Tier 2. Its Local File Tag genre was `Tamil Soundtrack`, while Selected Output had reverted to `Tamil Film Soundtrack`; Commit Album was available again. The same state remained after restarting the app (Tier 1/Tier 2 counts 24/256). The committed write is durable, but the user's authoritative Selected Output/commit state is not: stale reconciliation evidence overrides the newly committed baseline and the album is re-queued.
+- **Observed defect:** selecting `En Bommukutti Amavuku` settled with broken-image placeholders in both Local Art and Selected Art instead of a usable fallback. The local year showed `0` while Selected Output retained `1988`; this difference needs provenance review rather than assuming a wrong selected value.
+- **Observed behavior needing review:** switching tiers retained the previous detail pane and scroll position. Selecting `Aan Paavam` in Tier 1 changed the counts from 24/256 to 23/257 and removed the album from that list, while its detail table remained displayed under the active Tier 1 tab. No Stage or Commit button was used. Automatic reconciliation appears to reclassify the selected album without keeping the visible queue and detail selection aligned.
+- **Still unverified:** pending-commit behavior while playback blocks physical writes, provider response correctness, keyboard album navigation, and minimum-window-size layout. No import or explicit provider refresh was invoked.
+
+**Disposition:** the populated native workflow and restart test are complete. Phase 2 does not pass: screenshots demonstrate that the committed filesystem value survives, but the durable Selected Output projection and post-commit queue reconciliation do not.
 
 ## Later phases
 
-Phases 1, 2, 4, and 5 are intentionally not restated as approved target architecture in this review record. Their current behavior and proposed changes should be documented only when that phase is under review, using the same distinction between observed code, proposal, and accepted decision.
+Phases 2, 4, and 5 are intentionally not restated as approved target architecture in this review record. Their current behavior and proposed changes should be documented only when that phase is under review, using the same distinction between observed code, proposal, and accepted decision.

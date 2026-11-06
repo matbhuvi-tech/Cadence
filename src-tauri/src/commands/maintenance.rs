@@ -171,13 +171,23 @@ pub struct EnqueueBatchRequest {
     pub description: Option<String>,
     pub destination: Option<String>,
     pub force_override: Option<bool>,
+    pub require_idle: Option<bool>,
+    pub curate_drafts: Option<Vec<EnqueuedCurateDraft>>,
     pub items: Vec<crate::db::NewCommitItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnqueuedCurateDraft {
+    pub album_id: String,
+    pub draft: serde_json::Value,
 }
 
 #[tauri::command]
 pub fn commit_enqueue_batch(
     db: State<crate::db::AppDb>,
     worker: State<CommitQueueWorker>,
+    engine: State<crate::audio::AudioEngine>,
     request: EnqueueBatchRequest,
 ) -> Result<String, String> {
     let batch_id = request.id.unwrap_or_else(|| format!("batch-{}", uuid::Uuid::new_v4().simple()));
@@ -194,12 +204,128 @@ pub fn commit_enqueue_batch(
     };
 
     let mut conn = db.conn.lock();
-    crate::db::DbOperations::insert_commit_batch_and_items(&mut conn, &batch, &request.items)
+    let require_idle = request.require_idle.unwrap_or(false);
+    if require_idle && (engine.is_playing() || engine.is_paused()) {
+        return Err("Stop playback before queueing a Tier 1 batch.".into());
+    }
+    let drafts: Vec<_> = request.curate_drafts.unwrap_or_default().into_iter()
+        .map(|entry| (entry.album_id, entry.draft))
+        .collect();
+    let queued = crate::db::DbOperations::insert_commit_with_curate_drafts(&mut conn, &batch, &request.items, &drafts, require_idle)
         .map_err(|e| format!("Failed to enqueue batch: {}", e))?;
+    if !queued {
+        return Err("A track already has an unresolved commit. Review the queue before retrying the batch.".into());
+    }
     drop(conn);
 
     worker.emit_telemetry(true);
     Ok(batch_id)
+}
+
+#[tauri::command]
+pub fn commit_get_curate_projection(
+    db: State<crate::db::AppDb>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let conn = db.conn.lock();
+    load_curate_projection(&conn).map_err(|err| err.to_string())
+}
+
+fn load_curate_projection(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "WITH latest AS (
+            SELECT i.id, i.track_id, i.status, i.payload_json, i.artwork_result_id, i.error_message, b.rowid AS batch_order,
+                ROW_NUMBER() OVER (PARTITION BY i.track_id ORDER BY b.rowid DESC, i.rowid DESC) AS rank
+            FROM commit_queue_items i JOIN commit_queue_batches b ON b.id = i.batch_id
+            WHERE i.status IN ('pending', 'in_flight', 'failed', 'completed')
+        )
+        SELECT latest.track_id, latest.status, latest.payload_json,
+            latest.status <> 'completed' OR (
+                t.id IS NOT NULL
+                AND t.title IS COALESCE(json_extract(latest.payload_json, '$.title'), t.title)
+                AND t.artist_credit IS COALESCE(json_extract(latest.payload_json, '$.artist'), t.artist_credit)
+                AND t.album_title IS COALESCE(json_extract(latest.payload_json, '$.album'), t.album_title)
+                AND t.album_artist IS COALESCE(json_extract(latest.payload_json, '$.albumArtist'), t.album_artist)
+                AND t.composer IS COALESCE(json_extract(latest.payload_json, '$.composer'), t.composer)
+                AND t.release_year IS COALESCE(json_extract(latest.payload_json, '$.year'), t.release_year)
+                AND t.genre IS COALESCE(json_extract(latest.payload_json, '$.genre'), t.genre)
+                AND t.original_album IS COALESCE(json_extract(latest.payload_json, '$.originalAlbum'), t.original_album)
+                AND t.original_year IS COALESCE(json_extract(latest.payload_json, '$.originalYear'), t.original_year)
+            ), latest.id, a.thumbnail_url, latest.error_message
+        FROM latest LEFT JOIN tracks t ON t.id = latest.track_id
+        LEFT JOIN releases r ON r.id = t.release_id
+        LEFT JOIN commit_artwork_results a ON a.id = latest.artwork_result_id
+            AND latest.status = 'completed' AND r.front_cover_url = a.thumbnail_url
+        WHERE rank = 1 AND CASE WHEN json_valid(latest.payload_json) THEN json_extract(latest.payload_json, '$.curate') END = 1
+        ORDER BY batch_order, latest.track_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(serde_json::json!({
+            "trackId": row.get::<_, String>(0)?,
+            "status": row.get::<_, String>(1)?,
+            "payloadJson": row.get::<_, String>(2)?,
+            "applies": row.get::<_, bool>(3)?,
+            "id": row.get::<_, String>(4)?,
+            "artworkUrl": row.get::<_, Option<String>>(5)?,
+            "errorMessage": row.get::<_, Option<String>>(6)?,
+        }))
+    })?;
+    rows.collect()
+}
+
+#[cfg(test)]
+#[test]
+fn curate_projection_uses_newest_confirmation_and_ignores_cancelled_items() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::schema::initialize_schema(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO commit_queue_batches (id, description, total_tracks, destination, status, created_at)
+            VALUES ('first', 'First', 1, 'embedded', 'pending', '2026-01-01'),
+                   ('second', 'Second', 1, 'embedded', 'pending', '2026-01-02');
+         INSERT INTO commit_queue_items (id, batch_id, track_id, file_path, mount_id, payload_json, backup_json, status)
+            VALUES ('old', 'first', 'track', 'song.flac', 'mount', '{\"curate\":true,\"genre\":\"Old\"}', '{}', 'in_flight'),
+                   ('new', 'second', 'track', 'song.flac', 'mount', '{\"curate\":true,\"genre\":\"New\"}', '{}', 'pending');",
+    ).unwrap();
+    assert_eq!(load_curate_projection(&conn).unwrap()[0]["id"], "new");
+    conn.execute("UPDATE commit_queue_items SET status = 'cancelled' WHERE id = 'new'", []).unwrap();
+    assert_eq!(load_curate_projection(&conn).unwrap()[0]["id"], "old");
+    conn.execute("UPDATE commit_queue_items SET status = 'completed' WHERE id = 'old'", []).unwrap();
+    assert_eq!(load_curate_projection(&conn).unwrap()[0]["applies"], false);
+}
+
+#[tauri::command]
+pub fn commit_retry_curate_items(
+    db: State<crate::db::AppDb>,
+    worker: State<CommitQueueWorker>,
+    item_ids: Vec<String>,
+) -> Result<usize, String> {
+    let mut conn = db.conn.lock();
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let mut retried = 0;
+    for id in item_ids {
+        let changed = tx.execute(
+            "UPDATE commit_queue_items AS i SET status = 'pending', completed_at = NULL
+             WHERE i.id = ?1 AND i.status = 'failed'
+               AND CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json, '$.curate') END = 1
+               AND NOT EXISTS (
+                   SELECT 1 FROM commit_queue_items newer JOIN commit_queue_batches nb ON nb.id = newer.batch_id
+                   WHERE newer.track_id = i.track_id AND newer.status <> 'cancelled'
+                     AND nb.rowid > (SELECT b.rowid FROM commit_queue_batches b WHERE b.id = i.batch_id)
+               )",
+            [&id],
+        ).map_err(|err| err.to_string())?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE commit_queue_batches SET status = 'pending', completed_at = NULL
+                 WHERE id = (SELECT batch_id FROM commit_queue_items WHERE id = ?1)",
+                [&id],
+            ).map_err(|err| err.to_string())?;
+        }
+        retried += changed;
+    }
+    tx.commit().map_err(|err| err.to_string())?;
+    drop(conn);
+    worker.emit_telemetry(true);
+    Ok(retried)
 }
 
 #[tauri::command]

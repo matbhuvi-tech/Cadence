@@ -92,6 +92,7 @@ pub struct AudioEngine {
     upnp_manager: Arc<UpnpManager>,
     is_playing_atomic: Arc<AtomicBool>,
     is_paused_atomic: Arc<AtomicBool>,
+    library_scan_io: Arc<parking_lot::Mutex<()>>,
 }
 
 impl AudioEngine {
@@ -529,8 +530,8 @@ impl AudioEngine {
                             playback_start = None;
                             is_paused = true;
                         }
-                        is_playing_worker.store(false, Ordering::Release);
                         is_paused_worker.store(true, Ordering::Release);
+                        is_playing_worker.store(false, Ordering::Release);
                     }
 
                     AudioWorkerMsg::Resume => {
@@ -882,6 +883,7 @@ impl AudioEngine {
             upnp_manager,
             is_playing_atomic,
             is_paused_atomic,
+            library_scan_io: Arc::new(parking_lot::Mutex::new(())),
         }
     }
 
@@ -893,7 +895,14 @@ impl AudioEngine {
         self.is_paused_atomic.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn try_library_scan_io(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+        try_scan_io(&self.library_scan_io, || self.is_playing() || self.is_paused())
+    }
+
     pub fn play_track(&self, file_path: &str) -> Result<AudioStreamInfo, String> {
+        // Let the current scan operation finish before audio starts. The scanner cannot begin
+        // another operation while this request loads audio and publishes the playback state.
+        let _scan_guard = self.library_scan_io.lock();
         let (resp_tx, resp_rx) = channel();
         self.tx
             .send(AudioWorkerMsg::Play {
@@ -1133,4 +1142,23 @@ impl AudioEngine {
             })
         }
     }
+}
+
+fn try_scan_io(
+    gate: &parking_lot::Mutex<()>,
+    playback_active: impl FnOnce() -> bool,
+) -> Option<parking_lot::MutexGuard<'_, ()>> {
+    let permit = gate.try_lock()?;
+    (!playback_active()).then_some(permit)
+}
+
+#[cfg(test)]
+#[test]
+fn scan_io_rejects_loading_playing_and_paused_and_resumes_immediately_when_idle() {
+    let gate = parking_lot::Mutex::new(());
+    let loading = gate.lock();
+    assert!(try_scan_io(&gate, || false).is_none());
+    drop(loading);
+    assert!(try_scan_io(&gate, || true).is_none());
+    assert!(try_scan_io(&gate, || false).is_some());
 }

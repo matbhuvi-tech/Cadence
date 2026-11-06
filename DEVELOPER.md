@@ -21,7 +21,7 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 ## Global Invariants
 
-1. **Storage bus silence during playback:** No disk I/O occurs on music-library storage while playback is active or within a 30-second cooldown period.
+1. **Storage bus silence during playback:** Do not start music-library file writes while playback is active or paused. The native commit queue can accept intent in the local database during playback and resumes file writes when playback stops. Other subsystems may still have legacy cooldown gates until their playback policy is migrated.
 2. **Audio thread isolation:** Synchronous audio and pacing loops use MMCSS `Pro Audio` priority and CPU affinity isolated away from Core 0 and Core 1.
 3. **Memory-pinned buffers:** Active audio streams are preloaded into RAM and pinned with Win32 `VirtualLock`, with zero heap allocation in playback loops.
 4. **Network PHY quietness:** UPnP and WebSocket communication use event-driven updates, clamped socket buffers, and heartbeats of at least five seconds.

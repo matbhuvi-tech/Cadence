@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -186,47 +186,11 @@ pub fn read_track_sidecar(audio_path: &Path) -> TrackSidecar {
     TrackSidecar::default()
 }
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PlaybackScanMode {
-    Purist = 0,
-    Paced = 1,
-    Unthrottled = 2,
-}
-
-impl PlaybackScanMode {
-    pub fn from_u8(val: u8) -> Self {
-        match val {
-            0 => PlaybackScanMode::Purist,
-            1 => PlaybackScanMode::Paced,
-            _ => PlaybackScanMode::Unthrottled,
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
-            "paced" => PlaybackScanMode::Paced,
-            "unthrottled" => PlaybackScanMode::Unthrottled,
-            _ => PlaybackScanMode::Purist,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            PlaybackScanMode::Purist => "purist",
-            PlaybackScanMode::Paced => "paced",
-            PlaybackScanMode::Unthrottled => "unthrottled",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct ScannerController {
     pub is_scanning: Arc<AtomicBool>,
     pub is_paused: Arc<AtomicBool>,
     pub cancel_requested: Arc<AtomicBool>,
-    pub playback_mode: Arc<AtomicU8>,
     pub audio_engine: Arc<parking_lot::RwLock<Option<AudioEngine>>>,
     pub progress: Arc<Mutex<ScanProgressPayload>>,
 }
@@ -237,7 +201,6 @@ impl ScannerController {
             is_scanning: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
-            playback_mode: Arc::new(AtomicU8::new(0)), // Default: Purist
             audio_engine: Arc::new(parking_lot::RwLock::new(audio_engine)),
             progress: Arc::new(Mutex::new(ScanProgressPayload::default())),
         }
@@ -245,14 +208,6 @@ impl ScannerController {
 
     pub fn set_audio_engine(&self, engine: AudioEngine) {
         *self.audio_engine.write() = Some(engine);
-    }
-
-    pub fn set_playback_mode(&self, mode: PlaybackScanMode) {
-        self.playback_mode.store(mode as u8, Ordering::SeqCst);
-    }
-
-    pub fn get_playback_mode(&self) -> PlaybackScanMode {
-        PlaybackScanMode::from_u8(self.playback_mode.load(Ordering::SeqCst))
     }
 
     pub fn pause(&self) {
@@ -294,12 +249,21 @@ impl ScannerController {
             return Err("Scan already in progress".to_string());
         }
 
+        let audio_engine_ref = self.audio_engine.read().clone();
+        let scan_start_permit = match &audio_engine_ref {
+            Some(engine) => Some(engine.try_library_scan_io().ok_or(
+                "Stop playback before starting a library scan.",
+            )?),
+            None => None,
+        };
         let dir = PathBuf::from(&folder_path);
         if !dir.exists() {
             return Err(format!("Directory does not exist: {}", folder_path));
         }
 
-        self.is_scanning.store(true, Ordering::SeqCst);
+        if self.is_scanning.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err("Scan already in progress".into());
+        }
         self.is_paused.store(false, Ordering::SeqCst);
         self.cancel_requested.store(false, Ordering::SeqCst);
 
@@ -307,11 +271,10 @@ impl ScannerController {
         let is_paused = Arc::clone(&self.is_paused);
         let cancel_requested = Arc::clone(&self.cancel_requested);
         let progress_state = Arc::clone(&self.progress);
-        let playback_mode = Arc::clone(&self.playback_mode);
-        let audio_engine_ref = self.audio_engine.read().clone();
+        drop(scan_start_permit);
 
         let builder = std::thread::Builder::new().name("cadence-library-scanner".into());
-        let _ = builder.spawn(move || {
+        builder.spawn(move || {
             #[cfg(windows)]
             unsafe {
                 use windows_sys::Win32::System::Threading::{
@@ -340,6 +303,39 @@ impl ScannerController {
             let scan_start = Instant::now();
             let mut last_progress_emit = Instant::now();
             let progress_interval = Duration::from_millis(250); // 4Hz throttled
+            let wait_for_scan_io = |stage: &str, stop_on_cancel: bool| {
+                loop {
+                    let cancelled = cancel_requested.load(Ordering::SeqCst);
+                    if cancelled && stop_on_cancel {
+                        return Err(());
+                    }
+                    if !cancelled && is_paused.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    let permit = match &audio_engine_ref {
+                        Some(engine) => engine.try_library_scan_io().map(Some),
+                        None => Some(None),
+                    };
+                    if let Some(permit) = permit {
+                        let mut p = progress_state.lock();
+                        if p.stage == "suspended_playback" {
+                            p.stage = stage.to_owned();
+                            let _ = app.emit("library://scan-progress", &*p);
+                        }
+                        return Ok(permit);
+                    }
+                    {
+                        let mut p = progress_state.lock();
+                        if p.stage != "suspended_playback" {
+                            p.stage = "suspended_playback".into();
+                            p.speed_tracks_per_sec = 0.0;
+                            let _ = app.emit("library://scan-progress", &*p);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            };
 
             // 1. Discovery Stage
             {
@@ -355,10 +351,10 @@ impl ScannerController {
             }
 
             let mut candidate_files: Vec<PathBuf> = Vec::new();
-            for entry in WalkDir::new(&dir).follow_links(false).into_iter().filter_map(|e| e.ok()) {
-                if cancel_requested.load(Ordering::SeqCst) {
-                    break;
-                }
+            let mut directory = WalkDir::new(&dir).follow_links(false).into_iter();
+            while let Ok(_permit) = wait_for_scan_io("discovery", true) {
+                let Some(entry) = directory.next() else { break };
+                let Ok(entry) = entry else { continue };
                 if entry.file_type().is_file() {
                     let path = entry.path();
                     let fname = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
@@ -378,6 +374,29 @@ impl ScannerController {
             }
 
             let total_candidates = candidate_files.len();
+
+            let Ok(bootstrap_permit) = wait_for_scan_io("database", true) else {
+                {
+                    let mut p = progress_state.lock();
+                    p.stage = "cancelled".into();
+                    p.is_scanning = false;
+                    p.is_paused = false;
+                    let _ = app.emit("library://scan-progress", &*p);
+                }
+                let _ = app.emit("library://scan-complete", &ScanCompletePayload {
+                    folder_path,
+                    total_discovered: total_candidates,
+                    imported_count: 0,
+                    updated_count: 0,
+                    skipped_count: 0,
+                    duration_secs: scan_start.elapsed().as_secs_f64(),
+                    status: "cancelled".into(),
+                });
+                is_scanning.store(false, Ordering::SeqCst);
+                is_paused.store(false, Ordering::SeqCst);
+                cancel_requested.store(false, Ordering::SeqCst);
+                return;
+            };
 
             // Load existing file modification times from SQLite to allow sub-second skip
             let existing_mtimes: HashMap<String, (i64, i64)> = {
@@ -428,6 +447,7 @@ impl ScannerController {
             }
 
             // 2. Metadata Extraction & Diffing
+            drop(bootstrap_permit);
             let mut imported_count = 0;
             let mut updated_count = 0;
             let mut skipped_errors = 0;
@@ -464,69 +484,8 @@ impl ScannerController {
                 pending_releases.clear();
             };
 
-            let mut last_playback_check = Instant::now() - Duration::from_millis(500);
-            let mut cached_is_playing = false;
-
             for (idx, path) in candidate_files.iter().enumerate() {
-                // Check cancellation
-                if cancel_requested.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // Check pause
-                while is_paused.load(Ordering::SeqCst) && !cancel_requested.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-
-                // Rate-limited check of lightweight lock-free AudioEngine::is_playing
-                // Polled at most once every 100ms or 25 files to prevent any thread or atomic contention!
-                if idx % 25 == 0 || last_playback_check.elapsed() >= Duration::from_millis(100) {
-                    last_playback_check = Instant::now();
-                    cached_is_playing = audio_engine_ref
-                        .as_ref()
-                        .map(|e| e.is_playing())
-                        .unwrap_or(false);
-                }
-
-                let mode = PlaybackScanMode::from_u8(playback_mode.load(Ordering::Relaxed));
-                match mode {
-                    PlaybackScanMode::Purist => {
-                        if cached_is_playing {
-                            // 1. Immediately flush pending SQLite batch BEFORE entering suspend wait loop!
-                            // Guarantees all scanned tracks are visible in library and drops all database locks.
-                            flush_batch(&mut pending_tracks, &mut pending_releases, idx);
-
-                            // 2. Emit UI telemetry update indicating suspension
-                            {
-                                let mut p = progress_state.lock();
-                                p.stage = "suspended_playback".to_string();
-                                p.speed_tracks_per_sec = 0.0;
-                                let _ = app.emit("library://scan-progress", &*p);
-                            }
-
-                            // 3. Sleep loop checking lightweight lock-free is_playing and cancel
-                            while audio_engine_ref.as_ref().map(|e| e.is_playing()).unwrap_or(false)
-                                && !cancel_requested.load(Ordering::SeqCst)
-                            {
-                                std::thread::sleep(Duration::from_millis(250));
-                            }
-
-                            if cancel_requested.load(Ordering::SeqCst) {
-                                break;
-                            }
-                            cached_is_playing = false;
-                        }
-                    }
-                    PlaybackScanMode::Paced => {
-                        if cached_is_playing {
-                            // Apply 15ms inter-file pacing sleep to prevent SMB/NIC packet bursts during playback
-                            std::thread::sleep(Duration::from_millis(15));
-                        }
-                    }
-                    PlaybackScanMode::Unthrottled => {
-                        // Full background speed regardless of playback state
-                    }
-                }
+                let Ok(_scan_permit) = wait_for_scan_io("extraction", true) else { break };
 
                 let path_str = path.to_string_lossy().to_string();
                 let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -1081,14 +1040,14 @@ impl ScannerController {
                 }
             }
 
-            // Flush any remaining tracks & releases to SQLite
-            flush_batch(&mut pending_tracks, &mut pending_releases, total_candidates);
-
-            // Recompute release container artists to ensure multi-track consensus across the library
-            {
-                let mut conn = db.conn.lock();
-                let _ = DbOperations::recompute_release_artist_credits(&mut conn);
-                let _ = DbOperations::set_mount_status(&conn, &mount_id, "online");
+            // Finish buffered catalog work only when the transport permits scan I/O.
+            if !cancel_requested.load(Ordering::SeqCst) || !pending_tracks.is_empty() {
+                if let Ok(_scan_permit) = wait_for_scan_io("database", false) {
+                    flush_batch(&mut pending_tracks, &mut pending_releases, total_candidates);
+                    let mut conn = db.conn.lock();
+                    let _ = DbOperations::recompute_release_artist_credits(&mut conn);
+                    let _ = DbOperations::set_mount_status(&conn, &mount_id, "online");
+                }
             }
 
             let final_duration = scan_start.elapsed().as_secs_f64();
@@ -1132,7 +1091,10 @@ impl ScannerController {
             is_scanning.store(false, Ordering::SeqCst);
             is_paused.store(false, Ordering::SeqCst);
             cancel_requested.store(false, Ordering::SeqCst);
-        });
+        }).map_err(|err| {
+            self.is_scanning.store(false, Ordering::SeqCst);
+            format!("Could not start library scan: {err}")
+        })?;
 
         Ok(())
     }

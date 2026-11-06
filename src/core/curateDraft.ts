@@ -24,6 +24,7 @@ type TrackSelection = Pick<CurateDraftTrack, CurateTrackField |
 export interface CurateDraft {
   version: 1
   baseline: string
+  localCoverArt?: string
   staged: boolean
   fields: Record<AlbumField, FieldSelection>
   tracks: TrackSelection[]
@@ -43,6 +44,7 @@ export function captureCurateDraft(album: Proposal): CurateDraft {
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
     ]),
     staged: album.userOverridden === true,
+    localCoverArt: album.coverArt.local,
     fields: Object.fromEntries(albumFields.map(key => [key, selection(album[key])])) as CurateDraft['fields'],
     tracks: album.tracks.map(t => {
       const { trackId, matchedTitle, matchedArtists, originalAlbum, originalYear, provenanceSource,

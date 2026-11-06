@@ -693,8 +693,8 @@ export interface CandidateTelemetry {
   provider: string
   releaseId: string
   trackCount?: number
-  latencyMs: number
-  httpStatus: number
+  latencyMs?: number
+  httpStatus?: number
   confidenceScore: number
   rejectionReason?: string
 }

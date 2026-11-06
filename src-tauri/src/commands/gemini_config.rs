@@ -89,6 +89,7 @@ async fn generate(
     contents: Value,
     timeout_ms: u64,
     use_grounding: bool,
+    single_attempt: bool,
 ) -> Result<(Value, String, u64), String> {
     let settings = read_settings(app)?;
     let key = settings.api_key;
@@ -102,9 +103,11 @@ async fn generate(
     }
     *last = std::time::Instant::now();
     LAST_GEMINI_CALL_MS.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .build()
+    let mut client = reqwest::Client::builder().timeout(std::time::Duration::from_millis(timeout_ms));
+    if single_attempt {
+        client = client.redirect(reqwest::redirect::Policy::none());
+    }
+    let client = client.build()
         .map_err(|e| e.to_string())?;
     let candidates = [
         settings.model.as_str(),
@@ -116,10 +119,14 @@ async fn generate(
     ];
     let mut last_error = String::from("Gemini models are temporarily unavailable");
     for (index, model) in candidates.iter().enumerate() {
+        if single_attempt && index > 0 {
+            break;
+        }
         if candidates[..index].contains(model) {
             continue;
         }
-        for attempt in 0..3 {
+        let attempts = if single_attempt { 1 } else { 3 };
+        for attempt in 0..attempts {
             let mut req_body = json!({ "contents": &contents });
             if use_grounding {
                 req_body["tools"] = json!([{ "google_search": {} }]);
@@ -138,7 +145,7 @@ async fn generate(
                         .text()
                         .await
                         .unwrap_or_else(|_| "Gemini rate limit or service capacity reached".into());
-                    if attempt < 2 {
+                    if attempt + 1 < attempts {
                         tokio::time::sleep(std::time::Duration::from_millis(
                             2u64.pow(attempt + 1) * 1000,
                         ))
@@ -181,6 +188,7 @@ pub async fn gemini_resolve(
     app: AppHandle,
     operation: String,
     payload: Value,
+    single_attempt: Option<bool>,
 ) -> Result<Value, String> {
     let (prompt, timeout) = match operation.as_str() {
         "metadata" => {
@@ -405,7 +413,7 @@ Instructions:
                 contents.push(json!({"role": if h["role"] == "agent" {"model"} else {"user"}, "parts":[{"text":h["text"]}]}));
             }
             contents.push(json!({"role":"user","parts":[{"text":format!("{sys}\n\nUser Instruction: {prompt}")}]}));
-            let (data, model, delay) = generate(&app, Value::Array(contents), 12_000, false).await?;
+            let (data, model, delay) = generate(&app, Value::Array(contents), 12_000, false, false).await?;
             let parsed = clean_json(&text_content(&data)).unwrap_or_else(|_| json!({"response":"I analyzed your library. How would you like me to assist with tagging, filtering, or audio hygiene?","command":null,"suggestedActions":[{"label":"Library Statistics","prompt":"Give me a statistical breakdown of my library"},{"label":"Recommend Actions","prompt":"What actions do you recommend next?"},{"label":"Auto-Resolve Artists","prompt":"Extract missing artists from folder hierarchy"}]}));
             return Ok(
                 json!({"success":true,"response":parsed["response"],"command":parsed["command"],"suggestedActions":parsed["suggestedActions"],"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":0}}),
@@ -418,7 +426,7 @@ Instructions:
         payload["referenceUrl"].as_str().map(|u| !u.trim().is_empty()).unwrap_or(false) ||
         payload.get("userSearchQuery").is_some()
     );
-    let (data, model, delay) = generate(&app, contents, timeout, use_grounding).await?;
+    let (data, model, delay) = generate(&app, contents, timeout, use_grounding, single_attempt.unwrap_or(false)).await?;
     let parsed = clean_json(&text_content(&data))?;
     match operation.as_str() {
         "metadata" => {

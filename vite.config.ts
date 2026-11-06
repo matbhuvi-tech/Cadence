@@ -257,7 +257,9 @@ interface GeminiCallResult {
 
 async function executePacedGeminiCall(
   apiKey: string,
-  options: GeminiCallOptions
+  options: GeminiCallOptions,
+  singleAttempt = false,
+  cancelled = () => false,
 ): Promise<GeminiCallResult> {
   const { bodyPayload, timeoutMs = 12000 } = options
 
@@ -279,11 +281,13 @@ async function executePacedGeminiCall(
 
     // Attempt up to 3 retries with exponential backoff on 429/503 for this model
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (cancelled() || (singleAttempt && (attempt > 0 || model !== GEMINI_CANDIDATE_MODELS[0]))) break
       try {
         console.log(`[Gemini AI] Querying model ${model} (attempt ${attempt + 1})...`)
         const resTry = await fetch(geminiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          redirect: singleAttempt ? 'error' : 'follow',
           signal: AbortSignal.timeout(timeoutMs),
           body: JSON.stringify(bodyPayload),
         })
@@ -309,6 +313,7 @@ async function executePacedGeminiCall(
             errJson?.error?.message ||
             (resTry.status === 429 ? 'Rate limit exceeded (15 RPM)' : 'Service temporarily overloaded')
 
+          if (singleAttempt) break
           // If attempt < 2, perform exponential backoff: 2s, 4s (+ jitter)
           if (attempt < 2) {
             const backoffMs = Math.pow(2, attempt + 1) * 1000 + Math.floor(Math.random() * 500)
@@ -1188,6 +1193,13 @@ function localLibraryScannerPlugin(): Plugin {
       // 4. Apple iTunes Search API with Multi-Tier Resilient Fuzzy Fallback
       server.middlewares.use('/api/itunes-search', async (req, res) => {
         const url = new URL(req.url || '', `http://${req.headers.host}`)
+        const limit = Number(url.searchParams.get('maxRequests'))
+        let remaining = limit > 0 ? Math.min(2, limit) : Infinity
+        const appleFetch: typeof fetch = (input, init) => {
+          if (remaining < 1 || res.destroyed) return Promise.resolve(new Response(null, { status: 429 }))
+          remaining--
+          return fetch(input, limit > 0 ? { ...init, redirect: 'error' } : init)
+        }
         const artist = url.searchParams.get('artist') || ''
         const composer = url.searchParams.get('composer') || ''
         const title = url.searchParams.get('title') || ''
@@ -1249,10 +1261,10 @@ function localLibraryScannerPlugin(): Plugin {
             albumQueries.push(alb)
           }
 
-          for (const q of albumQueries) {
+          for (const q of limit > 0 ? albumQueries.slice(0, 1) : albumQueries) {
             try {
               const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&country=in&entity=album&limit=8`
-              const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+              const itunesRes = await appleFetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
@@ -1304,7 +1316,7 @@ function localLibraryScannerPlugin(): Plugin {
         }
 
         // Song entity queries if not found yet
-        if (!foundItem) {
+        if (!foundItem && !limit) {
           const searchQueries = [
             cleanComposer && cleanTitle ? `${cleanComposer} ${cleanTitle}`.trim() : null,
             cleanArtist && cleanTitle ? `${cleanArtist} ${cleanTitle}`.trim() : null,
@@ -1317,7 +1329,7 @@ function localLibraryScannerPlugin(): Plugin {
           for (const q of searchQueries) {
             try {
               const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=5`
-              const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+              const itunesRes = await appleFetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
@@ -1330,11 +1342,11 @@ function localLibraryScannerPlugin(): Plugin {
         }
 
         // Secondary fallback: query album entity with artist validation guard
-        if (!foundItem && cleanAlbum) {
+        if (!foundItem && cleanAlbum && !limit) {
           try {
             for (const albName of albumVariants) {
               const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(albName)}&entity=album&limit=5`
-              const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
+              const itunesRes = await appleFetch(itunesUrl, { signal: AbortSignal.timeout(6000) })
               if (itunesRes.ok) {
                 const data = (await itunesRes.json()) as any
                 if (data.results && data.results.length > 0) {
@@ -1376,7 +1388,7 @@ function localLibraryScannerPlugin(): Plugin {
         if (foundItem.collectionId) {
           try {
             const lookupUrl = `https://itunes.apple.com/lookup?id=${foundItem.collectionId}&entity=song`
-            const lookupRes = await fetch(lookupUrl, { signal: AbortSignal.timeout(4000) })
+            const lookupRes = await appleFetch(lookupUrl, { signal: AbortSignal.timeout(4000) })
             if (lookupRes.ok) {
               const lookupData = (await lookupRes.json()) as any
               if (lookupData.results && lookupData.results.length > 1) {
@@ -1421,16 +1433,18 @@ function localLibraryScannerPlugin(): Plugin {
 
       // 5. MusicBrainz Search API with 1-Req/Sec Rate Limiter & Multi-Tier Fuzzy Fallback
       let lastMbTime = 0
-      const mbFetch = async (endpoint: string) => {
+      const mbFetch = async (endpoint: string, cancelled: () => boolean, bounded: boolean) => {
         const now = Date.now()
         const wait = Math.max(0, 1100 - (now - lastMbTime))
         if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+        if (cancelled()) return new Response(null, { status: 429 })
         lastMbTime = Date.now()
         return fetch(endpoint, {
           headers: {
             'User-Agent': 'CadenceMusicAgent/1.0.0 (https://github.com/cadence-audio)',
             Accept: 'application/json',
           },
+          redirect: bounded ? 'error' : 'follow',
           signal: AbortSignal.timeout(7000),
         })
       }
@@ -1580,6 +1594,13 @@ function localLibraryScannerPlugin(): Plugin {
 
       server.middlewares.use('/api/musicbrainz-search', async (req, res) => {
         const url = new URL(req.url || '', `http://${req.headers.host}`)
+        const limit = Number(url.searchParams.get('maxRequests'))
+        let remaining = limit > 0 ? Math.min(2, limit) : Infinity
+        const releaseFetch = (endpoint: string) => {
+          if (remaining < 1 || res.destroyed) return Promise.resolve(new Response(null, { status: 429 }))
+          remaining--
+          return mbFetch(endpoint, () => res.destroyed, limit > 0)
+        }
         const artist = url.searchParams.get('artist') || ''
         const composer = url.searchParams.get('composer') || ''
         const title = url.searchParams.get('title') || ''
@@ -1660,7 +1681,7 @@ function localLibraryScannerPlugin(): Plugin {
             for (const rq of releaseQueries) {
               try {
                 const mbReleaseUrl = `https://musicbrainz.org/ws/2/release?query=${encodeURIComponent(rq)}&fmt=json&limit=5`
-                const mbRelRes = await mbFetch(mbReleaseUrl)
+                const mbRelRes = await releaseFetch(mbReleaseUrl)
                 if (mbRelRes.ok) {
                   const relData = (await mbRelRes.json()) as any
                   const matchingReleases = (relData.releases || []).filter((r: any) => albumMatches(r.title, cleanAlbum))
@@ -1674,7 +1695,7 @@ function localLibraryScannerPlugin(): Plugin {
                   if (topRel && topRel.id) {
                     // Fetch full release details with medium tracklist and labels
                     const detailUrl = `https://musicbrainz.org/ws/2/release/${topRel.id}?inc=recordings+artist-credits+labels+media&fmt=json`
-                    const detailRes = await mbFetch(detailUrl)
+                    const detailRes = await releaseFetch(detailUrl)
                     if (detailRes.ok) {
                       const detail = (await detailRes.json()) as any
                       const media = detail.media?.[0]
@@ -1749,7 +1770,7 @@ function localLibraryScannerPlugin(): Plugin {
             for (const rq of recordingQueries) {
               try {
                 const mbRecUrl = `https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(rq)}&fmt=json&limit=5`
-                const mbRecRes = await mbFetch(mbRecUrl)
+                const mbRecRes = await releaseFetch(mbRecUrl)
                 if (mbRecRes.ok) {
                   const recData = (await mbRecRes.json()) as any
                   const topRec = recData.recordings?.find((r: any) => r.score >= 75)
@@ -2140,7 +2161,7 @@ Do not include any surrounding markdown or explanation, just the raw JSON array.
                 },
               },
               timeoutMs: 35000,
-            })
+            }, new URL(req.url || '', `http://${req.headers.host}`).searchParams.has('singleAttempt'), () => res.destroyed)
 
             res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
             res.setHeader('x-gemini-model-used', callResult.modelUsed || '')

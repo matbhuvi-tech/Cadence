@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   FolderPlus,
@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope, NavigationAnchor } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
+import { projectCurateCommits, type CurateCommitRow } from './core/curateCommit'
 import { auditService } from './services/auditService'
 import { storagePersistence } from './core/storagePersistence'
 import { IngestionResult } from './services/libraryImporter'
@@ -75,8 +76,45 @@ import { GeminiSetupScreen } from './components/GeminiSetupScreen'
 
 function AppContent() {
   // Primary Graph State
-  const [tracks, setTracks] = useState<Track[]>(() => graphEngine.getAllTracks())
-  const [releases, setReleases] = useState<Release[]>(() => graphEngine.getAllReleases())
+  const [catalogTracks, setTracks] = useState<Track[]>(() => graphEngine.getAllTracks())
+  const [catalogReleases, setReleases] = useState<Release[]>(() => graphEngine.getAllReleases())
+  const [curateCommits, setCurateCommits] = useState<CurateCommitRow[]>([])
+  const commitReadVersion = useRef(0)
+  const refreshCurateCommits = useCallback(async () => {
+    const version = ++commitReadVersion.current
+    try {
+      const rows = await tauriBridge.commitGetCurateProjection()
+      if (version === commitReadVersion.current) {
+        setCurateCommits(current => JSON.stringify(current) === JSON.stringify(rows) ? current : rows)
+      }
+    } catch (err) {
+      console.warn('[Curate] Could not read commit queue:', err)
+    }
+  }, [])
+  useEffect(() => {
+    if (!tauriBridge.isTauri()) return
+    let disposed = false
+    let unsubscribe: (() => void) | undefined
+    void refreshCurateCommits()
+    void tauriBridge.listenCommitTelemetry(() => {
+      if (!disposed) void refreshCurateCommits()
+    }).then(unlisten => {
+      if (disposed) unlisten()
+      else {
+        unsubscribe = unlisten
+        void refreshCurateCommits()
+      }
+    })
+    return () => {
+      disposed = true
+      commitReadVersion.current++
+      unsubscribe?.()
+    }
+  }, [refreshCurateCommits])
+  const { tracks, releases } = useMemo(
+    () => projectCurateCommits(catalogTracks, catalogReleases, curateCommits),
+    [catalogTracks, catalogReleases, curateCommits],
+  )
   const [works, setWorks] = useState<Work[]>(() => graphEngine.getAllWorks())
   const [storageMounts, setStorageMounts] = useState<StorageMount[]>(() => graphEngine.getAllStorageMounts())
   const [auditIssues, setAuditIssues] = useState<AuditIssue[]>(() => graphEngine.getAllAuditIssues())
@@ -245,6 +283,7 @@ function AppContent() {
   // Audiophile Transport Synchronization: Immediately notify background artwork service
   useEffect(() => {
     backgroundArtworkService.notifyPlaybackState(isPlaying, isPaused)
+    if (isPlaying || isPaused) tauriBridge.notifyPlaybackState(isPaused ? 'Paused' : 'Playing')
   }, [isPlaying, isPaused])
 
   // Initialize background artwork service and hook debounced checkpoints
@@ -636,11 +675,7 @@ function AppContent() {
 
   const handleTriggerScan = async (folderPath: string, forceFull: boolean = false) => {
     try {
-      const savedPolicy = (localStorage.getItem('cadence_scan_playback_policy') || 'purist') as
-        | 'purist'
-        | 'paced'
-        | 'unthrottled'
-      await tauriBridge.startLibraryScan(folderPath, undefined, forceFull, savedPolicy)
+      await tauriBridge.startLibraryScan(folderPath, undefined, forceFull)
       setIsActivityPopoverOpen(true)
       showToast(`Started scan of "${folderPath}"...`)
     } catch (err: any) {
@@ -905,8 +940,8 @@ function AppContent() {
     // Self-healing: if graphEngine was reloaded or emptied by HMR while React state still has tracks
     if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
       graphEngine.loadCustomLibrary({
-        tracks,
-        releases,
+        tracks: catalogTracks,
+        releases: catalogReleases,
         works,
         auditIssues,
         storageMounts,
@@ -1849,8 +1884,10 @@ function AppContent() {
           />
         ) : topMode === 'curate' ? (
           <UnifiedCurateCockpit
-            tracks={tracks}
-            releases={releases}
+            tracks={catalogTracks}
+            releases={catalogReleases}
+            commitRows={curateCommits}
+            onCommitQueued={refreshCurateCommits}
             auditIssues={auditIssues}
             initialSelectedAlbumId={selectedAlbumId}
             navigationAnchor={navigationAnchor}
@@ -1878,11 +1915,7 @@ function AppContent() {
               setTopMode('library')
             }}
             showToast={showToast}
-            onRefreshLibrary={() => {
-              refreshFromEngine()
-              persistCurrentLibrary()
-            }}
-            isPlaying={isPlaying}
+            isPlaying={isPlaying || isPaused}
           />
         ) : focusedWorkbenchTrack ? (
           <FocusedWorkbench
@@ -2081,8 +2114,8 @@ function AppContent() {
                   setSearchQuery('')
                   if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
                     graphEngine.loadCustomLibrary({
-                      tracks,
-                      releases,
+                      tracks: catalogTracks,
+                      releases: catalogReleases,
                       works,
                       auditIssues,
                       storageMounts,

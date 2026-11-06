@@ -281,38 +281,22 @@ export class LRUCache<K, V> {
 /**
  * Lookahead Queue Prefetcher (Depth = 2)
  * Eliminates MusicBrainz 1 req/sec stepper latency while strictly enforcing
- * the Audiophile Transport Silence invariant during playback and cooldown.
+ * the transport guard during active playback.
  */
 export class LookaheadQueuePrefetcher {
   private cache = new LRUCache<string, ReleaseConsensusResult>(50)
-  private lastPlaybackStoppedTime = 0
+  private readonly activePrefetch = new Set<AbortController>()
 
   constructor() {
-    // Initialized to 0 on boot. Subscribe to playback stops to track cooldown.
     if (typeof tauriBridge?.onPlaybackStateChanged === 'function') {
       tauriBridge.onPlaybackStateChanged((state: string) => {
-        if (state === 'Stopped') {
-          this.lastPlaybackStoppedTime = Date.now()
-        }
+        if (['Loading', 'Playing', 'Paused'].includes(state)) this.cancelPendingPrefetch()
       })
     }
   }
 
-  public notifyPlaybackStopped(): void {
-    this.lastPlaybackStoppedTime = Date.now()
-  }
-
-  public setLastPlaybackStoppedTime(time: number): void {
-    this.lastPlaybackStoppedTime = time
-  }
-
-  public getLastPlaybackStoppedTime(): number {
-    return this.lastPlaybackStoppedTime
-  }
-
   /**
-   * Transport Silence Invariant: Returns false if playback is active, paused, loading,
-   * or within a 30-second quietness cooldown window after playback stopped.
+   * Lookahead may run as soon as the transport is stopped.
    */
   public async isTransportQuiet(statusOverride?: {
     isPlaying?: boolean
@@ -320,24 +304,11 @@ export class LookaheadQueuePrefetcher {
     playbackState?: string
   }): Promise<boolean> {
     try {
-      const status = statusOverride || (await tauriBridge.getPlaybackStatus().catch(() => null))
-      if (status) {
-        if (
-          status.isPlaying ||
-          status.isPaused ||
-          (status as any).playbackState === 'Loading' ||
-          (status as any).playbackState === 'Playing' ||
-          (status as any).playbackState === 'Paused'
-        ) {
-          return false
-        }
-      }
-      if (this.lastPlaybackStoppedTime > 0 && Date.now() - this.lastPlaybackStoppedTime < 30000) {
-        return false
-      }
-      return true
+      const status = statusOverride ?? await tauriBridge.getPlaybackStatus()
+      return Boolean(status && !status.isPlaying && !status.isPaused &&
+        !['Loading', 'Playing', 'Paused'].includes(status.playbackState ?? ''))
     } catch {
-      return true
+      return false
     }
   }
 
@@ -354,6 +325,7 @@ export class LookaheadQueuePrefetcher {
   }
 
   public cancelPendingPrefetch(): void {
+    for (const controller of this.activePrefetch) controller.abort()
     globalMusicBrainzQueue.cancelPendingPrefetch()
   }
 
@@ -366,28 +338,25 @@ export class LookaheadQueuePrefetcher {
     releases: Release[],
     tracks: Track[]
   ): Promise<void> {
-    const isQuiet = await this.isTransportQuiet()
-    if (!isQuiet) {
-      return
-    }
+    const controller = new AbortController()
+    this.activePrefetch.add(controller)
+    try {
+      for (const idx of [currentIndex + 1, currentIndex + 2]) {
+        if (!(await this.isTransportQuiet()) || controller.signal.aborted) break
+        const targetItem = queue[idx]
+        if (!targetItem || this.cache.has(targetItem.albumId)) continue
+        const targetRelease = releases.find((r) => r.id === targetItem.albumId)
+        if (!targetRelease) continue
+        const targetTracks = tracks.filter((t) => t.releaseId === targetItem.albumId)
 
-    const targetIndices = [currentIndex + 1, currentIndex + 2]
-    for (const idx of targetIndices) {
-      if (idx >= queue.length) continue
-      const targetItem = queue[idx]
-      if (!targetItem || this.cache.has(targetItem.albumId)) continue
-
-      const targetRelease = releases.find((r) => r.id === targetItem.albumId)
-      if (!targetRelease) continue
-
-      const targetTracks = tracks.filter((t) => t.releaseId === targetItem.albumId)
-
-      federatedResolversService
-        .resolve2of3ReleaseConsensus(targetRelease, targetTracks, true)
-        .then((result) => {
-          this.cache.set(targetItem.albumId, result)
-        })
-        .catch(() => {})
+        const result = await federatedResolversService
+          .resolve2of3ReleaseConsensus(targetRelease, targetTracks, true, undefined, undefined, undefined, controller.signal)
+        if (!controller.signal.aborted) this.cache.set(targetItem.albumId, result)
+      }
+    } catch {
+      // A cancelled or unavailable prefetch can be retried on the next idle selection.
+    } finally {
+      this.activePrefetch.delete(controller)
     }
   }
 }

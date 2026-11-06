@@ -59,6 +59,9 @@ import {
   ConsensusFieldSource,
 } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
+import { getCurateChange, isReconciledCurateDraft, makeCurateCommitItems, prepareTier1Commit, projectCurateCommits, type CurateCommitRow, type CurateValueChange } from '../../core/curateCommit'
+import type { EnqueueBatchPayload } from '../../types/commit'
+import { CurateCommitOutcomes } from './CurateCommitOutcomes'
 import {
   captureCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields,
   type CurateDraftTrack,
@@ -70,6 +73,7 @@ import { behavioralLearningService } from '../../services/behavioralLearningServ
 import { tauriBridge } from '../../services/tauriBridge'
 import { provenanceCacheService } from '../../services/provenanceCacheService'
 import { useCurationTrace } from '../../hooks/useCurationTrace'
+import { captureTrackDecisions, curateMatchingContext } from '../../services/curateEvidenceService'
 import { SteerProgressBar } from './SteerProgressBar'
 import { CurationDecisionTraceDrawer } from './CurationDecisionTraceDrawer'
 import { resolveGemini } from '../../services/geminiClient'
@@ -95,7 +99,8 @@ export interface UnifiedCurateCockpitProps {
   onOpenCommitModal: () => void
   onBackToLibrary: () => void
   showToast: (msg: string) => void
-  onRefreshLibrary?: () => void
+  commitRows?: CurateCommitRow[]
+  onCommitQueued?: () => Promise<void>
   isPlaying?: boolean
 }
 
@@ -122,9 +127,20 @@ interface AlbumWorkItem {
 }
 
 const emptyAuditIssues: AuditIssue[] = []
+const albumReviewFields = ['albumTitle', 'albumArtist', 'composer', 'year', 'coverArt', 'genre'] as const
+
+function SelectedChangeNote({ change, label }: { change: CurateValueChange | null | undefined; label?: string }) {
+  if (!change) return null
+  return (
+    <span className="block break-words text-[11px] leading-snug text-amber-200">
+      {label && `${label} · `}
+      {change.previous === undefined ? 'Added · No local value' : `Was: ${change.previous}`}
+    </span>
+  )
+}
 
 // Direct Apple Music URL and Slug Resolver
-async function resolveDirectAppleMusicCandidate(inputUrl: string, steerTitle?: string, steerArtist?: string): Promise<{
+async function resolveDirectAppleMusicCandidate(collectionId: string, signal: AbortSignal): Promise<{
   releaseTitle: string
   artistCredit: string
   composer: string
@@ -133,10 +149,6 @@ async function resolveDirectAppleMusicCandidate(inputUrl: string, steerTitle?: s
   coverArtUrl: string
   tracks: Array<{ trackNumber: number; trackName: string; artistName?: string }>
 } | null> {
-  let collectionId: string | null = null
-  const idMatch = inputUrl.match(/(?:album\/[^\/]+\/|album\/|id=?)(\d{8,12})/)
-  if (idMatch) collectionId = idMatch[1]
-
   const parseResults = (results: any[]) => {
     const coll = results.find(r => r.wrapperType === 'collection') || results[0]
     const songs = results.filter(r => r.wrapperType === 'track')
@@ -155,52 +167,14 @@ async function resolveDirectAppleMusicCandidate(inputUrl: string, steerTitle?: s
     }
   }
 
-  // 1. Direct ID lookup on iTunes Store API (try India storefront then global)
-  if (collectionId) {
-    try {
-      const res = await fetch(`https://itunes.apple.com/lookup?id=${collectionId}&country=in&entity=song`)
-      const data = await res.json()
-      if (data.resultCount > 0) return parseResults(data.results)
-
-      const resGlobal = await fetch(`https://itunes.apple.com/lookup?id=${collectionId}&entity=song`)
-      const dataGlobal = await resGlobal.json()
-      if (dataGlobal.resultCount > 0) return parseResults(dataGlobal.results)
-    } catch (e) {
-      console.warn('[AppleMusicResolver] Direct ID lookup failed:', e)
-    }
-  }
-
-  // 2. Fallback: Extract title slug from URL (e.g. if ID has typo or regional redirection)
-  let slugTitle = ''
-  const slugMatch = inputUrl.match(/album\/([^\/]+)\//)
-  if (slugMatch) {
-    slugTitle = slugMatch[1]
-      .replace(/-/g, ' ')
-      .replace(/\b(?:original motion picture soundtrack|soundtrack|ep|ost)\b/gi, '')
-      .trim()
-  }
-
-  const queryTerms = [slugTitle || steerTitle, steerArtist].filter(Boolean).join(' ')
-  if (queryTerms) {
-    try {
-      const sRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(queryTerms)}&country=in&media=music&entity=album`)
-      const sData = await sRes.json()
-      if (sData.resultCount > 0) {
-        const bestColl = sData.results[0]
-        const lRes = await fetch(`https://itunes.apple.com/lookup?id=${bestColl.collectionId}&country=in&entity=song`)
-        const lData = await lRes.json()
-        if (lData.resultCount > 0) return parseResults(lData.results)
-      }
-    } catch (e) {
-      console.warn('[AppleMusicResolver] Slug fallback search failed:', e)
-    }
-  }
-
-  return null
+  const res = await fetch(`https://itunes.apple.com/lookup?id=${collectionId}&country=in&entity=song`, { signal, redirect: 'error' })
+  if (!res.ok) return null
+  const data = await res.json()
+  return data.resultCount > 0 ? parseResults(data.results) : null
 }
 
 // Direct Wikipedia Tracklist & Metadata Resolver (100% deterministic, zero API quota)
-async function resolveDirectWikipediaCandidate(inputUrl: string): Promise<{
+async function resolveDirectWikipediaCandidate(inputUrl: string, signal: AbortSignal): Promise<{
   releaseTitle: string
   artistCredit: string
   composer: string
@@ -216,7 +190,7 @@ async function resolveDirectWikipediaCandidate(inputUrl: string): Promise<{
 
   try {
     const url = `https://en.wikipedia.org/api/rest_v1/page/html/${encodeURIComponent(slug)}`
-    const r = await fetch(url, { headers: { 'User-Agent': 'Cadence/1.0 (Bit-Perfect Music Manager)' } })
+    const r = await fetch(url, { signal, redirect: 'error', headers: { 'User-Agent': 'Cadence/1.0 (Bit-Perfect Music Manager)' } })
     if (!r.ok) return null
     const html = await r.text()
 
@@ -451,7 +425,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   onOpenCommitModal,
   onBackToLibrary,
   showToast,
-  onRefreshLibrary,
+  commitRows,
+  onCommitQueued,
   isPlaying = false,
 }) => {
   // 1. Compute Base Queue from Curation Queue Service
@@ -485,7 +460,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // Commit progress state
   const [isBatchCommitting, setIsBatchCommitting] = useState(false)
-  const [commitProgress, setCommitProgress] = useState<{ current: number; total: number } | null>(null)
+  const batchAbort = useRef<AbortController | null>(null)
+  useEffect(() => {
+    if (isPlaying) batchAbort.current?.abort()
+  }, [isPlaying])
+  useEffect(() => () => batchAbort.current?.abort(), [])
 
   // Compilation Provenance State & Abort Controller
   const [isResolvingProvenance, setIsResolvingProvenance] = useState(false)
@@ -506,6 +485,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [draftLoadAttempt, setDraftLoadAttempt] = useState(0)
   const [draftSaveError, setDraftSaveError] = useState<string | null>(null)
   const [stagingAlbumId, setStagingAlbumId] = useState<string | null>(null)
+  const [queuingAlbumId, setQueuingAlbumId] = useState<string | null>(null)
 
   // Initialize and populate album items - PRESERVES user edits across library refreshes
   useEffect(() => {
@@ -743,6 +723,48 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   }, [activeItemId, draftLoadAttempt])
 
   const selectedAlbum = activeItem && draftLoad?.id === activeItem.id && !draftLoad.failed ? activeItem : null
+  const selectedChanges = useMemo(() => {
+    if (!selectedAlbum) return null
+    const album = Object.fromEntries(albumReviewFields.map(key => [
+      key, getCurateChange(selectedAlbum[key].local, selectedAlbum[key].selected),
+    ])) as Record<typeof albumReviewFields[number], CurateValueChange | null>
+    const baselineTracks = new Map(selectedAlbum.rawTracks.map(track => [track.id, track]))
+    const tracks = new Map(selectedAlbum.tracks.map(track => {
+      const local = baselineTracks.get(track.trackId)
+      return [track.trackId, {
+        title: getCurateChange(track.localTitle, track.matchedTitle),
+        singers: getCurateChange(track.localArtists, track.matchedArtists),
+        originalAlbum: getCurateChange(local?.originalAlbum, track.originalAlbum),
+        originalYear: getCurateChange(local?.originalYear, track.originalYear),
+      }] as const
+    }))
+    return {
+      album, tracks,
+      albumCount: Object.values(album).filter(Boolean).length,
+      trackCount: Array.from(tracks.values()).filter(change => Object.values(change).some(Boolean)).length,
+    }
+  }, [selectedAlbum])
+  const selectedTrackIds = new Set(selectedAlbum?.tracks.map(track => track.trackId))
+  const selectedCommitRows = commitRows?.filter(row => selectedTrackIds.has(row.trackId)) ?? []
+  const commitsByTrack = useMemo(() => new Map(commitRows?.map(row => [row.trackId, row])), [commitRows])
+  const reconciledAlbumIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const id of loadedDrafts.current.keys()) {
+      const album = albumItems.get(id)
+      if (!album || commitsByTrack.get(album.tracks[0]?.trackId)?.status !== 'completed') continue
+      if (isReconciledCurateDraft(captureCurateDraft(album), commitsByTrack)) ids.add(id)
+    }
+    return ids
+  }, [albumItems, commitsByTrack, draftLoad])
+  const selectedCommitReconciled = Boolean(selectedAlbum && reconciledAlbumIds.has(selectedAlbum.id))
+  const selectedCommitStatuses = new Set(selectedCommitRows.map(row => row.status))
+  const selectedCommitError = selectedCommitRows.find(row => row.status === 'failed' && row.errorMessage)?.errorMessage
+  const selectedCommitStatus = selectedCommitStatuses.has('failed')
+    ? (selectedCommitStatuses.has('completed') ? 'Partially written · retry needed' : 'Write failed · retry needed')
+    : selectedCommitStatuses.has('in_flight') ? 'Writing tags'
+    : selectedCommitStatuses.has('pending') ? 'Queued for tag writing'
+    : selectedCommitStatuses.has('completed')
+      ? (selectedCommitRows.length === selectedTrackIds.size ? 'Tags written' : 'Some tags written') : null
 
   const saveAlbumDraft = useCallback(async (album: AlbumWorkItem) => {
     const state = loadedDrafts.current.get(album.id)
@@ -766,6 +788,46 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     }
   }, [])
 
+  // The native projection has confirmed that every written track matches SQLite.
+  // Adopt that baseline for the exact draft without touching a newer selection.
+  useEffect(() => {
+    if (!selectedAlbum || !selectedCommitReconciled) return
+    const { tracks: writtenTracks, releases: writtenReleases } = projectCurateCommits(
+      selectedAlbum.rawTracks,
+      selectedAlbum.rawRelease ? [selectedAlbum.rawRelease] : [],
+      selectedCommitRows,
+    )
+    const release = writtenReleases[0]
+    const firstTrack = writtenTracks[0]
+    const writtenArtwork = selectedCommitRows.find(row => row.artworkUrl)?.artworkUrl
+    const tracksById = new Map(writtenTracks.map(track => [track.id, track]))
+    const reconciled: AlbumWorkItem = {
+      ...selectedAlbum,
+      draftBasedOn: undefined,
+      userOverridden: false,
+      rawRelease: release,
+      rawTracks: writtenTracks,
+      albumTitle: { ...selectedAlbum.albumTitle, local: release?.title ?? firstTrack?.albumTitle ?? selectedAlbum.albumTitle.local },
+      albumArtist: { ...selectedAlbum.albumArtist, local: firstTrack?.albumArtist ?? release?.artistCredit ?? selectedAlbum.albumArtist.local },
+      composer: { ...selectedAlbum.composer, local: release?.composerName ?? firstTrack?.composerName ?? selectedAlbum.composer.local },
+      year: { ...selectedAlbum.year, local: release?.releaseYear ?? firstTrack?.canonicalReleaseYear ?? selectedAlbum.year.local },
+      genre: { ...selectedAlbum.genre, local: release?.genreTags[0] ?? selectedAlbum.genre.local },
+      coverArt: writtenArtwork
+        ? { ...selectedAlbum.coverArt, selected: writtenArtwork, local: writtenArtwork, userOverridden: false }
+        : selectedAlbum.coverArt,
+      tracks: selectedAlbum.tracks.map(track => {
+        const written = tracksById.get(track.trackId)
+        return written ? { ...track, localTitle: written.title, localArtists: written.artistCredit } : track
+      }),
+    }
+    if (!selectedAlbum.draftBasedOn && !selectedAlbum.userOverridden &&
+        selectedAlbum.coverArt.selected === reconciled.coverArt.selected &&
+        captureCurateDraft(reconciled).baseline === captureCurateDraft(selectedAlbum).baseline) return
+    setAlbumItems(prev => prev.get(selectedAlbum.id) === selectedAlbum
+      ? new Map(prev).set(selectedAlbum.id, reconciled)
+      : prev)
+  }, [selectedAlbum, selectedCommitReconciled, commitsByTrack])
+
   // Also save edits from a provider operation that finishes after the user selects another album.
   useEffect(() => {
     const previous = previousDraftItems.current
@@ -788,6 +850,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     isResuming: isTraceResuming,
     setIsResuming: setIsTraceResuming,
     executeFetch: executeTraceFetch,
+    lastEvidenceId,
     toggleDrawer: toggleTraceDrawer,
     closeDrawer: closeTraceDrawer,
     setTrace: setCurationTrace,
@@ -807,12 +870,25 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // Count by tier
   const tier1Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier1' && a.status !== 'committed')
-  }, [albumItems])
+    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier1' && a.status !== 'committed' && !reconciledAlbumIds.has(a.id))
+  }, [albumItems, reconciledAlbumIds])
 
   const tier2Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status !== 'committed')
-  }, [albumItems])
+    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status !== 'committed' && !reconciledAlbumIds.has(a.id))
+  }, [albumItems, reconciledAlbumIds])
+
+  const isCompilationAlbum = useMemo(() => {
+    if (!selectedAlbum) return false
+    const rel = selectedAlbum.rawRelease
+    const g = (selectedAlbum.genre?.selected || '').toLowerCase()
+    const t = (selectedAlbum.albumTitle?.selected || selectedAlbum.currentTitle || '').toLowerCase()
+    return Boolean(
+      rel?.isCompilation ||
+      g.includes('compilation') ||
+      /\b(hits\s+of|best\s+of|golden\s+hits|anthology|collection|classics)\b/i.test(t) ||
+      selectedAlbum.rawTracks.some(trk => trk.isCompilation || /\(from\s+["'][^"']+["']\)/i.test(trk.title))
+    )
+  }, [selectedAlbum])
 
   // Asynchronously resolve 4-way consensus for selected album
   useEffect(() => {
@@ -822,13 +898,17 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
     const fetchConsensus = async () => {
       try {
-        const consensus = await federatedResolversService.resolve2of3ReleaseConsensus(
-          selectedAlbum.rawRelease!,
-          selectedAlbum.rawTracks,
-          false
-        )
+        const release = selectedAlbum.rawRelease!
+        const consensus = await executeTraceFetch(selectedAlbum.id, {
+          trigger: 'initial', context: curateMatchingContext(release, selectedAlbum.rawTracks),
+        }, async (signal, onProgress, record) => {
+          const result = await federatedResolversService.resolve2of3ReleaseConsensus(
+            release, selectedAlbum.rawTracks, false, undefined, undefined, onProgress, signal, record, 1,
+          )
+          return { result, trace: result.decisionTrace, trackDecisions: captureTrackDecisions(result) }
+        })
 
-        if (!isMounted) return
+        if (!isMounted || !consensus) return
 
         setAlbumItems((prev) => {
           const next = new Map(prev)
@@ -1058,18 +1138,26 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // Steer Providers & Ground AI handler
   const handleFetchAndAnchor = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
-    if (!selectedAlbum || !selectedAlbum.rawRelease) return
+    if (!selectedAlbum || !selectedAlbum.rawRelease || isSteeringLoading) return
 
     setIsSteeringLoading(true)
     showToast(`Searching providers for "${steerAlbum || selectedAlbum.currentTitle}"...`)
 
     try {
       let aiMasterResult: any = undefined
+      let directAppleCandidate: any = null
+      const localRelease = selectedAlbum.rawRelease
+      const consensus = await executeTraceFetch(selectedAlbum.id, {
+        trigger: 'user_refresh', context: curateMatchingContext(localRelease, selectedAlbum.rawTracks),
+      }, async (signal, onProgress, record) => {
       let directWikiMaster: any = null
+      const useWikipedia = steerGroundingUrl.includes('wikipedia.org')
+      const useAi = !useWikipedia && Boolean(steerGroundingUrl.trim() || steerAlbum.trim())
 
       // 1. If user supplied a Wikipedia URL, resolve directly and deterministically (zero quota)
-      if (steerGroundingUrl.includes('wikipedia.org')) {
-        directWikiMaster = await resolveDirectWikipediaCandidate(steerGroundingUrl)
+      if (useWikipedia) {
+        directWikiMaster = await resolveDirectWikipediaCandidate(steerGroundingUrl, signal)
+        signal.throwIfAborted()
         if (directWikiMaster) {
           aiMasterResult = {
             releaseTitle: directWikiMaster.releaseTitle,
@@ -1083,13 +1171,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       }
 
       // 2. If user supplied a grounding URL or custom search, call compilationCanonicalizerService if not already resolved
-      if (!aiMasterResult && (steerGroundingUrl.trim() || steerAlbum.trim())) {
+      if (useAi) {
         try {
           const canonicalRes = await compilationCanonicalizerService.resolveCompilationSoundtracks(
-            selectedAlbum.rawRelease,
+            localRelease,
             selectedAlbum.rawTracks,
             releases,
             {
+              selectedAlbumSignal: signal,
               referenceUrl: steerGroundingUrl.trim() || undefined,
               userSearchQuery: {
                 albumTitle: steerAlbum.trim() || undefined,
@@ -1101,9 +1190,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
           if (canonicalRes && canonicalRes.success && canonicalRes.tracks && canonicalRes.tracks.length > 0) {
             const firstProp = canonicalRes.tracks[0]
-            const cleanRawTitle = cleanConsensusTitle(selectedAlbum.rawRelease.title)
+            const cleanRawTitle = cleanConsensusTitle(localRelease.title)
             const fallbackAlbumTitle = steerAlbum.trim() || cleanRawTitle
-            const fallbackComposer = steerArtist.trim() || selectedAlbum.rawRelease.composerName || selectedAlbum.rawRelease.artistCredit || ''
+            const fallbackComposer = steerArtist.trim() || localRelease.composerName || localRelease.artistCredit || ''
 
             aiMasterResult = {
               releaseTitle: isCompilationAlbum
@@ -1111,7 +1200,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 : (firstProp?.proposedOriginalAlbum || fallbackAlbumTitle),
               artistCredit: (firstProp as any)?.composer || (firstProp as any)?.proposedComposer || fallbackComposer,
               composer: (firstProp as any)?.composer || (firstProp as any)?.proposedComposer || fallbackComposer,
-              releaseYear: (firstProp as any)?.proposedOriginalYear || (firstProp as any)?.proposedYear || (Number(steerYear) || selectedAlbum.rawRelease.releaseYear),
+              releaseYear: (firstProp as any)?.proposedOriginalYear || (firstProp as any)?.proposedYear || (Number(steerYear) || localRelease.releaseYear),
               genre: `${detectedLanguage} Film Soundtrack`,
               tracks: canonicalRes.tracks.map((pt, idx) => ({
                 trackNumber: pt.trackNumber || idx + 1,
@@ -1126,12 +1215,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       }
 
       // 3. If user gave an Apple Music URL, directly resolve the authentic Apple Music album & tracklist
+      signal.throwIfAborted()
       let directAppleMaster: any = null
-      if (steerGroundingUrl.includes('music.apple.com') || steerGroundingUrl.includes('itunes.apple.com')) {
-        directAppleMaster = await resolveDirectAppleMusicCandidate(steerGroundingUrl, steerAlbum, steerArtist)
+      const appleId = /^https:\/\/(?:music|itunes)\.apple\.com\//i.test(steerGroundingUrl.trim())
+        ? steerGroundingUrl.match(/(?:album\/[^/]+\/|album\/|id=?)(\d{8,12})/)?.[1]
+        : undefined
+      if (appleId) {
+        directAppleMaster = await resolveDirectAppleMusicCandidate(appleId, signal).catch(error => {
+          signal.throwIfAborted()
+          console.warn('[AppleMusicResolver] Direct ID lookup failed:', error)
+          return null
+        })
       }
 
-      const directAppleCandidate: any = directAppleMaster ? {
+      directAppleCandidate = directAppleMaster ? {
         provider: 'itunes',
         confidenceScore: 0.99,
         releaseTitle: directAppleMaster.releaseTitle,
@@ -1154,14 +1251,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
       // 3. Build steered release for federated provider resolution
       const steeredRelease: Release = {
-        ...selectedAlbum.rawRelease,
-        title: directAppleMaster?.releaseTitle || aiMasterResult?.releaseTitle || steerAlbum.trim() || selectedAlbum.rawRelease.title,
-        artistCredit: directAppleMaster?.artistCredit || aiMasterResult?.artistCredit || steerArtist.trim() || selectedAlbum.rawRelease.artistCredit,
-        composerName: directAppleMaster?.composer || aiMasterResult?.composer || steerArtist.trim() || selectedAlbum.rawRelease.composerName,
-        releaseYear: directAppleMaster?.releaseYear || aiMasterResult?.releaseYear || Number(steerYear) || selectedAlbum.rawRelease.releaseYear,
+        ...localRelease,
+        title: directAppleMaster?.releaseTitle || aiMasterResult?.releaseTitle || steerAlbum.trim() || localRelease.title,
+        artistCredit: directAppleMaster?.artistCredit || aiMasterResult?.artistCredit || steerArtist.trim() || localRelease.artistCredit,
+        composerName: directAppleMaster?.composer || aiMasterResult?.composer || steerArtist.trim() || localRelease.composerName,
+        releaseYear: directAppleMaster?.releaseYear || aiMasterResult?.releaseYear || Number(steerYear) || localRelease.releaseYear,
       }
 
-      const consensus = await executeTraceFetch(selectedAlbum.id, async (signal, onProgress) => {
+        signal.throwIfAborted()
         const res = await federatedResolversService.resolve2of3ReleaseConsensus(
           steeredRelease,
           selectedAlbum.rawTracks,
@@ -1169,9 +1266,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           aiMasterResult,
           directAppleCandidate,
           onProgress,
-          signal
+          signal,
+          record,
+          appleId ? 0 : (useWikipedia || useAi ? 1 : 2),
         )
-        return { trace: res?.decisionTrace, result: res }
+        return { trace: res.decisionTrace, result: res, trackDecisions: captureTrackDecisions(res) }
       })
 
       if (!consensus) {
@@ -1264,25 +1363,15 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   }, [selectedAlbum])
 
   // Compilation album detection heuristic
-  const isCompilationAlbum = useMemo(() => {
-    if (!selectedAlbum) return false
-    const rel = selectedAlbum.rawRelease
-    const g = (selectedAlbum.genre?.selected || '').toLowerCase()
-    const t = (selectedAlbum.albumTitle?.selected || selectedAlbum.currentTitle || '').toLowerCase()
-    return Boolean(
-      rel?.isCompilation ||
-      g.includes('compilation') ||
-      /\b(hits\s+of|best\s+of|golden\s+hits|anthology|collection|classics)\b/i.test(t) ||
-      selectedAlbum.rawTracks.some(trk => trk.isCompilation || /\(from\s+["'][^"']+["']\)/i.test(trk.title))
-    )
-  }, [selectedAlbum])
+  const provenanceAttempted = useRef<string | undefined>(undefined)
+  useEffect(() => { provenanceAttempted.current = undefined }, [selectedAlbum?.id])
 
   // Automatic debounced compilation provenance resolution (500ms, playback guarded, parameter-hashed cache)
   useEffect(() => {
     if (!selectedAlbum || !isCompilationAlbum) return
     if (loadedDrafts.current.get(selectedAlbum.id)?.restored) return
 
-    // Transport Invariant: Defer inference if audio is actively playing or in post-playback cooldown
+    // Defer automatic inference until the transport is idle.
     if (isPlaying) {
       console.log('[UnifiedCurateCockpit] Audio playback active; deferring provenance inference')
       return
@@ -1360,7 +1449,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           }))
         }
 
-        const result: any = await resolveGemini('compilation', payload, controller.signal)
+        controller.signal.throwIfAborted()
+        if (provenanceAttempted.current === selectedAlbum.id) return
+        provenanceAttempted.current = selectedAlbum.id
+        const result: any = await resolveGemini('compilation', payload, controller.signal, true)
+        controller.signal.throwIfAborted()
         const rawTracks = Array.isArray(result) ? result : (Array.isArray(result?.tracks) ? result.tracks : (Array.isArray(result?.results) ? result.results : []))
         if (rawTracks.length > 0) {
           const provenanceResult: CompilationProvenanceResult = {
@@ -1456,7 +1549,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // Stage Album: saves state, keeps in queue with 'staged' badge, and advances
   const handleStage = useCallback(async () => {
-    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId) return
+    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || selectedCommitReconciled || batchAbort.current) return
 
     // Advance only after SQLite has acknowledged the staged draft.
     setStagingAlbumId(selectedAlbum.id)
@@ -1504,105 +1597,76 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     if (currIdx >= 0 && currIdx < activeList.length - 1) {
       setSelectedAlbumId(current => current === selectedAlbum.id ? activeList[currIdx + 1].id : current)
     }
-  }, [selectedAlbum, stagingAlbumId, saveAlbumDraft, activeTier, tier1Items, tier2Items, showToast])
+  }, [selectedAlbum, stagingAlbumId, selectedCommitReconciled, saveAlbumDraft, activeTier, tier1Items, tier2Items, showToast])
 
-  // Commit Album: permanently writes to disk and REMOVES it from the queue
+  // Freeze this album's exact selection in the native queue. The worker owns file writes.
   const handleCommitAlbum = useCallback(async () => {
-    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId) return
-
-    // Audiophile Transport Guard
-    if (isPlaying) {
-      showToast('⚠️ Storage Bus Silence: Playback active. Disk writes are paused until audio pauses.')
-      return
-    }
-
-    // 1. Commit edits into graphEngine sidecars
-    for (const trk of selectedAlbum.tracks) {
-      graphEngine.updateTrackSidecar(trk.trackId, {
-        title: trk.matchedTitle,
-        artistCredit: trk.matchedArtists,
-        albumTitle: selectedAlbum.albumTitle.selected,
-        composerName: selectedAlbum.composer.selected,
-        releaseYear: selectedAlbum.year.selected,
-        genre: selectedAlbum.genre.selected,
+    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitReconciled || batchAbort.current) return
+    setQueuingAlbumId(selectedAlbum.id)
+    try {
+      if (!tauriBridge.isTauri()) throw new Error('Open the desktop app to queue tag writes.')
+      const draft = captureCurateDraft(selectedAlbum)
+      const items = makeCurateCommitItems(draft, selectedAlbum.rawTracks, selectedAlbum.rawRelease)
+      if (!items.length) throw new Error('There are no tracks to commit.')
+      await saveAlbumDraft(selectedAlbum)
+      await tauriBridge.commitEnqueueBatch({
+        description: `Curate: ${selectedAlbum.albumTitle.selected}`,
+        destination: 'embedded',
+        items,
       })
-    }
-
-    // 2. Physical flush to disk via tauriBridge
-    try {
-      await tauriBridge.commitStagedSidecars()
+      showToast(`Queued "${selectedAlbum.albumTitle.selected}" for tag writing.`)
+      await onCommitQueued?.()
     } catch (err) {
-      console.warn('[UnifiedCurateCockpit] Commit notice:', err)
+      showToast(`Could not queue album: ${String(err)}`)
+    } finally {
+      setQueuingAlbumId(null)
     }
+  }, [selectedAlbum, stagingAlbumId, queuingAlbumId, selectedCommitReconciled, saveAlbumDraft, onCommitQueued, showToast])
 
-    // 3. Mark as committed in state so it is removed from active review queue
-    setAlbumItems((prev) => {
-      const next = new Map(prev)
-      const current = next.get(selectedAlbum.id)
-      if (current) {
-        next.set(selectedAlbum.id, {
-          ...current,
-          status: 'committed',
-        })
-      }
-      return next
-    })
-
-    onRefreshLibrary?.()
-    showToast(`✓ Committed "${selectedAlbum.albumTitle.selected}" to library and removed from queue!`)
-
-    // 4. Advance to next remaining album
-    const remaining = tier2Items.filter((a) => a.id !== selectedAlbum.id && a.status !== 'committed')
-    if (remaining.length > 0) {
-      setSelectedAlbumId(remaining[0].id)
-    } else {
-      setSelectedAlbumId(null)
-    }
-  }, [selectedAlbum, stagingAlbumId, isPlaying, tier2Items, onRefreshLibrary, showToast])
-
-  // Batch commit Tier 1 albums in background with Audiophile Guard
   const handleCommitAllTier1 = async () => {
-    if (tier1Items.length === 0 || stagingAlbumId) return
-
-    // Audiophile Transport Guard: Check if music is playing
-    if (isPlaying) {
-      showToast('⚠️ Storage Bus Silence: Playback active. Batch writes will start once audio pauses.')
-      return
-    }
-
+    if (!tier1Items.length || stagingAlbumId || queuingAlbumId || isPlaying || batchAbort.current) return
+    const controller = new AbortController()
+    batchAbort.current = controller
     setIsBatchCommitting(true)
-    setCommitProgress({ current: 0, total: tier1Items.length })
-
-    let processed = 0
-    for (const alb of tier1Items) {
-      // Stage each album's tracks
-      for (const trk of alb.tracks) {
-        graphEngine.updateTrackSidecar(trk.trackId, {
-          title: trk.matchedTitle,
-          artistCredit: trk.matchedArtists,
-          albumTitle: alb.albumTitle.selected,
-          composerName: alb.composer.selected,
-          releaseYear: alb.year.selected,
-          genre: alb.genre.selected,
-        })
-      }
-
-      processed++
-      setCommitProgress({ current: processed, total: tier1Items.length })
-      await new Promise((r) => setTimeout(r, 60)) // Yield to event loop
-    }
-
-    // Trigger physical sidecar flush via tauriBridge
     try {
-      await tauriBridge.commitStagedSidecars()
+      if (!tauriBridge.isTauri()) throw new Error('Open the desktop app to queue tag writes.')
+      const rows = new Map((await tauriBridge.commitGetCurateProjection()).map(row => [row.trackId, row]))
+      const items: EnqueueBatchPayload['items'] = []
+      const drafts: NonNullable<EnqueueBatchPayload['curateDrafts']> = []
+      for (const album of tier1Items) {
+        controller.signal.throwIfAborted()
+        if (album.draftBasedOn) continue
+        const loaded = loadedDrafts.current.has(album.id)
+        const saved = loaded ? null : await tauriBridge.curationGetDraft(album.id)
+        controller.signal.throwIfAborted()
+        const prepared = prepareTier1Commit(captureCurateDraft(album), saved, album.rawTracks, album.rawRelease, rows)
+        if (!prepared) continue
+        items.push(...prepared.items)
+        drafts.push({ albumId: album.id, draft: prepared.draft })
+      }
+      if (!items.length) {
+        showToast('No Tier 1 albums are ready to queue. Review their drafts or existing queue items.')
+        return
+      }
+      controller.signal.throwIfAborted()
+      await tauriBridge.commitEnqueueBatch({
+        description: `Curate Tier 1 · ${drafts.length} albums`,
+        destination: 'embedded',
+        requireIdle: true,
+        curateDrafts: drafts,
+        items,
+      })
+      const skipped = tier1Items.length - drafts.length
+      showToast(`Queued ${drafts.length} Tier 1 album(s) for tag writing.${skipped ? ` ${skipped} skipped.` : ''}`)
+      await onCommitQueued?.()
     } catch (err) {
-      console.warn('[UnifiedCurateCockpit] Sidecar commit note:', err)
+      showToast(controller.signal.aborted
+        ? 'Tier 1 preparation stopped. Stop playback before queueing a batch.'
+        : `Could not queue Tier 1: ${String(err)}`)
+    } finally {
+      batchAbort.current = null
+      setIsBatchCommitting(false)
     }
-
-    setIsBatchCommitting(false)
-    setCommitProgress(null)
-    onRefreshLibrary?.()
-    showToast(`✓ Successfully committed all ${tier1Items.length} Tier 1 albums!`)
   }
 
   // Keyboard navigation shortcuts
@@ -1635,6 +1699,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   ) => {
     const isEditing = editingFieldKey === fieldKey
     const selectedVal = fieldState.selected
+    const change = selectedChanges?.album[fieldKey]
 
     return (
       <tr key={fieldKey} data-testid={`master-row-${fieldKey}`} className="hover:bg-white/[0.015] transition-colors">
@@ -1679,7 +1744,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         </td>
 
         {/* Selected Output */}
-        <td data-testid={`master-cell-${fieldKey}-selected`} className="py-2.5 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+        <td data-testid={`master-cell-${fieldKey}-selected`} className={`py-2.5 px-4 border-l border-white/[0.06] ${change ? 'bg-amber-500/[0.07]' : 'bg-emerald-500/[0.03]'}`}>
           {isEditing ? (
             <div className="flex items-center gap-2">
               <input
@@ -1707,13 +1772,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           ) : (
             <div className="flex items-center justify-between gap-2 group">
               {selectedVal !== '' && selectedVal !== undefined ? (
-                <span className="font-semibold text-emerald-300 truncate">{String(selectedVal)}</span>
+                <div className="min-w-0">
+                  <span className="block break-words font-semibold text-emerald-300">{String(selectedVal)}</span>
+                  <SelectedChangeNote change={change} />
+                </div>
               ) : (
                 <span className="text-[11px] text-amber-300 font-medium">
                   ⚠️ Action Required (No Consensus)
                 </span>
               )}
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
                 <button
                   onClick={() => {
                     setEditingFieldKey(fieldKey)
@@ -1736,6 +1804,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // Row Renderer: Artwork Row
   const renderArtworkRow = (fieldState: MetadataFieldState<string>) => {
     const isEditing = editingFieldKey === 'coverArt'
+    const change = selectedChanges?.album.coverArt
 
     return (
       <tr data-testid="master-row-coverArt" className="hover:bg-white/[0.015] transition-colors">
@@ -1822,7 +1891,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         </td>
 
         {/* Selected Artwork */}
-        <td data-testid="master-cell-coverArt-selected" className="py-3 px-4 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+        <td data-testid="master-cell-coverArt-selected" className={`py-3 px-4 border-l border-white/[0.06] ${change ? 'bg-amber-500/[0.07]' : 'bg-emerald-500/[0.03]'}`}>
           {isEditing ? (
             <div className="flex flex-col gap-2">
               <input
@@ -1862,6 +1931,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 </div>
               )}
               <div>
+                {change && <span className="block text-[11px] text-amber-200">Cover changed</span>}
                 <button
                   onClick={() => {
                     setEditingFieldKey('coverArt')
@@ -1983,11 +2053,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             {activeTier === 'tier1' && tier1Items.length > 0 && (
               <button
                 onClick={handleCommitAllTier1}
-                disabled={isBatchCommitting}
+                disabled={isBatchCommitting || isPlaying || Boolean(stagingAlbumId || queuingAlbumId)}
                 className="px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-[11px] cursor-pointer transition-colors shadow-sm disabled:opacity-50"
               >
                 {isBatchCommitting
-                  ? `Writing ${commitProgress?.current}/${commitProgress?.total}...`
+                  ? 'Preparing queue…'
                   : `Commit All (${tier1Items.length})`}
               </button>
             )}
@@ -2109,7 +2179,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Stage Button (keeps in queue, preserves all changes) */}
                 <button
                   onClick={handleStage}
-                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId)}
+                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || selectedCommitReconciled || isBatchCommitting)}
                   data-testid="btn-stage-next"
                   className="px-3.5 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium text-xs border border-white/20 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   title="Save changes and keep in queue for later review"
@@ -2121,17 +2191,37 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Commit Button (saves permanently and removes from queue) */}
                 <button
                   onClick={handleCommitAlbum}
-                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId)}
+                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitReconciled || isBatchCommitting)}
                   data-testid="btn-commit-album"
                   className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-md flex items-center gap-1.5 disabled:opacity-50"
-                  title="Commit permanently to library and remove from queue"
+                  title="Queue the selected metadata for background tag writing"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Commit Album</span>
+                  <span>{queuingAlbumId ? 'Queuing…' : 'Commit Album'}</span>
                 </button>
               </div>
             </div>
 
+            {selectedCommitStatus && (
+              <div role="status" className="px-4 text-xs text-cyan-300">
+                Last commit · {selectedCommitStatus}
+                {selectedCommitError && <span className="ml-3 text-amber-200">{selectedCommitError}</span>}
+                {selectedCommitStatuses.has('failed') && (
+                  <button className="ml-3 underline" onClick={async () => {
+                    try {
+                      const count = await tauriBridge.commitRetryCurateItems(
+                        selectedCommitRows.filter(row => row.status === 'failed').map(row => row.id),
+                      )
+                      await onCommitQueued?.()
+                      showToast(count ? `Queued ${count} failed track(s) for retry.` : 'No failed tracks remain to retry.')
+                    } catch (err) {
+                      showToast(`Could not retry failed tracks: ${String(err)}`)
+                    }
+                  }}>Retry failed tracks</button>
+                )}
+              </div>
+            )}
+            <CurateCommitOutcomes tracks={selectedAlbum.tracks} rows={selectedCommitRows} />
             {selectedAlbum.draftBasedOn && (
               <div role="alert" className="px-4 py-3 text-xs bg-amber-500/10 text-amber-200">
                 Local metadata changed since this draft was saved. Review the Local and Selected columns before staging or committing.
@@ -2232,7 +2322,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   ) : (
                     <Sparkles className="w-3.5 h-3.5" />
                   )}
-                  <span>Fetch & Anchor</span>
+                  <span>Refresh Evidence</span>
                 </button>
 
                 <SteerProgressBar
@@ -2240,8 +2330,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   message={traceProgressMessage}
                   outcomeStatus={traceOutcomeStatus}
                   isFetching={isSteeringLoading || traceStatus === 'fetching'}
+                  evidenceSaveFailed={traceStatus === 'save_error'}
                   onToggleRationale={toggleTraceDrawer}
-                  hasTrace={Boolean(curationTrace)}
+                  hasTrace={Boolean(selectedAlbum)}
                 />
               </form>
             )}
@@ -2378,7 +2469,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                       <th className="py-2.5 px-4 w-1/5 text-[#D4AF37]">Apple Music Master</th>
                       <th className="py-2.5 px-4 w-1/5">MusicBrainz Archive</th>
                       <th className="py-2.5 px-4 w-1/5 text-cyan-400">Gemini AI Master</th>
-                      <th className="py-2.5 px-4 w-1/4 text-emerald-400 font-semibold bg-emerald-500/[0.03]">Selected Output</th>
+                      <th className="py-2.5 px-4 w-1/4 text-emerald-400 font-semibold bg-emerald-500/[0.03]">
+                        Selected Output
+                        {selectedChanges && (
+                          <span data-testid="curate-change-summary" className="mt-0.5 block font-sans font-normal text-zinc-300" aria-live="polite">
+                            {selectedChanges.albumCount || selectedChanges.trackCount
+                              ? `${selectedChanges.albumCount} album ${selectedChanges.albumCount === 1 ? 'field' : 'fields'} · ${selectedChanges.trackCount} ${selectedChanges.trackCount === 1 ? 'track' : 'tracks'} changed`
+                              : 'No changes from local tags'}
+                          </span>
+                        )}
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.04]">
@@ -2452,6 +2552,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   <tbody className="divide-y divide-white/[0.04]">
                     {selectedAlbum.tracks.map((trk, idx) => {
                       const isEditing = editingTrack?.trackId === trk.trackId
+                      const change = selectedChanges?.tracks.get(trk.trackId)
+                      const hasChange = change && Object.values(change).some(Boolean)
                       return (
                         <tr key={trk.trackId} data-testid={`track-row-${idx}`} className="hover:bg-white/[0.015] transition-colors">
                           <td className="py-3 px-3 font-mono text-white/50 text-[11px]">
@@ -2561,7 +2663,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           </td>
 
                           {/* Selected Output Cell */}
-                          <td data-testid={`track-cell-${idx}-selected`} className="py-3 px-3 bg-emerald-500/[0.03] border-l border-white/[0.06]">
+                          <td data-testid={`track-cell-${idx}-selected`} className={`py-3 px-3 border-l border-white/[0.06] ${hasChange ? 'bg-amber-500/[0.07]' : 'bg-emerald-500/[0.03]'}`}>
                             {isEditing ? (
                               <div className="flex flex-col gap-1.5">
                                 <input
@@ -2590,13 +2692,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                             ) : (
                               <div className="group relative">
                                 <div className="flex items-center justify-between gap-2">
-                                  <div className="font-medium text-emerald-300">{trk.matchedTitle}</div>
+                                  <div className="min-w-0">
+                                    <div className="break-words font-medium text-emerald-300">{trk.matchedTitle}</div>
+                                    <SelectedChangeNote change={change?.title} />
+                                  </div>
                                   <button
                                     onClick={() => {
                                       setEditingTrack({ trackId: trk.trackId, field: 'title' })
                                       setTrackEditValue(trk.matchedTitle || '')
                                     }}
-                                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-white/[0.08] rounded text-white/60 transition-opacity cursor-pointer"
+                                    className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 p-1 hover:bg-white/[0.08] rounded text-white/60 transition-opacity cursor-pointer"
                                     title="Edit Title"
                                   >
                                     <Edit2 className="w-3 h-3" />
@@ -2604,7 +2709,10 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                 </div>
                                 <div className="flex items-center justify-between gap-2 mt-0.5">
                                   {trk.matchedArtists ? (
-                                    <div className="text-[11px] text-white/80">{trk.matchedArtists}</div>
+                                    <div className="min-w-0 text-[11px] text-white/80">
+                                      <div className="break-words">{trk.matchedArtists}</div>
+                                      <SelectedChangeNote change={change?.singers} />
+                                    </div>
                                   ) : (
                                     <span className="text-[10px] text-amber-300 font-medium">
                                       ⚠️ Requires Action (Empty)
@@ -2615,7 +2723,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                       setEditingTrack({ trackId: trk.trackId, field: 'artists' })
                                       setTrackEditValue(trk.matchedArtists || '')
                                     }}
-                                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-white/[0.08] rounded text-white/60 transition-opacity cursor-pointer"
+                                    className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 p-1 hover:bg-white/[0.08] rounded text-white/60 transition-opacity cursor-pointer"
                                     title="Edit Singers"
                                   >
                                     <Edit2 className="w-3 h-3" />
@@ -2623,7 +2731,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                 </div>
 
                                 {/* Progressive Disclosure Compilation Provenance Sub-Row */}
-                                {isCompilationAlbum && (
+                                {(isCompilationAlbum || change?.originalAlbum || change?.originalYear) && (
                                   <div className="mt-1 pt-1 border-t border-white/[0.04]">
                                     {editingProvenanceTrackId === trk.trackId ? (
                                       <div className="flex items-center gap-1.5 w-full">
@@ -2664,6 +2772,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                         </button>
                                       </div>
                                     ) : (
+                                      <>
                                       <div className="flex items-center justify-between w-full group/prov">
                                         <div className="flex items-center gap-1.5 text-[11px]">
                                           <span className="text-[#D4AF37]/80 font-mono text-[10px]">↳ Film:</span>
@@ -2685,12 +2794,15 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                                             setProvenanceEditFilm(trk.originalAlbum || '')
                                             setProvenanceEditYear(trk.originalYear ? String(trk.originalYear) : '')
                                           }}
-                                          className="opacity-0 group-hover/prov:opacity-100 p-0.5 hover:bg-white/[0.08] rounded text-white/50 transition-opacity cursor-pointer"
+                                          className="opacity-0 group-hover/prov:opacity-100 group-focus-within/prov:opacity-100 p-0.5 hover:bg-white/[0.08] rounded text-white/50 transition-opacity cursor-pointer"
                                           title="Edit Original Film & Year (Enter)"
                                         >
                                           <Edit2 className="w-2.5 h-2.5" />
                                         </button>
                                       </div>
+                                      <SelectedChangeNote change={change?.originalAlbum} label="Original film" />
+                                      <SelectedChangeNote change={change?.originalYear} label="Original year" />
+                                      </>
                                     )}
                                   </div>
                                 )}
@@ -2890,6 +3002,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       )}
 
       <CurationDecisionTraceDrawer
+        albumId={selectedAlbum?.id}
+        lastEvidenceId={lastEvidenceId}
         isOpen={isTraceDrawerOpen}
         onClose={closeTraceDrawer}
         trace={curationTrace}

@@ -116,10 +116,10 @@ async function runTests() {
   // -------------------------------------------------------------------------
   // Test 6: LookaheadQueuePrefetcher LRU Cache & Transport Quietness Gate
   // -------------------------------------------------------------------------
-  console.log('[Test 6] Testing LookaheadQueuePrefetcher LRU Cache & 30s Cooldown Guard...')
+  console.log('[Test 6] Testing LookaheadQueuePrefetcher LRU Cache & Playback Guard...')
   const prefetcher = new LookaheadQueuePrefetcher()
 
-  // 1. Cold boot quietness check (lastPlaybackStoppedTime = 0)
+  // 1. Stopped transport permits lookahead immediately.
   assert.strictEqual(
     await prefetcher.isTransportQuiet({ isPlaying: false, isPaused: false, playbackState: 'Stopped' }),
     true
@@ -137,16 +137,13 @@ async function runTests() {
     false
   )
 
-  // 4. Recently stopped (within 30s cooldown) -> Not quiet
-  const now = Date.now()
-  prefetcher.setLastPlaybackStoppedTime(now - 10000) // stopped 10s ago
+  // 4. Loading blocks lookahead even before playback begins.
   assert.strictEqual(
-    await prefetcher.isTransportQuiet({ isPlaying: false, isPaused: false, playbackState: 'Stopped' }),
+    await prefetcher.isTransportQuiet({ isPlaying: false, isPaused: false, playbackState: 'Loading' }),
     false
   )
 
-  // 5. Cooldown elapsed (> 30s) -> Quiet
-  prefetcher.setLastPlaybackStoppedTime(now - 35000) // stopped 35s ago
+  // 5. A transition to stopped has no cooldown.
   assert.strictEqual(
     await prefetcher.isTransportQuiet({ isPlaying: false, isPaused: false, playbackState: 'Stopped' }),
     true
