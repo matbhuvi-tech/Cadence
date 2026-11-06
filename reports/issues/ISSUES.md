@@ -54,4 +54,5 @@
 - **User check:** Restart the development app with this branch, open En Bommukutti Amavuku CD RIP, and confirm the false warning is gone while Selected retains the saved choices and Local shows catalog credits. Navigate away and reopen. No commit is needed for this check.
 - **Limitations:** Drafts previously saved against overlaid values may legitimately require a one-time baseline review after the correction. No saved drafts or music tags are rewritten by this change.
 - **CodeScene:** Unavailable; user explicitly approved proceeding without it.
-- **Status:** Implemented and automated checks passed; awaiting user verification. Not merged or pushed.
+- **Release verification:** Windows NSIS installer build passed on 2026-11-06. User authorized pushing to main after the verification handoff; no separate live-desktop test result was reported.
+- **Status:** Ready for the user-authorized merge and push to main.
