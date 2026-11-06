@@ -1,7 +1,31 @@
-use tauri::State;
+use tauri::{Manager, State};
 use crate::audio::AudioEngine;
 use crate::curation::{CurationDecisionTrace, CurationStorage};
 use crate::db::AppDb;
+
+#[tauri::command]
+pub fn curation_export_snapshot(app: tauri::AppHandle, snapshot: String) -> Result<String, String> {
+    if snapshot.len() > 64 * 1024 {
+        return Err("Diagnostic snapshot exceeds the 64 KB limit".into());
+    }
+    let value: serde_json::Value = serde_json::from_str(&snapshot).map_err(|e| e.to_string())?;
+    let object = value.as_object().ok_or("Diagnostic snapshot must be an object")?;
+    if object.get("schema").and_then(|v| v.as_u64()) != Some(1)
+        || object.get("albumId").and_then(|v| v.as_str()).is_none_or(str::is_empty)
+    {
+        return Err("Invalid diagnostic snapshot".into());
+    }
+    const ALLOWED: &[&str] = &["schema", "capturedAt", "albumId", "title", "activeTier",
+        "calculatedTier", "queueIssue", "draft", "trace", "fields", "trackCount", "tracks", "commits"];
+    if object.keys().any(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err("Diagnostic snapshot contains an unexpected field".into());
+    }
+    let directory = app.path().app_data_dir().map_err(|e| e.to_string())?.join("diagnostics");
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let path = directory.join(format!("curate-snapshot-{}.json", uuid::Uuid::new_v4()));
+    std::fs::write(&path, snapshot).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
 
 #[tauri::command]
 pub fn curation_save_evidence(db: State<AppDb>, album_id: String, run: serde_json::Value) -> Result<(), String> {

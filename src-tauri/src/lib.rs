@@ -294,6 +294,7 @@ pub fn run() {
             curation_get_evidence,
             curation_get_trace,
             curation_clear_trace,
+            curation_export_snapshot,
             // Playlists
             db_get_playlists,
             db_get_playlist_details,

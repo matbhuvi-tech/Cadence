@@ -103,6 +103,7 @@ export interface UnifiedCurateCockpitProps {
   showToast: (msg: string) => void
   commitRows?: CurateCommitRow[]
   onCommitQueued?: () => Promise<void>
+  onReviewComplete?: (albumId: string) => void
   supersededCommitIds?: ReadonlySet<string>
   isPlaying?: boolean
 }
@@ -430,6 +431,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   showToast,
   commitRows,
   onCommitQueued,
+  onReviewComplete,
   supersededCommitIds,
   isPlaying = false,
 }) => {
@@ -713,7 +715,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     tauriBridge.curationGetDraft(activeItemId).then(draft => {
       if (cancelled) return
       const initial = captureCurateDraft(activeItem)
-      const rows = new Map((commitRows ?? []).filter(row => !supersededCommitIds?.has(row.id)).map(row => [row.trackId, row]))
+      // Reopening for a new review hides prior commits from the active proposal,
+      // but those commits still prove that the matching old draft was written.
+      const rows = new Map((commitRows ?? []).map(row => [row.trackId, row]))
       const completedDraft = draft && isReconciledCurateDraft(draft, rows)
       const restored = draft && !completedDraft ? restoreCurateDraft(activeItem, draft) : activeItem
       const snapshot = draft && !completedDraft ? { ...captureCurateDraft(restored), baseline: draft.baseline } : initial
@@ -923,8 +927,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         localTitle: track.localTitle, selectedTitle: track.matchedTitle,
         localArtists: track.localArtists, selectedArtists: track.matchedArtists,
         requiresHumanReview: track.requiresHumanReview === true })),
-      commits: selectedCommitRows.map(row => ({ trackId: row.trackId, status: row.status,
-        applies: row.applies === true, error: Boolean(row.errorMessage) })),
+      commits: (commitRows ?? []).filter(row => selectedTrackIds.has(row.trackId)).map(row => ({
+        trackId: row.trackId, status: row.status, applies: row.applies === true,
+        ignoredForCurrentReview: supersededCommitIds?.has(row.id) === true,
+        error: Boolean(row.errorMessage),
+      })),
     }, null, 2))
   }
 
@@ -2207,7 +2214,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     )}
                     {alb.albumArtist.requiresHumanReview && (
                       <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-medium">
-                        Action Req.
+                        {alb.albumArtist.selected ? 'Review suggested' : 'Action Req.'}
                       </span>
                     )}
                   </div>
@@ -2264,6 +2271,17 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               </div>
 
               <div className="flex items-center gap-2.5">
+                {onReviewComplete && selectedChanges?.albumCount === 0 && selectedChanges.trackCount === 0 &&
+                  !selectedCommitStatuses.has('pending') && !selectedCommitStatuses.has('in_flight') && !selectedCommitStatuses.has('failed') && (
+                  <button type="button" onClick={() => {
+                    onReviewComplete(selectedAlbum.id)
+                    showToast(`Review complete: ${selectedAlbum.albumTitle.selected}`)
+                  }} data-testid="btn-curate-review-complete"
+                    className="px-3 py-1.5 rounded-lg border border-emerald-700/60 text-emerald-300 text-xs hover:bg-emerald-900/30"
+                    title="Accept the current tags and remove this album from pending review without rewriting files">
+                    Done reviewing
+                  </button>
+                )}
                 {/* Re-Query / Paste Store Link Button */}
                 <button
                   onClick={() => setIsReQueryOpen(!isReQueryOpen)}
@@ -2449,6 +2467,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 <div className="flex items-center justify-between mb-2 text-xs text-cyan-300">
                   <span>Selected-album memory snapshot · local only</span>
                   <div className="flex gap-3">
+                    {tauriBridge.isTauri() && (
+                      <button type="button" onClick={() => void tauriBridge.curationExportSnapshot(diagnosticSnapshot)
+                        .then(path => showToast(`Snapshot saved locally: ${path}`))
+                        .catch(err => showToast(`Snapshot export failed: ${String(err)}`))}
+                        className="text-cyan-300 hover:text-white">Export locally</button>
+                    )}
                     <button type="button" onClick={() => void navigator.clipboard.writeText(diagnosticSnapshot)
                       .then(() => showToast('Snapshot copied. Paste it only where you choose.'))
                       .catch(() => showToast('Could not copy snapshot; select the text manually.'))}

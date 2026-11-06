@@ -1322,6 +1322,11 @@ class TauriBridgeService {
     if (this.isTauri()) await invoke('curation_save_evidence', { albumId, run })
   }
 
+  public async curationExportSnapshot(snapshot: string): Promise<string> {
+    if (!this.isTauri()) throw new Error('Snapshot export requires the desktop app')
+    return invoke('curation_export_snapshot', { snapshot })
+  }
+
   public async curationListEvidence(albumId: string): Promise<CurateEvidenceSummary[]> {
     return this.isTauri() ? invoke('curation_list_evidence', { albumId }) : []
   }

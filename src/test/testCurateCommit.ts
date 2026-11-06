@@ -93,6 +93,26 @@ test('resolves only the completed confirmation and leaves a later edit open', ()
   assert.equal(isReconciledCurateDraft(draft, new Map([['one', completed]])), false)
 })
 
+test('a reopened review still recognizes its superseded completed draft', () => {
+  const draft = {
+    fields: {
+      albumTitle: { selected: 'Album' }, albumArtist: { selected: 'Composer' },
+      composer: { selected: 'Composer' }, year: { selected: 1986 },
+      genre: { selected: 'Tamil Film Soundtrack' }, coverArt: { selected: '' },
+    },
+    tracks: [{ trackId: 'one', matchedTitle: 'Song', matchedArtists: 'Singer' }],
+  } as CurateDraft
+  const [item] = makeCurateCommitItems(draft, [
+    { id: 'one', filePath: 'song.flac', storageMountId: 'disk' } as Track,
+  ])
+  const completed = { ...item, status: 'completed' as const, applies: false }
+  const ignoredForNewReview = new Set([completed.id])
+  assert.equal(isReconciledCurateDraft(draft, new Map([[completed.trackId, completed]])), true)
+  assert.equal(isReconciledCurateDraft(draft, new Map(
+    [completed].filter(row => !ignoredForNewReview.has(row.id)).map(row => [row.trackId, row]),
+  )), false)
+})
+
 test('projects the persisted cover and reconciles only a verified artwork write', () => {
   const source = 'https://example.test/cover.png'
   const persisted = 'data:image/jpeg;base64,Y292ZXI='

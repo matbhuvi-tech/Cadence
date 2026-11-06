@@ -1921,6 +1921,12 @@ function AppContent() {
             releases={curateReleases}
             commitRows={curateCommits}
             onCommitQueued={refreshCurateCommits}
+            onReviewComplete={albumId => {
+              const albumTracks = catalogTracks.filter(track => track.releaseId === albumId)
+              const next = new Map(curateReviews)
+              for (const key of curateReviewKeys(albumId, albumTracks)) next.set(key, true)
+              setSavedCurateReviews(next)
+            }}
             supersededCommitIds={supersededCurateRows}
             auditIssues={auditIssues}
             initialSelectedAlbumId={selectedAlbumId}
