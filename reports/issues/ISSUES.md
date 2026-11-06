@@ -40,3 +40,18 @@
 - **Change:** Publish the combined Tier 1 and Tier 2 review count to the header, using the existing completed-commit reconciliation logic. Retain the last reported count when navigating away; before the first cockpit visit, retain the existing estimate.
 - **Status:** Verified by the user. Frontend/PWA build, 15 curation tests (using tsconfig.app.json), and NSIS installer build passed on 2026-11-06.
 
+
+## GitHub #5: Pending credits trigger a false local-metadata conflict
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/5
+- **Cause:** Library loading overlaid pending artist, composer, and album-artist selections onto the catalog fields used as the Curate Local baseline.
+- **Fix:** Load those three fields from the catalog and retain all proposals in `pendingSidecarEdits`. Draft comparison and genuine-change protection remain unchanged.
+- **Regression coverage:** `src/test/testLibraryLocalMetadata.ts` exercises the actual library loader with mocked native reads, draft serialization/reopening, retained proposals, genuine credit changes, and missing local credits. No music-drive access is performed by these tests.
+- **RED:** Before the fix, 3 of 6 new tests failed on pending-credit overlays.
+- **GREEN:** All 23 tests across the new loader suite and existing draft/commit/outcome suites passed. `npm run build` passed, including PWA build and TypeScript checks; Vite reported chunk-size and mixed-import warnings.
+- **Verification command:** `npx tsx --tsconfig tsconfig.app.json --test src/test/testLibraryLocalMetadata.ts src/test/testCurateDraft.ts src/test/testCurateCommit.ts src/test/testCurateCommitOutcomes.ts`
+- **Desktop QA:** Existing Curate QA automation checks provider/selection oracles but does not recreate a saved draft across library reloads. The new loader/draft regression provides deterministic coverage; live desktop verification remains pending.
+- **User check:** Restart the development app with this branch, open En Bommukutti Amavuku CD RIP, and confirm the false warning is gone while Selected retains the saved choices and Local shows catalog credits. Navigate away and reopen. No commit is needed for this check.
+- **Limitations:** Drafts previously saved against overlaid values may legitimately require a one-time baseline review after the correction. No saved drafts or music tags are rewritten by this change.
+- **CodeScene:** Unavailable; user explicitly approved proceeding without it.
+- **Status:** Implemented and automated checks passed; awaiting user verification. Not merged or pushed.
