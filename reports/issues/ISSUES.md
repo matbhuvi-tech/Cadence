@@ -68,4 +68,4 @@
 - **GREEN:** All 28 tests across `testCurateArtworkFallback.ts`, `testLibraryLocalMetadata.ts`, `testCurateDraft.ts`, `testCurateCommit.ts`, and `testCurateCommitOutcomes.ts` passed.
 - **Verification command:** `npx tsx --tsconfig tsconfig.app.json --test src/test/testCurateArtworkFallback.ts src/test/testLibraryLocalMetadata.ts src/test/testCurateDraft.ts src/test/testCurateCommit.ts src/test/testCurateCommitOutcomes.ts`
 - **Build:** `npm run build` passed cleanly (including PWA build, TypeScript check `tsc -b`, and Vite production bundle). `npx oxlint` passed with 0 errors.
-- **Status:** Awaiting user verification; issue open, branch unmerged.
+- **Status:** Verified and Fixed. Merged into main in e4afefa, NSIS installer build passed on 2026-11-06.
