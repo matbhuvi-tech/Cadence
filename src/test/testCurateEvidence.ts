@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { fetchCurateCandidate, restoreAppleTrackCandidates, type CurateEvidenceRun } from '../services/curateEvidenceService'
+import { fetchCurateCandidate, restoreAppleTrackCandidates, type CurateEvidenceRun, type CurateProviderAttempt } from '../services/curateEvidenceService'
 import { FederatedResolversService } from '../services/federatedResolvers'
 
 test('records real outcomes and excludes provider response bodies from the history payload', async () => {
@@ -42,13 +42,14 @@ test('looks up a known Apple release directly and records track IDs and credits'
       { wrapperType: 'track', collectionId: 123, trackId: 456, trackNumber: 1, trackName: 'Song', artistName: 'Singer' },
     ] })
   })
-  const attempts: string[] = []
+  const attempts: CurateProviderAttempt[] = []
   const candidate = await new FederatedResolversService().fetchItunesAlbumCandidate(
     { sanitizedTitle: 'Album', sanitizedArtist: 'Composer', trackCount: 1 },
-    attempt => attempts.push(attempt.outcome), undefined, 1, { appleReleaseId: '123' },
+    attempt => attempts.push(attempt), undefined, 1, { appleReleaseId: '123' },
   )
   assert.deepEqual(requests, ['/lookup'])
-  assert.deepEqual(attempts, ['success'])
+  assert.deepEqual(attempts.map(attempt => attempt.outcome), ['success'])
+  assert.equal(attempts[0].candidate?.tracks?.[0].providerTrackId, '456')
   assert.deepEqual(candidate?.tracks, [
     { trackId: '456', trackNumber: 1, trackName: 'Song', artistName: 'Singer' },
   ])
@@ -81,6 +82,9 @@ test('restores Apple rows by recorded mappings and flags conflicts in saved evid
     ['two', { title: 'Second version', artist: 'Provider credit', conflicted: true }],
   ])
   const tracks = run.attempts[0].candidate!.tracks!
+  tracks.push({ number: 3, title: 'Ambiguous older row' })
+  assert.equal(restoreAppleTrackCandidates(run).has('one'), false)
+  tracks.pop()
   tracks[0].providerTrackId = 'a'
   tracks[1].providerTrackId = 'b'
   assert.equal(restoreAppleTrackCandidates(run).get('one')?.title, 'Second version')

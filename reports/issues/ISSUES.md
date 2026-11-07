@@ -1,5 +1,12 @@
 # Issue Log
 
+## Issue #14 — Saved Apple track candidates disappear after reopening Curate
+
+- **Reproduction:** Refresh Apple evidence, save the draft, and reopen the album. Evidence History lists returned tracks while the Apple Music Track column is blank.
+- **Resolution:** Display archived candidates using the saved track mappings. New evidence records Apple track IDs. Older records use a unique saved Apple track position within the recorded release. Conflicts are labelled for review, and archived rows are read-only.
+- **Verification:** The restore regression passed with all 41 Curate checks and the production build. The affected album's saved evidence contains seven inferred and two conflicted mappings that can be restored. The evidence service had 96% line coverage. Live desktop verification remains pending.
+- **Status:** Pending user verification. [GitHub issue #14](https://github.com/matbhuvi-tech/Cadence/issues/14)
+
 ## Issue #13 — Malformed WAV timestamps leave Curate commits waiting
 
 - **Reproduction:** Queue Curate writes for WAV tracks with a malformed embedded date, then stop playback. The first three attempts report an invalid timestamp and later items stay pending.

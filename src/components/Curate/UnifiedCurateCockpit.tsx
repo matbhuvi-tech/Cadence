@@ -75,7 +75,7 @@ import { behavioralLearningService } from '../../services/behavioralLearningServ
 import { tauriBridge } from '../../services/tauriBridge'
 import { provenanceCacheService } from '../../services/provenanceCacheService'
 import { useCurationTrace } from '../../hooks/useCurationTrace'
-import { CURATE_REFRESH_PROVIDER_BUDGET, captureTrackDecisions, curateMatchingContext, sourceCandidatesFromGrouping, type CurateSourceCandidate } from '../../services/curateEvidenceService'
+import { CURATE_REFRESH_PROVIDER_BUDGET, captureTrackDecisions, curateMatchingContext, restoreAppleTrackCandidates, sourceCandidatesFromGrouping, type CurateSourceCandidate } from '../../services/curateEvidenceService'
 import { SteerProgressBar } from './SteerProgressBar'
 import { CurationDecisionTraceDrawer } from './CurationDecisionTraceDrawer'
 import { resolveGemini } from '../../services/geminiClient'
@@ -466,7 +466,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [draftLoadAttempt, setDraftLoadAttempt] = useState(0)
   const [draftSaveError, setDraftSaveError] = useState<string | null>(null)
   const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<string | null>(null)
-  const [savedAppleEvidence, setSavedAppleEvidence] = useState<{ albumId: string; title?: string; artist?: string; composer?: string; year?: number; genre?: string; trackCount?: number; releaseId?: string; rejectionReason?: string } | null>(null)
+  const [savedAppleEvidence, setSavedAppleEvidence] = useState<{ albumId: string; title?: string; artist?: string; composer?: string; year?: number; genre?: string; trackCount?: number; releaseId?: string; rejectionReason?: string; trackRows: ReturnType<typeof restoreAppleTrackCandidates> } | null>(null)
   const initialSteering = useRef<{ albumId: string; title: string; artist: string; year: string }>(undefined)
   const [stagingAlbumId, setStagingAlbumId] = useState<string | null>(null)
   const [queuingAlbumId, setQueuingAlbumId] = useState<string | null>(null)
@@ -853,8 +853,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       const run = await tauriBridge.curationGetEvidence(albumId, current.id)
       const candidate = run?.attempts.find(attempt => attempt.provider === 'apple' && attempt.outcome === 'success')?.candidate
       const telemetry = run?.decision?.candidateTelemetry?.find(item => item.provider === 'apple')
-      if (!cancelled && candidate) setSavedAppleEvidence({ ...candidate, albumId, releaseId: candidate.releaseId ?? telemetry?.releaseId,
-        rejectionReason: telemetry?.rejectionReason })
+      if (!cancelled && candidate && run) setSavedAppleEvidence({
+        ...candidate, albumId, releaseId: candidate.releaseId ?? telemetry?.releaseId,
+        rejectionReason: telemetry?.rejectionReason,
+        trackRows: restoreAppleTrackCandidates({ ...run, applicability: current.applicability }),
+      })
     }).catch(err => console.warn('[Curate] Evidence restore failed:', err))
     return () => { cancelled = true }
   }, [selectedAlbum?.id, lastEvidenceId])
@@ -2469,7 +2472,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 )}
                 <span className="block text-zinc-400">{savedAppleEvidence.rejectionReason
                   ? `Candidate excluded: ${savedAppleEvidence.rejectionReason}`
-                  : 'Saved retrieval result. Values retained locally may already match this candidate; provider track details may be unavailable.'}</span>
+                  : 'Saved candidates are shown beside local tracks where a recorded mapping is available.'}</span>
               </div>
             )}
 
@@ -2687,6 +2690,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   </thead>
                   <tbody className="divide-y divide-white/[0.04]">
                     {selectedAlbum.tracks.map((trk, idx) => {
+                      const savedAppleTrack = savedAppleEvidence?.albumId === selectedAlbum.id
+                        ? savedAppleEvidence.trackRows.get(trk.trackId) : undefined
+                      const hasLiveAppleTrack = Boolean(trk.appleTitle || trk.appleArtists)
+                      const appleTitle = hasLiveAppleTrack ? trk.appleTitle : savedAppleTrack?.title
+                      const appleCredit = hasLiveAppleTrack ? trk.appleArtists : savedAppleTrack?.artist
+                      const appleConflict = trk.providerDecisions?.some(decision =>
+                        decision.mapping?.provider === 'apple' && decision.mapping.status === 'conflicted') ||
+                        (savedAppleTrack?.conflicted && (!hasLiveAppleTrack ||
+                          (appleTitle === savedAppleTrack.title && appleCredit === savedAppleTrack.artist)))
+                      const selectableAppleCredit = appleConflict ? undefined : trk.appleArtists
                       const isEditing = editingTrack?.trackId === trk.trackId
                       const change = selectedChanges?.tracks.get(trk.trackId)
                       const hasChange = change && Object.values(change).some(Boolean)
@@ -2742,20 +2755,18 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           {/* Apple Music Cell */}
                           <td
                             data-testid={`track-cell-${idx}-apple`}
-                            onClick={() => {
-                              const targetArtist = trk.appleArtists
-                              if (targetArtist) {
-                                handleSelectTrackArtist(trk.trackId, targetArtist, 'single_provider_match')
-                              }
-                            }}
-                            className="py-3 px-3 cursor-pointer text-white/70 hover:text-[#D4AF37] transition-colors"
+                            onClick={selectableAppleCredit ? () => {
+                              handleSelectTrackArtist(trk.trackId, selectableAppleCredit, 'single_provider_match')
+                            } : undefined}
+                            className={`py-3 px-3 text-white/70 ${selectableAppleCredit ? 'cursor-pointer hover:text-[#D4AF37] transition-colors' : ''}`}
                           >
-                            <div className="font-medium text-white/70">
-                              {trk.appleTitle || (trk.appleArtists ? trk.matchedTitle : '—')}
-                            </div>
-                            <div className="text-[10px] text-white/50 mt-0.5">
-                              {trk.appleArtists || '—'}
-                            </div>
+                            <div className="font-medium text-white/70">{appleTitle || '—'}</div>
+                            <div className="text-[10px] text-white/50 mt-0.5">{appleCredit || '—'}</div>
+                            {appleConflict ? (
+                              <div className="mt-1 text-[10px] text-amber-300">Conflicting match · Review needed</div>
+                            ) : !hasLiveAppleTrack && savedAppleTrack && (
+                              <div className="mt-1 text-[10px] text-white/50">Saved candidate</div>
+                            )}
                           </td>
 
                           {/* MusicBrainz Cell */}

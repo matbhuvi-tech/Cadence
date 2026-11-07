@@ -24,6 +24,7 @@ export interface CurateProviderAttempt {
     artworkUrl?: string
     tracks?: Array<{
       localTrackId?: string
+      providerTrackId?: string
       number?: number
       title?: string
       artist?: string
@@ -122,6 +123,38 @@ export interface CurateEvidenceRun extends Omit<CurateEvidenceSummary, 'current'
   identityMappings?: CurateMappingCandidate[]
   identity?: CurateIdentityTrack[]
   sourceCandidates?: CurateSourceCandidate[]
+}
+
+interface SavedAppleTrack {
+  title?: string
+  artist?: string
+  conflicted: boolean
+}
+
+export function restoreAppleTrackCandidates(run: CurateEvidenceRun): Map<string, SavedAppleTrack> {
+  const rows = new Map<string, SavedAppleTrack>()
+  if (run.outcome !== 'completed' || run.applicability === 'superseded') return rows
+
+  const candidates = new Map(run.attempts.flatMap(attempt => {
+    const candidate = attempt.candidate
+    return attempt.provider === 'apple' && attempt.outcome === 'success' &&
+      candidate?.releaseId && candidate.tracks?.length ? [[candidate.releaseId, candidate.tracks] as const] : []
+  }))
+  for (const mapping of run.identityMappings ?? []) {
+    if (mapping.provider !== 'apple' || !mapping.releaseId || !mapping.providerTrackId || mapping.status === 'unmapped') continue
+    const tracks = candidates.get(mapping.releaseId)
+    if (!tracks) continue
+    // Older evidence omitted IDs from the Apple response summary. Use the
+    // recorded Apple position only when it identifies a unique archived row.
+    const legacy = tracks.every(track => !track.providerTrackId)
+    const matches = tracks.filter(track => legacy
+      ? mapping.providerPosition != null && track.number === mapping.providerPosition
+      : track.providerTrackId === mapping.providerTrackId)
+    if (matches.length !== 1) continue
+    const { title, artist } = matches[0]
+    rows.set(mapping.localTrackId, { title, artist, conflicted: mapping.status === 'conflicted' })
+  }
+  return rows
 }
 
 export interface CurateIdentityTrack {
