@@ -1,5 +1,13 @@
 # Issue Log
 
+## Issue #13 — Malformed WAV timestamps leave Curate commits waiting
+
+- **Reproduction:** Queue Curate writes for WAV tracks with a malformed embedded date, then stop playback. The first three attempts report an invalid timestamp and later items stay pending.
+- **Diagnosis:** The timestamp error occurs while Lofty reads the staged copy. The worker counts file-level tag errors toward mount isolation.
+- **Resolution:** Repair supported malformed WAV date frames on the staged copy when the confirmed payload contains a replacement year. Verify the replacement before the atomic swap. Count storage connection and device availability errors toward mount isolation.
+- **Verification:** The native WAV regression reproduced three tag failures leaving two items waiting. It now verifies the replacement dates, preserved artist credit, intact originals for files without replacement dates, and continued processing on the same mount. All 32 focused native checks passed. Rust line coverage and live desktop QA were unavailable.
+- **Status:** Pending desktop verification. [GitHub issue #13](https://github.com/matbhuvi-tech/Cadence/issues/13)
+
 ## Gemini quota monitoring and model fallback
 
 - **Reproduction:** Return a 429 from the preferred Gemini model, then submit another request. The previous implementation tried the same model again and the Activity Center only showed fixed local pacing.

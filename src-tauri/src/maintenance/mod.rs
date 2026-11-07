@@ -1,6 +1,7 @@
 pub mod commit_worker;
 pub mod fingerprint;
 pub mod worker;
+mod wav_date_repair;
 
 pub use commit_worker::{CommitQueueWorker, CommitTelemetryPayload};
 pub use fingerprint::generate_fingerprint_for_file;

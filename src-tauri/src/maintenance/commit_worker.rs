@@ -22,6 +22,49 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use crate::audio::AudioEngine;
 use crate::db::{AppDb, DbOperations};
 
+struct CommitWriteError {
+    message: String,
+    mount_unavailable: bool,
+}
+
+impl From<String> for CommitWriteError {
+    fn from(message: String) -> Self {
+        Self { message, mount_unavailable: false }
+    }
+}
+
+impl From<&str> for CommitWriteError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl CommitWriteError {
+    fn storage(operation: &str, error: &std::io::Error) -> Self {
+        use std::io::ErrorKind::*;
+        let mut mount_unavailable = matches!(error.kind(),
+            NotConnected | NetworkUnreachable | HostUnreachable | ConnectionAborted | ConnectionReset | TimedOut);
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::{
+                ERROR_BAD_NETPATH, ERROR_BAD_NET_NAME, ERROR_CONNECTION_UNAVAIL,
+                ERROR_DEVICE_NOT_CONNECTED, ERROR_NETNAME_DELETED, ERROR_NOT_READY,
+            };
+            mount_unavailable |= error.raw_os_error().is_some_and(|code| matches!(code as u32,
+                ERROR_BAD_NETPATH | ERROR_BAD_NET_NAME | ERROR_CONNECTION_UNAVAIL |
+                ERROR_DEVICE_NOT_CONNECTED | ERROR_NETNAME_DELETED | ERROR_NOT_READY));
+        }
+        Self { message: format!("{operation}: {error}"), mount_unavailable }
+    }
+
+    fn tag(operation: &str, error: lofty::error::LoftyError) -> Self {
+        match error.kind() {
+            lofty::error::ErrorKind::Io(io) => Self::storage(operation, io),
+            _ => format!("{operation}: {error}").into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitTelemetryPayload {
@@ -390,27 +433,30 @@ impl CommitQueueWorker {
                         }
                     }
                 }
-                Err(err_msg) => {
+                Err(error) => {
+                    let err_msg = error.message;
                     eprintln!("[CommitQueueWorker] Failed to write track {}: {}", item.file_path, err_msg);
                     let summary_res = {
                         let conn = self.lock_db();
                         DbOperations::fail_commit_item_and_get_summary(&conn, &item.id, &err_msg)
                     };
 
-                    // Track consecutive mount failures
-                    {
-                        let mut failures = self.mount_failure_counts.lock();
+                    // A per-file tag error is evidence that the mount was reachable.
+                    let mut failures = self.mount_failure_counts.lock();
+                    if error.mount_unavailable {
                         let count = failures.entry(item.mount_id.clone()).or_insert(0);
                         *count += 1;
                         if *count >= 3 {
-                            let mut off = self.offline_mounts.lock();
-                            off.insert(item.mount_id.clone());
+                            self.offline_mounts.lock().insert(item.mount_id.clone());
                             eprintln!(
-                                "[CommitQueueWorker] Mount {} failed 3 consecutive writes. Isolating mount.",
+                                "[CommitQueueWorker] Mount {} was unavailable for 3 consecutive writes. Isolating mount.",
                                 item.mount_id
                             );
                         }
+                    } else {
+                        failures.remove(&item.mount_id);
                     }
+                    drop(failures);
 
                     match summary_res {
                         Ok(summary) => {
@@ -432,7 +478,7 @@ impl CommitQueueWorker {
         &self,
         item: &crate::db::DbCommitQueueItem,
         payload: &serde_json::Value,
-    ) -> Result<i64, String> {
+    ) -> Result<i64, CommitWriteError> {
         let curate = payload.get("curate").and_then(|value| value.as_bool()).unwrap_or(false);
         if curate {
             let conn = self.lock_db();
@@ -442,15 +488,13 @@ impl CommitQueueWorker {
                 |row| row.get::<_, bool>(0),
             ).map_err(|err| err.to_string())?;
             if locked {
-                return Err("This storage mount is locked read-only.".to_string());
+                return Err("This storage mount is locked read-only.".into());
             }
         }
         let destination = payload.get("destination").and_then(|d| d.as_str()).unwrap_or("embedded");
         let target_path = Path::new(&item.file_path);
 
-        if !target_path.exists() {
-            return Err(format!("File does not exist: {}", item.file_path));
-        }
+        fs::metadata(target_path).map_err(|error| CommitWriteError::storage("Could not access the target file", &error))?;
 
         if destination == "sidecar" {
             // Write / update cadence-album.sidecar.json in target directory
@@ -486,9 +530,10 @@ impl CommitQueueWorker {
             let sidecar_str = serde_json::to_string_pretty(&sidecar_val)
                 .map_err(|e| format!("Failed to serialize sidecar: {}", e))?;
             fs::write(&temp_sidecar, sidecar_str)
-                .map_err(|e| format!("Failed to write temp sidecar: {}", e))?;
+                .map_err(|error| CommitWriteError::storage("Failed to write temp sidecar", &error))?;
 
-            Self::atomic_replace_file(&temp_sidecar, &sidecar_path)?;
+            Self::atomic_replace_file(&temp_sidecar, &sidecar_path)
+                .map_err(|error| CommitWriteError::storage("Failed to replace the sidecar", &error))?;
 
             // Update SQLite track status
             {
@@ -535,14 +580,26 @@ impl CommitQueueWorker {
 
         // Copy source file to temporary file in the same directory (same filesystem ensures atomic swap)
         fs::copy(target_path, &temp_path)
-            .map_err(|e| format!("Failed to copy to temp file: {}", e))?;
+            .map_err(|error| CommitWriteError::storage("Failed to copy to temp file", &error))?;
 
         // Open temp file with Lofty and apply metadata updates
-        let write_tags_res = (|| -> Result<(), String> {
-            let mut tagged_file = Probe::open(&temp_path)
-                .map_err(|e| format!("Lofty Probe open failed: {}", e))?
-                .read()
-                .map_err(|e| format!("Lofty read tags failed: {}", e))?;
+        let write_tags_res = (|| -> Result<(), CommitWriteError> {
+            let read_tags = || Probe::open(&temp_path)?.read();
+            let mut repaired = super::wav_date_repair::RepairedDates::default();
+            let mut tagged_file = match read_tags() {
+                Err(error) if ext.eq_ignore_ascii_case("wav")
+                    && matches!(error.kind(), lofty::error::ErrorKind::BadTimestamp(_)) => {
+                    repaired = super::wav_date_repair::remove_malformed_dates(
+                        &temp_path, payload.get("year").and_then(|value| value.as_i64()),
+                        payload.get("originalYear").and_then(|value| value.as_i64()),
+                    ).map_err(|error| CommitWriteError::storage("Could not repair the staged WAV date", &error))?;
+                    if !repaired.any() {
+                        return Err(CommitWriteError::tag("Lofty read tags failed", error));
+                    }
+                    read_tags().map_err(|error| CommitWriteError::tag("Could not read the repaired WAV tags", error))?
+                }
+                result => result.map_err(|error| CommitWriteError::tag("Lofty read tags failed", error))?,
+            };
 
             let tag_type = tagged_file.primary_tag_type();
             let tag = match tagged_file.tag_mut(tag_type) {
@@ -595,15 +652,23 @@ impl CommitQueueWorker {
             }
 
             tag.save_to_path(&temp_path, WriteOptions::default())
-                .map_err(|e| format!("Lofty save_to_path failed: {}", e))?;
+                .map_err(|error| CommitWriteError::tag("Lofty save_to_path failed", error))?;
 
-            if let Some(cover) = &artwork {
-                let verified = Probe::open(&temp_path).and_then(|probe| probe.read())
-                    .map_err(|err| format!("Could not verify the embedded cover: {err}"))?;
-                if !verified.primary_tag().or_else(|| verified.first_tag()).is_some_and(|tag| {
-                    tag.pictures().iter().any(|pic| pic.pic_type() == PictureType::CoverFront && pic.data() == cover.jpeg)
-                }) {
-                    return Err("The audio format did not retain the selected front cover.".into());
+            if artwork.is_some() || repaired.any() {
+                let verified = read_tags()
+                    .map_err(|error| CommitWriteError::tag("Could not verify the staged tags", error))?;
+                let verified_tag = verified.primary_tag().or_else(|| verified.first_tag())
+                    .ok_or("The audio format did not retain the staged tags.")?;
+                if let Some(cover) = &artwork {
+                    if !verified_tag.pictures().iter().any(|pic|
+                        pic.pic_type() == PictureType::CoverFront && pic.data() == cover.jpeg) {
+                        return Err("The audio format did not retain the selected front cover.".into());
+                    }
+                }
+                if (repaired.year && verified_tag.year().map(i64::from) != payload["year"].as_i64())
+                    || (repaired.original_year && verified_tag.get_string(&ItemKey::OriginalReleaseDate)
+                        .and_then(|date| date.parse::<i64>().ok()) != payload["originalYear"].as_i64()) {
+                    return Err("The WAV did not retain the confirmed replacement date.".into());
                 }
             }
             Ok(())
@@ -615,9 +680,9 @@ impl CommitQueueWorker {
         }
 
         // Atomic swap into place
-        if let Err(e) = Self::atomic_replace_file(&temp_path, target_path) {
+        if let Err(error) = Self::atomic_replace_file(&temp_path, target_path) {
             let _ = fs::remove_file(&temp_path);
-            return Err(e);
+            return Err(CommitWriteError::storage("Failed to replace the audio file", &error));
         }
 
         // Write cover.jpg to album directory if staged artwork data URL is provided (deduplicated per batch)
@@ -777,7 +842,7 @@ impl CommitQueueWorker {
         Ok(cover)
     }
 
-    fn atomic_replace_file(src: &Path, dest: &Path) -> Result<(), String> {
+    fn atomic_replace_file(src: &Path, dest: &Path) -> std::io::Result<()> {
         #[cfg(windows)]
         unsafe {
             use std::os::windows::ffi::OsStrExt;
@@ -795,17 +860,14 @@ impl CommitQueueWorker {
             );
 
             if ret == 0 {
-                return Err(format!(
-                    "Win32 MoveFileExW failed with error code: {}",
-                    std::io::Error::last_os_error()
-                ));
+                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         }
 
         #[cfg(not(windows))]
         {
-            fs::rename(src, dest).map_err(|e| format!("Failed to rename temp file: {}", e))
+            fs::rename(src, dest)
         }
     }
 
@@ -1021,7 +1083,11 @@ mod tests {
 
     fn wav_with_short_id3_year() -> Vec<u8> {
         let mut frames = Vec::new();
-        for (id, text) in [(b"TDRC", b"198".as_slice()), (b"TPE1", b"Original artist".as_slice())] {
+        for (id, text) in [
+            (b"TDRC", b"198".as_slice()),
+            (b"TDOR", b"1988-1".as_slice()),
+            (b"TPE1", b"Original artist".as_slice()),
+        ] {
             frames.extend(id);
             frames.extend(((text.len() + 1) as u32).to_be_bytes());
             frames.extend([0, 0, 0]); // Frame flags and Latin-1 encoding
@@ -1043,6 +1109,21 @@ mod tests {
     }
 
     #[test]
+    fn mount_isolation_requires_a_storage_connection_error() {
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::NotConnected, ErrorKind::NetworkUnreachable, ErrorKind::TimedOut] {
+            assert!(CommitWriteError::storage("write", &Error::from(kind)).mount_unavailable);
+        }
+        for kind in [ErrorKind::NotFound, ErrorKind::PermissionDenied, ErrorKind::InvalidData] {
+            assert!(!CommitWriteError::storage("write", &Error::from(kind)).mount_unavailable);
+        }
+        #[cfg(windows)]
+        assert!(CommitWriteError::storage("open", &Error::from_raw_os_error(
+            windows_sys::Win32::Foundation::ERROR_BAD_NETPATH as i32,
+        )).mount_unavailable);
+    }
+
+    #[test]
     fn malformed_wav_dates_can_be_repaired_without_blocking_the_mount() {
         let folder = std::env::temp_dir().join(format!("cadence-timestamp-{}", Uuid::new_v4()));
         fs::create_dir(&folder).unwrap();
@@ -1057,6 +1138,7 @@ mod tests {
             let mut payload = serde_json::json!({"curate": true, "genre": "Soundtrack"});
             if index == 3 {
                 payload["year"] = serde_json::json!(1988);
+                payload["originalYear"] = serde_json::json!(1987);
             }
             NewCommitItem {
                 id: index.to_string(), track_id: index.to_string(), file_path: path.to_str().unwrap().into(),
@@ -1085,6 +1167,7 @@ mod tests {
         let repaired = Probe::open(&repair).unwrap().read().unwrap();
         let tag = repaired.primary_tag().unwrap();
         assert_eq!(tag.year(), Some(1988));
+        assert_eq!(tag.get_string(&ItemKey::OriginalReleaseDate), Some("1987"));
         assert_eq!(tag.artist().as_deref(), Some("Original artist"));
         assert_eq!(tag.genre().as_deref(), Some("Soundtrack"));
         assert_eq!(Probe::open(&healthy).unwrap().read().unwrap().primary_tag().unwrap().genre().as_deref(), Some("Soundtrack"));
