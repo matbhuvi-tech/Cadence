@@ -290,3 +290,64 @@ fn legacy_identity_table_upgrades_before_curate_loads_existing_and_new_tracks() 
     drop(db);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn queue_projection_persists_and_invalidates_both_editions_on_regroup() {
+    use cadence_core_lib::db::curate_queue::{self, Classification, Reason};
+
+    let dir = std::env::temp_dir().join(format!("cadence-queue-{}", uuid::Uuid::new_v4()));
+    let path = dir.join("cadence.db");
+    let db = AppDb::new(path.clone()).unwrap();
+    let mut moving = track("moving", "a", "library/A", "one.flac", 1);
+    let staying = track("staying", "b", "library/B", "two.flac", 2);
+    let (a, b, clean) = {
+        let mut conn = db.conn.lock();
+        for song in [&moving, &staying] {
+            conn.execute(
+                "INSERT INTO releases (id,title,folder_path,folder_name,artist_credit,created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![song.release_id, song.album_title, song.folder_path,
+                    song.folder_name, song.artist_credit, song.created_at],
+            ).unwrap();
+        }
+        DbOperations::upsert_tracks_batch(&mut conn, &[moving.clone(), staying]).unwrap();
+        let a = identity(&conn, "moving").0;
+        let b = identity(&conn, "staying").0;
+        let tx = conn.transaction().unwrap();
+        let clean = curate_queue::get(&tx, &a).unwrap();
+        assert_eq!(clean.classification, Classification::NeedsAttention);
+        assert!(curate_queue::publish(&tx, &clean, &[]).unwrap());
+        let clean = curate_queue::get(&tx, &a).unwrap();
+        assert_eq!(clean.classification, Classification::NoActionRequired);
+
+        let current = curate_queue::get(&tx, &b).unwrap();
+        assert!(curate_queue::publish(
+            &tx, &current, &[Reason::PendingCommit, Reason::IdentityConflict],
+        ).unwrap());
+        let blocked = curate_queue::get(&tx, &b).unwrap();
+        assert_eq!(blocked.classification, Classification::NeedsAttention);
+        assert_eq!(blocked.reasons.len(), 2);
+        tx.commit().unwrap();
+        (a, b, clean)
+    };
+    drop(db);
+
+    let db = AppDb::new(path.clone()).unwrap();
+    let mut conn = db.conn.lock();
+    assert_eq!(curate_queue::get(&conn, &a).unwrap(), clean);
+    moving.release_id = "b".into();
+    DbOperations::upsert_tracks_batch(&mut conn, &[moving]).unwrap();
+    assert_eq!(identity(&conn, "moving").0, b);
+    for edition in [&a, &b] {
+        let projection = curate_queue::get(&conn, edition).unwrap();
+        assert!(projection.stale);
+        assert_eq!(projection.classification, Classification::NeedsAttention);
+    }
+    let tx = conn.transaction().unwrap();
+    assert!(!curate_queue::publish(&tx, &clean, &[Reason::ReviewCompleted]).unwrap());
+    tx.commit().unwrap();
+    drop(conn);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+}
