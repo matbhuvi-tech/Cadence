@@ -1,5 +1,12 @@
 # Issue Log
 
+## Issue #12 — Missing Gemini errors and provenance details
+
+- **Reproduction:** Refresh an album when Gemini fails. Evidence History includes Apple and MusicBrainz but omits the AI attempt and error.
+- **Resolution:** Record Gemini attempts before the compilation resolver handles errors. Store measured timing, available HTTP status and model metadata, safe error text, and the returned track proposals. Evidence History expands successful AI results and selects the newly saved run after refresh.
+- **Verification:** The failure regression first recorded zero attempts. Five focused cases now cover HTTP errors, native rejection strings, timeouts, network failures, cancellation, malformed/empty responses, and successful proposal details. Browser fixtures verified a visible 429 error and expandable successful results. The SQLite fixture verified that both failure details and successful proposals survive reopening the database.
+- **Status:** Pending user verification. [GitHub issue #12](https://github.com/matbhuvi-tech/Cadence/issues/12)
+
 ## Issue #11 — Edit Metadata opens the wrong completed album
 
 - **Reproduction:** Open a previously completed album in Listen and click **Edit Metadata** in its detail view. Curate can open another album from the queue.

@@ -3,13 +3,17 @@ import type { CurateMappingCandidate, CurationDecisionTrace, Release, ReleaseCon
 export const CURATE_REFRESH_PROVIDER_BUDGET = 12
 
 export interface CurateProviderAttempt {
-  provider: 'apple' | 'musicbrainz'
+  provider: 'apple' | 'musicbrainz' | 'gemini'
   query: string
   startedAt: string
   completedAt: string
   durationMs: number
   httpStatus?: number
-  outcome: 'success' | 'empty' | 'http_error' | 'parse_error' | 'timeout' | 'cancelled' | 'network_error'
+  outcome: 'success' | 'empty' | 'http_error' | 'parse_error' | 'timeout' | 'cancelled' | 'network_error' | 'error'
+  errorMessage?: string
+  modelUsed?: string
+  retriesAttempted?: number
+  pacingDelayMs?: number
   candidate?: {
     releaseId?: string
     title?: string
@@ -18,7 +22,18 @@ export interface CurateProviderAttempt {
     year?: number
     genre?: string
     artworkUrl?: string
-    tracks?: Array<{ number?: number; title?: string; artist?: string }>
+    tracks?: Array<{
+      localTrackId?: string
+      number?: number
+      title?: string
+      artist?: string
+      composer?: string
+      originalAlbum?: string
+      originalYear?: number
+      confidence?: number
+      isCompilationTrack?: boolean
+      notes?: string
+    }>
     trackCount?: number
   }
 }

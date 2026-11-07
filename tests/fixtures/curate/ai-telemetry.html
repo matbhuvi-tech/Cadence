@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><title>Cadence AI telemetry fixture</title></head>
+<body><div id="root"></div>
+<script type="module">
+import { mockReleases, mockTracks } from '/src/core/mockCatalog.ts'
+import { graphEngine } from '/src/core/graphEngine.ts'
+import { tauriBridge } from '/src/services/tauriBridge.ts'
+const release = mockReleases.find(row => row.id === 'rel-rahman-dil-se')
+const tracks = mockTracks.filter(row => row.releaseId === release.id)
+graphEngine.loadCustomLibrary({ tracks, releases: [release], works: [], auditIssues: [] })
+const runs = new Map()
+tauriBridge.curationSaveEvidence = async (albumId, run) => {
+  runs.set(run.id, JSON.parse(JSON.stringify({ ...run, albumId })))
+}
+tauriBridge.curationListEvidence = async albumId => [...runs.values()]
+  .filter(row => row.albumId === albumId).reverse().map((row, index) => ({ ...row, current: index === 0 }))
+tauriBridge.curationGetEvidence = async (_albumId, id) => runs.get(id) ?? null
+const outcome = new URL(location.href).searchParams.get('outcome')
+const fetchLocal = globalThis.fetch
+globalThis.fetch = (input, init) => {
+  const url = new URL(typeof input === 'string' ? input : input.url ?? input, location.href)
+  if (url.pathname === '/api/ai-compilation-resolver') {
+    return Promise.resolve(outcome === 'error'
+      ? Response.json({ error: 'Fixture Gemini quota exhausted' }, { status: 429 })
+      : Response.json({
+        success: true, albumTitle: release.title,
+        results: tracks.map(track => ({
+          id: track.id, trackNumber: track.trackNumber, title: 'Fixture AI song',
+          originalAlbum: 'Fixture original film', originalYear: 1998,
+          canonicalComposer: 'Fixture composer', primaryVocalists: 'Fixture singer',
+          confidence: 0.85, notes: 'Fixture discography match', isCompilationTrack: false,
+        })),
+        telemetry: { modelUsed: 'fixture-model', retriesAttempted: 0 },
+      }))
+  }
+  if (url.pathname === '/api/itunes-search') {
+    const songs = tracks.map(track => ({
+      wrapperType: 'track', collectionId: 123456789, trackId: track.trackNumber,
+      trackNumber: track.trackNumber, trackName: track.title, artistName: track.artistCredit,
+    }))
+    return Promise.resolve(Response.json(url.searchParams.has('releaseId') ? {
+      results: [{ wrapperType: 'collection', collectionId: 123456789,
+        collectionName: release.title, artistName: release.artistCredit }, ...songs],
+    } : {
+      success: true, releaseId: '123456789', releaseTitle: release.title,
+      artistCredit: release.artistCredit, tracks: songs,
+    }))
+  }
+  if (url.pathname.startsWith('/api/') || url.origin !== location.origin) {
+    return Promise.resolve(Response.json({}, { status: 404 }))
+  }
+  return fetchLocal(input, init)
+}
+await import('/src/main.tsx')
+</script>
+</body></html>

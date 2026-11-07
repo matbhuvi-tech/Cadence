@@ -464,6 +464,14 @@ mod tests {
                 "id": id, "requestedAt": time, "completedAt": time,
                 "outcome": outcome, "trigger": "user_refresh", "attempts": [],
             });
+            run["attempts"] = json!([
+                {"provider": "gemini", "outcome": "http_error", "httpStatus": 429, "errorMessage": "Quota exhausted"},
+                {"provider": "gemini", "outcome": "success", "modelUsed": "fixture-model",
+                 "candidate": {"trackCount": 1, "tracks": [
+                     {"localTrackId": "one", "title": "Song", "originalAlbum": "Film", "originalYear": 1986,
+                      "composer": "Composer", "artist": "Singer", "confidence": 0.85, "notes": "Source match"}
+                 ]}}
+            ]);
             if outcome == "completed" {
                 run["decision"] = json!({
                     "albumId": "album", "headlineSummary": id,
@@ -490,6 +498,8 @@ mod tests {
             assert_eq!(CurationStorage::get_trace(&db, "album").unwrap().unwrap().headline_summary, "current");
             assert!(CurationStorage::get_evidence(&db, "album", "late").unwrap().is_some());
             assert!(CurationStorage::get_evidence(&db, "other", "late").unwrap().is_none());
+            let saved = CurationStorage::get_evidence(&db, "album", "current").unwrap().unwrap();
+            assert_eq!(saved["attempts"], make_run("current", "2026-01-02T10:00:00.000Z", "completed")["attempts"]);
         }
         std::fs::remove_file(path).unwrap();
     }

@@ -10,6 +10,7 @@
 import { Track, Release } from '../core/types'
 import { tauriBridge } from './tauriBridge'
 import { resolveGemini } from './geminiClient'
+import type { RecordCurateAttempt } from './curateEvidenceService'
 import { ambientCurationService } from './ambientCurationService'
 import { graphEngine } from '../core/graphEngine'
 import { stripRipNoiseAndTags, normalizeCanonicalAlbumTitle, isSameCanonicalAlbum, isDefectiveArtistTag, isPlaceholderTag } from '../core/taxonomyUtils'
@@ -62,6 +63,7 @@ class CompilationCanonicalizerService {
       selectedAlbumSignal?: AbortSignal
       referenceUrl?: string
       userSearchQuery?: { albumTitle?: string; artistCredit?: string; year?: number }
+      recordAttempt?: RecordCurateAttempt
     }
   ): Promise<CompilationResolutionResult> {
     // 1. Audiophile Invariant Check: Never perform network lookups during active playback or cooldown
@@ -124,7 +126,8 @@ class CompilationCanonicalizerService {
         })),
       }
 
-      const json = await resolveGemini('compilation', payload, options?.selectedAlbumSignal, Boolean(options?.selectedAlbumSignal))
+      const json = await resolveGemini('compilation', payload, options?.selectedAlbumSignal,
+        Boolean(options?.selectedAlbumSignal), options?.recordAttempt)
       const rawResults: any[] = Array.isArray(json.results) ? json.results : []
 
       // 4. Map results and cross-reference with local library
@@ -226,7 +229,7 @@ class CompilationCanonicalizerService {
         success: false,
         albumTitle: release.title,
         tracks: [],
-        error: err.message || 'Network error while contacting AI compilation resolver',
+        error: typeof err === 'string' ? err : err.message || 'Network error while contacting AI compilation resolver',
       }
     }
   }

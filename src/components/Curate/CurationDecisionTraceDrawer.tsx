@@ -3,6 +3,7 @@ import { ExternalLink } from 'lucide-react'
 import type { CurationDecisionTrace, OutcomeStatus } from '../../core/types'
 import type { CurateEvidenceRun, CurateEvidenceSummary } from '../../services/curateEvidenceService'
 import { tauriBridge } from '../../services/tauriBridge'
+import { CurateEvidenceAttempt } from './CurateEvidenceAttempt'
 
 interface CurationDecisionTraceDrawerProps {
   isOpen: boolean
@@ -22,6 +23,11 @@ function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: st
   const [loaded, setLoaded] = useState(false)
   useEffect(() => {
     let active = true
+    setSelectedId(undefined)
+    setDetail(null)
+    setLoaded(false)
+    setRuns([])
+    setError('')
     void tauriBridge.curationListEvidence(albumId).then(rows => {
       if (!active) return
       setRuns(rows)
@@ -30,7 +36,8 @@ function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: st
     }).catch(() => { if (active) setError('Could not load evidence history.') })
     return () => { active = false }
   }, [albumId, revision])
-  const activeId = selectedId ?? runs.find(row => row.current)?.id ?? runs[0]?.id
+  const latestId = runs.find(row => row.id === revision)?.id
+  const activeId = selectedId ?? latestId ?? runs.find(row => row.current)?.id ?? runs[0]?.id
   useEffect(() => {
     if (!activeId) return
     let active = true
@@ -62,19 +69,11 @@ function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: st
             {selected.trigger === 'initial' ? 'Initial retrieval' : 'User refresh'} · Ended {new Date(selected.completedAt).toLocaleTimeString()}
           </p>
           {selected.attempts.map((attempt, index) => (
-            <div key={`${attempt.provider}-${index}`} className="text-zinc-300">
-              <div className="flex flex-wrap justify-between gap-1">
-                <span>{attempt.provider === 'apple' ? 'Apple' : 'MusicBrainz'} · {attempt.outcome.replaceAll('_', ' ')}</span>
-                <span>{attempt.durationMs} ms{attempt.httpStatus ? ` · HTTP ${attempt.httpStatus}` : ''}</span>
-              </div>
-              {attempt.candidate && (
-                <p className="text-zinc-400">
-                  {[attempt.candidate.title, attempt.candidate.artist, attempt.candidate.year].filter(Boolean).join(' · ')}
-                  {attempt.candidate.trackCount ? ` · ${attempt.candidate.trackCount} tracks` : ''}
-                </p>
-              )}
-            </div>
+            <CurateEvidenceAttempt key={`${attempt.provider}-${index}`} attempt={attempt} />
           ))}
+          {selected.trigger === 'user_refresh' && !selected.attempts.some(attempt => attempt.provider === 'gemini') && (
+            <p className="text-zinc-400">This run has no saved AI attempt details.</p>
+          )}
           {selected.decision && (
             <details className="text-zinc-300">
               <summary className="cursor-pointer">Decision snapshot</summary>

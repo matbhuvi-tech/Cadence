@@ -679,3 +679,9 @@ Explicit Refresh Evidence can spend up to 12 provider calls on the selected albu
 An Apple rate-limit response defers and retries the same request using `Retry-After` when available. Cancel refresh or leave the album to stop the wait and record the attempt as cancelled. An Apple album match followed by a failed track lookup produces a failed refresh with a reason. Other Cadence features, including background artwork and batch metadata, have independent Apple callers.
 
 The middleware fixture first reproduced zero tracks after a successful one-call search. It now verifies the required lookup, retry after HTTP 429, cancellation during the wait, and an explicit failure if the lookup fails. The evidence fixture verifies a direct lookup with stable track IDs. A live lookup for Dharmapathini returned all five tracks with credits. The 32 Curate checks and frontend build passed. Desktop interaction remains pending verification.
+
+#### AI attempt telemetry
+
+Explicit refresh records Gemini attempts in the same evidence run as Apple and MusicBrainz. Records include measured start/completion time and duration, outcome, available HTTP status and model metadata, and bounded error text with credentials redacted. Successful compilation responses retain the returned per-track title, local ID, original album/year, composer, singers, confidence, and notes. File paths and unrelated response fields are excluded from this snapshot.
+
+Evidence History exposes the saved error or expandable returned tracks. After refresh it selects the new run, including a failed run that did not become current evidence. Older refreshes without an AI record report that the run has no saved AI attempt details.

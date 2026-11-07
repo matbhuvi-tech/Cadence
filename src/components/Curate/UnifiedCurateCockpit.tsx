@@ -1230,6 +1230,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             releases,
             {
               selectedAlbumSignal: signal,
+              recordAttempt: record,
               referenceUrl: steerGroundingUrl.trim() || undefined,
               userSearchQuery: {
                 albumTitle: steerAlbum.trim() || undefined,
