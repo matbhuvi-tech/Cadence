@@ -12,7 +12,17 @@ const releases = mockReleases.filter(release => ids.has(release.id))
 const tracks = mockTracks.filter(track => ids.has(track.releaseId))
   .map(track => ({ ...track, coverArtUrl: undefined, artwork: undefined }))
 graphEngine.loadCustomLibrary({ tracks, releases, works: [], auditIssues: [] })
-localStorage.setItem('cadence.curate.review-status.v1', JSON.stringify([[target, true]]))
+// Seed review state for this page without overwriting any saved browser reviews.
+const reviewKey = 'cadence.curate.review-status.v1'
+let reviewState = JSON.stringify([[target, true]])
+const { getItem, setItem } = Storage.prototype
+Storage.prototype.getItem = function (key) {
+  return this === localStorage && key === reviewKey ? reviewState : getItem.call(this, key)
+}
+Storage.prototype.setItem = function (key, value) {
+  if (this === localStorage && key === reviewKey) reviewState = value
+  else setItem.call(this, key, value)
+}
 const fetchLocal = globalThis.fetch
 globalThis.fetch = (input, init) => {
   const url = new URL(typeof input === 'string' ? input : input.url ?? input, location.href)

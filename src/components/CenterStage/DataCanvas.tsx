@@ -55,7 +55,7 @@ interface DataCanvasProps {
 
   onSelectVariant: (releaseId: string, variantId: string) => void
   onInspectRelease: (releaseId: string) => void
-  onCustomizeRelease?: (release: Release, reopenReview?: boolean) => void
+  onCustomizeRelease?: (release: Release) => void
   onUpdateReleaseDetails?: (
     releaseId: string,
     updates: {

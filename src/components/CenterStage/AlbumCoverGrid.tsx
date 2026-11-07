@@ -37,7 +37,7 @@ interface AlbumCoverGridProps {
   selectedTrackId?: string
   onSelectTrack: (trackId: string) => void
   onInspectRelease: (releaseId: string) => void
-  onCustomizeRelease?: (release: Release, reopenReview?: boolean) => void
+  onCustomizeRelease?: (release: Release) => void
   onUpdateReleaseDetails?: (
     releaseId: string,
     updates: {
@@ -471,7 +471,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
       )
   }, [albumCards])
 
-  const handleEditAlbum = (album: AlbumCardData, e?: React.MouseEvent, targetReleaseId?: string, reopenReview = false) => {
+  const handleEditAlbum = (album: AlbumCardData, e?: React.MouseEvent, targetReleaseId?: string) => {
     e?.stopPropagation()
     let relToEdit: Release | undefined = album.release
     if (targetReleaseId && releases) {
@@ -512,7 +512,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     }
 
     if (onCustomizeRelease) {
-      onCustomizeRelease(relToEdit, reopenReview)
+      onCustomizeRelease(relToEdit)
     }
   }
 
@@ -684,7 +684,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
             </button>
 
             <button
-              onClick={(e) => handleEditAlbum(album, e, undefined, true)}
+              onClick={(e) => handleEditAlbum(album, e)}
               className="w-8 h-8 rounded-full bg-black/60 hover:bg-black/80 text-white/90 backdrop-blur-md border border-white/20 flex items-center justify-center shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer pointer-events-auto"
               title="Curate Album Metadata & Artwork"
             >

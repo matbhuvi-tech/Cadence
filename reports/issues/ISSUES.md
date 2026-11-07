@@ -1,5 +1,13 @@
 # Issue Log
 
+## Issue #11 — Edit Metadata opens the wrong completed album
+
+- **Reproduction:** Open a previously completed album in Listen and click **Edit Metadata** in its detail view. Curate can open another album from the queue.
+- **Cause:** The detail action did not opt into reopening a completed review, so Curate excluded its target.
+- **Resolution:** Reopen completed reviews in the shared metadata-edit handler, using the requested release ID and the existing mechanism for superseding prior commit rows.
+- **Browser regression:** Serve `tests/fixtures/curate/edit-metadata-navigation.html` with Vite. Open Dil Se, return to Listen, then click **Edit Metadata**. Before the fix, Curate selected Delhi-6. After the fix, Selected Output showed Dil Se and its tracks.
+- **Status:** Browser fixture verified. Desktop verification pending. [GitHub issue #11](https://github.com/matbhuvi-tech/Cadence/issues/11)
+
 ## Issue #10 — Curate refresh skips Apple track lookup
 
 - **Reproduction:** Refresh evidence for an Apple match while the refresh allocates one Apple call. The saved result shows the album with zero tracks.
@@ -16,7 +24,7 @@
 - **Status:** Implemented and user-verified on 2026-11-06. See the [Milestone A checkpoint](../../docs/designs/CurateArchitecture.md#milestone-a-implementation-checkpoint).
 
 ## Curate queue includes albums after a human commit
-- **Expected:** A successfully committed album stays out of both Curate queues and the badge count. Only the Listen album card's “Curate Album Metadata & Artwork” action reopens it.
+- **Expected:** A successfully committed album stays out of both Curate queues and the badge count. Explicit metadata edits in Listen reopen the selected review.
 - **Status:** Implementation pending verification.
 
 ## Issue #3: Missing File Name in Curate Local File Column

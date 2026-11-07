@@ -2133,8 +2133,8 @@ function AppContent() {
                 onSelectAllTracks={handleSelectAllTracks}
                 onSelectVariant={handleSelectVariant}
                 onInspectRelease={handleInspectRelease}
-                onCustomizeRelease={(rel, reopenReview) => {
-                  if (reopenReview && topMode === 'library' && curateReviews.get(rel.id) === true) {
+                onCustomizeRelease={rel => {
+                  if (curateReviews.get(rel.id) === true) {
                     const albumTracks = catalogTracks.filter(track => track.releaseId === rel.id)
                     const trackIds = new Set(albumTracks.map(track => track.id))
                     const ignored = curateCommits.filter(row => trackIds.has(row.trackId)).map(row => row.id)
