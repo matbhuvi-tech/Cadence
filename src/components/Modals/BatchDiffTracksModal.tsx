@@ -748,19 +748,7 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
                   }}
                 />
               </div>
-              <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#64748B]">
-                <span>Free Tier Quota Buffer:</span>
-                <span className="text-cyan-400 font-bold">15 RPM Safe</span>
-                {/* 15-dot LED Indicator */}
-                <div className="flex items-center gap-0.5 ml-1" title="15 Requests Per Minute Safe Window">
-                  {Array.from({ length: 15 }).map((_, i) => (
-                    <span
-                      key={i}
-                      className={`w-1 h-1 rounded-full ${i < 3 ? 'bg-cyan-400' : 'bg-white/15'}`}
-                    />
-                  ))}
-                </div>
-              </div>
+              <p className="font-mono text-[10px] text-[#94A3B8]">Model and cooldown details are in Activity Center.</p>
             </div>
           </div>
         )}
@@ -2150,13 +2138,13 @@ export const BatchDiffTracksModal: React.FC<BatchDiffTracksModalProps> = ({
 
               <div className="py-4 text-xs text-[#94A3B8] space-y-3 leading-relaxed">
                 <p>
-                  Cadence Core is operating on the <strong className="text-white">Google Gemini Free Tier</strong>, which enforces a strict ceiling of <strong className="text-cyan-400">15 Requests Per Minute (RPM)</strong>.
+                  Google applies Gemini limits by project and model. Those limits can change.
                 </p>
                 <p>
-                  To ensure your batch harmonization and sidecars complete reliably without HTTP 429 server rejections or dropped tags, Cadence:
+                  Cadence spaces requests and switches to an eligible model if Google limits the current one.
                 </p>
                 <ul className="list-disc list-inside space-y-1 text-white/80 pl-1 font-mono text-[11px]">
-                  <li>Paces cloud queries with a 4.0-second safe buffer.</li>
+                  <li>Waits at least four seconds between Gemini requests.</li>
                   <li>Resolves Apple Music & MusicBrainz in parallel without waiting.</li>
                   <li>Stages all completed progress non-destructively in JSON sidecars.</li>
                 </ul>

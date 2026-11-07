@@ -18,7 +18,7 @@ import { ScanProgressPayload } from '../../core/types'
 import { tauriBridge } from '../../services/tauriBridge'
 import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
 import { backgroundArtworkService, BackgroundArtworkState } from '../../services/backgroundArtworkService'
-import { getGeminiQuota } from '../../services/geminiClient'
+import { getGeminiQuota, subscribeGeminiQuota, type GeminiQuotaTelemetry } from '../../services/geminiClient'
 
 interface ActivityCenterPopoverProps {
   isOpen: boolean
@@ -36,12 +36,7 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
   onDismissAllSkipped,
 }) => {
   const { maintenanceStats } = useMaintenanceWorker(isOpen)
-  const [aiQuota, setAiQuota] = useState<{
-    rateLimitRpm: number
-    pacingIntervalMs: number
-    nextSlotRemainingMs: number
-    isPacingActive: boolean
-  } | null>(null)
+  const [aiQuota, setAiQuota] = useState<GeminiQuotaTelemetry | null>(null)
 
   const [bgArtState, setBgArtState] = useState<BackgroundArtworkState>(() => backgroundArtworkService.getState())
 
@@ -52,22 +47,43 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
 
   useEffect(() => {
     if (!isOpen) return
-    let isMounted = true
-    const checkQuota = async () => {
-      try {
-        const data = await getGeminiQuota()
-        if (isMounted) setAiQuota(data)
-      } catch {}
-    }
-    checkQuota()
-    const interval = setInterval(checkQuota, 2000)
+    let mounted = true
+    let unsubscribe: (() => void) | undefined
+    const update = (quota: GeminiQuotaTelemetry) => { if (mounted) setAiQuota(quota) }
+    void subscribeGeminiQuota(update).then(stop => {
+      if (mounted) unsubscribe = stop
+      else stop()
+    }).catch(() => {}).then(() => {
+      if (mounted) void getGeminiQuota().then(update).catch(() => {})
+    })
     return () => {
-      isMounted = false
-      clearInterval(interval)
+      mounted = false
+      unsubscribe?.()
     }
   }, [isOpen])
 
+  const [quotaNow, setQuotaNow] = useState(Date.now)
+  useEffect(() => {
+    if (!isOpen) return
+    setQuotaNow(Date.now())
+    const timer = setInterval(() => setQuotaNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [isOpen])
   if (!isOpen) return null
+  const nextSlotMs = Math.max(0, (aiQuota?.lastCallTimestamp ?? 0) + (aiQuota?.pacingIntervalMs ?? 0) - quotaNow)
+  const cooldowns = [
+    ...(aiQuota?.projectBlock ? [{ model: 'Google project', ...aiQuota.projectBlock }] : []),
+    ...(aiQuota?.groundingBlock ? [{ model: 'Google Search grounding', ...aiQuota.groundingBlock }] : []),
+    ...(aiQuota?.models ?? []),
+  ].filter(block => block.blockedUntil > quotaNow)
+  const quotaReasons: Record<string, string> = {
+    daily_quota: 'Daily quota reached',
+    requests_per_minute: 'Requests per minute limit reached',
+    tokens_per_minute: 'Tokens per minute limit reached',
+    rate_limit: 'Rate limited',
+    overloaded: 'Temporarily overloaded',
+    unavailable: 'Model unavailable',
+  }
 
   const percent =
     telemetry.totalCount > 0
@@ -475,38 +491,30 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
             <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
             <span>Gemini AI Cloud Pipeline</span>
           </div>
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
-            Free Tier (15 RPM Safe)
-          </span>
         </div>
-
-        <div className="flex items-center justify-between text-[11px] text-[#94A3B8]">
-          <span>Token Bucket Buffer:</span>
-          <span className="font-mono text-white">
-            {aiQuota?.isPacingActive
-              ? `Refilling in ${(aiQuota.nextSlotRemainingMs / 1000).toFixed(1)}s`
-              : 'Safe Pacing Active (4.0s Floor)'}
-          </span>
-        </div>
-
-        {/* 15-LED Quota Slot Display */}
-        <div className="flex items-center justify-between pt-1 border-t border-white/[0.06]">
-          <span className="text-[10px] text-[#64748B] font-mono">1-Min Window Budget:</span>
-          <div className="flex items-center gap-1" title="15 Requests Per Minute Safe Window">
-            {Array.from({ length: 15 }).map((_, i) => (
-              <span
-                key={i}
-                className={`w-1.5 h-1.5 rounded-full ${
-                  aiQuota?.isPacingActive && i < 4
-                    ? 'bg-amber-400'
-                    : i < 3
-                    ? 'bg-cyan-400'
-                    : 'bg-white/10'
-                }`}
-              />
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] text-[#94A3B8]">
+          <dt>{aiQuota?.inFlightModel ? 'In use' : 'Last successful model'}</dt>
+          <dd className="min-w-0 break-all text-right font-mono text-white">{aiQuota?.currentModel ?? '—'}</dd>
+          <dt>Preferred model</dt>
+          <dd className="min-w-0 break-all text-right font-mono text-white">{aiQuota?.preferredModel || '—'}</dd>
+          <dt>Request pacing</dt>
+          <dd className="text-right text-white">
+            {nextSlotMs > 0 ? `${Math.ceil(nextSlotMs / 1000)}s until next slot` : 'Ready'}
+          </dd>
+        </dl>
+        {cooldowns.length > 0 && (
+          <ul className="space-y-1 border-t border-white/[0.08] pt-2 text-[11px] text-amber-300">
+            {cooldowns.map(block => (
+              <li key={block.model}>
+                <span className="break-all font-mono">{block.model}</span>
+                {' · '}{quotaReasons[block.reason] ?? block.reason}
+                {block.observedLimit && ['daily_quota', 'requests_per_minute', 'tokens_per_minute'].includes(block.reason)
+                  ? ' (limit ' + block.observedLimit + ')' : ''}
+                {' · Check again after '}{new Date(block.blockedUntil).toLocaleString()}
+              </li>
             ))}
-          </div>
-        </div>
+          </ul>
+        )}
       </div>
 
       {/* Control Buttons */}

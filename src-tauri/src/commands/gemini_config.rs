@@ -1,16 +1,10 @@
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::sync::{
-    atomic::{AtomicI64, Ordering},
-    OnceLock,
-};
 use tauri::AppHandle;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const DEFAULT_MODEL: &str = "gemini-3.5-flash-lite";
 const PACING_MS: u64 = 4_000;
-static LAST_GEMINI_CALL: OnceLock<tokio::sync::Mutex<std::time::Instant>> = OnceLock::new();
-static LAST_GEMINI_CALL_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,96 +78,364 @@ fn clean_json(text: &str) -> Result<Value, String> {
     serde_json::from_str(slice_to_parse).map_err(|e| format!("Gemini returned invalid JSON: {e}"))
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiBlock {
+    reason: &'static str,
+    blocked_until: i64,
+    observed_limit: Option<String>,
+    #[serde(skip)]
+    consecutive: u32,
+}
+
+#[derive(Default)]
+struct GeminiQuota {
+    credential: Option<u64>,
+    preferred: String,
+    in_flight: Option<String>,
+    last_successful: Option<String>,
+    last_call: Option<std::time::Instant>,
+    last_timestamp: i64,
+    models: std::collections::BTreeMap<String, GeminiBlock>,
+    project: Option<GeminiBlock>,
+    grounding: Option<GeminiBlock>,
+}
+
+static QUOTA: std::sync::LazyLock<std::sync::Mutex<GeminiQuota>> =
+    std::sync::LazyLock::new(Default::default);
+static GEMINI_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn quota() -> std::sync::MutexGuard<'static, GeminiQuota> {
+    QUOTA.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn pacific_reset_ms(now: i64) -> Option<i64> {
+    let local = chrono::DateTime::from_timestamp_millis(now)?
+        .with_timezone(&chrono_tz::America::Los_Angeles);
+    let midnight = local.date_naive().succ_opt()?.and_hms_opt(0, 0, 0)?;
+    Some(
+        midnight
+            .and_local_timezone(chrono_tz::America::Los_Angeles)
+            .single()?
+            .timestamp_millis(),
+    )
+}
+
+fn quota_block(
+    status: u16,
+    now: i64,
+    hint: i64,
+    violations: &[&Value],
+    previous: Option<&GeminiBlock>,
+) -> GeminiBlock {
+    let daily = violations.iter().any(|v| {
+        let name = quota_name(v);
+        name.contains("perday") || name.contains("daily")
+    });
+    let minute_metric = violations.iter().map(|v| quota_name(v)).find_map(|name| {
+        if !name.contains("perminute") { return None; }
+        if name.contains("token") { Some("tokens_per_minute") }
+        else if name.contains("request") { Some("requests_per_minute") }
+        else { None }
+    });
+    let (reason, fallback) = match status {
+        404 => ("unavailable", 600_000),
+        503 => ("overloaded", 15_000),
+        _ if daily => ("daily_quota", 86_400_000),
+        _ => (minute_metric.unwrap_or("rate_limit"), 30_000),
+    };
+    let consecutive = previous
+        .filter(|block| block.reason == reason)
+        .map_or(1, |block| (block.consecutive + 1).min(5));
+    let estimated = if daily {
+        pacific_reset_ms(now).unwrap_or(now + fallback)
+    } else if consecutive == 1 && hint > 0 {
+        now.saturating_add(hint)
+    } else {
+        now + fallback * (1_i64 << (consecutive - 1)) + now.rem_euclid(1000)
+    };
+    GeminiBlock {
+        reason,
+        consecutive,
+        blocked_until: estimated.max(now.saturating_add(hint)),
+        observed_limit: violations.iter().find_map(|v| {
+            let value = &v["quotaValue"];
+            value.as_u64().map(|n| n.to_string()).or_else(|| {
+                value
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+                    .map(str::to_owned)
+            })
+        }),
+    }
+}
+
+fn quota_name(violation: &Value) -> String {
+    format!(
+        "{} {}",
+        violation["quotaId"].as_str().unwrap_or_default(),
+        violation["quotaMetric"].as_str().unwrap_or_default()
+    )
+    .to_ascii_lowercase().replace(['_', '-'], "")
+}
+
+fn retry_hint(headers: &reqwest::header::HeaderMap, data: &Value, now: i64) -> i64 {
+    let header_ms = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.parse::<i64>()
+                .ok()
+                .filter(|n| *n >= 0)
+                .map(|n| n.saturating_mul(1000))
+                .or_else(|| {
+                    let time: chrono::DateTime<chrono::Utc> =
+                        httpdate::parse_http_date(v).ok()?.into();
+                    Some(time.timestamp_millis().saturating_sub(now))
+                })
+        })
+        .unwrap_or(0);
+    let details = data["error"]["details"].as_array().into_iter().flatten();
+    let detail_ms = details
+        .filter(|v| v["@type"] == "type.googleapis.com/google.rpc.RetryInfo")
+        .filter_map(|v| {
+            v["retryDelay"]
+                .as_str()?
+                .strip_suffix('s')?
+                .parse::<f64>()
+                .ok()
+        })
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| (n * 1000.0).ceil() as i64)
+        .max()
+        .unwrap_or(0);
+    header_ms.max(detail_ms)
+}
+
+fn is_grounding_quota(violation: &Value) -> bool {
+    let name = quota_name(violation);
+    name.contains("grounding") || name.contains("googlesearch")
+}
+
+fn record_block(
+    state: &mut GeminiQuota,
+    model: &str,
+    status: u16,
+    grounded: bool,
+    headers: &reqwest::header::HeaderMap,
+    data: &Value,
+) {
+    let now = now_ms();
+    let hint = retry_hint(headers, data, now);
+    let violations = data["error"]["details"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["@type"] == "type.googleapis.com/google.rpc.QuotaFailure")
+        .flat_map(|v| v["violations"].as_array().into_iter().flatten());
+    let (grounding, generation): (Vec<_>, Vec<_>) = violations.partition(|v| is_grounding_quota(v));
+    let (shared, scoped): (Vec<_>, Vec<_>) = generation.into_iter().partition(|v| {
+        let name = quota_name(v);
+        v["quotaDimensions"]["model"].is_null()
+            && !name.contains("permodel")
+            && (name.contains("spend")
+                || name
+                    .split_whitespace()
+                    .any(|part| part.ends_with("perproject")))
+    });
+    if status == 429 && !grounding.is_empty() {
+        state.grounding = Some(quota_block(
+            status,
+            now,
+            hint,
+            &grounding,
+            state.grounding.as_ref(),
+        ));
+    }
+    if status == 429 && !shared.is_empty() {
+        state.project = Some(quota_block(
+            status,
+            now,
+            hint,
+            &shared,
+            state.project.as_ref(),
+        ));
+    }
+    if status != 429 || !scoped.is_empty() || (shared.is_empty() && grounding.is_empty()) {
+        let key = if status == 429 && grounded && scoped.is_empty() {
+            format!("{model} (Google Search)")
+        } else {
+            model.to_string()
+        };
+        let block = quota_block(status, now, hint, &scoped, state.models.get(&key));
+        state.models.insert(key, block.clone());
+        // Google can identify the underlying quota model even when the request used an alias.
+        for canonical in scoped
+            .iter()
+            .filter_map(|v| v["quotaDimensions"]["model"].as_str())
+        {
+            state.models.insert(
+                canonical.trim_start_matches("models/").to_string(),
+                block.clone(),
+            );
+        }
+    }
+}
+
+fn project_block_until(state: &GeminiQuota, grounded: bool) -> i64 {
+    let project = state
+        .project
+        .as_ref()
+        .map_or(0, |block| block.blocked_until);
+    let grounding = state
+        .grounding
+        .as_ref()
+        .map_or(0, |block| block.blocked_until);
+    if grounded {
+        project.max(grounding)
+    } else {
+        project
+    }
+}
+
+fn model_block_until(state: &GeminiQuota, model: &str, grounded: bool) -> i64 {
+    let global = state
+        .models
+        .get(model)
+        .map_or(0, |block| block.blocked_until);
+    if !grounded {
+        return global;
+    }
+    global.max(
+        state
+            .models
+            .get(&format!("{model} (Google Search)"))
+            .map_or(0, |block| block.blocked_until),
+    )
+}
+
+fn candidates(preferred: &str) -> impl Iterator<Item = &str> {
+    [preferred, DEFAULT_MODEL, "gemini-3.1-flash-lite"]
+        .into_iter()
+        .enumerate()
+        .filter(move |(index, model)| {
+            ![preferred, DEFAULT_MODEL, "gemini-3.1-flash-lite"][..*index].contains(model)
+        })
+        .map(|(_, model)| model)
+}
+
+fn pacing_remaining(state: &GeminiQuota) -> std::time::Duration {
+    state
+        .last_call
+        .map(|time| std::time::Duration::from_millis(PACING_MS).saturating_sub(time.elapsed()))
+        .unwrap_or_default()
+}
+
+struct ActiveAttempt<'a>(&'a AppHandle);
+impl Drop for ActiveAttempt<'_> {
+    fn drop(&mut self) {
+        quota().in_flight = None;
+        emit_quota(self.0);
+    }
+}
+
 async fn generate(
     app: &AppHandle,
     contents: Value,
     timeout_ms: u64,
     use_grounding: bool,
-    single_attempt: bool,
-) -> Result<(Value, String, u64), String> {
-    let settings = read_settings(app)?;
-    let key = settings.api_key;
-    let pacing = LAST_GEMINI_CALL.get_or_init(|| {
-        tokio::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(10))
-    });
-    let mut last = pacing.lock().await;
-    let wait = PACING_MS.saturating_sub(last.elapsed().as_millis() as u64);
-    if wait > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-    }
-    *last = std::time::Instant::now();
-    LAST_GEMINI_CALL_MS.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
-    let mut client = reqwest::Client::builder().timeout(std::time::Duration::from_millis(timeout_ms));
-    if single_attempt {
-        client = client.redirect(reqwest::redirect::Policy::none());
-    }
-    let client = client.build()
-        .map_err(|e| e.to_string())?;
-    let candidates = [
-        settings.model.as_str(),
-        DEFAULT_MODEL,
-        "gemini-3.8-flash",
-        "gemini-3.6-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-flash-latest",
-    ];
-    let mut last_error = String::from("Gemini models are temporarily unavailable");
-    for (index, model) in candidates.iter().enumerate() {
-        if single_attempt && index > 0 {
-            break;
-        }
-        if candidates[..index].contains(model) {
-            continue;
-        }
-        let attempts = if single_attempt { 1 } else { 3 };
-        for attempt in 0..attempts {
-            let mut req_body = json!({ "contents": &contents });
-            if use_grounding {
-                req_body["tools"] = json!([{ "google_search": {} }]);
-            } else {
-                req_body["generationConfig"] = json!({ "responseMimeType": "application/json" });
+    attempt_budget: usize,
+) -> Result<(Value, String, u64, usize), String> {
+    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+        let _turn = GEMINI_TURN.lock().await;
+        let settings = read_settings(app)?;
+        {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            settings.api_key.hash(&mut hasher);
+            let credential = Some(hasher.finish());
+            let mut state = quota();
+            if state.credential != credential {
+                state.models.clear();
+                state.project = None;
+                state.grounding = None;
+                state.last_successful = None;
+                state.credential = credential;
             }
+            state.preferred = settings.model.trim_start_matches("models/").to_string();
+        }
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()
+            .map_err(|_| "Unable to initialize Gemini HTTP client".to_string())?;
+        let mut body = json!({ "contents": contents });
+        if use_grounding {
+            body["tools"] = json!([{ "google_search": {} }]);
+        } else {
+            body["generationConfig"] = json!({ "responseMimeType": "application/json" });
+        }
+        let preferred = settings.model.trim_start_matches("models/");
+        let mut attempts = 0;
+        let mut pacing_delay = 0;
+        let mut last_status = 503;
+        for model in candidates(preferred) {
+            if attempts >= attempt_budget { break; }
+            let delay = {
+                let state = quota();
+                let now = now_ms();
+                if project_block_until(&state, use_grounding) > now { break; }
+                if model_block_until(&state, model, use_grounding) > now { continue; }
+                pacing_remaining(&state)
+            };
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+                pacing_delay += delay.as_millis() as u64;
+            }
+            attempts += 1;
+            {
+                let mut state = quota();
+                state.in_flight = Some(model.to_string());
+                state.last_call = Some(std::time::Instant::now());
+                state.last_timestamp = now_ms();
+            }
+            let _active = ActiveAttempt(app);
+            emit_quota(app);
             let response = client.post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"))
-                .header("x-goog-api-key", &key).json(&req_body).send().await;
-            match response {
-                Ok(r) if r.status().is_success() => {
-                    let data: Value = r.json().await.map_err(|e| e.to_string())?;
-                    return Ok((data, (*model).to_string(), wait));
+                .header("x-goog-api-key", &settings.api_key).json(&body).send().await
+                .map_err(|_| "Gemini request failed (502): network error".to_string())?;
+            last_status = response.status().as_u16();
+            let headers = response.headers().clone();
+            if response.status().is_success() {
+                let data = response.json::<Value>().await.map_err(|_| "Gemini returned invalid JSON".to_string())?;
+                let mut state = quota();
+                state.models.remove(model);
+                if use_grounding {
+                    state.models.remove(&format!("{model} (Google Search)"));
+                    state.grounding = None;
                 }
-                Ok(r) if r.status().as_u16() == 429 || r.status().as_u16() == 503 => {
-                    last_error = r
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Gemini rate limit or service capacity reached".into());
-                    if attempt + 1 < attempts {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            2u64.pow(attempt + 1) * 1000,
-                        ))
-                        .await;
-                    }
-                }
-                Ok(r) if r.status().as_u16() == 404 => {
-                    last_error = format!(
-                        "Gemini model {model} is unavailable: {}",
-                        r.text().await.unwrap_or_default()
-                    );
-                    break;
-                }
-                Ok(r) => {
-                    return Err(format!(
-                        "Gemini request failed ({}): {}",
-                        r.status(),
-                        r.text().await.unwrap_or_default()
-                    ));
-                }
-                Err(e) => {
-                    last_error = e.to_string();
-                    break;
-                }
+                state.project = None;
+                state.last_successful = Some(data["modelVersion"].as_str().unwrap_or(model).to_string());
+                return Ok((data, state.last_successful.clone().unwrap_or_else(|| model.to_string()), pacing_delay, attempts - 1));
             }
+            if !matches!(last_status, 429 | 503 | 404) { break; }
+            let data = response.json::<Value>().await.unwrap_or(Value::Null);
+            record_block(&mut quota(), model, last_status, use_grounding, &headers, &data);
         }
-    }
-    Err(last_error)
+        let state = quota();
+        let now = now_ms();
+        let project_until = project_block_until(&state, use_grounding);
+        let retry_at = candidates(preferred).map(|model| {
+            project_until.max(model_block_until(&state, model, use_grounding))
+        }).min().unwrap_or(0);
+        if retry_at > now && (project_until > now || state.models.values().any(|block| {
+            block.blocked_until > now && !matches!(block.reason, "unavailable" | "overloaded")
+        })) { last_status = 429; }
+        let retry = chrono::DateTime::from_timestamp_millis(retry_at).filter(|_| retry_at > now)
+            .map(|time| format!("; try again after {}", time.to_rfc3339())).unwrap_or_default();
+        Err(format!("Gemini request failed ({last_status}){retry}"))
+    }).await.map_err(|_| "Gemini request failed (504): timed out".to_string())?
 }
 
 fn text_content(data: &Value) -> String {
@@ -183,12 +445,85 @@ fn text_content(data: &Value) -> String {
         .to_string()
 }
 
+enum RequestCancellation {
+    Running(tokio::sync::oneshot::Sender<()>),
+    Cancelled(std::time::Instant),
+}
+
+static GEMINI_REQUESTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, RequestCancellation>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn requests(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, RequestCancellation>> {
+    let mut requests = GEMINI_REQUESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    requests.retain(|_, entry| !matches!(entry, RequestCancellation::Cancelled(at) if at.elapsed().as_secs() >= 60));
+    requests
+}
+
+struct RegisteredRequest(String);
+impl Drop for RegisteredRequest {
+    fn drop(&mut self) {
+        requests().remove(&self.0);
+    }
+}
+
+#[tauri::command]
+pub fn cancel_gemini_request(request_id: String) {
+    let mut requests = requests();
+    if let Some(RequestCancellation::Running(sender)) = requests.insert(
+        request_id,
+        RequestCancellation::Cancelled(std::time::Instant::now()),
+    ) {
+        let _ = sender.send(());
+    }
+}
+
 #[tauri::command]
 pub async fn gemini_resolve(
     app: AppHandle,
     operation: String,
     payload: Value,
     single_attempt: Option<bool>,
+    attempt_budget: Option<usize>,
+    request_id: Option<String>,
+) -> Result<Value, String> {
+    let work = resolve_operation(
+        app,
+        operation,
+        payload,
+        attempt_budget
+            .unwrap_or(if single_attempt == Some(true) { 1 } else { 3 })
+            .clamp(1, 3),
+    );
+    let Some(request_id) = request_id else {
+        return work.await;
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    {
+        use std::collections::hash_map::Entry;
+        match requests().entry(request_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(RequestCancellation::Running(sender));
+            }
+            Entry::Occupied(_) => return Err("Gemini request cancelled or already running".into()),
+        }
+    }
+    let _registration = RegisteredRequest(request_id);
+    tokio::select! {
+        biased;
+        _ = receiver => Err("Gemini request cancelled".into()),
+        result = work => result,
+    }
+}
+
+async fn resolve_operation(
+    app: AppHandle,
+    operation: String,
+    payload: Value,
+    attempt_budget: usize,
 ) -> Result<Value, String> {
     let (prompt, timeout) = match operation.as_str() {
         "metadata" => {
@@ -413,36 +748,40 @@ Instructions:
                 contents.push(json!({"role": if h["role"] == "agent" {"model"} else {"user"}, "parts":[{"text":h["text"]}]}));
             }
             contents.push(json!({"role":"user","parts":[{"text":format!("{sys}\n\nUser Instruction: {prompt}")}]}));
-            let (data, model, delay) = generate(&app, Value::Array(contents), 12_000, false, false).await?;
+            let (data, model, delay, retries) =
+                generate(&app, Value::Array(contents), 12_000, false, attempt_budget).await?;
             let parsed = clean_json(&text_content(&data)).unwrap_or_else(|_| json!({"response":"I analyzed your library. How would you like me to assist with tagging, filtering, or audio hygiene?","command":null,"suggestedActions":[{"label":"Library Statistics","prompt":"Give me a statistical breakdown of my library"},{"label":"Recommend Actions","prompt":"What actions do you recommend next?"},{"label":"Auto-Resolve Artists","prompt":"Extract missing artists from folder hierarchy"}]}));
             return Ok(
-                json!({"success":true,"response":parsed["response"],"command":parsed["command"],"suggestedActions":parsed["suggestedActions"],"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":0}}),
+                json!({"success":true,"response":parsed["response"],"command":parsed["command"],"suggestedActions":parsed["suggestedActions"],"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":retries}}),
             );
         }
         _ => return Err("Unknown Gemini operation".into()),
     };
     let contents = json!([{"role":"user","parts":[{"text":prompt}]}]);
-    let use_grounding = operation == "compilation" && (
-        payload["referenceUrl"].as_str().map(|u| !u.trim().is_empty()).unwrap_or(false) ||
-        payload.get("userSearchQuery").is_some()
-    );
-    let (data, model, delay) = generate(&app, contents, timeout, use_grounding, single_attempt.unwrap_or(false)).await?;
+    let use_grounding = operation == "compilation"
+        && (payload["referenceUrl"]
+            .as_str()
+            .map(|u| !u.trim().is_empty())
+            .unwrap_or(false)
+            || payload.get("userSearchQuery").is_some());
+    let (data, model, delay, retries) =
+        generate(&app, contents, timeout, use_grounding, attempt_budget).await?;
     let parsed = clean_json(&text_content(&data))?;
     match operation.as_str() {
         "metadata" => {
             let results = parsed.as_array().cloned().unwrap_or_default();
             Ok(
-                json!({"success":true,"count":results.len(),"results":results,"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":0}}),
+                json!({"success":true,"count":results.len(),"results":results,"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":retries}}),
             )
         }
         "compilation" => {
             let results = parsed.as_array().cloned().unwrap_or_default();
             Ok(
-                json!({"success":true,"albumTitle":payload["albumTitle"],"count":results.len(),"results":results,"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":0}}),
+                json!({"success":true,"albumTitle":payload["albumTitle"],"count":results.len(),"results":results,"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":retries}}),
             )
         }
         "cover-art" => Ok(
-            json!({"success":true,"provider":"ai","canonicalReleaseTitle":parsed["canonicalReleaseTitle"].as_str().unwrap_or(payload["albumTitle"].as_str().unwrap_or("")),"canonicalArtist":parsed["canonicalArtist"].as_str().unwrap_or(payload["artistCredit"].as_str().unwrap_or("")),"canonicalComposer":parsed["canonicalComposer"].as_str().unwrap_or(payload["composerName"].as_str().unwrap_or("")),"releaseYear":parsed["releaseYear"].as_u64().unwrap_or(payload["releaseYear"].as_u64().unwrap_or(0)),"recordLabel":parsed["recordLabel"].as_str().unwrap_or("Archival Master"),"officialCoverDescription":parsed["officialCoverDescription"].as_str().unwrap_or("AI Verified Canonical Master Release"),"coverArtUrl":parsed["suggestedCoverArtUrl"].as_str().unwrap_or(""),"coverResolution":parsed["coverResolution"].as_str().unwrap_or("Master Reference Scan (AI Verified)"),"confidenceScore":parsed["confidenceScore"].as_f64().unwrap_or(0.95),"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":0}}),
+            json!({"success":true,"provider":"ai","canonicalReleaseTitle":parsed["canonicalReleaseTitle"].as_str().unwrap_or(payload["albumTitle"].as_str().unwrap_or("")),"canonicalArtist":parsed["canonicalArtist"].as_str().unwrap_or(payload["artistCredit"].as_str().unwrap_or("")),"canonicalComposer":parsed["canonicalComposer"].as_str().unwrap_or(payload["composerName"].as_str().unwrap_or("")),"releaseYear":parsed["releaseYear"].as_u64().unwrap_or(payload["releaseYear"].as_u64().unwrap_or(0)),"recordLabel":parsed["recordLabel"].as_str().unwrap_or("Archival Master"),"officialCoverDescription":parsed["officialCoverDescription"].as_str().unwrap_or("AI Verified Canonical Master Release"),"coverArtUrl":parsed["suggestedCoverArtUrl"].as_str().unwrap_or(""),"coverResolution":parsed["coverResolution"].as_str().unwrap_or("Master Reference Scan (AI Verified)"),"confidenceScore":parsed["confidenceScore"].as_f64().unwrap_or(0.95),"telemetry":{"modelUsed":model,"pacingDelayMs":delay,"retriesAttempted":retries}}),
         ),
         _ => unreachable!(),
     }
@@ -450,16 +789,25 @@ Instructions:
 
 #[tauri::command]
 pub async fn get_gemini_quota() -> Value {
-    let last_timestamp = LAST_GEMINI_CALL_MS.load(Ordering::Relaxed);
-    let elapsed = if last_timestamp == 0 {
-        PACING_MS
-    } else {
-        chrono::Utc::now()
-            .timestamp_millis()
-            .saturating_sub(last_timestamp) as u64
-    };
-    let remaining = PACING_MS.saturating_sub(elapsed);
-    json!({"rateLimitRpm":15,"pacingIntervalMs":PACING_MS,"nextSlotRemainingMs":remaining,"isPacingActive":remaining>0,"lastCallTimestamp":last_timestamp})
+    quota_snapshot()
+}
+
+fn emit_quota(app: &AppHandle) {
+    let _ = app.emit("gemini-quota-changed", quota_snapshot());
+}
+
+fn quota_snapshot() -> Value {
+    let state = quota();
+    let remaining = pacing_remaining(&state).as_millis() as u64;
+    let models: Vec<_> = state.models.iter().map(|(model, block)| json!({
+        "model": model, "reason": block.reason, "blockedUntil": block.blocked_until, "observedLimit": block.observed_limit
+    })).collect();
+    json!({
+        "rateLimitRpm": 15, "pacingIntervalMs": PACING_MS, "nextSlotRemainingMs": remaining,
+        "isPacingActive": remaining > 0, "lastCallTimestamp": state.last_timestamp,
+        "preferredModel": state.preferred, "currentModel": state.in_flight.as_ref().or(state.last_successful.as_ref()),
+        "inFlightModel": state.in_flight, "projectBlock": state.project, "groundingBlock": state.grounding, "models": models
+    })
 }
 
 #[cfg(windows)]
@@ -551,12 +899,11 @@ pub fn get_gemini_config(app: AppHandle) -> Result<GeminiConfigStatus, String> {
         .as_ref()
         .map(|s| !s.api_key.is_empty())
         .unwrap_or(false);
-    Ok(GeminiConfigStatus {
-        configured,
-        model: settings
-            .map(|s| s.model)
-            .unwrap_or_else(|| DEFAULT_MODEL.into()),
-    })
+    let model = settings
+        .map(|s| s.model)
+        .unwrap_or_else(|| DEFAULT_MODEL.into());
+    quota().preferred = model.trim_start_matches("models/").to_string();
+    Ok(GeminiConfigStatus { configured, model })
 }
 
 #[tauri::command]
@@ -579,7 +926,10 @@ pub fn save_gemini_api_key(app: AppHandle, api_key: String, model: String) -> Re
 fn write_settings(app: &AppHandle, settings: GeminiSettings) -> Result<(), String> {
     let serialized = serde_json::to_vec(&settings).map_err(|e| e.to_string())?;
     let encrypted = protect(&serialized)?;
-    std::fs::write(config_path(app)?, encrypted).map_err(|e| e.to_string())
+    std::fs::write(config_path(app)?, encrypted).map_err(|e| e.to_string())?;
+    quota().preferred = settings.model.trim_start_matches("models/").to_string();
+    emit_quota(app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -600,4 +950,66 @@ pub fn remove_gemini_api_key(app: AppHandle) -> Result<(), String> {
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod gemini_tests {
+    use super::*;
+
+    #[test]
+    fn daily_quota_resets_at_pacific_midnight_across_dst() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-01T07:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let reset = chrono::DateTime::parse_from_rfc3339("2026-11-02T08:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let violation =
+            json!({ "quotaId": "GenerateRequestsPerDayPerProjectPerModel", "quotaValue": "20" });
+        let block = quota_block(429, now, 2_000, &[&violation], None);
+        assert_eq!(block.reason, "daily_quota");
+        assert_eq!(block.blocked_until, reset);
+        assert_eq!(block.observed_limit.as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn quota_blocks_alias_and_canonical_model_without_blocking_other_models() {
+        let mut state = GeminiQuota::default();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "120".parse().unwrap());
+        let data = json!({ "error": { "details": [
+            { "@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
+                { "quotaId": "GenerateRequestsPerMinutePerProjectPerModel", "quotaDimensions": { "model": DEFAULT_MODEL } }
+            ] },
+            { "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "90.5s" }
+        ] } });
+        let before = now_ms();
+        record_block(&mut state, "model-alias", 429, false, &headers, &data);
+        let until = model_block_until(&state, "model-alias", false);
+        assert!(until >= before + 120_000);
+        assert_eq!(until, model_block_until(&state, DEFAULT_MODEL, false));
+        assert_eq!(model_block_until(&state, "gemini-3.1-flash-lite", false), 0);
+        assert_eq!(project_block_until(&state, false), 0);
+    }
+
+    #[test]
+    fn search_quota_does_not_block_ordinary_inference() {
+        let mut state = GeminiQuota::default();
+        let data = json!({ "error": { "details": [
+            { "@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
+                { "quotaId": "GroundingRequestsPerDayPerProject" }
+            ] }
+        ] } });
+        record_block(
+            &mut state,
+            DEFAULT_MODEL,
+            429,
+            true,
+            &Default::default(),
+            &data,
+        );
+        assert!(project_block_until(&state, true) > now_ms());
+        assert_eq!(project_block_until(&state, false), 0);
+        assert_eq!(model_block_until(&state, DEFAULT_MODEL, false), 0);
+    }
 }

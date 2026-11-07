@@ -27,6 +27,7 @@ async function run() {
   }
 
   const previousFetch = globalThis.fetch
+  const realNow = Date.now
   const previousKey = process.env.GEMINI_API_KEY
   const calls: string[] = []
   process.env.GEMINI_API_KEY = 'test-key'
@@ -59,6 +60,81 @@ async function run() {
     const quota = await request('/api/ai-quota-telemetry', '')
     assert.equal(quota.currentModel, fallback.telemetry.modelUsed)
     assert.equal(quota.models.find((model: any) => firstModel.endsWith('/' + model.model + ':generateContent')).reason, 'rate_limit')
+
+    // Use a controlled clock for pacing and reset tests. No real Gemini calls are sent.
+    let time = realNow() + 10_000
+    Date.now = () => time
+    process.env.GEMINI_API_KEY = 'test-daily-scope'
+    calls.length = 0
+    globalThis.fetch = async input => {
+      calls.push(String(input))
+      if (calls.length === 1) {
+        time += 4000
+        return Response.json({ error: { details: [{
+          '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+          violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel', quotaValue: '20',
+            quotaDimensions: { model: 'gemini-3.5-flash-lite' } }],
+        }] } }, { status: 429 })
+      }
+      return Response.json({ modelVersion: 'fixture-actual-model', candidates: [{ content: { parts: [{ text: '[]' }] } }] })
+    }
+    const daily = await request('/api/ai-compilation-resolver', 'attemptBudget=2', compilation)
+    assert.equal(daily.telemetry.retriesAttempted, 1)
+    assert.equal(daily.telemetry.modelUsed, 'fixture-actual-model')
+    assert.equal(calls.length, 2)
+    assert.notEqual(new URL(calls[1]).pathname, '/v1beta/models/gemini-3.5-flash-lite:generateContent')
+    const dailyQuota = await request('/api/ai-quota-telemetry', '')
+    assert.equal(dailyQuota.currentModel, 'fixture-actual-model')
+    const dailyBlock = dailyQuota.models.find((model: any) => model.model === 'gemini-3.5-flash-lite')
+    assert.equal(dailyBlock.reason, 'daily_quota')
+    assert.equal(dailyBlock.observedLimit, '20')
+    assert.ok(dailyBlock.blockedUntil > time)
+
+    process.env.GEMINI_API_KEY = 'test-shared-scope'
+    time += 4000
+    calls.length = 0
+    globalThis.fetch = async input => {
+      calls.push(String(input))
+      return Response.json({ error: { details: [
+        { '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'SpendPerProject' }] },
+        { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '90s' },
+      ] } }, { status: 429, headers: { 'Retry-After': '120' } })
+    }
+    const [limitedGemini, queued] = await Promise.all([
+      request('/api/ai-compilation-resolver', 'attemptBudget=3', compilation),
+      request('/api/ai-compilation-resolver', 'attemptBudget=3', compilation),
+    ])
+    assert.equal(calls.length, 1, 'queued work must respect a project-wide 429')
+    assert.equal(limitedGemini.code, 'RATE_LIMIT_429')
+    assert.equal(queued.retryAt, time + 120_000)
+    assert.equal((await request('/api/ai-quota-telemetry', '')).projectBlock.blockedUntil, queued.retryAt)
+    time = queued.retryAt + 4000
+    calls.length = 0
+    let started!: () => void
+    let finish!: (response: Response) => void
+    const fetching = new Promise<void>(resolve => { started = resolve })
+    globalThis.fetch = input => {
+      calls.push(String(input))
+      started()
+      return new Promise(resolve => { finish = resolve })
+    }
+    const recovering = request('/api/ai-compilation-resolver', 'attemptBudget=2', compilation)
+    await fetching
+    const active = await request('/api/ai-quota-telemetry', '')
+    assert.ok(active.inFlightModel)
+    assert.equal(active.currentModel, active.inFlightModel)
+    const cancel = new AbortController()
+    const cancelled = request('/api/ai-compilation-resolver', 'attemptBudget=2', compilation, cancel.signal)
+    cancel.abort()
+    assert.equal(await cancelled, null)
+    assert.equal(calls.length, 1, 'cancelling queued work must not send another request')
+    finish(Response.json({ candidates: [{ content: { parts: [{ text: '[]' }] } }] }))
+    assert.equal((await recovering).success, true)
+    const recovered = await request('/api/ai-quota-telemetry', '')
+    assert.equal(recovered.inFlightModel, null)
+    assert.equal(recovered.currentModel, active.currentModel)
+    assert.equal(recovered.projectBlock, undefined)
+    Date.now = realNow
 
     calls.length = 0
     globalThis.fetch = async input => {
@@ -119,6 +195,7 @@ async function run() {
     assert.equal(incomplete.success, false)
     assert.match(incomplete.message, /track lookup/)
   } finally {
+    Date.now = realNow
     globalThis.fetch = previousFetch
     if (previousKey === undefined) delete process.env.GEMINI_API_KEY
     else process.env.GEMINI_API_KEY = previousKey

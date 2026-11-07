@@ -200,6 +200,7 @@ pub fn run() {
             save_gemini_model,
             remove_gemini_api_key,
             gemini_resolve,
+            cancel_gemini_request,
             get_gemini_quota,
             search_artist_portraits,
             play_track,

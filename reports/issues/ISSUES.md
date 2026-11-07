@@ -1,5 +1,12 @@
 # Issue Log
 
+## Gemini quota monitoring and model fallback
+
+- **Reproduction:** Return a 429 from the preferred Gemini model, then submit another request. The previous implementation tried the same model again and the Activity Center only showed fixed local pacing.
+- **Change:** Both backends now share quota cooldowns across requests, respect Google retry hints, and route to eligible Flash-Lite models. The Activity Center shows the in-flight or last successful model and any active cooldowns. Interactive Curate evidence can use two upstream attempts, while automatic provenance retains a one-attempt budget.
+- **Verification:** The mocked provider budget test reproduced the reuse of a throttled model and now covers fallback, actual model telemetry, concurrent project throttling, and queued cancellation. Rust tests cover Pacific midnight across daylight saving, alias quota scope, and grounding quota isolation.
+- **Status:** Pending desktop verification.
+
 ## Issue #12 — Missing Gemini errors and provenance details
 
 - **Reproduction:** Refresh an album when Gemini fails. Evidence History includes Apple and MusicBrainz but omits the AI attempt and error.

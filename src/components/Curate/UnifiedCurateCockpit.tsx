@@ -1493,7 +1493,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         controller.signal.throwIfAborted()
         if (provenanceAttempted.current === selectedAlbum.id) return
         provenanceAttempted.current = selectedAlbum.id
-        const result: any = await resolveGemini('compilation', payload, controller.signal, true)
+        const result: any = await resolveGemini('compilation', payload, controller.signal, 1)
         controller.signal.throwIfAborted()
         const rawTracks = Array.isArray(result) ? result : (Array.isArray(result?.tracks) ? result.tracks : (Array.isArray(result?.results) ? result.results : []))
         if (rawTracks.length > 0) {

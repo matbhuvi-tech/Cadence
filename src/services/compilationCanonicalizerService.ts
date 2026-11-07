@@ -127,7 +127,7 @@ class CompilationCanonicalizerService {
       }
 
       const json = await resolveGemini('compilation', payload, options?.selectedAlbumSignal,
-        Boolean(options?.selectedAlbumSignal), options?.recordAttempt)
+        options?.selectedAlbumSignal ? 2 : 3, options?.recordAttempt)
       const rawResults: any[] = Array.isArray(json.results) ? json.results : []
 
       // 4. Map results and cross-reference with local library

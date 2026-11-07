@@ -544,8 +544,8 @@ export class FederatedResolversService {
       } catch (err: any) {
         console.warn('Batch AI resolution failed during batch diff:', err?.message || err)
         warnings.ai =
-          err?.message?.includes('429') || err?.message?.includes('Rate limit')
-            ? 'Gemini Free Tier rate limit (15 RPM) reached. Apple Music & MusicBrainz matches are preserved.'
+          /\b429\b|rate limit/i.test(err instanceof Error ? err.message : String(err))
+            ? 'Gemini rate limit reached. Apple Music & MusicBrainz matches are preserved.'
             : err?.message || 'Gemini AI service encountered a temporary delay.'
       }
     } else if (abortSignal?.aborted) {

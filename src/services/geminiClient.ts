@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import type { CompilationProvenanceResult } from '../core/types'
 import type { CurateProviderAttempt, RecordCurateAttempt } from './curateEvidenceService'
 
@@ -21,20 +22,31 @@ function safeErrorMessage(error: unknown): string {
 }
 
 export async function resolveGemini(operation: 'metadata' | 'cover-art' | 'compilation' | 'agent-chat', payload: unknown,
-  signal?: AbortSignal, singleAttempt = false, record?: RecordCurateAttempt,
+  signal?: AbortSignal, budget: number | boolean = 3, record?: RecordCurateAttempt,
 ): Promise<CompilationProvenanceResult | any> {
+  const attemptBudget = budget === true ? 1 : budget === false ? 3 : budget
   const startedAt = new Date().toISOString()
   const started = performance.now()
   let outcome: CurateProviderAttempt['outcome'] = 'error'
   let httpStatus: number | undefined
   let errorMessage: string | undefined
+  let responseModel: string | undefined
   let result: any
   let candidate: CurateProviderAttempt['candidate']
   const context = payload as { albumTitle?: string; userSearchQuery?: { albumTitle?: string } } | null
   try {
     signal?.throwIfAborted()
     if (isDesktop()) {
-      result = await invoke('gemini_resolve', { operation, payload, singleAttempt })
+      const requestId = signal ? globalThis.crypto.randomUUID() : undefined
+      const cancel = () => { void invoke('cancel_gemini_request', { requestId }).catch(() => {}) }
+      const pending = invoke('gemini_resolve', { operation, payload, attemptBudget, requestId })
+      signal?.addEventListener('abort', cancel, { once: true })
+      try {
+        if (signal?.aborted) cancel()
+        result = await pending
+      } finally {
+        signal?.removeEventListener('abort', cancel)
+      }
     } else {
       const endpoint: Record<typeof operation, string> = {
         metadata: '/api/ai-metadata-resolver',
@@ -42,13 +54,14 @@ export async function resolveGemini(operation: 'metadata' | 'cover-art' | 'compi
         compilation: '/api/ai-compilation-resolver',
         'agent-chat': '/api/agent-chat',
       }
-      const response = await fetch(endpoint[operation] + (singleAttempt ? '?singleAttempt=1' : ''), {
+      const response = await fetch(endpoint[operation] + `?attemptBudget=${attemptBudget}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         signal,
       })
       httpStatus = response.status
+      responseModel = textField(response.headers.get('x-gemini-model-used') || undefined)
       outcome = response.ok ? 'parse_error' : 'http_error'
       result = await response.json()
       if (!response.ok) throw new Error(result.error || `Gemini request failed (${response.status})`)
@@ -102,16 +115,43 @@ export async function resolveGemini(operation: 'metadata' | 'cover-art' | 'compi
       query: textField(context?.userSearchQuery?.albumTitle) ?? textField(context?.albumTitle) ?? operation,
       startedAt, completedAt: new Date().toISOString(), durationMs: Math.round(performance.now() - started),
       outcome, httpStatus, errorMessage, candidate,
-      modelUsed: textField(result?.telemetry?.modelUsed),
+      modelUsed: textField(result?.telemetry?.modelUsed) ?? responseModel,
       retriesAttempted: numberField(result?.telemetry?.retriesAttempted),
       pacingDelayMs: numberField(result?.telemetry?.pacingDelayMs),
     })
   }
 }
 
-export async function getGeminiQuota(): Promise<any> {
+export interface GeminiQuotaBlock {
+  reason: string
+  blockedUntil: number
+  observedLimit?: string | null
+}
+
+export interface GeminiQuotaTelemetry {
+  rateLimitRpm: number
+  pacingIntervalMs: number
+  nextSlotRemainingMs: number
+  isPacingActive: boolean
+  lastCallTimestamp: number
+  preferredModel?: string
+  currentModel?: string | null
+  inFlightModel?: string | null
+  projectBlock?: GeminiQuotaBlock | null
+  groundingBlock?: GeminiQuotaBlock | null
+  models?: Array<GeminiQuotaBlock & { model: string }>
+}
+
+export async function getGeminiQuota(): Promise<GeminiQuotaTelemetry> {
   if (isDesktop()) return invoke('get_gemini_quota')
   const response = await fetch('/api/ai-quota-telemetry')
   if (!response.ok) throw new Error(`Gemini quota request failed (${response.status})`)
   return response.json()
+}
+
+export async function subscribeGeminiQuota(onChange: (quota: GeminiQuotaTelemetry) => void): Promise<() => void> {
+  if (isDesktop()) return listen<GeminiQuotaTelemetry>('gemini-quota-changed', event => onChange(event.payload))
+  // The development endpoint reads process memory. It does not call Gemini.
+  const interval = setInterval(() => { void getGeminiQuota().then(onChange).catch(() => {}) }, 2000)
+  return () => clearInterval(interval)
 }

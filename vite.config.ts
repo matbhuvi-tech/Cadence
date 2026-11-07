@@ -229,18 +229,77 @@ function getGeminiModel(): string {
   return 'gemini-3.5-flash-lite'
 }
 
-// --- Gemini API Shared Token-Bucket Pacer & Resilient Backoff ---
+const GEMINI_PACING_INTERVAL_MS = 4000
+type GeminiBlock = { reason: string; blockedUntil: number; observedLimit?: string; consecutive: number }
+const geminiModels = new Map<string, GeminiBlock>()
+let geminiProjectBlock: GeminiBlock | undefined
+let geminiQueue = Promise.resolve()
+let geminiCredential = ''
+let geminiPreferredModel = getGeminiModel().replace(/^models\//, '')
+let geminiInFlight: string | null = null
+let geminiLastSuccessfulModel: string | null = null
 let lastGeminiCallTimestamp = 0
-const GEMINI_PACING_INTERVAL_MS = 4000 // 15 RPM Safe Pacing Buffer for Free Tier
 
-const GEMINI_CANDIDATE_MODELS = [
-  getGeminiModel(),
-  'gemini-3.5-flash-lite',
-  'gemini-3.8-flash',
-  'gemini-3.6-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-flash-latest',
-].filter((m, idx, arr) => m && arr.indexOf(m) === idx)
+function nextPacificMidnight(now: number): number {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: 'numeric', day: 'numeric',
+  })
+  const localDate = formatter.format(now)
+  let low = now
+  let high = now + 26 * 60 * 60_000
+  while (high - low > 1) {
+    const mid = Math.floor((low + high) / 2)
+    if (formatter.format(mid) === localDate) low = mid
+    else high = mid
+  }
+  return high
+}
+
+function recordGeminiBlock(model: string, status: number, headers: Headers, data: any) {
+  const now = Date.now()
+  const details: any[] = Array.isArray(data?.error?.details) ? data.error.details : []
+  const violations = details.flatMap(detail =>
+    detail?.['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure' && Array.isArray(detail.violations)
+      ? detail.violations : [])
+  const quotaName = (v: any) => String(v?.quotaId ?? '') + ' ' + String(v?.quotaMetric ?? '')
+  const daily = (v: any) => /per[_ -]?day|daily/i.test(quotaName(v))
+  const projectWide = (v: any) => !v?.quotaDimensions?.model &&
+    /spend|perproject(?:\s|$)/i.test(quotaName(v)) && !/permodel/i.test(quotaName(v))
+  const retry = details.find(detail => detail?.['@type'] === 'type.googleapis.com/google.rpc.RetryInfo')?.retryDelay
+  const retryAfter = headers.get('retry-after')
+  const headerMs = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter ?? '') - now
+  const detailMs = typeof retry === 'string' && /^\d+(\.\d+)?s$/.test(retry) ? Number(retry.slice(0, -1)) * 1000 : 0
+  const hint = Math.max(0, Number.isFinite(headerMs) ? headerMs : 0, Number.isFinite(detailMs) ? detailMs : 0)
+  const remember = (items: any[], old?: GeminiBlock): GeminiBlock => {
+    const isDaily = items.some(daily)
+    const minuteQuota = items.map(quotaName).map(name => name.replace(/[_-]/g, '').toLowerCase())
+      .find(name => name.includes('perminute') && /token|request/.test(name))
+    let reason = 'rate_limit'
+    if (status === 404) reason = 'unavailable'
+    else if (status === 503) reason = 'overloaded'
+    else if (isDaily) reason = 'daily_quota'
+    else if (minuteQuota) reason = minuteQuota.includes('token') ? 'tokens_per_minute' : 'requests_per_minute'
+    const consecutive = old?.reason === reason ? Math.min(old.consecutive + 1, 5) : 1
+    const duration = status === 404 ? 600_000 : status === 503 ? 15_000 : 30_000
+    const backoff = duration * 2 ** (consecutive - 1) + Math.random() * 1000
+    const estimatedUntil = isDaily ? nextPacificMidnight(now) : now + (consecutive === 1 && hint > 0 ? hint : backoff)
+    const limit = items.find(v => /^\d+$/.test(String(v?.quotaValue ?? '')))?.quotaValue
+    const block = { reason, consecutive, blockedUntil: Math.min(8.64e15, Math.ceil(Math.max(estimatedUntil, now + hint))),
+      observedLimit: limit === undefined ? undefined : String(limit) }
+    return old && old.blockedUntil > block.blockedUntil ? old : block
+  }
+  const shared = violations.filter(projectWide)
+  const scoped = violations.filter(v => !projectWide(v))
+  if (status === 429 && shared.length) geminiProjectBlock = remember(shared, geminiProjectBlock)
+  if (status !== 429 || scoped.length || !shared.length) {
+    const block = remember(scoped, geminiModels.get(model))
+    geminiModels.set(model, block)
+    for (const violation of scoped) {
+      const canonical = violation?.quotaDimensions?.model
+      if (typeof canonical === 'string') geminiModels.set(canonical.replace(/^models\//, ''), block)
+    }
+  }
+}
 
 interface GeminiCallOptions {
   bodyPayload: any
@@ -254,105 +313,130 @@ interface GeminiCallResult {
   modelUsed?: string
   pacingDelayMs?: number
   retriesAttempted?: number
+  retryAt?: number
   error?: string
 }
 
 async function executePacedGeminiCall(
   apiKey: string,
-  options: GeminiCallOptions,
-  singleAttempt = false,
-  cancelled = () => false,
+  { bodyPayload, timeoutMs = 12000 }: GeminiCallOptions,
+  attemptBudget: number,
+  signal: AbortSignal,
 ): Promise<GeminiCallResult> {
-  const { bodyPayload, timeoutMs = 12000 } = options
-
-  // 1. Enforce Token-Bucket Pacing (4000ms safe floor between calls)
-  const now = Date.now()
-  const elapsed = now - lastGeminiCallTimestamp
-  const waitMs = Math.max(0, GEMINI_PACING_INTERVAL_MS - elapsed)
-  if (waitMs > 0) {
-    console.log(`[Gemini Pacing] Enforcing safe Free Tier buffer: waiting ${waitMs}ms before dispatch...`)
-    await new Promise((r) => setTimeout(r, waitMs))
-  }
-  lastGeminiCallTimestamp = Date.now()
-
-  let lastError: any = null
-  let totalRetries = 0
-
-  for (const model of GEMINI_CANDIDATE_MODELS) {
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
-
-    // Attempt up to 3 retries with exponential backoff on 429/503 for this model
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (cancelled() || (singleAttempt && (attempt > 0 || model !== GEMINI_CANDIDATE_MODELS[0]))) break
-      try {
-        console.log(`[Gemini AI] Querying model ${model} (attempt ${attempt + 1})...`)
-        const resTry = await fetch(geminiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          redirect: singleAttempt ? 'error' : 'follow',
-          signal: AbortSignal.timeout(timeoutMs),
-          body: JSON.stringify(bodyPayload),
-        })
-
-        if (resTry.ok) {
-          lastGeminiCallTimestamp = Date.now()
-          const json = await resTry.json()
-          return {
-            ok: true,
-            status: 200,
-            data: json,
-            modelUsed: model,
-            pacingDelayMs: waitMs,
-            retriesAttempted: totalRetries,
-          }
-        }
-
-        // Handle 429 Too Many Requests or 503 Overloaded
-        if (resTry.status === 429 || resTry.status === 503) {
-          totalRetries++
-          const errJson = (await resTry.json().catch(() => ({}))) as any
-          lastError =
-            errJson?.error?.message ||
-            (resTry.status === 429 ? 'Rate limit exceeded (15 RPM)' : 'Service temporarily overloaded')
-
-          if (singleAttempt) break
-          // If attempt < 2, perform exponential backoff: 2s, 4s (+ jitter)
-          if (attempt < 2) {
-            const backoffMs = Math.pow(2, attempt + 1) * 1000 + Math.floor(Math.random() * 500)
-            console.warn(
-              `[Gemini AI] Model ${model} returned HTTP ${resTry.status}. Exponential backoff: waiting ${backoffMs}ms before retry...`
-            )
-            await new Promise((r) => setTimeout(r, backoffMs))
-            continue
-          } else {
-            console.warn(
-              `[Gemini AI] Model ${model} exhausted retries on HTTP ${resTry.status}. Trying next fallback model...`
-            )
-            break // Fallback to next candidate model
-          }
-        } else {
-          // Other error (400, 404, etc.)
-          const errJson = (await resTry.json().catch(() => ({}))) as any
-          lastError = errJson?.error?.message || `HTTP ${resTry.status}`
-          console.warn(`[Gemini AI] Model ${model} returned HTTP ${resTry.status}: ${lastError}`)
-          break // Move to next model
-        }
-      } catch (err: any) {
-        lastError = err.message
-        console.warn(`[Gemini AI] Model ${model} fetch exception: ${err.message}`)
-        break
-      }
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+  const previous = geminiQueue
+  let release!: () => void
+  const turn = new Promise<void>(resolve => { release = resolve })
+  geminiQueue = previous.then(() => turn)
+  let attempts = 0
+  let pacingDelayMs = 0
+  let lastStatus = 503
+  let lastModel: string | undefined
+  const wait = async (promise: Promise<void>) => {
+    deadline.throwIfAborted()
+    let abort!: () => void
+    try {
+      await Promise.race([promise, new Promise<void>((_, reject) => {
+        abort = () => reject(deadline.reason)
+        deadline.addEventListener('abort', abort, { once: true })
+      })])
+      deadline.throwIfAborted()
+    } finally {
+      deadline.removeEventListener('abort', abort)
     }
   }
 
-  return {
-    ok: false,
-    status: lastError?.includes('429') || lastError?.includes('Rate limit') ? 429 : 503,
-    error: lastError || 'All Gemini AI candidate models failed',
-    pacingDelayMs: waitMs,
-    retriesAttempted: totalRetries,
+  try {
+    await wait(previous)
+    if (geminiCredential !== apiKey) {
+      geminiCredential = apiKey
+      geminiModels.clear()
+      geminiProjectBlock = undefined
+      geminiLastSuccessfulModel = null
+    }
+    geminiPreferredModel = getGeminiModel().replace(/^models\//, '')
+    const candidates = [...new Set([geminiPreferredModel, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'])]
+    for (const model of candidates) {
+      if (attempts >= attemptBudget) break
+      if ((geminiProjectBlock?.blockedUntil ?? 0) > Date.now()) break
+      if ((geminiModels.get(model)?.blockedUntil ?? 0) > Date.now()) continue
+      const delay = Math.max(0, GEMINI_PACING_INTERVAL_MS - (Date.now() - lastGeminiCallTimestamp))
+      if (delay) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await wait(new Promise(resolve => { timer = setTimeout(resolve, delay) }))
+        } finally {
+          clearTimeout(timer)
+        }
+        pacingDelayMs += delay
+      }
+      deadline.throwIfAborted()
+      attempts++
+      lastModel = model
+      geminiInFlight = model
+      lastGeminiCallTimestamp = Date.now()
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+          redirect: 'error',
+          signal: deadline,
+          body: JSON.stringify(bodyPayload),
+        },
+      )
+      lastStatus = response.status
+      const data = await response.json().catch(() => null)
+      deadline.throwIfAborted()
+      geminiInFlight = null
+      if (response.ok && data) {
+        geminiModels.delete(model)
+        geminiProjectBlock = undefined
+        const version = (data as { modelVersion?: unknown }).modelVersion
+        const servedModel = typeof version === 'string' ? version : model
+        geminiLastSuccessfulModel = servedModel
+        return { ok: true, status: 200, data, modelUsed: servedModel, pacingDelayMs, retriesAttempted: attempts - 1 }
+      }
+      if (![429, 503, 404].includes(lastStatus)) break
+      recordGeminiBlock(model, lastStatus, response.headers, data)
+    }
+    const now = Date.now()
+    const projectUntil = geminiProjectBlock?.blockedUntil ?? 0
+    const eligibleAt = candidates.map(model => Math.max(projectUntil, geminiModels.get(model)?.blockedUntil ?? 0))
+    const retryAt = Math.min(...eligibleAt)
+    const rateLimited = (projectUntil > now && geminiProjectBlock?.reason !== 'overloaded') ||
+      candidates.some(model => {
+        const block = geminiModels.get(model)
+        return block && block.blockedUntil > now && !['unavailable', 'overloaded'].includes(block.reason)
+      })
+    const status = lastStatus === 429 || (retryAt > now && rateLimited) ? 429 : lastStatus >= 400 ? lastStatus : 502
+    return { ok: false, status, modelUsed: lastModel ?? undefined, pacingDelayMs,
+      retriesAttempted: Math.max(0, attempts - 1), retryAt: retryAt > now ? retryAt : undefined,
+      error: `Gemini request failed (${status})${retryAt > now ? ` — try again after ${new Date(retryAt).toISOString()}` : ''}` }
+  } catch {
+    const status = signal.aborted ? 499 : deadline.aborted ? 504 : 502
+    return { ok: false, status, modelUsed: lastModel, pacingDelayMs, retriesAttempted: Math.max(0, attempts - 1),
+      error: `Gemini request failed (${status})` }
+  } finally {
+    if (attempts) geminiInFlight = null
+    release()
   }
 }
+
+function geminiAttemptBudget(req: import('node:http').IncomingMessage): number {
+  const query = new URL(req.url || '/', 'http://localhost').searchParams
+  if (query.has('singleAttempt')) return 1
+  const value = Number(query.get('attemptBudget') ?? 3)
+  return Number.isInteger(value) ? Math.min(3, Math.max(1, value)) : 3
+}
+
+function geminiRequestSignal(res: import('node:http').ServerResponse): AbortSignal {
+  const controller = new AbortController()
+  if (res.destroyed) controller.abort()
+  else res.once('close', () => controller.abort())
+  return controller.signal
+}
+
 
 function localLibraryScannerPlugin(): Plugin {
   return {
@@ -1960,7 +2044,8 @@ No other text or markdown explanation, just the pure JSON array.`
                 },
               },
               timeoutMs: 25000,
-            })
+            }, geminiAttemptBudget(req), geminiRequestSignal(res))
+            if (res.destroyed) return
 
             res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
             res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
@@ -1974,6 +2059,7 @@ No other text or markdown explanation, just the pure JSON array.`
                 JSON.stringify({
                   error: errMessage,
                   code: callResult.status === 429 ? 'RATE_LIMIT_429' : 'AI_ERROR',
+                  retryAt: callResult.retryAt,
                   pacingDelayMs: callResult.pacingDelayMs,
                 })
               )
@@ -2074,10 +2160,18 @@ No markdown, just JSON.`
                 generationConfig: { responseMimeType: 'application/json' },
               },
               timeoutMs: 15000,
-            })
+            }, geminiAttemptBudget(req), geminiRequestSignal(res))
+            if (res.destroyed) return
 
             res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
             res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
+            res.setHeader('x-gemini-retries', String(callResult.retriesAttempted || 0))
+
+            if (!callResult.ok) {
+              res.statusCode = callResult.status
+              res.end(JSON.stringify({ success: false, error: callResult.error, retryAt: callResult.retryAt }))
+              return
+            }
 
             let parsed: any = {}
             if (callResult.ok && callResult.data) {
@@ -2215,7 +2309,8 @@ Do not include any surrounding markdown or explanation, just the raw JSON array.
                 },
               },
               timeoutMs: 35000,
-            }, new URL(req.url || '', `http://${req.headers.host}`).searchParams.has('singleAttempt'), () => res.destroyed)
+            }, geminiAttemptBudget(req), geminiRequestSignal(res))
+            if (res.destroyed) return
 
             res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
             res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
@@ -2229,6 +2324,7 @@ Do not include any surrounding markdown or explanation, just the raw JSON array.
                 JSON.stringify({
                   error: errMessage,
                   code: callResult.status === 429 ? 'RATE_LIMIT_429' : 'AI_ERROR',
+                  retryAt: callResult.retryAt,
                   pacingDelayMs: callResult.pacingDelayMs,
                 })
               )
@@ -2349,10 +2445,18 @@ Instructions:
                 },
               },
               timeoutMs: 12000,
-            })
+            }, geminiAttemptBudget(req), geminiRequestSignal(res))
+            if (res.destroyed) return
 
             res.setHeader('x-gemini-pacing-delay', String(callResult.pacingDelayMs || 0))
             res.setHeader('x-gemini-model-used', callResult.modelUsed || '')
+            res.setHeader('x-gemini-retries', String(callResult.retriesAttempted || 0))
+
+            if (!callResult.ok) {
+              res.statusCode = callResult.status
+              res.end(JSON.stringify({ success: false, error: callResult.error, retryAt: callResult.retryAt }))
+              return
+            }
 
             let aiResponseText = ''
             if (callResult.ok && callResult.data) {
@@ -2420,7 +2524,12 @@ Instructions:
         res.statusCode = 200
         res.end(
           JSON.stringify({
-            rateLimitRpm: 15,
+            rateLimitRpm: 15, // Local pacing ceiling, not a provider quota.
+            preferredModel: geminiPreferredModel,
+            currentModel: geminiInFlight ?? geminiLastSuccessfulModel,
+            inFlightModel: geminiInFlight,
+            projectBlock: geminiProjectBlock,
+            models: [...geminiModels].map(([model, block]) => ({ model, ...block })),
             pacingIntervalMs: GEMINI_PACING_INTERVAL_MS,
             nextSlotRemainingMs,
             isPacingActive: nextSlotRemainingMs > 0,

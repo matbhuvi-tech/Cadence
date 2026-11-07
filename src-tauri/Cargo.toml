@@ -30,6 +30,8 @@ walkdir = "2"
 rusqlite = { version = "0.31", features = ["bundled", "blob"] }
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+httpdate = "1"
 socket2 = "0.6"
 axum = { version = "0.7", default-features = false, features = ["ws", "tokio", "http1", "json", "query"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }

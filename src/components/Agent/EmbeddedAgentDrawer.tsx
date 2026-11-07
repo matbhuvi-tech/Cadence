@@ -727,7 +727,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
                 </div>
 
                 <div className="flex items-center justify-between text-[10px] text-[#94A3B8] font-mono pt-0.5">
-                  <span>Free Tier Buffer (15 RPM Safe)</span>
+                  <span>Gemini request pacing</span>
                   <button
                     type="button"
                     onClick={() => handleBypassToLocal()}
