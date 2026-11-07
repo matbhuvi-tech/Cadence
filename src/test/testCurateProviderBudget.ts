@@ -47,6 +47,18 @@ async function run() {
     assert.equal(calls.filter(url => url.includes('itunes.apple.com')).length, 1)
     assert.equal(calls.filter(url => url.includes('musicbrainz.org')).length, 2)
     assert.equal(calls.filter(url => url.includes('generateContent')).length, 1)
+    const compilation = { albumTitle: 'Missing', tracks: [{ title: 'Song' }] }
+    const firstModel = new URL(calls.find(url => url.includes('generateContent'))!).pathname
+    globalThis.fetch = async input => {
+      calls.push(String(input))
+      return Response.json({ candidates: [{ content: { parts: [{ text: '[]' }] } }] })
+    }
+    const fallback = await request('/api/ai-compilation-resolver', 'singleAttempt=1', compilation)
+    assert.equal(fallback.success, true)
+    assert.notEqual(new URL(calls.at(-1)!).pathname, firstModel, 'skip the model throttled by the previous request')
+    const quota = await request('/api/ai-quota-telemetry', '')
+    assert.equal(quota.currentModel, fallback.telemetry.modelUsed)
+    assert.equal(quota.models.find((model: any) => firstModel.endsWith('/' + model.model + ':generateContent')).reason, 'rate_limit')
 
     calls.length = 0
     globalThis.fetch = async input => {
