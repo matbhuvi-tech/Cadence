@@ -171,3 +171,21 @@ test('keeps a committed album excluded when a rescan recreates its catalog IDs',
   assert.equal(next.get('new-album'), true)
   assert.equal(next.get('other-album'), undefined)
 })
+
+test('only the frozen draft revision matches an identical completed selection after restart', () => {
+  const draft = {
+    revision: 'draft-a',
+    fields: {
+      albumTitle: { selected: 'Album' }, albumArtist: { selected: 'Singer' },
+      composer: { selected: '' }, year: { selected: 1988 }, genre: { selected: 'Soundtrack' },
+      coverArt: { selected: '' },
+    },
+    tracks: [{ trackId: 'one', matchedTitle: 'Song' }],
+  } as CurateDraft
+  const [item] = makeCurateCommitItems(draft, [
+    { id: 'one', filePath: 'song.flac', storageMountId: 'disk' } as Track,
+  ])
+  const rows = new Map([['one', { ...item, status: 'completed' as const }]])
+  assert.equal(isReconciledCurateDraft(JSON.parse(JSON.stringify(draft)), rows), true)
+  assert.equal(isReconciledCurateDraft({ ...draft, revision: 'draft-b' } as CurateDraft, rows), false)
+})
