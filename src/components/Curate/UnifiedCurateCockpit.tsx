@@ -61,12 +61,12 @@ import {
   ConsensusFieldSource,
 } from '../../core/types'
 import { graphEngine } from '../../core/graphEngine'
-import { getCurateChange, isReconciledCurateDraft, makeCurateCommitItems, prepareTier1Commit, projectCurateCommits, type CurateCommitRow, type CurateValueChange } from '../../core/curateCommit'
+import { getCurateChange, isReconciledCurateDraft, matchesCurateConfirmation, makeCurateCommitItems, prepareTier1Commit, projectCurateCommits, type CurateCommitRow, type CurateValueChange } from '../../core/curateCommit'
 import type { EnqueueBatchPayload } from '../../types/commit'
 import { CurateCommitOutcomes } from './CurateCommitOutcomes'
 import {
-  captureCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields,
-  type CurateDraftTrack,
+  captureCurateDraft, captureCurateBaseline, restoreCurateDraft, migrateCurateDraft, mergeCurateProposal, selectCurateTrackFields,
+  type CurateDraft, type CurateDraftTrack,
 } from '../../core/curateDraft'
 import { curationQueueService, AlbumCurationQueueItem } from '../../services/curationQueueService'
 import { federatedResolversService, type ProviderResult } from '../../services/federatedResolvers'
@@ -103,6 +103,7 @@ export interface UnifiedCurateCockpitProps {
   showToast: (msg: string) => void
   commitRows?: CurateCommitRow[]
   onCommitQueued?: () => Promise<void>
+  onDraftSaved?: (draft: CurateDraft) => void
   onReviewComplete?: (albumId: string) => void
   supersededCommitIds?: ReadonlySet<string>
   isPlaying?: boolean
@@ -126,8 +127,14 @@ interface AlbumWorkItem {
   genre: MetadataFieldState<string>
   tracks: CurateDraftTrack[]
   draftBasedOn?: string
+  heldTrackEdits?: CurateDraft['heldTrackEdits']
   rawRelease?: Release
   rawTracks: Track[]
+}
+
+function captureAlbumDraft(album: AlbumWorkItem): CurateDraft {
+  const draft = captureCurateDraft(album)
+  return { ...draft, baseline: album.draftBasedOn ?? draft.baseline }
 }
 
 const emptyAuditIssues: AuditIssue[] = []
@@ -397,6 +404,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   showToast,
   commitRows,
   onCommitQueued,
+  onDraftSaved,
   onReviewComplete,
   supersededCommitIds,
   isPlaying = false,
@@ -448,9 +456,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [albumItems, setAlbumItems] = useState<Map<string, AlbumWorkItem>>(new Map())
   const previousDraftItems = useRef(albumItems)
   const loadedDrafts = useRef(new Map<string, {
-    saved: string
+    serialized: string
+    draft: CurateDraft
     restored: boolean
-    pending?: { serialized: string; write: Promise<void> }
+    pending?: Promise<void>
+    saved: boolean
   }>())
   const [draftLoad, setDraftLoad] = useState<{ id: string; failed: boolean } | null>(null)
   const [draftLoadAttempt, setDraftLoadAttempt] = useState(0)
@@ -685,21 +695,28 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       // but those commits still prove that the matching old draft was written.
       const rows = new Map((commitRows ?? []).map(row => [row.trackId, row]))
       const completedDraft = draft && isReconciledCurateDraft(draft, rows)
-      const restored = draft && !completedDraft ? restoreCurateDraft(activeItem, draft) : activeItem
-      const snapshot = draft && !completedDraft ? { ...captureCurateDraft(restored), baseline: draft.baseline } : initial
-      if (draft && !completedDraft) {
+      const restoredDraft = draft && !completedDraft
+        ? matchesCurateConfirmation(draft, rows) ? draft : migrateCurateDraft(draft, captureCurateBaseline(activeItem))
+        : null
+      const restored = restoredDraft ? restoreCurateDraft(activeItem, restoredDraft) : activeItem
+      const snapshot = restoredDraft
+        ? { ...captureCurateDraft(restored), baseline: restoredDraft.baseline }
+        : initial
+      if (restoredDraft) {
         setAlbumItems(prev => {
           const current = prev.get(activeItemId)
           if (!current) return prev
           return new Map(prev).set(activeItemId, {
-            ...restoreCurateDraft(current, draft),
-            draftBasedOn: initial.baseline === draft.baseline ? undefined : draft.baseline,
+            ...restoreCurateDraft(current, restoredDraft),
+            draftBasedOn: initial.baseline === restoredDraft.baseline ? undefined : restoredDraft.baseline,
           })
         })
       }
       loadedDrafts.current.set(activeItemId, {
-        saved: JSON.stringify(snapshot),
-        restored: Boolean(draft && !completedDraft),
+        serialized: JSON.stringify(snapshot),
+        draft: { ...snapshot, revision: restoredDraft === draft ? draft?.revision : undefined },
+        saved: true,
+        restored: Boolean(restoredDraft),
       })
       setDraftLoad({ id: activeItemId, failed: false })
     }).catch(err => {
@@ -735,16 +752,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const selectedTrackIds = new Set(selectedAlbum?.tracks.map(track => track.trackId))
   const selectedCommitRows = commitRows?.filter(row => selectedTrackIds.has(row.trackId) && !supersededCommitIds?.has(row.id)) ?? []
   const commitsByTrack = useMemo(() => new Map(commitRows?.filter(row => !supersededCommitIds?.has(row.id)).map(row => [row.trackId, row])), [commitRows, supersededCommitIds])
-  const reconciledAlbumIds = useMemo(() => {
-    const ids = new Set<string>()
-    for (const id of loadedDrafts.current.keys()) {
-      const album = albumItems.get(id)
-      if (!album || commitsByTrack.get(album.tracks[0]?.trackId)?.status !== 'completed') continue
-      if (isReconciledCurateDraft(captureCurateDraft(album), commitsByTrack)) ids.add(id)
-    }
-    return ids
-  }, [albumItems, commitsByTrack, draftLoad])
-  const selectedCommitReconciled = Boolean(selectedAlbum && reconciledAlbumIds.has(selectedAlbum.id))
+  const selectedDraft = selectedAlbum && captureAlbumDraft(selectedAlbum)
+  const loadedSelection = selectedAlbum ? loadedDrafts.current.get(selectedAlbum.id) : undefined
+  if (selectedDraft && loadedSelection?.serialized === JSON.stringify(selectedDraft)) {
+    selectedDraft.revision = loadedSelection.draft.revision
+  }
+  const selectedCommitConfirmed = Boolean(selectedDraft && matchesCurateConfirmation(selectedDraft, commitsByTrack))
+  const selectedCommitReconciled = Boolean(selectedDraft && isReconciledCurateDraft(selectedDraft, commitsByTrack))
   const selectedCommitStatuses = new Set(selectedCommitRows.map(row => row.status))
   const selectedCommitError = selectedCommitRows.find(row => row.status === 'failed' && row.errorMessage)?.errorMessage
   const selectedCommitStatus = selectedCommitStatuses.has('failed')
@@ -754,67 +768,40 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     : selectedCommitStatuses.has('completed')
       ? (selectedCommitRows.length === selectedTrackIds.size ? 'Tags written' : 'Some tags written') : null
 
-  const saveAlbumDraft = useCallback(async (album: AlbumWorkItem) => {
+  const saveAlbumDraft = useCallback(async (album: AlbumWorkItem, requireRevision = false, renewRevision = false) => {
     const state = loadedDrafts.current.get(album.id)
-    if (!state) return
-    const draft = captureCurateDraft(album)
-    draft.baseline = album.draftBasedOn ?? draft.baseline
+    if (!state) throw new Error('The album draft has not loaded.')
+    const draft = captureAlbumDraft(album)
     const serialized = JSON.stringify(draft)
-    if (state.pending?.serialized === serialized) return state.pending.write
-    if (!state.pending && state.saved === serialized) return
-    const pending = { serialized, write: tauriBridge.curationSaveDraft(album.id, draft) }
-    state.pending = pending
+    if (!renewRevision && state.serialized === serialized && (!requireRevision || state.draft.revision)) {
+      const sameDraft = state.draft
+      if (state.pending) {
+        await state.pending
+        return sameDraft
+      }
+      if (state.saved) return sameDraft
+      draft.revision = sameDraft.revision
+    }
+    draft.revision ??= crypto.randomUUID()
+    const prior = state.pending
+    // Serialize writes per album. An older save cannot overwrite a newer edit.
+    const write = (prior?.catch(() => undefined) ?? Promise.resolve())
+      .then(() => tauriBridge.curationSaveDraft(album.id, draft))
+    Object.assign(state, { draft, serialized, pending: write, saved: false })
     try {
-      await pending.write
-      state.saved = serialized
-      if (state.pending === pending) setDraftSaveError(current => current === album.id ? null : current)
+      await write
+      if (state.pending === write) {
+        state.saved = true
+        setDraftSaveError(current => current === album.id ? null : current)
+      }
     } catch (err) {
-      if (state.pending === pending) setDraftSaveError(album.id)
+      if (state.pending === write) setDraftSaveError(album.id)
       throw err
     } finally {
-      if (state.pending === pending) state.pending = undefined
+      if (state.pending === write) state.pending = undefined
     }
+    return draft
   }, [])
-
-  // The native projection has confirmed that every written track matches SQLite.
-  // Adopt that baseline for the exact draft without touching a newer selection.
-  useEffect(() => {
-    if (!selectedAlbum || !selectedCommitReconciled) return
-    const { tracks: writtenTracks, releases: writtenReleases } = projectCurateCommits(
-      selectedAlbum.rawTracks,
-      selectedAlbum.rawRelease ? [selectedAlbum.rawRelease] : [],
-      selectedCommitRows,
-    )
-    const release = writtenReleases[0]
-    const firstTrack = writtenTracks[0]
-    const writtenArtwork = selectedCommitRows.find(row => row.artworkUrl)?.artworkUrl
-    const tracksById = new Map(writtenTracks.map(track => [track.id, track]))
-    const reconciled: AlbumWorkItem = {
-      ...selectedAlbum,
-      draftBasedOn: undefined,
-      userOverridden: false,
-      rawRelease: release,
-      rawTracks: writtenTracks,
-      albumTitle: { ...selectedAlbum.albumTitle, local: release?.title ?? firstTrack?.albumTitle ?? selectedAlbum.albumTitle.local },
-      albumArtist: { ...selectedAlbum.albumArtist, local: firstTrack?.albumArtist ?? release?.artistCredit ?? selectedAlbum.albumArtist.local },
-      composer: { ...selectedAlbum.composer, local: release?.composerName ?? firstTrack?.composerName ?? selectedAlbum.composer.local },
-      year: { ...selectedAlbum.year, local: release?.releaseYear ?? firstTrack?.canonicalReleaseYear ?? selectedAlbum.year.local },
-      genre: { ...selectedAlbum.genre, local: release?.genreTags[0] ?? selectedAlbum.genre.local },
-      coverArt: writtenArtwork
-        ? { ...selectedAlbum.coverArt, selected: writtenArtwork, local: writtenArtwork, userOverridden: false }
-        : selectedAlbum.coverArt,
-      tracks: selectedAlbum.tracks.map(track => {
-        const written = tracksById.get(track.trackId)
-        return written ? { ...track, localTitle: written.title, localArtists: written.artistCredit } : track
-      }),
-    }
-    if (!selectedAlbum.draftBasedOn && !selectedAlbum.userOverridden &&
-        selectedAlbum.coverArt.selected === reconciled.coverArt.selected &&
-        captureCurateDraft(reconciled).baseline === captureCurateDraft(selectedAlbum).baseline) return
-    setAlbumItems(prev => prev.get(selectedAlbum.id) === selectedAlbum
-      ? new Map(prev).set(selectedAlbum.id, reconciled)
-      : prev)
-  }, [selectedAlbum, selectedCommitReconciled, commitsByTrack])
 
   // Also save edits from a provider operation that finishes after the user selects another album.
   useEffect(() => {
@@ -823,9 +810,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     for (const id of loadedDrafts.current.keys()) {
       const album = albumItems.get(id)
       if (!album || album === previous.get(id) || album.status === 'committed') continue
-      void saveAlbumDraft(album).catch(err => console.warn('[UnifiedCurateCockpit] Draft save failed:', err))
+      void saveAlbumDraft(album).then(draft => {
+        const state = loadedDrafts.current.get(album.id)
+        if (state?.saved && state.draft === draft && draft.revision &&
+            album.tracks.some(track => commitsByTrack.has(track.trackId))) onDraftSaved?.(draft)
+      }).catch(err => console.warn('[UnifiedCurateCockpit] Draft save failed:', err))
     }
-  }, [albumItems, saveAlbumDraft])
+  }, [albumItems, saveAlbumDraft, commitsByTrack, onDraftSaved])
 
   // Curation Decision Trace Hook
   const {
@@ -1196,9 +1187,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     try {
       let aiMasterResult: any = undefined
       let directAppleCandidate: ProviderResult | null = null
-      const localRelease = selectedAlbum.rawRelease
+      const effective = projectCurateCommits(selectedAlbum.rawTracks, [selectedAlbum.rawRelease], selectedCommitRows)
+      const localRelease = effective.releases[0]
       const consensus = await executeTraceFetch(selectedAlbum.id, {
-        trigger: 'user_refresh', context: curateMatchingContext(localRelease, selectedAlbum.rawTracks),
+        trigger: 'user_refresh', context: curateMatchingContext(localRelease, effective.tracks),
+        confirmedCommitIds: Object.fromEntries(effective.tracks.map(track => [
+          track.id, commitRows?.find(row => row.trackId === track.id)?.id ?? null,
+        ])),
       }, async (signal, onProgress, record) => {
       let directWikiMaster: any = null
       const useWikipedia = steerGroundingUrl.includes('wikipedia.org')
@@ -1226,7 +1221,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         try {
           const canonicalRes = await compilationCanonicalizerService.resolveCompilationSoundtracks(
             localRelease,
-            selectedAlbum.rawTracks,
+            effective.tracks,
             releases,
             {
               selectedAlbumSignal: signal,
@@ -1303,7 +1298,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         signal.throwIfAborted()
         const res = await federatedResolversService.resolve2of3ReleaseConsensus(
           steeredRelease,
-          selectedAlbum.rawTracks,
+          effective.tracks,
           false,
           aiMasterResult,
           directAppleCandidate,
@@ -1642,17 +1637,17 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // Freeze this album's exact selection in the native queue. The worker owns file writes.
   const handleCommitAlbum = useCallback(async () => {
-    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitReconciled || batchAbort.current) return
+    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitConfirmed || batchAbort.current) return
     setQueuingAlbumId(selectedAlbum.id)
     try {
       if (!tauriBridge.isTauri()) throw new Error('Open the desktop app to queue tag writes.')
-      const draft = captureCurateDraft(selectedAlbum)
+      const draft = await saveAlbumDraft(selectedAlbum, true, selectedCommitRows.some(row => row.lineageChanged))
       const items = makeCurateCommitItems(draft, selectedAlbum.rawTracks, selectedAlbum.rawRelease)
       if (!items.length) throw new Error('There are no tracks to commit.')
-      await saveAlbumDraft(selectedAlbum)
       await tauriBridge.commitEnqueueBatch({
         description: `Curate: ${selectedAlbum.albumTitle.selected}`,
         destination: 'embedded',
+        curateDrafts: [{ albumId: selectedAlbum.id, draft }],
         items,
       })
       showToast(`Queued "${selectedAlbum.albumTitle.selected}" for tag writing.`)
@@ -1662,7 +1657,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     } finally {
       setQueuingAlbumId(null)
     }
-  }, [selectedAlbum, stagingAlbumId, queuingAlbumId, selectedCommitReconciled, saveAlbumDraft, onCommitQueued, showToast])
+  }, [selectedAlbum, stagingAlbumId, queuingAlbumId, selectedCommitConfirmed, selectedCommitRows, saveAlbumDraft, onCommitQueued, showToast])
 
   const handleCommitAllTier1 = async () => {
     if (!tier1Items.length || stagingAlbumId || queuingAlbumId || isPlaying || batchAbort.current) return
@@ -1678,9 +1673,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         controller.signal.throwIfAborted()
         if (album.draftBasedOn) continue
         const loaded = loadedDrafts.current.has(album.id)
-        const saved = loaded ? null : await tauriBridge.curationGetDraft(album.id)
+        const saved = loaded ? await saveAlbumDraft(album, true) : await tauriBridge.curationGetDraft(album.id)
         controller.signal.throwIfAborted()
-        const prepared = prepareTier1Commit(captureCurateDraft(album), saved, album.rawTracks, album.rawRelease, rows)
+        // Review legacy selections individually before a batch can freeze them.
+        if (saved && !saved.revision) continue
+        const prepared = prepareTier1Commit(captureAlbumDraft(album), saved, album.rawTracks, album.rawRelease, rows, crypto.randomUUID(), loaded)
         if (!prepared) continue
         items.push(...prepared.items)
         drafts.push({ albumId: album.id, draft: prepared.draft })
@@ -2275,7 +2272,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Commit Button (saves permanently and removes from queue) */}
                 <button
                   onClick={handleCommitAlbum}
-                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitReconciled || isBatchCommitting)}
+                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitConfirmed || isBatchCommitting)}
                   data-testid="btn-commit-album"
                   className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-md flex items-center gap-1.5 disabled:opacity-50"
                   title="Queue the selected metadata for background tag writing"
@@ -2305,7 +2302,17 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 )}
               </div>
             )}
-            <CurateCommitOutcomes tracks={selectedAlbum.tracks} rows={selectedCommitRows} />
+            <CurateCommitOutcomes tracks={selectedAlbum.tracks} rows={selectedCommitRows} draft={selectedDraft || undefined} />
+            {loadedDrafts.current.get(selectedAlbum.id)?.restored && !loadedDrafts.current.get(selectedAlbum.id)?.draft.revision && !selectedCommitConfirmed && (
+              <p role="status" className="px-4 text-xs text-amber-200">
+                Saved provider proposals without verified dependencies need review. Refresh evidence to evaluate them against this album.
+              </p>
+            )}
+            {Boolean(selectedAlbum.heldTrackEdits?.length) && (
+              <p role="status" className="px-4 text-xs text-amber-200">
+                Some track edits are held for review because their original tracks are absent from this album.
+              </p>
+            )}
             {selectedAlbum.draftBasedOn && (
               <div role="alert" className="px-4 py-3 text-xs bg-amber-500/10 text-amber-200">
                 Local metadata changed since this draft was saved. Review the Local and Selected columns before staging or committing.

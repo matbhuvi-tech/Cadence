@@ -13,6 +13,7 @@ type Proposal = {
   [K in AlbumField]: MetadataFieldState<K extends 'year' ? number | undefined : string>
 } & {
   tracks: CurateDraftTrack[]
+  heldTrackEdits?: TrackSelection[]
   userOverridden?: boolean
 }
 
@@ -24,11 +25,13 @@ type TrackSelection = Pick<CurateDraftTrack, CurateTrackField |
 
 export interface CurateDraft {
   version: 1
+  revision?: string
   baseline: string
   localCoverArt?: string
   staged: boolean
   fields: Record<AlbumField, FieldSelection>
   tracks: TrackSelection[]
+  heldTrackEdits?: TrackSelection[]
 }
 
 function selection(field: FieldSelection): FieldSelection {
@@ -45,6 +48,7 @@ export function captureCurateDraft(album: Proposal): CurateDraft {
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
     ]),
     staged: album.userOverridden === true,
+    heldTrackEdits: album.heldTrackEdits,
     localCoverArt: album.coverArt.local,
     fields: Object.fromEntries(albumFields.map(key => [key, selection(album[key])])) as CurateDraft['fields'],
     tracks: album.tracks.map(t => {
@@ -67,7 +71,54 @@ export function restoreCurateDraft<T extends Proposal>(album: T, draft: CurateDr
     const { matchedTitle, matchedArtists, originalAlbum, originalYear } = saved
     return { ...track, ...saved, matchedTitle, matchedArtists, originalAlbum, originalYear }
   })
-  return { ...album, ...fields, tracks, userOverridden: draft.staged }
+  return { ...album, ...fields, tracks, heldTrackEdits: draft.heldTrackEdits, userOverridden: draft.staged }
+}
+
+export function captureCurateBaseline(album: Proposal): CurateDraft {
+  return captureCurateDraft({
+    ...album,
+    ...Object.fromEntries(albumFields.map(key => [key, {
+      ...album[key], selected: album[key].local, source: 'local_fallback', userOverridden: false,
+    }])),
+    tracks: album.tracks.map(track => ({
+      ...track, matchedTitle: track.localTitle, matchedArtists: track.localArtists,
+    })),
+  })
+}
+
+// Saved evidence without field dependencies is historical. Only an explicit
+// selection can be restored independently of that evidence.
+export function migrateCurateDraft(draft: CurateDraft, baseline: CurateDraft): CurateDraft {
+  const fields = { ...baseline.fields }
+  for (const key of albumFields) {
+    const prior = draft.fields[key]
+    if (prior?.userOverridden) fields[key] = prior
+    else if (prior && prior.selected !== fields[key].selected) {
+      fields[key] = { ...fields[key], requiresHumanReview: true }
+    }
+  }
+  const savedTracks = new Map([...(draft.heldTrackEdits ?? []), ...draft.tracks].map(track => [track.trackId, track]))
+  const tracks = baseline.tracks.map(track => {
+    const saved = savedTracks.get(track.trackId)
+    if (!saved) return track
+    savedTracks.delete(track.trackId)
+    const overrides = saved.selectedOverrides ?? (saved.provenanceSource === 'user_override'
+      ? ['originalAlbum', 'originalYear'] as const : [])
+    const pendingReview = trackFields.some(key => !overrides.includes(key) && saved[key] !== track[key])
+    return {
+      ...track,
+      ...Object.fromEntries(overrides.map(key => [key, saved[key]])),
+      selectedOverrides: overrides.length ? overrides : undefined,
+      provenanceSource: overrides.includes('originalAlbum') ? saved.provenanceSource : track.provenanceSource,
+      providerDecisions: saved.providerDecisions?.map(decision => decision.status === 'needs_review' ? decision : {
+        ...decision, status: 'needs_review' as const, reason: 'Saved proposal lacks verified dependencies.',
+      }),
+      requiresHumanReview: pendingReview || track.requiresHumanReview,
+    }
+  })
+  const heldTrackEdits = Array.from(savedTracks.values()).filter(track =>
+    track.selectedOverrides?.length || track.provenanceSource === 'user_override')
+  return { ...draft, fields, tracks, heldTrackEdits: heldTrackEdits.length ? heldTrackEdits : undefined }
 }
 
 export function mergeCurateProposal<T extends Proposal>(current: T, fresh: T): T {

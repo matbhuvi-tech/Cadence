@@ -1322,8 +1322,8 @@ class TauriBridgeService {
     return this.isTauri() ? invoke('curation_get_identity', { trackIds }) : []
   }
 
-  public async curationSaveEvidence(albumId: string, run: CurateEvidenceRun): Promise<void> {
-    if (this.isTauri()) await invoke('curation_save_evidence', { albumId, run })
+  public async curationSaveEvidence(albumId: string, run: CurateEvidenceRun): Promise<boolean> {
+    return this.isTauri() ? invoke<boolean>('curation_save_evidence', { albumId, run }) : true
   }
 
   public async curationExportSnapshot(snapshot: string): Promise<string> {

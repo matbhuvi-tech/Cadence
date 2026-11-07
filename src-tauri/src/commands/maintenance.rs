@@ -255,7 +255,8 @@ pub fn commit_get_curate_projection(
 fn load_curate_projection(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::Value>> {
     let mut stmt = conn.prepare(
         "WITH latest AS (
-            SELECT i.id, i.track_id, i.status, i.payload_json, i.artwork_result_id, i.error_message, b.rowid AS batch_order,
+            SELECT i.id, i.track_id, i.status, i.payload_json, i.artwork_result_id, i.error_message,
+                i.file_path, i.mount_id, b.rowid AS batch_order,
                 ROW_NUMBER() OVER (PARTITION BY i.track_id ORDER BY b.rowid DESC, i.rowid DESC) AS rank
             FROM commit_queue_items i JOIN commit_queue_batches b ON b.id = i.batch_id
             WHERE i.status IN ('pending', 'in_flight', 'failed', 'completed')
@@ -272,8 +273,24 @@ fn load_curate_projection(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<s
                 AND t.genre IS COALESCE(json_extract(latest.payload_json, '$.genre'), t.genre)
                 AND t.original_album IS COALESCE(json_extract(latest.payload_json, '$.originalAlbum'), t.original_album)
                 AND t.original_year IS COALESCE(json_extract(latest.payload_json, '$.originalYear'), t.original_year)
-            ), latest.id, a.thumbnail_url, latest.error_message
+            ), latest.id, a.thumbnail_url, latest.error_message,
+            COALESCE(draft_revision.sequence >
+                json_extract(latest.payload_json, '$.curateDraftSequence'), 0),
+            json_extract(latest.payload_json, '$.curateLineage') IS NOT NULL AND (
+                t.id IS NULL OR t.file_path IS NOT latest.file_path OR t.mount_id IS NOT latest.mount_id
+                OR identity.disc_id IS NOT json_extract(latest.payload_json, '$.curateLineage.discId')
+            ),
+            json_object('title', t.title, 'artist', t.artist_credit, 'album', t.album_title,
+                'albumArtist', t.album_artist, 'composer', t.composer, 'year', t.release_year,
+                'genre', t.genre, 'originalAlbum', t.original_album, 'originalYear', t.original_year,
+                'coverArtUrl', r.front_cover_url),
+            COALESCE(json_array_length(draft.draft_json, '$.heldTrackEdits') > 0, 0)
         FROM latest LEFT JOIN tracks t ON t.id = latest.track_id
+        LEFT JOIN curate_identity_tracks identity ON identity.local_track_id = t.id
+        LEFT JOIN curation_drafts draft ON draft.album_id = CASE WHEN json_valid(latest.payload_json)
+            THEN json_extract(latest.payload_json, '$.curateAlbumId') END
+        LEFT JOIN curation_draft_revisions draft_revision ON draft_revision.album_id = draft.album_id
+            AND draft_revision.revision = json_extract(draft.draft_json, '$.revision')
         LEFT JOIN releases r ON r.id = t.release_id
         LEFT JOIN commit_artwork_results a ON a.id = latest.artwork_result_id
             AND latest.status = 'completed' AND r.front_cover_url = a.thumbnail_url
@@ -289,6 +306,10 @@ fn load_curate_projection(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<s
             "id": row.get::<_, String>(4)?,
             "artworkUrl": row.get::<_, Option<String>>(5)?,
             "errorMessage": row.get::<_, Option<String>>(6)?,
+            "hasNewerDraft": row.get::<_, bool>(7)?,
+            "lineageChanged": row.get::<_, bool>(8)?,
+            "catalog": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(9)?).unwrap_or_default(),
+            "hasHeldEdits": row.get::<_, bool>(10)?,
         }))
     })?;
     rows.collect()
@@ -307,6 +328,13 @@ fn curate_projection_uses_newest_confirmation_and_ignores_cancelled_items() {
             VALUES ('old', 'first', 'track', 'song.flac', 'mount', '{\"curate\":true,\"genre\":\"Old\"}', '{}', 'in_flight'),
                    ('new', 'second', 'track', 'song.flac', 'mount', '{\"curate\":true,\"genre\":\"New\"}', '{}', 'pending');",
     ).unwrap();
+    conn.execute_batch(
+        "INSERT INTO curation_draft_revisions (sequence, album_id, revision) VALUES (1, 'album', 'draft-a'), (2, 'album', 'draft-b');
+         INSERT INTO curation_drafts VALUES ('album', '{\"revision\":\"draft-b\"}', '2026-01-03');
+         UPDATE commit_queue_items SET payload_json = json_set(payload_json,
+            '$.curateAlbumId', 'album', '$.curateDraftSequence', 1) WHERE id = 'new';",
+    ).unwrap();
+    assert_eq!(load_curate_projection(&conn).unwrap()[0]["hasNewerDraft"], true);
     assert_eq!(load_curate_projection(&conn).unwrap()[0]["id"], "new");
     conn.execute("UPDATE commit_queue_items SET status = 'cancelled' WHERE id = 'new'", []).unwrap();
     assert_eq!(load_curate_projection(&conn).unwrap()[0]["id"], "old");

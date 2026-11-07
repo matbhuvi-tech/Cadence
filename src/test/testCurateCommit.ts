@@ -37,7 +37,7 @@ test('Tier 1 uses saved selections and skips conflicts or tracks that already ha
     },
     tracks: [{ trackId: 'one', matchedTitle: 'Song' }],
   } as CurateDraft
-  const saved = { ...local, fields: { ...local.fields, genre: { ...local.fields.genre, selected: 'Saved genre' } } }
+  const saved = { ...local, fields: { ...local.fields, genre: { ...local.fields.genre, selected: 'Saved genre', userOverridden: true } } }
   const tracks = [{ id: 'one', filePath: 'song.flac', storageMountId: 'disk' }] as Track[]
   const result = prepareTier1Commit(local, saved, tracks, undefined, new Map())
   assert.equal(JSON.parse(result!.items[0].payloadJson).genre, 'Saved genre')
@@ -188,4 +188,15 @@ test('only the frozen draft revision matches an identical completed selection af
   const rows = new Map([['one', { ...item, status: 'completed' as const }]])
   assert.equal(isReconciledCurateDraft(JSON.parse(JSON.stringify(draft)), rows), true)
   assert.equal(isReconciledCurateDraft({ ...draft, revision: 'draft-b' } as CurateDraft, rows), false)
+})
+
+test('keeps an album open when a completed write has a newer saved draft', () => {
+  const tracks = [{ id: 'one', releaseId: 'album' }] as Track[]
+  const row = {
+    id: 'write-a', trackId: 'one', status: 'completed' as const,
+    payloadJson: '{"curate":true,"curateTrackCount":1,"curateReviewId":"a"}',
+  }
+  const closed = reconcileCurateReviewState(new Map(), tracks, [row])
+  assert.equal(closed.get('album'), true)
+  assert.equal(reconcileCurateReviewState(closed, tracks, [{ ...row, hasNewerDraft: true }]).has('album'), false)
 })

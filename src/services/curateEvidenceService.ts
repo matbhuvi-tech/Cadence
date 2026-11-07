@@ -104,6 +104,7 @@ export function curateMatchingContext(release: Release, tracks: Track[]) {
 }
 
 export interface CurateEvidenceSummary {
+  applicability?: 'unverified' | 'superseded' | null
   id: string
   trigger: 'initial' | 'user_refresh'
   requestedAt: string
@@ -113,6 +114,7 @@ export interface CurateEvidenceSummary {
 }
 
 export interface CurateEvidenceRun extends Omit<CurateEvidenceSummary, 'current'> {
+  confirmedCommitIds?: Record<string, string | null>
   context: ReturnType<typeof curateMatchingContext>
   attempts: CurateProviderAttempt[]
   decision?: CurationDecisionTrace

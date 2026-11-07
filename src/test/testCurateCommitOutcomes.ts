@@ -35,3 +35,20 @@ test('shows the latest projected outcome once per track', () => {
   assert.ok(!html.includes('1 complete'))
   assert.equal(html.split('Written song').length - 1, 1)
 })
+
+test('labels different catalog, confirmed and editable values for the same track', () => {
+  const html = renderToStaticMarkup(createElement(CurateCommitOutcomes, {
+    tracks: [tracks[0]],
+    rows: [{ ...rows[0], status: 'pending', catalog: { title: 'Physical song' }, payloadJson: '{"title":"Confirmed song"}' }],
+    draft: {
+      version: 1, baseline: 'baseline', staged: false,
+      fields: {
+        albumTitle: {}, albumArtist: {}, composer: {}, genre: {}, year: {}, coverArt: {},
+      } as import('../core/curateDraft').CurateDraft['fields'],
+      tracks: [{ trackId: tracks[0].trackId, matchedTitle: 'Draft song', source: 'manual_override', confidence: 1 }],
+    },
+  }))
+  assert.ok(html.includes('Catalog: Physical song'))
+  assert.ok(html.includes('Effective confirmed: Confirmed song'))
+  assert.ok(html.includes('Draft: Draft song'))
+})

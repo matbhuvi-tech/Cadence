@@ -685,3 +685,12 @@ The middleware fixture first reproduced zero tracks after a successful one-call 
 Explicit refresh records Gemini attempts in the same evidence run as Apple and MusicBrainz. Records include measured start/completion time and duration, outcome, available HTTP status and model metadata, and bounded error text with credentials redacted. Successful compilation responses retain the returned per-track title, local ID, original album/year, composer, singers, confidence, and notes. File paths and unrelated response fields are excluded from this snapshot.
 
 Evidence History exposes the saved error or expandable returned tracks. After refresh it selects the new run, including a failed run that did not become current evidence. Older refreshes without an AI record report that the run has no saved AI attempt details.
+
+
+#### Milestone D implementation checkpoint
+
+Curate confirms a frozen draft revision and records the track's catalog lineage in the same SQLite transaction as queue insertion or replacement. Pending revisions can be superseded while in-flight and completed items retain their original payloads. The catalog, effective confirmed values, and editable draft are displayed separately. A newer draft keeps the album actionable even if an older write completes.
+
+A refresh uses the effective confirmed values at its start and merges into the latest editable draft, preserving explicit choices. If the confirmed item or identity changes before the refresh is saved, Curate archives the response as superseded. Restored generated proposals without verified dependencies fall back to catalog values for review. Explicit track edits stay attached to their local IDs, and edits whose tracks are absent are held.
+
+The revision regression first failed because identical tag values let a completed write retire a newer draft. It now passes. The 40 Curate checks, 30 native checks, and production build passed. The native fixture covers pending replacement, an immutable in-flight revision, a superseded refresh, restart, and a detached target. Headless line coverage was 97% for the commit helpers and 100% for the draft helpers. Live desktop verification requires a connected QA target.

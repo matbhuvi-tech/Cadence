@@ -76,7 +76,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
 
   const executeFetch = useCallback(async <T>(
     targetAlbumId: string,
-    input: Pick<CurateEvidenceRun, 'trigger' | 'context'>,
+    input: Pick<CurateEvidenceRun, 'trigger' | 'context' | 'confirmedCommitIds'>,
     fetchFn: (signal: AbortSignal, onProgress: (event: ExecutionProgressEvent) => void, record: RecordCurateAttempt) =>
       Promise<{ trace?: CurationDecisionTrace | null; result: T; trackDecisions?: CurateEvidenceRun['trackDecisions']; identityMappings?: CurateEvidenceRun['identityMappings']; sourceCandidates?: CurateEvidenceRun['sourceCandidates'] }>,
   ): Promise<T | null> => {
@@ -122,14 +122,18 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     if (active()) setRefreshAlbumId(undefined)
     run.completedAt = new Date().toISOString()
     try {
-      await tauriBridge.curationSaveEvidence(targetAlbumId, run)
+      const applicable = await tauriBridge.curationSaveEvidence(targetAlbumId, run)
       if (active()) {
         setLastEvidenceId(id)
-        if (run.decision) setTrace(run.decision)
+        if (run.decision && applicable) setTrace(run.decision)
         setStatus(run.outcome === 'failed' ? 'error' : run.outcome)
         if (run.outcome === 'failed') setProgressMessage(failureMessage)
+        if (run.outcome === 'completed' && !applicable) {
+          setStatus('error')
+          setProgressMessage('Evidence was saved to history. Refresh again against the current album and confirmed values.')
+        }
       }
-      return active() && !controller.signal.aborted ? result : null
+      return applicable && active() && !controller.signal.aborted ? result : null
     } catch (err) {
       console.warn('[useCurationTrace] Evidence persistence failed:', err)
       if (active()) {

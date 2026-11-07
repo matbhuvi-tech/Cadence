@@ -367,3 +367,87 @@ fn queue_projection_persists_and_invalidates_both_editions_on_regroup() {
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(dir).unwrap();
 }
+
+
+#[test]
+fn frozen_curate_revisions_survive_replacement_refresh_and_restart() {
+    use cadence_core_lib::curation::CurationStorage;
+    use cadence_core_lib::db::{DbCommitQueueBatch, NewCommitItem};
+    let dir = std::env::temp_dir().join(format!("cadence-phase-d-{}", uuid::Uuid::new_v4()));
+    let path = dir.join("cadence.db");
+    let db = AppDb::new(path.clone()).unwrap();
+    let song = track("one", "album", "library/Harbor Lights", "one.flac", 1);
+    db.conn.lock().execute(
+        "INSERT INTO releases (id,title,folder_path,folder_name,artist_credit,created_at)
+         VALUES ('album','Harbor Lights','library/Harbor Lights','Harbor Lights','Various Artists','2026-11-07')",
+        [],
+    ).unwrap();
+    db.conn.lock().execute(
+        "INSERT INTO storage_mounts (id, name, mount_path, mount_type, file_system, last_seen_timestamp)
+         VALUES ('fixture', 'Fixture', 'library', 'internal', 'NTFS', '2026-11-07')",
+        [],
+    ).unwrap();
+    DbOperations::upsert_tracks_batch(&mut db.conn.lock(), &[song.clone()]).unwrap();
+    let confirm = |db: &AppDb, revision: &str| {
+        let draft = json!({"revision": revision, "tracks": [{"trackId": "one"}]});
+        let batch = DbCommitQueueBatch {
+            id: format!("batch-{revision}"), description: Some("Curate fixture".into()), total_tracks: 1,
+            destination: "embedded".into(), force_override: false, status: "pending".into(),
+            created_at: "2026-11-07".into(), completed_at: None,
+        };
+        let item = NewCommitItem {
+            id: revision.into(), track_id: song.id.clone(), file_path: song.file_path.clone(),
+            mount_id: song.mount_id.clone(), expected_crc: None, backup_json: "{}".into(),
+            payload_json: json!({"curate": true, "curateDraftRevision": revision, "genre": revision}).to_string(),
+        };
+        DbOperations::insert_commit_with_curate_drafts(
+            &mut db.conn.lock(), &batch, &[item], &[("album".into(), draft)], false,
+        ).unwrap()
+    };
+    let outcome = |db: &AppDb, id: &str| -> (String, serde_json::Value) {
+        db.conn.lock().query_row(
+            "SELECT status, payload_json FROM commit_queue_items WHERE id = ?1",
+            [id], |row| {
+                let payload: String = row.get(1)?;
+                Ok((row.get(0)?, serde_json::from_str(&payload).unwrap()))
+            },
+        ).unwrap()
+    };
+    assert!(confirm(&db, "a"));
+    assert!(confirm(&db, "b"));
+    assert_eq!(outcome(&db, "a").0, "cancelled");
+    assert_eq!(outcome(&db, "a").1["genre"], "a");
+    let claimed = DbOperations::claim_next_commit_item(&db.conn.lock(), &[]).unwrap().unwrap().0;
+    assert_eq!(claimed.id, "b");
+
+    let identity = CurationStorage::get_identity(&db, &["one".into()]).unwrap();
+    let refresh = json!({
+        "id": "late", "requestedAt": "2026-11-07T10:00:00Z", "completedAt": "2026-11-07T10:00:01Z",
+        "outcome": "completed", "trigger": "user_refresh", "identity": identity,
+        "confirmedCommitIds": {"one": "b"},
+        "decision": {"albumId": "album", "outcomeStatus": "evaluated_unchanged", "headlineSummary": "Late result"}
+    });
+    let newer = json!({"revision": "c", "tracks": [{"trackId": "one"}]});
+    CurationStorage::save_draft(&db, "album", &newer).unwrap();
+    assert!(confirm(&db, "c"));
+    assert_eq!(outcome(&db, "b").0, "in_flight");
+    assert!(DbOperations::claim_next_commit_item(&db.conn.lock(), &[]).unwrap().is_none());
+    assert!(!CurationStorage::save_evidence(&db, "album", &refresh).unwrap());
+    assert!(CurationStorage::get_evidence(&db, "album", "late").unwrap().is_some());
+    assert_eq!(CurationStorage::list_evidence(&db, "album").unwrap()[0]["current"], false);
+    DbOperations::complete_commit_item_and_get_summary(&db.conn.lock(), "b", 100).unwrap();
+    drop(db);
+
+    let db = AppDb::new(path.clone()).unwrap();
+    assert_eq!(outcome(&db, "b").0, "completed");
+    assert_eq!(outcome(&db, "c").0, "pending");
+    assert_eq!(outcome(&db, "c").1["curateLineage"]["editionId"], identity[0]["editionId"]);
+    assert!(CurationStorage::save_draft(&db, "album", &json!({"revision": "b"})).is_err());
+    assert_eq!(CurationStorage::get_draft(&db, "album").unwrap(), Some(newer));
+    db.conn.lock().execute("DELETE FROM tracks WHERE id = 'one'", []).unwrap();
+    assert!(DbOperations::claim_next_commit_item(&db.conn.lock(), &[]).unwrap().is_none());
+    assert_eq!(outcome(&db, "c").0, "failed");
+    drop(db);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+}

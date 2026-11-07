@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { MetadataFieldState, TrackCandidateState } from '../core/types'
-import { captureCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields } from '../core/curateDraft'
+import { captureCurateDraft, captureCurateBaseline, migrateCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields } from '../core/curateDraft'
 
 const field = (selected: string): MetadataFieldState<string> => ({ selected, local: selected, source: 'local_fallback', confidence: 1 })
 const track: TrackCandidateState = {
@@ -92,4 +92,22 @@ test('reopens an older draft against the current baseline by track identity', ()
   assert.equal(restored.tracks[1].matchedTitle, 'My title')
   assert.equal(restored.tracks[1].localTitle, 'Changed local title')
   assert.notEqual(captureCurateDraft(current).baseline, draft.baseline)
+})
+
+test('legacy proposals fall back to physical values while explicit edits survive migration', () => {
+  const legacy = captureCurateDraft({
+    ...baseline,
+    genre: { ...baseline.genre, selected: 'Old provider genre', source: 'single_provider_match' },
+    composer: { ...baseline.composer, selected: 'Manual composer', userOverridden: true },
+    tracks: [selectCurateTrackFields({
+      ...track, matchedTitle: 'Unverified song', matchedArtists: 'Manual singer',
+    }, 'matchedArtists')],
+  })
+  const restored = restoreCurateDraft(baseline, migrateCurateDraft(legacy, captureCurateBaseline(baseline)))
+  assert.equal(restored.genre.selected, baseline.genre.local)
+  assert.equal(restored.genre.requiresHumanReview, true)
+  assert.equal(restored.composer.selected, 'Manual composer')
+  assert.equal(restored.tracks[0].matchedTitle, track.localTitle)
+  assert.equal(restored.tracks[0].matchedArtists, 'Manual singer')
+  assert.equal(restored.tracks[0].requiresHumanReview, true)
 })

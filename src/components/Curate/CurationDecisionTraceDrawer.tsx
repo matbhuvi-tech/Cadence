@@ -58,7 +58,7 @@ function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: st
           className="w-full rounded border border-zinc-700 bg-zinc-900 p-2 text-zinc-200">
           {runs.map(run => (
             <option key={run.id} value={run.id}>
-              {run.current ? 'Current' : 'Previous'} · {new Date(run.requestedAt).toLocaleString()} · {run.outcome}
+              {run.applicability === 'unverified' ? 'Unverified' : run.applicability === 'superseded' ? 'Superseded' : run.current ? 'Current' : 'Previous'} · {new Date(run.requestedAt).toLocaleString()} · {run.outcome}
             </option>
           ))}
         </select>

@@ -14,6 +14,13 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS curation_draft_revisions (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            album_id TEXT NOT NULL,
+            revision TEXT NOT NULL,
+            UNIQUE (album_id, revision)
+        );
+
         CREATE TABLE IF NOT EXISTS curation_evidence_runs (
             id TEXT PRIMARY KEY,
             album_id TEXT NOT NULL,

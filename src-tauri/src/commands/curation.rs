@@ -33,7 +33,7 @@ pub fn curation_get_identity(db: State<AppDb>, track_ids: Vec<String>) -> Result
 }
 
 #[tauri::command]
-pub fn curation_save_evidence(db: State<AppDb>, album_id: String, run: serde_json::Value) -> Result<(), String> {
+pub fn curation_save_evidence(db: State<AppDb>, album_id: String, run: serde_json::Value) -> Result<bool, String> {
     CurationStorage::save_evidence(&db, &album_id, &run)
 }
 

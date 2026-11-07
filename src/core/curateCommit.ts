@@ -1,4 +1,4 @@
-import type { CurateDraft } from './curateDraft'
+import { migrateCurateDraft, type CurateDraft } from './curateDraft'
 import type { Release, Track } from './types'
 import type { NewCommitItemPayload } from '../types/commit'
 
@@ -24,6 +24,10 @@ export interface CurateCommitRow {
   status: 'pending' | 'in_flight' | 'failed' | 'completed'
   payloadJson: string
   applies?: boolean
+  hasNewerDraft?: boolean
+  hasHeldEdits?: boolean
+  lineageChanged?: boolean
+  catalog?: Partial<Record<keyof Tags, string | number | null>>
   artworkUrl?: string | null
   errorMessage?: string | null
 }
@@ -55,6 +59,11 @@ export function reconcileCurateReviewState(
     const previous = keys.map(key => state.get(key)).find(value => value !== undefined)
     const albumRows = album.map(track => byTrack.get(track.id))
     let reviewId: string | undefined
+    const hasOpenDraft = albumRows.some(row => row?.hasNewerDraft || row?.hasHeldEdits || row?.lineageChanged)
+    if (hasOpenDraft) {
+      for (const key of keys) if (next.get(key) === true) next.delete(key)
+      continue
+    }
     const completed = previous === true || albumRows.every((row, index) => {
       if (row?.status !== 'completed' || (previous && previous.includes(row.id))) return false
       const payload = JSON.parse(row.payloadJson)
@@ -100,7 +109,8 @@ export function makeCurateCommitItems(
       filePath: track.filePath,
       mountId: track.storageMountId,
       payloadJson: JSON.stringify({
-        ...selectedTags(draft, selection), curate: true, curateTrackCount: draft.tracks.length, curateReviewId, destination: 'embedded',
+        ...selectedTags(draft, selection), curate: true, curateTrackCount: draft.tracks.length,
+        curateReviewId, curateDraftRevision: draft.revision, destination: 'embedded',
       }),
       backupJson: JSON.stringify({
         title: track.title,
@@ -147,16 +157,25 @@ function selectedTags(draft: CurateDraft, selection: CurateDraft['tracks'][numbe
 }
 
 export function isReconciledCurateDraft(draft: CurateDraft, rows: ReadonlyMap<string, CurateCommitRow>) {
-  return draft.tracks.length > 0 && draft.tracks.every(selection => {
+  return matchesCurateConfirmation(draft, rows, true)
+}
+
+export function matchesCurateConfirmation(
+  draft: CurateDraft, rows: ReadonlyMap<string, CurateCommitRow>, requireCompleted = false,
+) {
+  let reviewId: string | undefined
+  return draft.tracks.length > 0 && draft.tracks.every((selection, index) => {
     const row = rows.get(selection.trackId)
-    // A completed write can precede catalog reconciliation. `applies` describes
-    // whether the catalog currently mirrors the payload, not whether the write ran.
-    if (row?.status !== 'completed') return false
-    const confirmed: Tags & { curateTrackCount?: number } = JSON.parse(row.payloadJson)
+    if (!row || row.lineageChanged || (requireCompleted && row.status !== 'completed')) return false
+    const confirmed: Tags & {
+      curateTrackCount?: number; curateReviewId?: string; curateDraftRevision?: string
+    } = JSON.parse(row.payloadJson)
+    if (index === 0) reviewId = confirmed.curateReviewId
+    if (confirmed.curateReviewId !== reviewId || confirmed.curateDraftRevision !== draft.revision) return false
     if (confirmed.curateTrackCount !== undefined && confirmed.curateTrackCount !== draft.tracks.length) return false
     const expected = selectedTags(draft, selection)
     if (confirmed.coverArtUrl) {
-      if (!row.artworkUrl || (draft.fields.coverArt.selected !== confirmed.coverArtUrl &&
+      if ((requireCompleted && !row.artworkUrl) || (draft.fields.coverArt.selected !== confirmed.coverArtUrl &&
           draft.fields.coverArt.selected !== row.artworkUrl)) return false
     } else if (expected.coverArtUrl ||
         (draft.fields.coverArt.userOverridden && draft.fields.coverArt.selected !== draft.localCoverArt)) {
@@ -168,23 +187,56 @@ export function isReconciledCurateDraft(draft: CurateDraft, rows: ReadonlyMap<st
   })
 }
 
+const commitFieldLabels: Record<keyof Tags, string> = {
+  title: 'Track title', artist: 'Track credit', album: 'Album title', albumArtist: 'Album artist',
+  composer: 'Composer', year: 'Year', originalAlbum: 'Original album', originalYear: 'Original year',
+  genre: 'Genre', coverArtUrl: 'Cover art',
+}
+
+export function curateCommitDifferences(row: CurateCommitRow, draft?: CurateDraft) {
+  if (!row.catalog) return []
+  const tags: Tags = JSON.parse(row.payloadJson)
+  const track = draft?.tracks.find(selection => selection.trackId === row.trackId)
+  const draftTags = draft && track ? selectedTags(draft, track) : undefined
+  return (Object.keys(commitFieldLabels) as (keyof Tags)[]).flatMap(key => {
+    const catalog = row.catalog?.[key] ?? undefined
+    const confirmed = row.lineageChanged || row.applies === false
+      ? catalog : key === 'coverArtUrl' && row.artworkUrl ? row.artworkUrl : tags[key] ?? catalog
+    const selected = draftTags?.[key] ?? (key === 'coverArtUrl' ? draft?.fields.coverArt.selected : undefined)
+    if (catalog === confirmed && (selected === undefined || catalog === selected)) return []
+    const display = (value: string | number | undefined) => key === 'coverArtUrl' && typeof value === 'string'
+      ? value.startsWith('data:') ? 'Embedded image' : value : value
+    return [{
+      field: commitFieldLabels[key],
+      catalog: display(catalog),
+      confirmed: display(confirmed),
+      selected: display(selected),
+    }]
+  })
+}
+
 export function prepareTier1Commit(
   current: CurateDraft, saved: CurateDraft | null, tracks: Track[], release: Release | undefined,
   rows: ReadonlyMap<string, CurateCommitRow>,
+  revision?: string,
+  currentSession = false,
 ) {
   if (saved) {
     const currentTrackIds = new Set(tracks.map(track => track.id))
     if (saved.baseline !== current.baseline || saved.tracks.length !== current.tracks.length ||
         !saved.tracks.every(track => currentTrackIds.has(track.trackId))) return null
   }
-  const draft = saved ? { ...saved, localCoverArt: current.localCoverArt } : current
+  if ((saved && isReconciledCurateDraft(saved, rows)) || isReconciledCurateDraft(current, rows)) return null
+  const draft = saved && !currentSession ? migrateCurateDraft(saved, current) : saved ?? current
+  if (revision && saved && !currentSession && draft.tracks.some((track, index) =>
+    JSON.stringify(selectedTags(draft, track)) !== JSON.stringify(selectedTags(saved, saved.tracks[index])))) return null
   if (!draft.tracks.length ||
-      isReconciledCurateDraft(draft, rows) ||
       draft.tracks.some(track => {
         const row = rows.get(track.trackId)
         return row && row.status !== 'completed'
       })) return null
-  return { draft, items: makeCurateCommitItems(draft, tracks, release) }
+  const frozen = { ...draft, revision: draft.revision ?? revision }
+  return { draft: frozen, items: makeCurateCommitItems(frozen, tracks, release) }
 }
 
 export function projectCurateCommits(tracks: Track[], releases: Release[], rows: CurateCommitRow[]) {
@@ -193,7 +245,7 @@ export function projectCurateCommits(tracks: Track[], releases: Release[], rows:
   const byRelease = new Map<string, { tags: Tags; order: number }>()
   const updatedTracks = tracks.map(track => {
     const commit = byTrack.get(track.id)
-    if (!commit || commit.row.applies === false) return track
+    if (!commit || commit.row.applies === false || commit.row.lineageChanged) return track
     const tags: Tags = JSON.parse(commit.row.payloadJson)
     if (commit.row.status === 'completed') tags.coverArtUrl = commit.row.artworkUrl ?? undefined
     if ((byRelease.get(track.releaseId)?.order ?? -1) < commit.order) {

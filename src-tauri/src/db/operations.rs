@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use chrono::Utc;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2532,6 +2532,18 @@ impl DbOperations {
         Self::insert_commit_with_curate_drafts(conn, batch, items, &[], false).map(|_| ())
     }
 
+    pub(crate) fn record_curate_draft_revision(conn: &Connection, album_id: &str, revision: &str) -> Result<i64> {
+        conn.execute(
+            "INSERT INTO curation_draft_revisions (album_id, revision) VALUES (?1, ?2)
+             ON CONFLICT(album_id, revision) DO NOTHING",
+            params![album_id, revision],
+        )?;
+        conn.query_row(
+            "SELECT sequence FROM curation_draft_revisions WHERE album_id = ?1 AND revision = ?2",
+            params![album_id, revision], |row| row.get(0),
+        )
+    }
+
     pub fn insert_commit_with_curate_drafts(
         conn: &mut Connection,
         batch: &DbCommitQueueBatch,
@@ -2594,14 +2606,69 @@ impl DbOperations {
                 artwork_result_id = NULL",
         )?;
 
-        for item in items {
+        let parsed_items: Vec<_> = items.iter().map(|item| {
+            serde_json::from_str::<serde_json::Value>(&item.payload_json).ok()
+        }).collect();
+        let revisioned_ids: Vec<_> = items.iter().zip(&parsed_items)
+            .filter(|(_, payload)| payload.as_ref().is_some_and(|value|
+                value["curate"].as_bool() == Some(true) && value["curateDraftRevision"].is_string()))
+            .map(|(item, _)| item.track_id.clone()).collect();
+        let lineage_by_track: HashMap<_, _> = super::curate_identity::snapshot(&tx, &revisioned_ids, true)?
+            .into_iter().filter_map(|track| Some((track["localTrackId"].as_str()?.to_owned(), track)))
+            .collect();
+        for (item, mut payload) in items.iter().zip(parsed_items) {
+            let mut frozen_payload = None;
+            if let Some(payload) = payload.as_mut().filter(|value| value["curate"].as_bool() == Some(true)) {
+                if let Some(revision) = payload["curateDraftRevision"].as_str() {
+                    let (album_id, _) = drafts.iter()
+                        .find(|(_, draft)| draft["revision"].as_str() == Some(revision)
+                            && draft["tracks"].as_array().is_some_and(|tracks| tracks.iter()
+                                .any(|track| track["trackId"].as_str() == Some(&item.track_id))))
+                        .ok_or_else(|| rusqlite::Error::InvalidParameterName("Curate draft revision is missing".into()))?;
+                    let target_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM tracks
+                         WHERE id = ?1 AND file_path = ?2 AND mount_id = ?3 AND release_id = ?4)",
+                        params![item.track_id, item.file_path, item.mount_id, album_id],
+                        |row| row.get(0),
+                    )?;
+                    if !target_exists {
+                        return Err(rusqlite::Error::InvalidParameterName("Curate track target changed".into()));
+                    }
+                    let lineage = lineage_by_track.get(&item.track_id).ok_or_else(||
+                        rusqlite::Error::InvalidParameterName("Curate track lineage is unresolved".into()))?;
+                    let duplicate: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM commit_queue_items WHERE track_id = ?1 AND status <> 'cancelled'
+                         AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.curateDraftRevision') END = ?2)",
+                        params![item.track_id, revision], |row| row.get(0),
+                    )?;
+                    if duplicate {
+                        return Ok(false);
+                    }
+                    let sequence = Self::record_curate_draft_revision(&tx, album_id, revision)?;
+                    payload["curateDraftSequence"] = serde_json::json!(sequence);
+                    payload["curateAlbumId"] = serde_json::json!(album_id);
+                    payload["curateLineage"] = lineage.clone();
+                    frozen_payload = Some(payload.to_string());
+
+                }
+            }
+            // A superseded confirmation remains in history with its original payload.
+            let pending_id: Option<String> = tx.query_row(
+                "SELECT id FROM commit_queue_items WHERE track_id = ?1 AND status = 'pending'
+                 AND (?2 OR CASE WHEN json_valid(payload_json)
+                    THEN json_extract(payload_json, '$.curateDraftRevision') IS NOT NULL END)",
+                params![item.track_id, frozen_payload.is_some()], |row| row.get(0),
+            ).optional()?;
+            if let Some(id) = pending_id {
+                Self::update_commit_item_status(&tx, &id, "cancelled", Some("Superseded by a newer confirmation"), 0)?;
+            }
             stmt.execute(params![
                 item.id,
                 batch.id,
                 item.track_id,
                 item.file_path,
                 item.mount_id,
-                item.payload_json,
+                frozen_payload.as_deref().unwrap_or(&item.payload_json),
                 item.backup_json,
                 item.expected_crc,
             ])?;
@@ -2629,6 +2696,21 @@ impl DbOperations {
         let Some(item) = Self::fetch_next_pending_commit_item(&tx, excluded_mounts)? else {
             return Ok(None);
         };
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&item.payload_json) {
+            if let Some(lineage) = payload.get("curateLineage") {
+                let target_exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?1 AND file_path = ?2 AND mount_id = ?3)",
+                    params![item.track_id, item.file_path, item.mount_id], |row| row.get(0),
+                )?;
+                let current = super::curate_identity::snapshot(&tx, std::slice::from_ref(&item.track_id), false)?;
+                if !target_exists || !current.first().is_some_and(|track|
+                    track["editionId"] == lineage["editionId"] && track["discId"] == lineage["discId"]) {
+                    Self::update_commit_item_status(&tx, &item.id, "failed", Some("Track identity changed after confirmation. Review the album again."), 0)?;
+                    tx.commit()?;
+                    return Ok(None);
+                }
+            }
+        }
         let summary = Self::mark_commit_item_in_flight_and_get_summary(&tx, &item.id)?;
         tx.commit()?;
         Ok(Some((item, summary)))
@@ -2642,7 +2724,10 @@ impl DbOperations {
             "SELECT id, batch_id, track_id, file_path, mount_id, payload_json, backup_json,
                     expected_crc, status, retry_count, error_message, written_bytes, started_at, completed_at
              FROM commit_queue_items
-             WHERE status = 'pending'
+             WHERE status = 'pending' AND NOT EXISTS (
+                 SELECT 1 FROM commit_queue_items active
+                 WHERE active.track_id = commit_queue_items.track_id AND active.status = 'in_flight'
+             )
              ORDER BY rowid ASC
              LIMIT 1".to_string()
         } else {
@@ -2651,7 +2736,10 @@ impl DbOperations {
                 "SELECT id, batch_id, track_id, file_path, mount_id, payload_json, backup_json,
                         expected_crc, status, retry_count, error_message, written_bytes, started_at, completed_at
                  FROM commit_queue_items
-                 WHERE status = 'pending' AND mount_id NOT IN ({})
+                 WHERE status = 'pending' AND mount_id NOT IN ({}) AND NOT EXISTS (
+                     SELECT 1 FROM commit_queue_items active
+                     WHERE active.track_id = commit_queue_items.track_id AND active.status = 'in_flight'
+                 )
                  ORDER BY rowid ASC
                  LIMIT 1",
                 placeholders
@@ -2733,12 +2821,15 @@ impl DbOperations {
                     |r| r.get(0),
                 )?;
                 if pending_or_inflight == 0 {
-                    let has_failed: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM commit_queue_items WHERE batch_id = ?1 AND status = 'failed'",
-                        params![bid],
+                    let final_status: String = conn.query_row(
+                        "SELECT CASE
+                            WHEN EXISTS (SELECT 1 FROM commit_queue_items WHERE batch_id = ?1 AND status = 'failed') THEN 'failed'
+                            WHEN EXISTS (SELECT 1 FROM commit_queue_items WHERE batch_id = ?1 AND status = 'completed') THEN 'completed'
+                            ELSE 'cancelled'
+                         END",
+                        [&bid],
                         |r| r.get(0),
                     )?;
-                    let final_status = if has_failed > 0 { "completed_with_errors" } else { "completed" };
                     conn.execute(
                         "UPDATE commit_queue_batches SET status = ?1, completed_at = ?2 WHERE id = ?3",
                         params![final_status, now, bid],

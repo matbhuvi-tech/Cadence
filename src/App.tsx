@@ -25,6 +25,7 @@ import {
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope, NavigationAnchor } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
 import { curateReviewKeys, projectCurateCommits, reconcileCurateReviewState, type CurateCommitRow, type CurateReviewState } from './core/curateCommit'
+import type { CurateDraft } from './core/curateDraft'
 import { auditService } from './services/auditService'
 import { storagePersistence } from './core/storagePersistence'
 import { IngestionResult } from './services/libraryImporter'
@@ -115,17 +116,40 @@ function AppContent() {
     return ids
   }, [curateReviews])
   const commitReadVersion = useRef(0)
+  const draftSaveVersion = useRef(0)
   const refreshCurateCommits = useCallback(async () => {
     const version = ++commitReadVersion.current
+    const draftVersion = draftSaveVersion.current
     try {
       const rows = await tauriBridge.commitGetCurateProjection()
       if (version === commitReadVersion.current) {
         setCurateHistoryReady(true)
-        setCurateCommits(current => JSON.stringify(current) === JSON.stringify(rows) ? current : rows)
+        setCurateCommits(current => {
+          // A read started before a draft save can still report useful write
+          // outcomes, but must not clear the newer draft marker for that item.
+          const local = draftVersion === draftSaveVersion.current ? null : new Map(current.map(row => [row.id, row]))
+          const next = local ? rows.map(row => {
+            const saved = local.get(row.id)
+            return saved?.hasNewerDraft
+              ? { ...row, hasNewerDraft: true, hasHeldEdits: saved.hasHeldEdits }
+              : row
+          }) : rows
+          return JSON.stringify(current) === JSON.stringify(next) ? current : next
+        })
       }
     } catch (err) {
       console.warn('[Curate] Could not read commit queue:', err)
     }
+  }, [])
+  const noteCurateDraftSaved = useCallback((draft: CurateDraft) => {
+    draftSaveVersion.current++
+    const ids = new Set(draft.tracks.map(track => track.trackId))
+    setCurateCommits(current => current.map(row => {
+      if (!ids.has(row.trackId)) return row
+      const confirmation = JSON.parse(row.payloadJson)
+      if (!confirmation.curateDraftRevision || confirmation.curateDraftRevision === draft.revision) return row
+      return { ...row, hasNewerDraft: true, hasHeldEdits: Boolean(draft.heldTrackEdits?.length) }
+    }))
   }, [])
   useEffect(() => {
     if (!tauriBridge.isTauri()) return
@@ -1921,6 +1945,7 @@ function AppContent() {
             releases={curateReleases}
             commitRows={curateCommits}
             onCommitQueued={refreshCurateCommits}
+            onDraftSaved={noteCurateDraftSaved}
             onReviewComplete={albumId => {
               const albumTracks = catalogTracks.filter(track => track.releaseId === albumId)
               const next = new Map(curateReviews)
