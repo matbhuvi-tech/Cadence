@@ -174,6 +174,7 @@ pub(crate) fn record_draft_edits(
 pub(super) fn initialize(conn: &Connection) -> Result<()> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     tx.execute_batch(include_str!("curate_identity.sql"))?;
+    tx.execute_batch(include_str!("curate_queue.sql"))?;
     let has_catalog_source_key = tx.query_row(
         "SELECT EXISTS (
             SELECT 1 FROM pragma_table_info('curate_identity_tracks') WHERE name = 'catalog_source_key'

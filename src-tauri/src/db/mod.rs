@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 
 pub(crate) mod curate_identity;
+pub mod curate_queue;
 pub mod operations;
 pub mod schema;
 

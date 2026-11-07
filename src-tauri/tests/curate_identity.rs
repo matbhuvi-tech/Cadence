@@ -336,8 +336,24 @@ fn queue_projection_persists_and_invalidates_both_editions_on_regroup() {
     let mut conn = db.conn.lock();
     assert_eq!(curate_queue::get(&conn, &a).unwrap(), clean);
     moving.release_id = "b".into();
+    conn.execute_batch(
+        "CREATE TEMP TRIGGER reject_projection_update
+         BEFORE UPDATE ON curate_queue_projection
+         BEGIN SELECT RAISE(ABORT, 'fixture rejects projection update'); END;",
+    ).unwrap();
+    assert!(DbOperations::upsert_tracks_batch(&mut conn, &[moving.clone()]).is_err());
+    assert_eq!(identity(&conn, "moving").0, a);
+    assert_eq!(curate_queue::get(&conn, &a).unwrap(), clean);
+    assert!(!curate_queue::get(&conn, &b).unwrap().stale);
+    conn.execute_batch("DROP TRIGGER reject_projection_update").unwrap();
+
     DbOperations::upsert_tracks_batch(&mut conn, &[moving]).unwrap();
     assert_eq!(identity(&conn, "moving").0, b);
+    drop(conn);
+    drop(db);
+
+    let db = AppDb::new(path.clone()).unwrap();
+    let mut conn = db.conn.lock();
     for edition in [&a, &b] {
         let projection = curate_queue::get(&conn, edition).unwrap();
         assert!(projection.stale);
