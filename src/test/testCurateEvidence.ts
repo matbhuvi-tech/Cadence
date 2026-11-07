@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { fetchCurateCandidate } from '../services/curateEvidenceService'
+import { fetchCurateCandidate, restoreAppleTrackCandidates, type CurateEvidenceRun } from '../services/curateEvidenceService'
 import { FederatedResolversService } from '../services/federatedResolvers'
 
 test('records real outcomes and excludes provider response bodies from the history payload', async () => {
@@ -52,4 +52,38 @@ test('looks up a known Apple release directly and records track IDs and credits'
   assert.deepEqual(candidate?.tracks, [
     { trackId: '456', trackNumber: 1, trackName: 'Song', artistName: 'Singer' },
   ])
+})
+
+test('restores Apple rows by recorded mappings and flags conflicts in saved evidence', () => {
+  const run: CurateEvidenceRun = {
+    id: 'run', trigger: 'user_refresh', requestedAt: '', completedAt: '', outcome: 'completed',
+    context: { title: 'Album', artist: 'Artist', composer: undefined, year: 1988, tracks: [] },
+    attempts: [{
+      provider: 'apple', query: '', startedAt: '', completedAt: '', durationMs: 0, outcome: 'success',
+      candidate: { releaseId: 'album', tracks: [
+        { number: 9, title: 'Second version', artist: 'Provider credit' },
+        { number: 3, title: 'First version', artist: 'Other credit' },
+      ] },
+    }],
+    identityMappings: [
+      { localTrackId: 'one', provider: 'apple', releaseId: 'album', providerTrackId: 'a',
+        providerPosition: 3, method: 'title', positional: false, status: 'inferred' },
+      { localTrackId: 'two', provider: 'apple', releaseId: 'album', providerTrackId: 'b',
+        providerPosition: 9, method: 'title', positional: false, status: 'conflicted' },
+      { localTrackId: 'elsewhere', provider: 'apple', releaseId: 'other', providerTrackId: 'b',
+        providerPosition: 9, method: 'title', positional: false, status: 'inferred' },
+    ],
+  }
+  const saved = JSON.stringify(run)
+  const rows = restoreAppleTrackCandidates(JSON.parse(saved))
+  assert.deepEqual([...rows], [
+    ['one', { title: 'First version', artist: 'Other credit', conflicted: false }],
+    ['two', { title: 'Second version', artist: 'Provider credit', conflicted: true }],
+  ])
+  const tracks = run.attempts[0].candidate!.tracks!
+  tracks[0].providerTrackId = 'a'
+  tracks[1].providerTrackId = 'b'
+  assert.equal(restoreAppleTrackCandidates(run).get('one')?.title, 'Second version')
+  assert.equal(restoreAppleTrackCandidates({ ...run, applicability: 'superseded' }).size, 0)
+  assert.equal(restoreAppleTrackCandidates({ ...run, identityMappings: [] }).size, 0)
 })
