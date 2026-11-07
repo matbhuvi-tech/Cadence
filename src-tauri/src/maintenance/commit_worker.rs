@@ -1019,6 +1019,86 @@ mod tests {
         true
     }
 
+    fn wav_with_short_id3_year() -> Vec<u8> {
+        let mut frames = Vec::new();
+        for (id, text) in [(b"TDRC", b"198".as_slice()), (b"TPE1", b"Original artist".as_slice())] {
+            frames.extend(id);
+            frames.extend(((text.len() + 1) as u32).to_be_bytes());
+            frames.extend([0, 0, 0]); // Frame flags and Latin-1 encoding
+            frames.extend(text);
+        }
+        let mut tag = b"ID3\x04\x00\x00\x00\x00\x00".to_vec();
+        tag.push(frames.len() as u8);
+        tag.extend(frames);
+        let mut wav = wav_fixture();
+        wav.extend(b"id3 ");
+        wav.extend((tag.len() as u32).to_le_bytes());
+        wav.extend(&tag);
+        if tag.len() % 2 != 0 {
+            wav.push(0);
+        }
+        let size = (wav.len() - 8) as u32;
+        wav[4..8].copy_from_slice(&size.to_le_bytes());
+        wav
+    }
+
+    #[test]
+    fn malformed_wav_dates_can_be_repaired_without_blocking_the_mount() {
+        let folder = std::env::temp_dir().join(format!("cadence-timestamp-{}", Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        let database = folder.join("cadence.db");
+        let db = AppDb::new(database.clone()).unwrap();
+        let malformed = wav_with_short_id3_year();
+        let repair = folder.join("3.wav");
+        let healthy = folder.join("4.wav");
+        let items: Vec<_> = (0..5).map(|index| {
+            let path = folder.join(format!("{index}.wav"));
+            fs::write(&path, if index < 4 { malformed.clone() } else { wav_fixture() }).unwrap();
+            let mut payload = serde_json::json!({"curate": true, "genre": "Soundtrack"});
+            if index == 3 {
+                payload["year"] = serde_json::json!(1988);
+            }
+            NewCommitItem {
+                id: index.to_string(), track_id: index.to_string(), file_path: path.to_str().unwrap().into(),
+                mount_id: "disk".into(), payload_json: payload.to_string(),
+                backup_json: "{}".into(), expected_crc: None,
+            }
+        }).collect();
+        let read_error = Probe::open(&repair).unwrap().read().err().expect("fixture should fail to parse");
+        assert!(read_error.to_string().contains("Timestamp segment is too short"));
+        let batch = DbCommitQueueBatch {
+            id: "batch".into(), description: Some("Timestamp fixture".into()), total_tracks: 5,
+            destination: "embedded".into(), force_override: false, status: "pending".into(),
+            created_at: "2026-11-07".into(), completed_at: None,
+        };
+        DbOperations::insert_commit_batch_and_items(&mut db.conn.lock(), &batch, &items).unwrap();
+        let worker = CommitQueueWorker::with_playback_gate(db, || false);
+        let handle = worker.start().unwrap();
+        let drained = wait_until(|| worker.get_telemetry().pending_items == 0);
+        worker.stop();
+        handle.join().unwrap();
+        let telemetry = worker.get_telemetry();
+        assert!(drained, "the bad tags stranded {} items on the mount", telemetry.pending_items);
+        assert_eq!(telemetry.failed_items, 3);
+        assert_eq!(telemetry.completed_items, 2);
+        assert!(telemetry.offline_mounts.is_empty());
+        let repaired = Probe::open(&repair).unwrap().read().unwrap();
+        let tag = repaired.primary_tag().unwrap();
+        assert_eq!(tag.year(), Some(1988));
+        assert_eq!(tag.artist().as_deref(), Some("Original artist"));
+        assert_eq!(tag.genre().as_deref(), Some("Soundtrack"));
+        assert_eq!(Probe::open(&healthy).unwrap().read().unwrap().primary_tag().unwrap().genre().as_deref(), Some("Soundtrack"));
+        for index in 0..3 {
+            assert_eq!(fs::read(folder.join(format!("{index}.wav"))).unwrap(), malformed);
+        }
+        drop(worker);
+        for item in items {
+            fs::remove_file(item.file_path).unwrap();
+        }
+        fs::remove_file(database).unwrap();
+        fs::remove_dir(folder).unwrap();
+    }
+
     #[test]
     fn curate_confirmation_survives_worker_restart_and_writes_wav_after_playback() {
         let folder = std::env::temp_dir().join(format!("cadence-curate-{}", Uuid::new_v4()));
