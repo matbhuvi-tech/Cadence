@@ -1,12 +1,18 @@
 # Curate Components (`src/components/Curate`)
 
 ## Overview
-Houses the dedicated Master-Detail Curation Workbench (`⌘2`) for Cadence. Unifies catalog defect triage, 4-way metadata reconciliation, artwork inspection, and multi-track sidecar staging into a coherent album-hierarchical inspection flow.
+Houses the dedicated Master-Detail Curation Workbench (`⌘2`) and Unified Cockpit for Cadence. Unifies catalog defect triage, 4-way metadata reconciliation, artwork inspection, multi-track sidecar staging, and live decision trace inspection into an album-hierarchical workflow.
 
 ## Interface
+- `UnifiedCurateCockpit`: Primary cockpit combining defect triage, automated evidence fetching, provider resolution, and sidecar review into a unified workstation.
 - `CurationWorkbench`: Master-detail container orchestrating active queue selection, filter switching, keyboard navigation (`⌘[`, `⌘]`, `Esc`, `⌘4`), and staging to `graphEngine`.
 - `CurationQueueRail`: 280px left navigation rail displaying defect-categorized album queues (`All`, `Soundtracks`, `Artwork`, `Staged`) with wrapping compact filter pills (`flex-wrap`), broken-cover fallback icons (`onError`), defect badges, completion counters, and `pb-24` bottom scroll clearance.
 - `CurationReconciliationStage`: 12-column split top deck (`xl:col-span-4` 2x2 Artwork Inspector + `xl:col-span-8` `table-fixed` 4-Way Metadata Provider Reconciliation Matrix with Column 1 provenance badges), unified full-width single-column editable track table (`trackTitles` and `trackArtists` with 2-state Reset), strict `isCaseB = hasCompilationSignals && compilationClusters.length > 1` heuristic, and 3-tier field merge precedence (`Stage & Next → ⌘↵`).
+- `CurationDecisionTraceDrawer`: Slide-out inspection drawer detailing field-level consensus decisions, confidence scores, provider latencies, and candidate rejection reasons.
+- `SteerProgressBar`: Visual multi-step progress bar indicating current album evidence resolution and staging states.
+- `CurateCommitOutcomes`: Telemetry component displaying dry-run differences and post-commit outcomes.
+- `CurateArtworkThumbnail`: Fallback-safe album artwork thumbnail with disk read fallback and broken-image placeholder.
+- `CurateEvidenceAttempt`: Telemetry view detailing provider attempts, latency, and response status.
 
 ## Invariants
 - All staged modifications must be written exclusively to `track.pendingSidecarEdits` and `track.sidecarStatus = 'uncommitted_sidecar'`, leaving in-memory track objects pristine until two-phase commit.
@@ -16,6 +22,7 @@ Houses the dedicated Master-Detail Curation Workbench (`⌘2`) for Cadence. Unif
 ## Side Effects
 - Mutates pending sidecar state on tracks within `graphEngine`.
 - Stages cover art replacements and updates staging badges in global application state.
+- Dispatches IPC commands to persist curation traces and drafts to SQLite when transport is idle.
 
 ## Verification
 - Run: `npm run build`

@@ -112,22 +112,26 @@ export function hasTrackPhysicalDelta(
   return (Object.keys(selected) as (keyof Tags)[]).some(key => getCurateChange(raw[key], selected[key]))
 }
 
-export function makeCurateCommitItems(
-  draft: CurateDraft, rawTracks: Track[], rawRelease?: Release,
-): NewCommitItemPayload[] {
+function prepareCurateCommitTracks(draft: CurateDraft, rawTracks: Track[], rawRelease?: Release) {
   const byId = new Map(rawTracks.map(track => [track.id, track]))
   const cover = draft.fields.coverArt.selected
   if (draft.fields.coverArt.userOverridden && typeof cover === 'string' && cover &&
       cover !== draft.localCoverArt && !coverSource(draft)) {
     throw new Error('Choose a JPEG or PNG cover from an HTTP(S) URL or image data URL.')
   }
-  const changed = draft.tracks.flatMap(selection => {
+  return draft.tracks.flatMap(selection => {
     const track = byId.get(selection.trackId)
     if (!track) throw new Error('A selected track is missing from the physical catalog.')
     if (!hasTrackPhysicalDelta(draft, selection, track, rawRelease)) return []
     if (!track.filePath || !track.storageMountId) throw new Error('A selected track has no file path or storage mount.')
     return [{ track, selection, filePath: track.filePath, mountId: track.storageMountId }]
   })
+}
+
+export function makeCurateCommitItems(
+  draft: CurateDraft, rawTracks: Track[], rawRelease?: Release,
+): NewCommitItemPayload[] {
+  const changed = prepareCurateCommitTracks(draft, rawTracks, rawRelease)
   if (!changed.length) return []
   const curateReviewId = crypto.randomUUID()
   return changed.map(({ track, selection, filePath, mountId }) => ({
@@ -223,6 +227,21 @@ const commitFieldLabels: Record<keyof Tags, string> = {
   title: 'Track title', artist: 'Track credit', album: 'Album title', albumArtist: 'Album artist',
   composer: 'Composer', year: 'Year', originalAlbum: 'Original album', originalYear: 'Original year',
   genre: 'Genre', coverArtUrl: 'Cover art',
+}
+
+export function getCurateCommitPreviewTracks(draft: CurateDraft, rawTracks: Track[], rawRelease?: Release) {
+  return prepareCurateCommitTracks(draft, rawTracks, rawRelease).map(({ track, selection }) => {
+    const raw = physicalTags(track, rawRelease)
+    const selected = selectedTags(draft, selection)
+    return {
+      trackId: track.id,
+      title: track.title,
+      changes: (Object.keys(commitFieldLabels) as (keyof Tags)[]).flatMap(key => {
+        const change = getCurateChange(raw[key], selected[key])
+        return change ? [{ field: commitFieldLabels[key], previous: change.previous, selected: selected[key] }] : []
+      }),
+    }
+  })
 }
 
 export function curateCommitDifferences(row: CurateCommitRow, draft?: CurateDraft) {

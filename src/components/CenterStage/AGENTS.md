@@ -1,4 +1,4 @@
-# CenterStage Components
+# CenterStage Components (`src/components/CenterStage`)
 
 ## Overview
 Houses the central data presentation and curation viewports for Cadence. Supports multiple visual browsing and editing modes: album grid, virtualized data tables, classical work-movement hierarchies, multi-track spreadsheet editing, folder tree browsing, and focused release workbenches.
@@ -14,6 +14,7 @@ Houses the central data presentation and curation viewports for Cadence. Support
 - `VariantStackCard`: Interactive expandable stack grouping multiple editions (e.g., Vinyl, SACD, Deluxe) of a release.
 - `VirtualDataTable`: High-density virtualized list for rendering large track catalogs without UI lag.
 - `WorkMovementView`: Hierarchical multi-movement classical music browser grouping compositions by composer and opus.
+- [SubToolbar](./SubToolbar/AGENTS.md): Secondary toolbar components for scope navigation (albums, artists, composers, tracks) and responsive progressive-disclosure view controls.
 
 ## Invariants
 - Visual virtualization must be utilized in `VirtualDataTable` and `AlbumCoverGrid` to avoid DOM bloat on large libraries (100k+ tracks).

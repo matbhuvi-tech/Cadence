@@ -14,3 +14,4 @@ Subdirectory-specific instructions remain in:
 
 - [Frontend](./src/AGENTS.md)
 - [Native backend](./src-tauri/AGENTS.md)
+- [Mobile Remote PWA](./pwa/AGENTS.md)

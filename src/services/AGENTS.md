@@ -1,7 +1,7 @@
-# Services Package
+# Services Package (`src/services`)
 
 ## Overview
-Houses business logic, external API integrations, background service workers, SQLite query layers, and the Tauri IPC bridge. Coordinates AcoustID acoustic fingerprinting, music metadata scanning, metadata normalization, agent dispatch pipelines, and artwork analysis.
+Houses business logic, external API integrations, background service workers, SQLite query layers, and the Tauri IPC bridge. Coordinates AcoustID acoustic fingerprinting, music metadata scanning, metadata normalization, agent dispatch pipelines, federated provider reconciliation, Gemini AI inference, and artwork analysis.
 
 ## Interface
 - `tauriBridge.ts`: Primary IPC bridge communicating with Tauri Rust commands (audio playback, library scan, DB queries, remote websocket server).
@@ -18,6 +18,12 @@ Houses business logic, external API integrations, background service workers, SQ
 - `compilationCanonicalizerService.ts`: Detects and standardizes compilation releases (Various Artists, soundtracks).
 - `albumGroupingService.ts`: Deterministic multi-disc box set grouping engine, canonical master album clustering, and format edition stacking.
 - `curationQueueService.ts`: Curation queue generator prioritizing defect queues (soundtrack conflicts, incomplete tags, missing art) and `LookaheadQueuePrefetcher` with 50-item LRU cache and transport quietness cooldown guard.
+- `curateEvidenceService.ts`: Federated provider candidate fetching and recording (`fetchCurateCandidate`, `CurateProviderAttempt`) with rate limits and quota tracking.
+- `appleQuota.ts`: Apple Music API rate limiting and 429/503 retry-after handling (`fetchAppleWithQuota`).
+- `behavioralLearningService.ts`: User curation preference and confidence adaptation engine.
+- `creditInferenceService.ts`: Resolves granular artist credit roles and motion picture score compositions.
+- `provenanceCacheService.ts`: SQLite-backed parameter-hashed cache for compilation soundtrack provenance with SHA-256 fingerprinting.
+- `geminiClient.ts`: AI metadata, cover art, compilation provenance, and agent chat inference via Tauri IPC (`gemini_resolve`) or dev server endpoints with token-bucket pacing and backoff.
 - `federatedResolvers.ts`: Multi-source metadata resolvers querying MusicBrainz, Apple Music, and Wikipedia/Wikidata with `GlobalMusicBrainzQueue` rate-limiting (1050ms interval, priority preemption), 2-of-3 consensus arbitration (`resolve2of3ReleaseConsensus`), and artist biographical enrichment (`hydrateArtistEditorialProfile`).
 - `integrityScanner.ts`: Evaluates audio container integrity, checks FLAC MD5 hashes, and measures clipping peaks.
 - `backgroundArtworkService.ts`: Asynchronously fetches, caches, and prioritizes album cover artwork.
@@ -27,9 +33,10 @@ Houses business logic, external API integrations, background service workers, SQ
 ## Invariants
 - All disk reads, metadata extraction, or SQLite batch queries must observe playback idle guards (`!isPlaying && !isPaused`) to guarantee audiophile transport silence.
 - Tauri bridge calls must handle graceful fallbacks when running inside standard web browsers (mock mode).
+- External API queries must honor provider-specific rate limits (MusicBrainz 1050ms pacing, Apple 429/503 retry-after delay, Gemini 4000ms token-bucket interval).
 
 ## Side Effects
-- Makes external HTTP network requests to AcoustID, MusicBrainz, and image CDNs.
+- Makes external HTTP network requests to AcoustID, MusicBrainz, Apple Music, Gemini AI, and image CDNs.
 - Invokes Tauri native commands via IPC affecting system processes, threads, and databases.
 
 ## Verification

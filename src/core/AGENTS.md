@@ -1,10 +1,12 @@
-# Core Architecture Package
+# Core Architecture Package (`src/core`)
 
 ## Overview
-Houses the core domain models, graph traversal algorithms, search intent parsing, taxonomy normalizers, sidecar file serialization, and the atomic two-phase transaction engine for Cadence.
+Houses core domain models, graph traversal algorithms, search intent parsing, taxonomy normalizers, sidecar file serialization, curate draft/commit state, and the atomic two-phase transaction engine for Cadence.
 
 ## Interface
 - `types.ts`: Foundational data contracts: `Track`, `Release`, `Person`, `Credit`, `Work`, `Movement`, `Playlist`, `IntegrityMetrics`, `SampleRateTransition`, `ReleaseConsensusResult`, `ConsensusFieldResult`, `SubReleaseGrouping`, `UpdateArtistEditorialPayload`.
+- `curateCommit.ts`: Curate review reconciliation (`reconcileCurateReviewState`, `curateReviewKeys`, `getCurateChange`) and commit row structures.
+- `curateDraft.ts`: In-memory and persisted curation draft state (`captureCurateDraft`, `restoreCurateDraft`).
 - `transactionEngine.ts`: Manages atomic staging, diff calculation, dry-run validations, and commit rollbacks for file tag writes.
 - `graphEngine.ts`: In-memory relational graph linking artists, releases, tracks, works, and credit roles for high-speed queries.
 - `searchIntentClassifier.ts`: NLP query parser tokenizing free-form omnibar text into semantic filters (e.g. genre, decade, audio quality, artist).
@@ -18,6 +20,7 @@ Houses the core domain models, graph traversal algorithms, search intent parsing
 ## Invariants
 - Modifications to audio file metadata must be represented as staged `Transaction` objects before physical disk execution.
 - Relational graph indices in `graphEngine` must update transactionally when tracks or releases are added, mutated, or deleted.
+- Curate review state reconciliation must preserve human reviews across library rescans using normalized path signatures.
 
 ## Side Effects
 - Reads and parses sidecar JSON files from the filesystem.

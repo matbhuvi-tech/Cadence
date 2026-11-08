@@ -247,7 +247,7 @@ fn record_block(
                     .split_whitespace()
                     .any(|part| part.ends_with("perproject")))
     });
-    if status == 429 && !grounding.is_empty() {
+    if status == 429 && (!grounding.is_empty() || (grounded && scoped.is_empty() && shared.is_empty())) {
         state.grounding = Some(quota_block(
             status,
             now,
@@ -265,7 +265,7 @@ fn record_block(
             state.project.as_ref(),
         ));
     }
-    if status != 429 || !scoped.is_empty() || (shared.is_empty() && grounding.is_empty()) {
+    if status != 429 || !scoped.is_empty() || (!grounded && shared.is_empty() && grounding.is_empty()) {
         let key = if status == 429 && grounded && scoped.is_empty() {
             format!("{model} (Google Search)")
         } else {
@@ -370,64 +370,71 @@ async fn generate(
         }
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()
             .map_err(|_| "Unable to initialize Gemini HTTP client".to_string())?;
-        let mut body = json!({ "contents": contents });
-        if use_grounding {
-            body["tools"] = json!([{ "google_search": {} }]);
-        } else {
-            body["generationConfig"] = json!({ "responseMimeType": "application/json" });
-        }
         let preferred = settings.model.trim_start_matches("models/");
         let mut attempts = 0;
         let mut pacing_delay = 0;
         let mut last_status = 503;
-        for model in candidates(preferred) {
-            if attempts >= attempt_budget { break; }
-            let delay = {
-                let state = quota();
-                let now = now_ms();
-                if project_block_until(&state, use_grounding) > now { break; }
-                if model_block_until(&state, model, use_grounding) > now { continue; }
-                pacing_remaining(&state)
+        for &grounded in if use_grounding { &[true, false][..] } else { &[false][..] } {
+            let mut body = json!({ "contents": &contents });
+            if grounded {
+                body["tools"] = json!([{ "google_search": {} }]);
+            } else {
+                body["generationConfig"] = json!({ "responseMimeType": "application/json" });
+            }
+            let mode_budget = if !grounded && attempts > 0 {
+                attempt_budget.max(attempts + 1)
+            } else {
+                attempt_budget
             };
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-                pacing_delay += delay.as_millis() as u64;
-            }
-            attempts += 1;
-            {
-                let mut state = quota();
-                state.in_flight = Some(model.to_string());
-                state.last_call = Some(std::time::Instant::now());
-                state.last_timestamp = now_ms();
-            }
-            let _active = ActiveAttempt(app);
-            emit_quota(app);
-            let response = client.post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"))
-                .header("x-goog-api-key", &settings.api_key).json(&body).send().await
-                .map_err(|_| "Gemini request failed (502): network error".to_string())?;
-            last_status = response.status().as_u16();
-            let headers = response.headers().clone();
-            if response.status().is_success() {
-                let data = response.json::<Value>().await.map_err(|_| "Gemini returned invalid JSON".to_string())?;
-                let mut state = quota();
-                state.models.remove(model);
-                if use_grounding {
-                    state.models.remove(&format!("{model} (Google Search)"));
-                    state.grounding = None;
+            for model in candidates(preferred) {
+                if attempts >= mode_budget { break; }
+                let delay = {
+                    let state = quota();
+                    let now = now_ms();
+                    if project_block_until(&state, grounded) > now { break; }
+                    if model_block_until(&state, model, grounded) > now { continue; }
+                    pacing_remaining(&state)
+                };
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                    pacing_delay += delay.as_millis() as u64;
                 }
-                state.project = None;
-                state.last_successful = Some(data["modelVersion"].as_str().unwrap_or(model).to_string());
-                return Ok((data, state.last_successful.clone().unwrap_or_else(|| model.to_string()), pacing_delay, attempts - 1));
+                attempts += 1;
+                {
+                    let mut state = quota();
+                    state.in_flight = Some(model.to_string());
+                    state.last_call = Some(std::time::Instant::now());
+                    state.last_timestamp = now_ms();
+                }
+                let _active = ActiveAttempt(app);
+                emit_quota(app);
+                let response = client.post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"))
+                    .header("x-goog-api-key", &settings.api_key).json(&body).send().await
+                    .map_err(|_| "Gemini request failed (502): network error".to_string())?;
+                last_status = response.status().as_u16();
+                let headers = response.headers().clone();
+                if response.status().is_success() {
+                    let data = response.json::<Value>().await.map_err(|_| "Gemini returned invalid JSON".to_string())?;
+                    let mut state = quota();
+                    state.models.remove(model);
+                    if grounded {
+                        state.models.remove(&format!("{model} (Google Search)"));
+                        state.grounding = None;
+                    }
+                    state.project = None;
+                    state.last_successful = Some(data["modelVersion"].as_str().unwrap_or(model).to_string());
+                    return Ok((data, state.last_successful.clone().unwrap_or_else(|| model.to_string()), pacing_delay, attempts - 1));
+                }
+                if !matches!(last_status, 429 | 503 | 404) { break; }
+                let data = response.json::<Value>().await.unwrap_or(Value::Null);
+                record_block(&mut quota(), model, last_status, grounded, &headers, &data);
             }
-            if !matches!(last_status, 429 | 503 | 404) { break; }
-            let data = response.json::<Value>().await.unwrap_or(Value::Null);
-            record_block(&mut quota(), model, last_status, use_grounding, &headers, &data);
         }
         let state = quota();
         let now = now_ms();
-        let project_until = project_block_until(&state, use_grounding);
+        let project_until = project_block_until(&state, false);
         let retry_at = candidates(preferred).map(|model| {
-            project_until.max(model_block_until(&state, model, use_grounding))
+            project_until.max(model_block_until(&state, model, false))
         }).min().unwrap_or(0);
         if retry_at > now && (project_until > now || state.models.values().any(|block| {
             block.blocked_until > now && !matches!(block.reason, "unavailable" | "overloaded")
@@ -1010,6 +1017,29 @@ mod gemini_tests {
         );
         assert!(project_block_until(&state, true) > now_ms());
         assert_eq!(project_block_until(&state, false), 0);
+        assert_eq!(model_block_until(&state, DEFAULT_MODEL, false), 0);
+    }
+
+    #[test]
+    fn grounded_429_without_quota_failure_details_blocks_grounding_and_allows_ungrounded_fallback() {
+        let mut state = GeminiQuota::default();
+        let data = json!({ "error": {
+            "code": 429,
+            "message": "You exceeded your current quota, please check your plan and billing details.",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [{ "@type": "type.googleapis.com/google.rpc.Help" }]
+        } });
+        record_block(
+            &mut state,
+            "gemini-flash-lite-latest",
+            429,
+            true,
+            &Default::default(),
+            &data,
+        );
+        assert!(project_block_until(&state, true) > now_ms());
+        assert_eq!(project_block_until(&state, false), 0);
+        assert_eq!(model_block_until(&state, "gemini-flash-lite-latest", false), 0);
         assert_eq!(model_block_until(&state, DEFAULT_MODEL, false), 0);
     }
 }

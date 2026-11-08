@@ -1,5 +1,12 @@
 # Issue Log
 
+## Issue #15 — Gemini API calls always return 429 when Google Search grounding quota is exhausted
+
+- **Reproduction:** Open Curate and refresh/resolve an album using a Gemini API key whose Google Search Grounding (`google_search`) quota is 0 or exhausted while standard `generateContent` quota is healthy. Every call fails with `Gemini request failed (429)`.
+- **Diagnosis:** `resolve_operation` in `src-tauri/src/commands/gemini_config.rs` sets `use_grounding = true` whenever `userSearchQuery` or `referenceUrl` is present. `generate` only attempted grounded requests (`tools: [{"google_search": {}}]`) across candidate models and never fell back to ungrounded JSON inference. Additionally, upstream `429` responses for `google_search` omit `QuotaFailure` details (`violations` is empty), so `record_block` did not record the project-level `grounding` cooldown.
+- **Resolution:** Record `state.grounding` when a grounded request returns `429` without model/project-spend `QuotaFailure` violations, and iterate over `&[true, false]` in `generate` when `use_grounding` is requested so blocked or rate-limited grounding automatically falls back to ungrounded JSON inference (`responseMimeType: "application/json"`).
+- **Status:** Pending user verification. [GitHub issue #15](https://github.com/matbhuvi-tech/Cadence/issues/15)
+
 ## Issue #14 — Saved Apple track candidates disappear after reopening Curate
 
 - **Reproduction:** Refresh Apple evidence, save the draft, and reopen the album. Evidence History lists returned tracks while the Apple Music Track column is blank.

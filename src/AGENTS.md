@@ -10,6 +10,7 @@ Root of the frontend React and TypeScript codebase for Cadence. Initializes the 
 
 ## Subdirectories & System Boundaries
 - [components](./components/AGENTS.md): UI component packages (CenterStage, AudioPlayer, CommandBar, LeftRail, Modals, etc.).
+- [config](./config/AGENTS.md): Runtime configuration flags and client-side feature toggles.
 - [context](./context/AGENTS.md): React context providers including `AudioPlayerContext`.
 - [core](./core/AGENTS.md): Domain models, relational graph engine, search classifier, and transaction engine.
 - [hooks](./hooks/AGENTS.md): Custom hooks bridging Tauri backend event streams to React state.

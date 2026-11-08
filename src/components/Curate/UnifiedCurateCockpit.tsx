@@ -2,10 +2,8 @@
  * src/components/Curate/UnifiedCurateCockpit.tsx
  * Production Unified Curate & Metadata Management Cockpit (⌘2).
  * 
- * Merges Curate and Audit into a single command center with 2-Tier Workflow:
- * - Tier 1: Auto-Staged (High-confidence 3-of-4 consensus, 1-click non-blocking batch commit).
- * - Tier 2: Guided 4-Way Table Reconciliation (Local, Apple Music, MusicBrainz, Gemini AI, Selected).
- * 
+ * Priority-ordered album triage and metadata reconciliation.
+ *
  * Features:
  * - Sequence-aware track offset alignment (e.g. #6-#10 mapped to #1-#5 for Ranga).
  * - Consensus Empty-State Invariant: leaves Selected empty when local tag is missing and external providers lack quorum.
@@ -19,92 +17,83 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   Sparkles,
   CheckCircle2,
-  SlidersHorizontal,
   Layers,
-  ArrowRight,
   BookOpen,
   Volume2,
   Pause,
   X,
   Edit2,
   Check,
-  Undo2,
   Trash2,
-  Image as ImageIcon,
   Link2,
-  Music,
-  Info,
-  ChevronDown,
   RotateCcw,
-  ChevronLeft,
-  ChevronRight,
-  ShieldCheck,
-  AlertCircle,
-  Plus,
   Search,
   ArrowLeft,
-  Folder,
+  PanelLeft,
   FileText,
   Disc,
 } from 'lucide-react'
 import { CurateArtworkThumbnail } from './CurateArtworkThumbnail'
+import { CuratePriorityPopover } from './CuratePriorityPopover'
+import { SelectedOutputCard } from './SelectedOutputCard'
+import {
+  evaluateCatalogProblems, filterAndRankCurateAlbums, loadDismissedProblems, loadPrioritySettings, savePrioritySettings,
+  loadCurateFilterState, saveCurateFilterState, resolveFilterTransition, saveDismissedProblem, removeDismissedProblem,
+  type CurateFilterState, type CurateProblemCategoryId, type CatalogProblemSummary, type PrioritySettings, type DismissedProblemsMap,
+} from '../../core/curatePriorities'
 import {
   Track,
   Release,
   AuditIssue,
-  NavigationAnchor,
-  CurateTier,
   MetadataFieldState,
   TrackCandidateState,
   LearnedRule,
   SemanticConventions,
   ConsensusFieldSource,
 } from '../../core/types'
-import { graphEngine } from '../../core/graphEngine'
-import { getCurateChange, isReconciledCurateDraft, matchesCurateConfirmation, makeCurateCommitItems, prepareTier1Commit, projectCurateCommits, type CurateCommitRow, type CurateValueChange } from '../../core/curateCommit'
+import { getCurateChange, isReconciledCurateDraft, matchesCurateConfirmation, makeCurateCommitItems, projectCurateCommits, curateReviewKeys, type CurateCommitRow, type CurateValueChange } from '../../core/curateCommit'
+import { stepFilteredAlbumSelection, resolvePostCommitNavigation, applyAcceptedSuggestionsToDraft, resolveStagedAlbumIds, resolveAlbumSelectionDraftState } from '../../core/curateWorkflow'
+import { CurateAlbumSearch, CurateFilterBar } from './CurateFilterBar'
+import { CurateCommitPreviewModal, type CommitPreviewAlbumInput } from './CurateCommitPreviewModal'
+import { labels } from './curateProblemLabels'
 import type { EnqueueBatchPayload } from '../../types/commit'
-import { CurateCommitOutcomes } from './CurateCommitOutcomes'
 import {
   captureCurateDraft, captureCurateBaseline, restoreCurateDraft, migrateCurateDraft, mergeCurateProposal, selectCurateTrackFields,
   type CurateDraft, type CurateDraftTrack,
 } from '../../core/curateDraft'
-import { curationQueueService, AlbumCurationQueueItem } from '../../services/curationQueueService'
 import { federatedResolversService, type ProviderResult } from '../../services/federatedResolvers'
 import { compilationCanonicalizerService } from '../../services/compilationCanonicalizerService'
 import { behavioralLearningService } from '../../services/behavioralLearningService'
 import { tauriBridge } from '../../services/tauriBridge'
-import { provenanceCacheService } from '../../services/provenanceCacheService'
 import { useCurationTrace } from '../../hooks/useCurationTrace'
 import { CURATE_REFRESH_PROVIDER_BUDGET, captureTrackDecisions, curateMatchingContext, restoreAppleTrackCandidates, sourceCandidatesFromGrouping, type CurateSourceCandidate } from '../../services/curateEvidenceService'
 import { SteerProgressBar } from './SteerProgressBar'
 import { CurationDecisionTraceDrawer } from './CurationDecisionTraceDrawer'
-import { resolveGemini } from '../../services/geminiClient'
-import type { CompilationProvenanceResult } from '../../core/types'
 import {
-  cleanRipNoise,
   cleanConsensusTitle,
   isPlaceholderTag,
-  isDefectiveArtistTag,
-  detectSequenceOffset,
-  applyConsensusEmptyStateRule,
   detectLanguage,
-  getCuratedAlbumArtwork,
 } from '../../core/taxonomyUtils'
 
 export interface UnifiedCurateCockpitProps {
   tracks: Track[]
   releases: Release[]
+  rawTracks?: Track[]
+  rawReleases?: Release[]
+  summary?: CatalogProblemSummary
+  prioritySettings?: PrioritySettings
+  dismissedProblems?: DismissedProblemsMap
+  onPrioritySettingsChange?: (settings: PrioritySettings) => void
+  onDismissedProblemsChange?: (dismissals: DismissedProblemsMap) => void
   auditIssues?: AuditIssue[]
   initialSelectedAlbumId?: string | null
-  navigationAnchor?: NavigationAnchor | null
   onReturnToAnchor?: () => void
-  onOpenCommitModal: () => void
   onBackToLibrary: () => void
   showToast: (msg: string) => void
   commitRows?: CurateCommitRow[]
+  commitQueueHostRef?: React.Ref<HTMLDivElement>
   onCommitQueued?: () => Promise<void>
   onDraftSaved?: (draft: CurateDraft) => void
-  onReviewComplete?: (albumId: string) => void
   supersededCommitIds?: ReadonlySet<string>
   isPlaying?: boolean
 }
@@ -115,8 +104,6 @@ interface AlbumWorkItem {
   leadTrackId?: string
   folderName: string
   currentTitle: string
-  tier: CurateTier
-  status: 'staged' | 'committing' | 'committed'
   confidenceScore: number
   offsetApplied?: number
   albumTitle: MetadataFieldState<string>
@@ -128,6 +115,7 @@ interface AlbumWorkItem {
   tracks: CurateDraftTrack[]
   draftBasedOn?: string
   heldTrackEdits?: CurateDraft['heldTrackEdits']
+  proposal?: CurateDraft
   rawRelease?: Release
   rawTracks: Track[]
 }
@@ -395,27 +383,71 @@ function mergeConsensusTrackStates(
 export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   tracks,
   releases,
+  rawTracks = tracks,
+  rawReleases = releases,
+  summary,
+  prioritySettings: settingsProp,
+  dismissedProblems: dismissalsProp,
+  onPrioritySettingsChange,
+  onDismissedProblemsChange,
   auditIssues = emptyAuditIssues,
   initialSelectedAlbumId,
-  navigationAnchor,
   onReturnToAnchor,
-  onOpenCommitModal,
   onBackToLibrary,
   showToast,
   commitRows,
+  commitQueueHostRef,
   onCommitQueued,
   onDraftSaved,
-  onReviewComplete,
   supersededCommitIds,
   isPlaying = false,
 }) => {
-  // 1. Compute Base Queue from Curation Queue Service
-  const baseQueue = useMemo(() => {
-    return curationQueueService.computeCurationQueue(tracks, releases, auditIssues)
-  }, [tracks, releases, auditIssues])
-
-  // 2. Active Tier & Modals
-  const [activeTier, setActiveTier] = useState<CurateTier>('tier2')
+  const [localSettings, setPrioritySettings] = useState(loadPrioritySettings)
+  const [localDismissals, setDismissedProblems] = useState(loadDismissedProblems)
+  const prioritySettings = settingsProp ?? localSettings
+  const dismissedProblems = dismissalsProp ?? localDismissals
+  const problemSummary = useMemo(
+    () => summary ?? evaluateCatalogProblems(tracks, releases, prioritySettings, dismissedProblems),
+    [summary, tracks, releases, prioritySettings, dismissedProblems],
+  )
+  const [filter, setFilter] = useState(loadCurateFilterState)
+  const [showFilters, setShowFilters] = useState(() =>
+    !filter.priorities.length && !filter.categories.length && !filter.selectedAlbumIdFilter,
+  )
+  const filterToggleRef = useRef<HTMLButtonElement>(null)
+  const filterToggleLabel = showFilters ? 'Hide filter sidebar' : 'Show filter sidebar'
+  const [preview, setPreview] = useState<CommitPreviewAlbumInput[] | null>(null)
+  const [stagedIds, setStagedIds] = useState<ReadonlySet<string>>(new Set())
+  const albums = useMemo(() => {
+    const byId = new Map(releases.map(release => [release.id, { id: release.id, title: release.title }]))
+    for (const track of tracks) {
+      if (!byId.has(track.releaseId)) byId.set(track.releaseId, { id: track.releaseId, title: track.albumTitle ?? '' })
+    }
+    return [...byId.values()]
+  }, [releases, tracks])
+  const filteredAlbums = useMemo(() => filterAndRankCurateAlbums(albums, problemSummary, filter), [albums, problemSummary, filter])
+  const changeFilter = (next: CurateFilterState) => {
+    directSelection.current = null
+    const transition = resolveFilterTransition(albums, problemSummary, next, 'filter_change')
+    saveCurateFilterState(transition.filter)
+    setFilter(transition.filter)
+    if (transition.toastMessage) showToast(transition.toastMessage)
+    const applied = transition.filter
+    const addedFilter = applied.priorities.some(priority => !filter.priorities.includes(priority)) ||
+      applied.categories.some(category => !filter.categories.includes(category)) ||
+      (applied.selectedAlbumIdFilter && applied.selectedAlbumIdFilter !== filter.selectedAlbumIdFilter)
+    if (showFilters && addedFilter) {
+      setShowFilters(false)
+      filterToggleRef.current?.focus()
+    }
+    if (!transition.filteredAlbums.some(album => album.id === selectedAlbumId)) {
+      setSelectedAlbumId(transition.filteredAlbums[0]?.id ?? null)
+    }
+  }
+  const updateDismissals = (dismissals: DismissedProblemsMap) => {
+    setDismissedProblems(dismissals)
+    onDismissedProblemsChange?.(dismissals)
+  }
   const [isRulesModalOpen, setIsRulesModalOpen] = useState(false)
   const [isHealthDrawerOpen, setIsHealthDrawerOpen] = useState(false)
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(initialSelectedAlbumId || null)
@@ -446,11 +478,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   useEffect(() => () => batchAbort.current?.abort(), [])
 
   // Compilation Provenance State & Abort Controller
-  const [isResolvingProvenance, setIsResolvingProvenance] = useState(false)
   const [editingProvenanceTrackId, setEditingProvenanceTrackId] = useState<string | null>(null)
   const [provenanceEditFilm, setProvenanceEditFilm] = useState('')
   const [provenanceEditYear, setProvenanceEditYear] = useState('')
-  const provenanceAbortRef = useRef<AbortController | null>(null)
 
   // 3. Build Rich Album Work Items
   const [albumItems, setAlbumItems] = useState<Map<string, AlbumWorkItem>>(new Map())
@@ -465,7 +495,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const [draftLoad, setDraftLoad] = useState<{ id: string; failed: boolean } | null>(null)
   const [draftLoadAttempt, setDraftLoadAttempt] = useState(0)
   const [draftSaveError, setDraftSaveError] = useState<string | null>(null)
-  const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<string | null>(null)
   const [savedAppleEvidence, setSavedAppleEvidence] = useState<{ albumId: string; title?: string; artist?: string; composer?: string; year?: number; genre?: string; trackCount?: number; releaseId?: string; rejectionReason?: string; trackRows: ReturnType<typeof restoreAppleTrackCandidates> } | null>(null)
   const initialSteering = useRef<{ albumId: string; title: string; artist: string; year: string }>(undefined)
   const [stagingAlbumId, setStagingAlbumId] = useState<string | null>(null)
@@ -474,7 +503,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // Initialize and populate album items - PRESERVES user edits across library refreshes
   useEffect(() => {
     const tracksByRelease = new Map<string, Track[]>()
-    for (const track of tracks) {
+    for (const track of rawTracks) {
       const releaseTracks = tracksByRelease.get(track.releaseId)
       if (releaseTracks) releaseTracks.push(track)
       else tracksByRelease.set(track.releaseId, [track])
@@ -482,74 +511,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     setAlbumItems((prev) => {
       const next = new Map(prev)
 
-      for (const qItem of baseQueue) {
-        // If album already exists in state, PRESERVE IT and do not overwrite user choices
-        if (next.has(qItem.albumId)) {
-          continue
-        }
+      const releasesById = new Map(rawReleases.map(release => [release.id, release]))
+      for (const albumId of new Set([...releasesById.keys(), ...tracksByRelease.keys()])) {
+        const rel = releasesById.get(albumId)
+        const albTracks = (tracksByRelease.get(albumId) ?? []).sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0))
+        const existing = next.get(albumId)
+        if (existing && existing.rawRelease === rel && existing.rawTracks.length === albTracks.length &&
+            existing.rawTracks.every((track, index) => track === albTracks[index])) continue
 
-        const rel = releases.find((r) => r.id === qItem.albumId)
-        const albTracks = (tracksByRelease.get(qItem.albumId) ?? []).sort((a, b) => (a.trackNumber || 0) - (b.trackNumber || 0))
-
-        if (!rel && albTracks.length === 0) continue
-
-        const rawTitle = rel?.title || albTracks[0]?.albumTitle || qItem.albumTitle || 'Unknown Album'
-        const rawComposer = rel?.composerName || albTracks.find((t) => t.composerName)?.composerName || ''
-
-        // Multi-track artist consensus: inspect if tracks have multiple distinct performers
-        // or an explicit common container tag rather than blindly taking the first track's artist
-        const trackArtists = albTracks.map((t) => (t.artistCredit || '').trim()).filter(Boolean)
-        const distinctTrackArtists = Array.from(new Set(trackArtists))
-        const hasExplicitAlbumArtist = (albTracks.find((t) => (t as any).albumArtist) as any)?.albumArtist
-
-        let resolvedRawArtist: string
-        if (hasExplicitAlbumArtist) {
-          resolvedRawArtist = hasExplicitAlbumArtist
-        } else if (rawComposer && (distinctTrackArtists.length > 1 || !rel?.artistCredit)) {
-          // If tracks have diverse performers (e.g. playback singers) or rel artist is missing, promote composer
-          resolvedRawArtist = rawComposer
-        } else if (distinctTrackArtists.length === 1) {
-          // Unanimous single performer across all tracks
-          resolvedRawArtist = distinctTrackArtists[0]
-        } else {
-          resolvedRawArtist = rel?.artistCredit || albTracks[0]?.artistCredit || 'Unknown Artist'
-        }
-
-        const rawArtist = resolvedRawArtist
-        const rawYear = rel?.releaseYear || albTracks[0]?.canonicalReleaseYear || albTracks[0]?.originalYear || (albTracks[0] as any)?.releaseYear
-        const rawArt =
-          rel?.coverArtUrl ||
-          rel?.artwork?.frontCoverUrl ||
-          (rel as any)?.front_cover_url ||
-          (rel as any)?.frontCoverUrl ||
-          (albTracks[0] as any)?.coverArtUrl ||
-          (albTracks[0] as any)?.artworkUrl ||
-          (albTracks[0] as any)?.frontCoverUrl ||
-          getCuratedAlbumArtwork(rawTitle, rawComposer || rawArtist) ||
-          (albTracks[0]?.id ? `cadence:cover://${albTracks[0].id}` : '')
-        const trackGenre = (albTracks[0] as any)?.genre
-        const rawGenre = rel?.genreTags?.[0] || trackGenre || 'Soundtrack'
-
-        // Detect album primary language for accurate conventions
-        const initDetectedLang = detectLanguage({
-          title: rawTitle,
-          artistCredit: rawArtist,
-          composerName: rawComposer,
-          genreTags: rel?.genreTags || (trackGenre ? [trackGenre] : []),
-          filePath: albTracks[0]?.filePath,
-        }) || 'Hindi'
-
-        // Check learned rules for artist and composer
-        const learnedArtist = behavioralLearningService.applyLearnedRules(rawArtist, 'artist').value
-        const learnedComposer = rawComposer ? behavioralLearningService.applyLearnedRules(rawComposer, 'composer').value : ''
-
-        // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Language-prefixed genre)
-        const conv = behavioralLearningService.applySoundtrackConventions({
-          composer: rawComposer,
-          albumArtist: rawArtist,
-          genre: rawGenre,
-          language: initDetectedLang,
-        })
+        const rawTitle = rel?.title || albTracks[0]?.albumTitle || ''
+        const rawComposer = rel?.composerName || albTracks.find(track => track.composerName)?.composerName || ''
+        const rawArtist = albTracks.find(track => track.albumArtist)?.albumArtist || rel?.artistCredit || ''
+        const rawYear = rel?.releaseYear || albTracks[0]?.canonicalReleaseYear
+        const rawArt = rel?.coverArtUrl || rel?.artwork?.frontCoverUrl || ''
+        const rawGenre = rel?.genreTags?.[0] || albTracks[0]?.genre || ''
 
         // Track candidate states
         const trackStates: TrackCandidateState[] = albTracks.map((t) => ({
@@ -559,7 +534,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           localArtists: t.artistCredit || '',
           localDuration: t.duration,
           matchedTitle: t.title,
-          matchedArtists: behavioralLearningService.applyLearnedRules(t.artistCredit || rawArtist, 'artist').value,
+          matchedArtists: t.artistCredit || '',
           originalAlbum: t.originalAlbum || '',
           originalYear: t.originalYear,
           provenanceSource: t.originalAlbum ? ('local_fallback' as any) : undefined,
@@ -573,30 +548,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           sampleRate: t.sampleRate,
         }))
 
-        const emptyArtistRule = applyConsensusEmptyStateRule(rawArtist, {})
-        const albumConfidence = qItem.confidenceScore ?? (qItem.defectSeverity === 'info' ? 0.90 : 0.60)
-        const isDefectiveArtist = isDefectiveArtistTag(rawArtist, rawTitle)
-        const hasRipNoise = Boolean(rawTitle && cleanRipNoise(rawTitle).toLowerCase() !== rawTitle.toLowerCase())
-        const hasValidYear = Boolean(rawYear && Number(rawYear) >= 1900)
-        const isClean =
-          !qItem.requiresDisambiguation &&
-          albumConfidence >= 0.85 &&
-          !isPlaceholderTag(rawArtist) &&
-          !isPlaceholderTag(rawTitle) &&
-          !isDefectiveArtist &&
-          !hasRipNoise &&
-          hasValidYear
-
-        const finalAlbumArtist = conv.albumArtist || (emptyArtistRule.selected !== '' ? learnedArtist : '')
-        const finalGenre = conv.genre || rawGenre
-
-        next.set(qItem.albumId, {
-          id: qItem.albumId,
-          folderName: qItem.folderName || rel?.folderPath || albTracks[0]?.folderName || '',
+        const baseline: AlbumWorkItem = {
+          id: albumId,
+          folderName: rel?.folderPath || albTracks[0]?.folderName || '',
           currentTitle: rawTitle,
-          tier: isClean ? 'tier1' : 'tier2',
-          status: 'staged',
-          confidenceScore: albumConfidence,
+          confidenceScore: 0.9,
           rawRelease: rel,
           rawTracks: albTracks,
           albumTitle: {
@@ -613,17 +569,17 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             apple: undefined,
             musicbrainz: undefined,
             ai: undefined,
-            selected: finalAlbumArtist,
-            confidence: emptyArtistRule.hasConsensus ? 0.9 : 0.3,
+            selected: rawArtist,
+            confidence: rawArtist ? 0.9 : 0.3,
             source: 'local_fallback',
-            requiresHumanReview: !finalAlbumArtist || emptyArtistRule.requiresHumanReview,
+            requiresHumanReview: !rawArtist,
           },
           composer: {
             local: rawComposer,
             apple: undefined,
             musicbrainz: undefined,
             ai: undefined,
-            selected: learnedComposer,
+            selected: rawComposer,
             confidence: rawComposer ? 0.9 : 0.4,
             source: 'local_fallback',
           },
@@ -650,34 +606,58 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             apple: undefined,
             musicbrainz: undefined,
             ai: undefined,
-            selected: finalGenre,
+            selected: rawGenre,
             confidence: 0.85,
             source: 'local_fallback',
           },
           tracks: trackStates,
-        })
+        }
+        if (!existing) {
+          next.set(albumId, baseline)
+          continue
+        }
+        const draft = captureAlbumDraft(existing)
+        const fresh = captureCurateBaseline(baseline)
+        if (draft.baseline === fresh.baseline) {
+          next.set(albumId, { ...existing, rawRelease: rel, rawTracks: albTracks })
+        } else if (loadedDrafts.current.get(albumId)?.draft.revision) {
+          next.set(albumId, {
+            ...restoreCurateDraft(baseline, migrateCurateDraft(draft, fresh)),
+            draftBasedOn: draft.baseline,
+          })
+        } else {
+          next.set(albumId, baseline)
+        }
       }
 
-      if (initialSelectedAlbumId && !prev.has(initialSelectedAlbumId)) {
-        const requested = next.get(initialSelectedAlbumId)
-        if (requested) setActiveTier(requested.tier)
+      for (const id of next.keys()) {
+        if (!releasesById.has(id) && !tracksByRelease.has(id)) next.delete(id)
       }
-
       return next
     })
-  }, [baseQueue, releases, tracks])
+  }, [rawReleases, rawTracks])
 
-  const eligibleIds = useMemo(() => new Set(baseQueue.map(item => item.albumId)), [baseQueue])
-  const activeItem = selectedAlbumId && eligibleIds.has(selectedAlbumId) ? albumItems.get(selectedAlbumId) : undefined
+  const previousFiltered = useRef(filteredAlbums)
+  const preserveSelectionOnRank = useRef(false)
+  const directSelection = useRef(initialSelectedAlbumId)
   useEffect(() => {
-    if (activeItem || eligibleIds.size === 0) return
-    const eligible = Array.from(albumItems.values()).filter(item => eligibleIds.has(item.id))
-    const first = eligible.find(item => item.tier === activeTier) ?? eligible[0]
-    if (first) {
-      setSelectedAlbumId(first.id)
-      setActiveTier(first.tier)
-    }
-  }, [activeItem, activeTier, albumItems, eligibleIds])
+    directSelection.current = initialSelectedAlbumId
+    if (initialSelectedAlbumId) setSelectedAlbumId(initialSelectedAlbumId)
+  }, [initialSelectedAlbumId])
+  useEffect(() => {
+    const previous = previousFiltered.current
+    previousFiltered.current = filteredAlbums
+    const preserveSelection = preserveSelectionOnRank.current
+    preserveSelectionOnRank.current = false
+    setSelectedAlbumId(id => {
+      if (id && (preserveSelection || (directSelection.current === id && !previous.some(album => album.id === id)))) return id
+      if (id && !previous.some(album => album.id === id) && !filteredAlbums.some(album => album.id === id)) {
+        return filteredAlbums[0]?.id ?? null
+      }
+      return resolvePostCommitNavigation(previous, filteredAlbums, id)
+    })
+  }, [filteredAlbums])
+  const activeItem = selectedAlbumId ? albumItems.get(selectedAlbumId) : undefined
   const activeItemId = activeItem?.id
 
   // Only the selected album needs a draft read. Resolve it before showing editable output.
@@ -691,13 +671,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     tauriBridge.curationGetDraft(activeItemId).then(draft => {
       if (cancelled) return
       const initial = captureCurateDraft(activeItem)
-      // Reopening for a new review hides prior commits from the active proposal,
-      // but those commits still prove that the matching old draft was written.
+      // Completed confirmations supersede their saved draft.
       const rows = new Map((commitRows ?? []).map(row => [row.trackId, row]))
       const completedDraft = draft && isReconciledCurateDraft(draft, rows, activeItem.rawTracks, activeItem.rawRelease)
-      const restoredDraft = draft && !completedDraft
-        ? matchesCurateConfirmation(draft, rows, false, activeItem.rawTracks, activeItem.rawRelease) ? draft : migrateCurateDraft(draft, captureCurateBaseline(activeItem))
-        : null
+      const restoredDraft = resolveAlbumSelectionDraftState(
+        draft, captureCurateBaseline(activeItem), Boolean(completedDraft),
+        Boolean(draft && matchesCurateConfirmation(draft, rows, false, activeItem.rawTracks, activeItem.rawRelease)),
+      )
       const restored = restoredDraft ? restoreCurateDraft(activeItem, restoredDraft) : activeItem
       const snapshot = restoredDraft
         ? { ...captureCurateDraft(restored), baseline: restoredDraft.baseline }
@@ -718,6 +698,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         saved: true,
         restored: Boolean(restoredDraft),
       })
+      if (restoredDraft?.staged) setStagedIds(previous => new Set(previous).add(activeItemId))
       setDraftLoad({ id: activeItemId, failed: false })
     }).catch(err => {
       if (cancelled) return
@@ -761,12 +742,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   const selectedCommitReconciled = Boolean(selectedAlbum && selectedDraft && isReconciledCurateDraft(selectedDraft, commitsByTrack, selectedAlbum.rawTracks, selectedAlbum.rawRelease))
   const selectedCommitStatuses = new Set(selectedCommitRows.map(row => row.status))
   const selectedCommitError = selectedCommitRows.find(row => row.status === 'failed' && row.errorMessage)?.errorMessage
-  const selectedCommitStatus = selectedCommitStatuses.has('failed')
-    ? (selectedCommitStatuses.has('completed') ? 'Partially written · retry needed' : 'Write failed · retry needed')
-    : selectedCommitStatuses.has('in_flight') ? 'Writing tags'
-    : selectedCommitStatuses.has('pending') ? 'Queued for tag writing'
-    : selectedCommitStatuses.has('completed')
-      ? (selectedCommitRows.length === selectedTrackIds.size ? 'Tags written' : 'Some tags written') : null
 
   const saveAlbumDraft = useCallback(async (album: AlbumWorkItem, requireRevision = false, renewRevision = false) => {
     const state = loadedDrafts.current.get(album.id)
@@ -809,7 +784,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     previousDraftItems.current = albumItems
     for (const id of loadedDrafts.current.keys()) {
       const album = albumItems.get(id)
-      if (!album || album === previous.get(id) || album.status === 'committed') continue
+      if (!album || album === previous.get(id) || album.draftBasedOn) continue
       void saveAlbumDraft(album).then(draft => {
         const state = loadedDrafts.current.get(album.id)
         if (state?.saved && state.draft === draft && draft.revision &&
@@ -827,14 +802,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     outcomeStatus: traceOutcomeStatus,
     isDrawerOpen: isTraceDrawerOpen,
     isResuming: isTraceResuming,
-    setIsResuming: setIsTraceResuming,
     executeFetch: executeTraceFetch,
     isRefreshing: isSteeringLoading,
     cancelRefresh,
     lastEvidenceId,
     toggleDrawer: toggleTraceDrawer,
     closeDrawer: closeTraceDrawer,
-    setTrace: setCurationTrace,
   } = useCurationTrace({
     albumId: selectedAlbum?.id,
   })
@@ -844,7 +817,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   useEffect(() => {
     const albumId = selectedAlbum?.id
     setSavedAppleEvidence(null)
-    setDiagnosticSnapshot(null)
     if (!albumId) return
     let cancelled = false
     void tauriBridge.curationListEvidence(albumId).then(async runs => {
@@ -862,42 +834,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     return () => { cancelled = true }
   }, [selectedAlbum?.id, lastEvidenceId])
 
-  const captureDiagnosticSnapshot = () => {
-    if (!selectedAlbum) return
-    const fields = Object.fromEntries(albumReviewFields.map(key => [key, {
-      local: key === 'coverArt' ? Boolean(selectedAlbum.coverArt.local) : selectedAlbum[key].local,
-      selected: key === 'coverArt' ? Boolean(selectedAlbum.coverArt.selected) : selectedAlbum[key].selected,
-      source: selectedAlbum[key].source,
-      confidence: selectedAlbum[key].confidence,
-      requiresHumanReview: selectedAlbum[key].requiresHumanReview === true,
-    }]))
-    // Deliberate allowlist: no paths, artwork URLs, tokens, raw responses, or audio buffers.
-    setDiagnosticSnapshot(JSON.stringify({
-      schema: 1,
-      capturedAt: new Date().toISOString(),
-      albumId: selectedAlbum.id,
-      title: selectedAlbum.currentTitle,
-      activeTier,
-      calculatedTier: selectedAlbum.tier,
-      queueIssue: baseQueue.find(item => item.albumId === selectedAlbum.id)?.issueBadgeLabel,
-      draft: { restored: loadedDrafts.current.get(selectedAlbum.id)?.restored === true,
-        baselineChanged: Boolean(selectedAlbum.draftBasedOn), staged: selectedAlbum.userOverridden === true },
-      trace: { status: traceStatus, outcome: curationTrace?.outcomeStatus, evidenceId: lastEvidenceId },
-      fields,
-      trackCount: selectedAlbum.tracks.length,
-      tracks: selectedAlbum.tracks.slice(0, 100).map(track => ({ id: track.trackId, number: track.trackNumber,
-        localTitle: track.localTitle, selectedTitle: track.matchedTitle,
-        localArtists: track.localArtists, selectedArtists: track.matchedArtists,
-        requiresHumanReview: track.requiresHumanReview === true })),
-      commits: (commitRows ?? []).filter(row => selectedTrackIds.has(row.trackId)).map(row => ({
-        trackId: row.trackId, status: row.status, applies: row.applies === true,
-        ignoredForCurrentReview: supersededCommitIds?.has(row.id) === true,
-        error: Boolean(row.errorMessage),
-      })),
-    }, null, 2))
-  }
-
-  // Sync steering parameters when active album changes
   useEffect(() => {
     if (selectedAlbum) {
       const title = selectedAlbum.albumTitle.selected || selectedAlbum.currentTitle || ''
@@ -910,15 +846,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       setSteerGroundingUrl('')
     }
   }, [selectedAlbum?.id])
-
-  // Count by tier
-  const tier1Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier1' && a.status !== 'committed' && eligibleIds.has(a.id))
-  }, [albumItems, eligibleIds])
-
-  const tier2Items = useMemo(() => {
-    return Array.from(albumItems.values()).filter((a) => a.tier === 'tier2' && a.status !== 'committed' && eligibleIds.has(a.id))
-  }, [albumItems, eligibleIds])
 
   const isCompilationAlbum = useMemo(() => {
     if (!selectedAlbum) return false
@@ -933,94 +860,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     )
   }, [selectedAlbum])
 
-  // Asynchronously resolve 4-way consensus for selected album
-  useEffect(() => {
-    if (!selectedAlbum || !selectedAlbum.rawRelease || !selectedAlbum.rawTracks.length) return
-    if (loadedDrafts.current.get(selectedAlbum.id)?.restored) return
-    let isMounted = true
-
-    const fetchConsensus = async () => {
-      try {
-        const release = selectedAlbum.rawRelease!
-        const consensus = await executeTraceFetch(selectedAlbum.id, {
-          trigger: 'initial', context: curateMatchingContext(release, selectedAlbum.rawTracks),
-        }, async (signal, onProgress, record) => {
-          const result = await federatedResolversService.resolve2of3ReleaseConsensus(
-            release, selectedAlbum.rawTracks, false, undefined, undefined, onProgress, signal, record, 2, 1,
-          )
-          return { result, trace: result.decisionTrace, trackDecisions: captureTrackDecisions(result),
-            identityMappings: result.identityMappings, sourceCandidates: sourceCandidatesFromGrouping(result) }
-        })
-
-        if (!isMounted || !consensus) return
-
-        setAlbumItems((prev) => {
-          const next = new Map(prev)
-          const current = next.get(selectedAlbum.id)
-          if (!current) return prev
-
-          // Preserve user-selected values and manual overrides when online provider candidates arrive
-          const preserveField = <T,>(curr: MetadataFieldState<T>, cand?: MetadataFieldState<T>): MetadataFieldState<T> => {
-            if (!cand) return curr
-            const isUserSet = curr.userOverridden || (curr.selected !== '' && curr.selected !== undefined && curr.source !== 'local_fallback')
-            return {
-              ...cand,
-              selected: isUserSet ? curr.selected : (cand.selected || curr.selected),
-              userOverridden: curr.userOverridden,
-              source: curr.userOverridden ? 'manual_override' : (isUserSet ? curr.source : cand.source),
-            }
-          }
-
-          // Apply semantic conventions (Indian Soundtrack -> Artist = Composer, Language-prefixed genre)
-          const convRes = behavioralLearningService.applySoundtrackConventions({
-            composer: String(consensus.albumFieldStates?.composer?.selected || current.composer.selected || ''),
-            albumArtist: String(consensus.albumFieldStates?.albumArtist?.selected || current.albumArtist.selected || ''),
-            genre: String(consensus.albumFieldStates?.genre?.selected || current.genre.selected || ''),
-            language: detectedLanguage,
-          })
-
-          const updated: AlbumWorkItem = {
-            ...current,
-            tier: consensus.tier || current.tier,
-            confidenceScore: consensus.confidenceScore || current.confidenceScore,
-            offsetApplied: consensus.sequenceOffsetResult?.isConfidentOffset
-              ? consensus.sequenceOffsetResult.detectedOffset
-              : undefined,
-            albumTitle: preserveField(current.albumTitle, consensus.albumFieldStates?.albumTitle),
-            albumArtist: {
-              ...preserveField(current.albumArtist, consensus.albumFieldStates?.albumArtist),
-              selected: current.userOverridden
-                ? current.albumArtist.selected
-                : (convRes.albumArtist || preserveField(current.albumArtist, consensus.albumFieldStates?.albumArtist).selected),
-            },
-            composer: preserveField(current.composer, consensus.albumFieldStates?.composer),
-            year: preserveField(current.year, consensus.albumFieldStates?.releaseYear),
-            coverArt: preserveField(current.coverArt, consensus.albumFieldStates?.coverArt),
-            genre: {
-              ...preserveField(current.genre, consensus.albumFieldStates?.genre),
-              selected: current.userOverridden
-                ? current.genre.selected
-                : (convRes.genre || preserveField(current.genre, consensus.albumFieldStates?.genre).selected),
-            },
-            tracks: mergeConsensusTrackStates(consensus.trackStates, current.tracks, current.rawTracks),
-          }
-
-          next.set(selectedAlbum.id, mergeCurateProposal(current, updated))
-          return next
-        })
-      } catch (err) {
-        console.warn('[UnifiedCurateCockpit] Consensus fetch deferred:', err)
-      }
-    }
-
-    fetchConsensus()
-
-    return () => {
-      isMounted = false
-    }
-  }, [selectedAlbum?.id])
-
-  // Select provider cell for an album field
   const handleSelectFieldSource = (
     fieldKey: 'albumTitle' | 'albumArtist' | 'composer' | 'year' | 'coverArt' | 'genre',
     source: 'local' | 'apple' | 'musicbrainz' | 'ai'
@@ -1375,7 +1214,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           tracks: mergeConsensusTrackStates(consensus.trackStates, current.tracks, current.rawTracks),
         }
 
-        next.set(selectedAlbum.id, mergeCurateProposal(current, updated))
+        const proposal = mergeCurateProposal(current, updated)
+        next.set(selectedAlbum.id, {
+          ...restoreCurateDraft(proposal, captureCurateDraft(current)),
+          proposal: captureCurateDraft(proposal),
+        })
         return next
       })
 
@@ -1384,6 +1227,42 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       console.error('[UnifiedCurateCockpit] Fetch & Anchor error:', err)
       showToast('⚠️ Failed to re-query providers. Check search inputs.')
     }
+  }
+
+  const acceptSuggestions = () => {
+    if (!selectedAlbum) return
+    const apple = savedAppleEvidence?.albumId === selectedAlbum.id && !savedAppleEvidence.rejectionReason ? savedAppleEvidence : undefined
+    const learned = behavioralLearningService.applySoundtrackConventions({
+      composer: selectedAlbum.composer.selected,
+      albumArtist: selectedAlbum.albumArtist.selected,
+      genre: selectedAlbum.genre.selected,
+      language: detectedLanguage,
+    })
+    const candidates = {
+      albumTitle: apple?.title,
+      albumArtist: apple?.artist || behavioralLearningService.applyLearnedRules(learned.albumArtist || selectedAlbum.albumArtist.selected, 'artist').value,
+      composer: apple?.composer || behavioralLearningService.applyLearnedRules(selectedAlbum.composer.selected, 'composer').value,
+      year: apple?.year,
+      genre: apple?.genre || learned.genre,
+      coverArt: undefined,
+    }
+    setAlbumItems(previous => {
+      const current = previous.get(selectedAlbum.id)
+      if (!current) return previous
+      const currentDraft = captureAlbumDraft(current)
+      const trackSuggestions = new Map(current.proposal?.tracks.map(track => [track.trackId, track]))
+      for (const track of currentDraft.tracks) {
+        const saved = apple?.trackRows.get(track.trackId)
+        if (!saved || saved.conflicted || trackSuggestions.has(track.trackId)) continue
+        trackSuggestions.set(track.trackId, {
+          ...track, matchedTitle: saved.title || track.matchedTitle,
+          matchedArtists: saved.artist || track.matchedArtists,
+        })
+      }
+      const proposal = { ...currentDraft, ...current.proposal, tracks: [...trackSuggestions.values()] }
+      const draft = applyAcceptedSuggestionsToDraft(currentDraft, proposal, candidates)
+      return new Map(previous).set(current.id, restoreCurateDraft(current, draft))
+    })
   }
 
   // Dynamically detect album language based on tags, file path, and title
@@ -1399,167 +1278,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       filePath: selectedAlbum.rawTracks?.[0]?.filePath,
     }) || 'Hindi'
   }, [selectedAlbum])
-
-  // Compilation album detection heuristic
-  const provenanceAttempted = useRef<string | undefined>(undefined)
-  useEffect(() => { provenanceAttempted.current = undefined }, [selectedAlbum?.id])
-
-  // Automatic debounced compilation provenance resolution (500ms, playback guarded, parameter-hashed cache)
-  useEffect(() => {
-    if (!selectedAlbum || !isCompilationAlbum) return
-    if (loadedDrafts.current.get(selectedAlbum.id)?.restored) return
-
-    // Defer automatic inference until the transport is idle.
-    if (isPlaying) {
-      console.log('[UnifiedCurateCockpit] Audio playback active; deferring provenance inference')
-      return
-    }
-
-    // Abort previous in-flight request if user switched albums
-    if (provenanceAbortRef.current) {
-      provenanceAbortRef.current.abort()
-      provenanceAbortRef.current = null
-    }
-
-    const controller = new AbortController()
-    provenanceAbortRef.current = controller
-
-    const timer = setTimeout(async () => {
-      try {
-        const albumTitleStr = selectedAlbum.albumTitle?.selected || selectedAlbum.currentTitle
-        const albumArtistStr = selectedAlbum.albumArtist?.selected || ''
-        const composerStr = selectedAlbum.composer?.selected || ''
-
-        const hashKey = await provenanceCacheService.computeHashKey(
-          albumTitleStr,
-          albumArtistStr,
-          composerStr,
-          selectedAlbum.rawTracks
-        )
-
-        // 1. Check SQLite / memory cache first
-        const cached = await provenanceCacheService.get(hashKey)
-        if (cached && Array.isArray(cached.tracks) && cached.tracks.length > 0) {
-          setAlbumItems(prev => {
-            const next = new Map(prev)
-            const cur = next.get(selectedAlbum.id)
-            if (!cur) return prev
-            const updatedTracks = cur.tracks.map(tState => {
-              const match = cached.tracks.find(ct => ct.trackId === tState.trackId || ct.trackNumber === tState.trackNumber)
-              if (match && match.originalAlbum) {
-                return {
-                  ...tState,
-                  originalAlbum: tState.selectedOverrides?.includes('originalAlbum') ? tState.originalAlbum : match.originalAlbum,
-                  originalYear: tState.selectedOverrides?.includes('originalYear') ? tState.originalYear : match.originalYear,
-                  provenanceSource: tState.selectedOverrides?.includes('originalAlbum') ? 'user_override' as const : 'consensus' as const,
-                  aiTitle: match.title,
-                  aiArtists: match.primaryVocalists || (match.primaryVocalists === undefined && (match as any).singers ? (match as any).singers : undefined),
-                }
-              }
-              return tState
-            })
-            next.set(selectedAlbum.id, {
-              ...cur,
-              albumTitle: { ...cur.albumTitle, ai: albumTitleStr },
-              albumArtist: { ...cur.albumArtist, ai: albumArtistStr || cur.albumArtist.selected },
-              composer: { ...cur.composer, ai: composerStr || cur.composer.selected },
-              year: { ...cur.year, ai: cur.year.selected },
-              genre: { ...cur.genre, ai: `${detectedLanguage} Film Soundtrack` },
-              tracks: updatedTracks,
-            })
-            return next
-          })
-          return
-        }
-
-        // 2. Cache miss: initiate single-pass Gemini call via DPAPI backend
-        setIsResolvingProvenance(true)
-        const payload = {
-          albumTitle: albumTitleStr,
-          artistCredit: albumArtistStr,
-          composerName: composerStr,
-          tracks: selectedAlbum.rawTracks.map(t => ({
-            id: t.id,
-            trackNumber: t.trackNumber || 1,
-            title: t.title,
-            duration: t.duration || t.durationSeconds,
-            artists: t.artistCredit,
-          }))
-        }
-
-        const identity = await tauriBridge.curationGetIdentity(payload.tracks.map(track => track.id))
-        controller.signal.throwIfAborted()
-        if (provenanceAttempted.current === selectedAlbum.id) return
-        provenanceAttempted.current = selectedAlbum.id
-        const result: any = await resolveGemini('compilation', payload, controller.signal, 1)
-        controller.signal.throwIfAborted()
-        const rawTracks = Array.isArray(result) ? result : (Array.isArray(result?.tracks) ? result.tracks : (Array.isArray(result?.results) ? result.results : []))
-        if (rawTracks.length > 0) {
-          const provenanceResult: CompilationProvenanceResult = {
-            albumTitle: albumTitleStr,
-            isCompilation: true,
-            cached: false,
-            tracks: rawTracks.map((rt: any, idx: number) => ({
-              trackId: rt.trackId || rt.id || selectedAlbum.rawTracks[idx]?.id || `trk-${idx}`,
-              trackNumber: rt.trackNumber || (idx + 1),
-              title: rt.title || selectedAlbum.rawTracks[idx]?.title || '',
-              originalAlbum: rt.originalAlbum || rt.proposedOriginalAlbum || rt.movie || '',
-              originalYear: rt.originalYear || rt.proposedOriginalYear || rt.year,
-              confidence: rt.confidence || 0.9,
-              reasoning: rt.reasoning || rt.notes,
-              primaryVocalists: rt.primaryVocalists || rt.singers || rt.artists,
-              canonicalComposer: rt.canonicalComposer || rt.composer,
-            }))
-          }
-
-          // Save to parameter-hashed cache
-          await provenanceCacheService.set(hashKey, selectedAlbum.id, albumTitleStr, payload, provenanceResult, undefined, identity)
-
-          // Update tracks and Gemini AI Master column in UI state
-          setAlbumItems(prev => {
-            const next = new Map(prev)
-            const cur = next.get(selectedAlbum.id)
-            if (!cur) return prev
-            const updatedTracks = cur.tracks.map(tState => {
-              const match = provenanceResult.tracks.find(ct => ct.trackId === tState.trackId || ct.trackNumber === tState.trackNumber)
-              if (match && match.originalAlbum) {
-                return {
-                  ...tState,
-                  originalAlbum: tState.selectedOverrides?.includes('originalAlbum') ? tState.originalAlbum : match.originalAlbum,
-                  originalYear: tState.selectedOverrides?.includes('originalYear') ? tState.originalYear : match.originalYear,
-                  provenanceSource: tState.selectedOverrides?.includes('originalAlbum') ? 'user_override' as const : 'gemini_ai' as const,
-                  aiTitle: match.title,
-                  aiArtists: match.primaryVocalists || (match.primaryVocalists === undefined && (match as any).singers ? (match as any).singers : undefined),
-                }
-              }
-              return tState
-            })
-            next.set(selectedAlbum.id, {
-              ...cur,
-              albumTitle: { ...cur.albumTitle, ai: albumTitleStr },
-              albumArtist: { ...cur.albumArtist, ai: albumArtistStr || cur.albumArtist.selected },
-              composer: { ...cur.composer, ai: composerStr || cur.composer.selected },
-              year: { ...cur.year, ai: cur.year.selected },
-              genre: { ...cur.genre, ai: `${detectedLanguage} Film Soundtrack` },
-              tracks: updatedTracks,
-            })
-            return next
-          })
-        }
-      } catch (err: any) {
-        if (err.name !== 'AbortError') {
-          console.warn('[UnifiedCurateCockpit] Provenance inference note:', err)
-        }
-      } finally {
-        setIsResolvingProvenance(false)
-      }
-    }, 500)
-
-    return () => {
-      clearTimeout(timer)
-      controller.abort()
-    }
-  }, [selectedAlbum?.id, isCompilationAlbum, isPlaying])
 
   // Manual edit handler for track provenance
   const handleSaveProvenance = useCallback((trackId: string) => {
@@ -1588,7 +1306,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // Stage Album: saves state, keeps in queue with 'staged' badge, and advances
   const handleStage = useCallback(async () => {
-    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || selectedCommitReconciled || batchAbort.current) return
+    if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitReconciled || batchAbort.current) return
 
     // Advance only after SQLite has acknowledged the staged draft.
     setStagingAlbumId(selectedAlbum.id)
@@ -1607,39 +1325,43 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       if (current) {
         next.set(selectedAlbum.id, {
           ...current,
-          status: 'staged',
           userOverridden: true,
         })
       }
       return next
     })
 
-    // 2. Save sidecar in memory via graphEngine
-    for (const trk of selectedAlbum.tracks) {
-      graphEngine.updateTrackSidecar(trk.trackId, {
-        title: trk.matchedTitle,
-        artistCredit: trk.matchedArtists,
-        albumTitle: selectedAlbum.albumTitle.selected,
-        composerName: selectedAlbum.composer.selected,
-        releaseYear: selectedAlbum.year.selected,
-        genre: selectedAlbum.genre.selected,
-        originalAlbum: trk.originalAlbum,
-        originalYear: trk.originalYear,
-      })
-    }
-
     showToast(`✓ Staged "${selectedAlbum.albumTitle.selected}". Saved for review in queue.`)
 
-    // 3. Advance to next album in queue
-    const activeList = (activeTier === 'tier1' ? tier1Items : tier2Items).filter(a => a.status !== 'committed')
-    const currIdx = activeList.findIndex((a) => a.id === selectedAlbum.id)
-    if (currIdx >= 0 && currIdx < activeList.length - 1) {
-      setSelectedAlbumId(current => current === selectedAlbum.id ? activeList[currIdx + 1].id : current)
-    }
-  }, [selectedAlbum, stagingAlbumId, selectedCommitReconciled, saveAlbumDraft, activeTier, tier1Items, tier2Items, showToast])
+    setStagedIds(prev => new Set(prev).add(selectedAlbum.id))
+    setSelectedAlbumId(current => current === selectedAlbum.id
+      ? stepFilteredAlbumSelection(filteredAlbums, current, 1) : current)
+  }, [selectedAlbum, stagingAlbumId, queuingAlbumId, selectedCommitReconciled, saveAlbumDraft, filteredAlbums, showToast])
 
-  // Freeze this album's exact selection in the native queue. The worker owns file writes.
-  const handleCommitAlbum = useCallback(async () => {
+  const markDraftsQueued = (drafts: NonNullable<EnqueueBatchPayload['curateDrafts']>) => {
+    const queued = new Set(drafts.map(({ albumId }) => albumId))
+    for (const { albumId, draft } of drafts) {
+      const state = loadedDrafts.current.get(albumId)
+      if (state && (!state.draft.revision || state.draft.revision === draft.revision)) {
+        // Keep the local snapshot ordering. The native draft may round-trip
+        // through a JSON object with a different property order.
+        const snapshot: CurateDraft = JSON.parse(state.serialized)
+        Object.assign(state, { draft, serialized: JSON.stringify({ ...snapshot, staged: false }), saved: true })
+      }
+    }
+    setStagedIds(previous => new Set([...previous].filter(id => !queued.has(id))))
+    setAlbumItems(previous => {
+      const next = new Map(previous)
+      for (const id of queued) {
+        const album = next.get(id)
+        if (album) next.set(id, { ...album, userOverridden: false })
+      }
+      return next
+    })
+  }
+
+  // Freeze the selection in the same transaction that enqueues the writes.
+  const handleCommitAlbum = async () => {
     if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitConfirmed || batchAbort.current) return
     setQueuingAlbumId(selectedAlbum.id)
     try {
@@ -1647,12 +1369,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       const draft = await saveAlbumDraft(selectedAlbum, true, selectedCommitRows.some(row => row.lineageChanged))
       const items = makeCurateCommitItems(draft, selectedAlbum.rawTracks, selectedAlbum.rawRelease)
       if (!items.length) throw new Error('There are no tracks to commit.')
+      const drafts = [{ albumId: selectedAlbum.id, draft: { ...draft, staged: false } }]
       await tauriBridge.commitEnqueueBatch({
         description: `Curate: ${selectedAlbum.albumTitle.selected}`,
         destination: 'embedded',
-        curateDrafts: [{ albumId: selectedAlbum.id, draft }],
+        curateDrafts: drafts,
         items,
       })
+      markDraftsQueued(drafts)
       showToast(`Queued "${selectedAlbum.albumTitle.selected}" for tag writing.`)
       await onCommitQueued?.()
     } catch (err) {
@@ -1660,50 +1384,92 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     } finally {
       setQueuingAlbumId(null)
     }
-  }, [selectedAlbum, stagingAlbumId, queuingAlbumId, selectedCommitConfirmed, selectedCommitRows, saveAlbumDraft, onCommitQueued, showToast])
+  }
 
-  const handleCommitAllTier1 = async () => {
-    if (!tier1Items.length || stagingAlbumId || queuingAlbumId || isPlaying || batchAbort.current) return
+  // The native draft-list command enforces the idle cooldown. Refresh the
+  // staged badges when entering Curate or returning to idle.
+  useEffect(() => {
+    if (isPlaying) return
+    let cancelled = false
+    void tauriBridge.listCurationDrafts().then(drafts => {
+      if (!cancelled) setStagedIds(new Set(resolveStagedAlbumIds(drafts)))
+    }).catch(() => {
+      // The transport may still be in cooldown. Commit All can retry on demand.
+    })
+    return () => { cancelled = true }
+  }, [isPlaying])
+
+  const openCommitPreview = async () => {
+    if (stagingAlbumId || queuingAlbumId || isPlaying || batchAbort.current) return
     const controller = new AbortController()
     batchAbort.current = controller
     setIsBatchCommitting(true)
     try {
+      await Promise.all([...loadedDrafts.current.values()].map(state => state.pending))
+      const drafts = await tauriBridge.listCurationDrafts()
+      controller.signal.throwIfAborted()
+      const ids = resolveStagedAlbumIds(drafts)
+      setStagedIds(new Set(ids))
+      const candidates = ids.flatMap(albumId => {
+        const album = albumItems.get(albumId)
+        const draft = drafts[albumId]
+        if (!album || matchesCurateConfirmation(draft, commitsByTrack, false, album.rawTracks, album.rawRelease)) return []
+        return [{
+          albumId, title: album.currentTitle, draft,
+          rawTracks: album.rawTracks, rawRelease: album.rawRelease,
+          currentBaseline: captureCurateBaseline(album).baseline,
+          lineageChanged: album.rawTracks.some(track => commitsByTrack.get(track.id)?.lineageChanged),
+        }]
+      })
+      if (candidates.length) setPreview(candidates)
+      else showToast('No staged albums are ready to commit.')
+    } catch (err) {
+      if (!controller.signal.aborted) showToast(`Could not load staged albums: ${String(err)}`)
+    } finally {
+      batchAbort.current = null
+      setIsBatchCommitting(false)
+    }
+  }
+
+  const confirmBatch = async (eligibleAlbumIds: readonly string[]) => {
+    if (!preview || batchAbort.current || stagingAlbumId || queuingAlbumId) return
+    batchAbort.current = new AbortController()
+    setIsBatchCommitting(true)
+    try {
       if (!tauriBridge.isTauri()) throw new Error('Open the desktop app to queue tag writes.')
-      const rows = new Map((await tauriBridge.commitGetCurateProjection()).filter(row => !supersededCommitIds?.has(row.id)).map(row => [row.trackId, row]))
       const items: EnqueueBatchPayload['items'] = []
       const drafts: NonNullable<EnqueueBatchPayload['curateDrafts']> = []
-      for (const album of tier1Items) {
-        controller.signal.throwIfAborted()
-        if (album.draftBasedOn) continue
-        const loaded = loadedDrafts.current.has(album.id)
-        const saved = loaded ? await saveAlbumDraft(album, true) : await tauriBridge.curationGetDraft(album.id)
-        controller.signal.throwIfAborted()
-        // Review legacy selections individually before a batch can freeze them.
-        if (saved && !saved.revision) continue
-        const prepared = prepareTier1Commit(captureAlbumDraft(album), saved, album.rawTracks, album.rawRelease, rows, crypto.randomUUID(), loaded)
-        if (!prepared) continue
-        items.push(...prepared.items)
-        drafts.push({ albumId: album.id, draft: prepared.draft })
+      for (const entry of preview) {
+        if (!eligibleAlbumIds.includes(entry.albumId)) continue
+        const album = albumItems.get(entry.albumId)
+        if (!album || album.rawTracks !== entry.rawTracks || album.rawRelease !== entry.rawRelease) {
+          throw new Error('Local tags changed. Open the preview again.')
+        }
+        const current = loadedDrafts.current.get(entry.albumId)
+        if (current?.pending || (current?.draft.revision && current.draft.revision !== entry.draft.revision)) {
+          throw new Error('A staged draft changed. Open the preview again.')
+        }
+        if (matchesCurateConfirmation(entry.draft, commitsByTrack, false, entry.rawTracks, entry.rawRelease)) continue
+        const draft = { ...entry.draft, revision: entry.draft.revision ?? crypto.randomUUID(), staged: false }
+        const changed = makeCurateCommitItems(draft, entry.rawTracks, entry.rawRelease)
+        if (!changed.length) continue
+        drafts.push({ albumId: entry.albumId, draft })
+        items.push(...changed)
       }
-      if (!items.length) {
-        showToast('No Tier 1 albums are ready to queue. Review their drafts or existing queue items.')
-        return
-      }
-      controller.signal.throwIfAborted()
+      if (!items.length) throw new Error('There are no tracks to commit.')
       await tauriBridge.commitEnqueueBatch({
-        description: `Curate Tier 1 · ${drafts.length} albums`,
+        description: `Curate · ${drafts.length} staged albums`,
         destination: 'embedded',
-        requireIdle: true,
         curateDrafts: drafts,
         items,
       })
-      const skipped = tier1Items.length - drafts.length
-      showToast(`Queued ${drafts.length} Tier 1 album(s) for tag writing.${skipped ? ` ${skipped} skipped.` : ''}`)
+      markDraftsQueued(drafts)
+      setPreview(null)
+      showToast(`Queued ${drafts.length} staged album(s) for tag writing.`)
       await onCommitQueued?.()
     } catch (err) {
-      showToast(controller.signal.aborted
-        ? 'Tier 1 preparation stopped. Stop playback before queueing a batch.'
-        : `Could not queue Tier 1: ${String(err)}`)
+      setPreview(null)
+      showToast(`Could not queue staged albums: ${String(err)}`)
     } finally {
       batchAbort.current = null
       setIsBatchCommitting(false)
@@ -1713,15 +1479,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   // Keyboard navigation shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === '[') {
+      if ((e.metaKey || e.ctrlKey) && (e.key === '[' || e.key === ']')) {
         e.preventDefault()
-        const currentIdx = tier2Items.findIndex((a) => a.id === selectedAlbumId)
-        if (currentIdx > 0) setSelectedAlbumId(tier2Items[currentIdx - 1].id)
-      } else if ((e.metaKey || e.ctrlKey) && e.key === ']') {
-        e.preventDefault()
-        const currentIdx = tier2Items.findIndex((a) => a.id === selectedAlbumId)
-        if (currentIdx < tier2Items.length - 1) setSelectedAlbumId(tier2Items[currentIdx + 1].id)
+        directSelection.current = null
+        setSelectedAlbumId(current => stepFilteredAlbumSelection(filteredAlbums, current, e.key === '[' ? -1 : 1))
       } else if (e.key === 'Escape') {
+        if (document.querySelector('[data-curate-priority-popover]:popover-open')) return
+        if (preview) return
         if (isRulesModalOpen) setIsRulesModalOpen(false)
         else if (isHealthDrawerOpen) setIsHealthDrawerOpen(false)
         else onBackToLibrary()
@@ -1730,7 +1494,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedAlbumId, tier2Items, isRulesModalOpen, isHealthDrawerOpen, onBackToLibrary])
+  }, [filteredAlbums, preview, isRulesModalOpen, isHealthDrawerOpen, onBackToLibrary])
 
   // Row Renderer: Album Text Field
   const renderFieldRow = (
@@ -2042,45 +1806,24 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           </div>
           <div>
             <h1 className="text-sm font-semibold tracking-wide text-white">Curate & Metadata Cockpit</h1>
-            <p className="text-[10px] text-white/50">Unified 2-Tier Pipeline • Audiophile Clean Transport</p>
+            <p className="text-[10px] text-white/50">Album metadata and artwork</p>
           </div>
-        </div>
-
-        {/* Center: 2-Tier Segmented Switch */}
-        <div className="flex items-center p-1 bg-black/40 rounded-xl border border-white/[0.08]">
-          <button
-            onClick={() => setActiveTier('tier1')}
-            className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-2 cursor-pointer ${
-              activeTier === 'tier1'
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                : 'text-white/60 hover:text-white'
-            }`}
-          >
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>Tier 1: Auto-Staged</span>
-            <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-emerald-500/30 text-emerald-200">
-              {tier1Items.length}
-            </span>
-          </button>
-
-          <button
-            onClick={() => setActiveTier('tier2')}
-            className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-2 cursor-pointer ${
-              activeTier === 'tier2'
-                ? 'bg-[#D4AF37]/20 text-[#D4AF37] border border-[#D4AF37]/40 shadow-sm'
-                : 'text-white/60 hover:text-white'
-            }`}
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span>Tier 2: Guided Reconciliation</span>
-            <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-[#D4AF37]/30 text-[#D4AF37]">
-              {tier2Items.length}
-            </span>
-          </button>
         </div>
 
         {/* Right Action Icons */}
         <div className="flex items-center gap-2">
+          {commitQueueHostRef && <div ref={commitQueueHostRef} />}
+          <CuratePriorityPopover
+            settings={prioritySettings}
+            summary={problemSummary}
+            onSave={settings => {
+              preserveSelectionOnRank.current = true
+              directSelection.current = selectedAlbumId
+              savePrioritySettings(settings)
+              setPrioritySettings(settings)
+              onPrioritySettingsChange?.(settings)
+            }}
+          />
           {/* Audiophile Transport Status Indicator */}
           <div
             className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 ${
@@ -2119,32 +1862,69 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
       {/* 2. Main Body Split Deck */}
       <div className="flex-1 flex overflow-hidden">
+        <div className={`relative shrink-0 overflow-hidden border-r border-white/10 bg-[#121318] motion-safe:transition-[width] motion-safe:duration-200 motion-safe:ease-in-out ${showFilters ? 'w-52 xl:w-64' : 'w-9'}`}>
+          <div className="relative z-10 flex h-10 items-center justify-end border-b border-white/[0.06] px-1">
+            {showFilters && <span className="absolute left-3 text-xs font-semibold text-zinc-300">Filters</span>}
+            <button
+              ref={filterToggleRef}
+              type="button"
+              aria-label={filterToggleLabel}
+              aria-controls="curate-filters"
+              aria-expanded={showFilters}
+              title={filterToggleLabel}
+              className="cursor-pointer rounded-lg p-1.5 text-white/70 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline focus-visible:outline-cyan-300 aria-expanded:bg-white/[0.08] aria-expanded:text-white"
+              onClick={() => setShowFilters(visible => !visible)}
+            >
+              <PanelLeft aria-hidden="true" className="h-4 w-4" />
+            </button>
+          </div>
+          <div inert={!showFilters}
+            className={`absolute bottom-0 right-0 top-10 flex motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-in-out ${showFilters ? '' : '-translate-x-9'}`}>
+            <CurateFilterBar summary={problemSummary} settings={prioritySettings} filter={filter}
+              albums={albums} onFilterChange={changeFilter} />
+          </div>
+        </div>
         {/* Left Album Rail */}
-        <aside className="w-72 border-r border-white/[0.08] bg-[#0A0B0E] flex flex-col shrink-0">
-          <div className="p-3 border-b border-white/[0.06] flex items-center justify-between">
-            <span className="text-xs font-medium text-white/70">
-              {activeTier === 'tier1' ? 'Tier 1 Auto-Staged' : 'Tier 2 Pending Review'}
-            </span>
-            {activeTier === 'tier1' && tier1Items.length > 0 && (
+        <aside className="w-60 border-r border-white/[0.08] bg-[#0A0B0E] flex flex-col shrink-0 xl:w-72">
+          <div className="p-3 border-b border-white/[0.06] flex items-center justify-end">
+            {
               <button
-                onClick={handleCommitAllTier1}
+                onClick={openCommitPreview}
                 disabled={isBatchCommitting || isPlaying || Boolean(stagingAlbumId || queuingAlbumId)}
                 className="px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-[11px] cursor-pointer transition-colors shadow-sm disabled:opacity-50"
               >
                 {isBatchCommitting
                   ? 'Preparing queue…'
-                  : `Commit All (${tier1Items.length})`}
+                  : `Commit All (${stagedIds.size})`}
               </button>
-            )}
+            }
           </div>
 
+          <div className="shrink-0 space-y-1 border-b border-white/[0.06] px-3 py-2">
+            <h2 className="text-xs font-semibold text-white">
+              {filter.categories.length === 1 ? labels[filter.categories[0]] : 'Albums to curate'}
+              <span className="ml-1 whitespace-nowrap font-normal text-zinc-400">({filteredAlbums.length})</span>
+            </h2>
+            <CurateAlbumSearch summary={problemSummary} settings={prioritySettings} filter={filter}
+              albums={albums} onFilterChange={changeFilter} />
+          </div>
           <div className="flex-1 overflow-y-auto divide-y divide-white/[0.04]">
-            {(activeTier === 'tier1' ? tier1Items : tier2Items).map((alb) => (
+            {filteredAlbums.flatMap(({ id }) => albumItems.get(id) ?? []).map((alb) => (
               <div
                 key={alb.id}
                 data-testid="curate-album-item"
                 data-album-id={alb.id}
-                onClick={() => setSelectedAlbumId(alb.id)}
+                role="button"
+                tabIndex={0}
+                aria-pressed={selectedAlbumId === alb.id}
+                onClick={() => { directSelection.current = null; setSelectedAlbumId(alb.id) }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    directSelection.current = null
+                    setSelectedAlbumId(alb.id)
+                  }
+                }}
                 className={`p-3.5 transition-colors cursor-pointer flex gap-3 ${
                   selectedAlbum?.id === alb.id
                     ? 'bg-white/[0.08] border-l-2 border-[#D4AF37]'
@@ -2171,24 +1951,32 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                         +{alb.offsetApplied} offset
                       </span>
                     )}
-                    {alb.userOverridden && (
+                    {stagedIds.has(alb.id) && (
                       <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-medium">
                         ✓ Staged
                       </span>
                     )}
-                    {alb.albumArtist.requiresHumanReview && (
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-medium">
-                        {alb.albumArtist.selected ? 'Review suggested' : 'Action Req.'}
+                    {problemSummary.albumProblems.get(alb.id)?.filter(problem =>
+                      (!filter.priorities.length || filter.priorities.includes(problem.priority)) &&
+                      (!filter.categories.length || filter.categories.includes(problem.categoryId)),
+                    ).sort((a, b) => a.priority.localeCompare(b.priority)).slice(0, 1).map(problem => (
+                      <span key={problem.categoryId} title={labels[problem.categoryId]}
+                        className="min-w-0 truncate rounded bg-amber-500/20 px-1.5 text-[9px] text-amber-300">
+                        {problem.priority} · {labels[problem.categoryId]}
                       </span>
-                    )}
+                    ))}
                   </div>
                 </div>
               </div>
             ))}
 
-            {(activeTier === 'tier1' ? tier1Items : tier2Items).length === 0 && (
+            {filteredAlbums.length === 0 && (
               <div className="p-8 text-center text-white/40 text-xs">
-                No albums in {activeTier === 'tier1' ? 'Tier 1' : 'Tier 2'}
+                {resolveFilterTransition(albums, problemSummary, filter, 'batch_resolved').filterCompleted ? (
+                  <>All albums matching current filters are resolved
+                    <button className="block mx-auto mt-2 text-cyan-300" onClick={() => changeFilter({ priorities: [], categories: [] })}>Reset Filters</button>
+                  </>
+                ) : 'No albums need curation'}
               </div>
             )}
           </div>
@@ -2197,27 +1985,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         {/* Center Reconciliation Workbench */}
         {selectedAlbum ? (
           <main className="flex-1 flex flex-col bg-[#0E0F12] overflow-y-auto p-6 space-y-6 pb-48">
-            {/* Status bar when resolving compilation provenance */}
-            {isResolvingProvenance && (
-              <div className="flex items-center justify-between px-3.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 animate-in fade-in duration-200">
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                  <span>✦ Identifying source soundtracks and release years via Gemini...</span>
-                </div>
-                <button
-                  onClick={() => {
-                    if (provenanceAbortRef.current) {
-                      provenanceAbortRef.current.abort()
-                      provenanceAbortRef.current = null
-                      setIsResolvingProvenance(false)
-                    }
-                  }}
-                  className="px-2 py-0.5 rounded bg-white/[0.08] hover:bg-white/[0.15] text-white/70 text-[10px] cursor-pointer"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
+
 
             {/* Header for Active Album */}
             <div className="flex items-center justify-between pb-4 border-b border-white/[0.08]">
@@ -2226,25 +1994,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   {selectedAlbum.folderName}
                 </span>
                 <span className="text-xs text-white/40">•</span>
-                <span className="text-xs text-[#D4AF37] font-medium flex items-center gap-1.5">
-                  <SlidersHorizontal className="w-3.5 h-3.5" />
-                  <span>
-                    {selectedAlbum.tier === 'tier1' ? 'Tier 1 Auto-Staged' : 'Tier 2 Guided 4-Way Reconciliation Table'}
-                  </span>
-                </span>
               </div>
 
               <div className="flex items-center gap-2.5">
-                {onReviewComplete && selectedChanges?.albumCount === 0 && selectedChanges.trackCount === 0 &&
-                  !selectedCommitStatuses.has('pending') && !selectedCommitStatuses.has('in_flight') && !selectedCommitStatuses.has('failed') && (
-                  <button type="button" onClick={() => {
-                    onReviewComplete(selectedAlbum.id)
-                    showToast(`Review complete: ${selectedAlbum.albumTitle.selected}`)
-                  }} data-testid="btn-curate-review-complete"
-                    className="px-3 py-1.5 rounded-lg border border-emerald-700/60 text-emerald-300 text-xs hover:bg-emerald-900/30"
-                    title="Accept the current tags and remove this album from pending review without rewriting files">
-                    Done reviewing
-                  </button>
+                {Boolean(problemSummary.albumProblems.get(selectedAlbum.id)?.length) && (
+                  <label className="text-xs text-white/70">
+                    <select aria-label="Dismiss Problem" value="" onChange={event =>
+                      updateDismissals(saveDismissedProblem(selectedAlbum.id, event.target.value as CurateProblemCategoryId, selectedAlbum.rawTracks))
+                    } className="rounded border border-white/10 bg-zinc-900 p-1.5">
+                      <option value="" disabled>Dismiss Problem</option>
+                      {problemSummary.albumProblems.get(selectedAlbum.id)?.map(problem =>
+                        <option key={problem.categoryId} value={problem.categoryId}>{labels[problem.categoryId]}</option>
+                      )}
+                    </select>
+                  </label>
                 )}
                 {/* Re-Query / Paste Store Link Button */}
                 <button
@@ -2263,7 +2026,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Stage Button (keeps in queue, preserves all changes) */}
                 <button
                   onClick={handleStage}
-                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || selectedCommitReconciled || isBatchCommitting)}
+                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitReconciled || isBatchCommitting)}
                   data-testid="btn-stage-next"
                   className="px-3.5 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium text-xs border border-white/20 transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   title="Save changes and keep in queue for later review"
@@ -2272,7 +2035,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   <span>{stagingAlbumId === selectedAlbum.id ? 'Saving draft…' : 'Stage & Next'}</span>
                 </button>
 
-                {/* Commit Button (saves permanently and removes from queue) */}
+                {/* Queue writes for this album */}
                 <button
                   onClick={handleCommitAlbum}
                   disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitConfirmed || isBatchCommitting)}
@@ -2286,26 +2049,22 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               </div>
             </div>
 
-            {selectedCommitStatus && (
-              <div role="status" className="px-4 text-xs text-cyan-300">
-                Last commit · {selectedCommitStatus}
-                {selectedCommitError && <span className="ml-3 text-amber-200">{selectedCommitError}</span>}
-                {selectedCommitStatuses.has('failed') && (
-                  <button className="ml-3 underline" onClick={async () => {
-                    try {
-                      const count = await tauriBridge.commitRetryCurateItems(
-                        selectedCommitRows.filter(row => row.status === 'failed').map(row => row.id),
-                      )
-                      await onCommitQueued?.()
-                      showToast(count ? `Queued ${count} failed track(s) for retry.` : 'No failed tracks remain to retry.')
-                    } catch (err) {
-                      showToast(`Could not retry failed tracks: ${String(err)}`)
-                    }
-                  }}>Retry failed tracks</button>
-                )}
+            {selectedCommitStatuses.has('failed') && (
+              <div role="status" className="flex flex-wrap gap-2 px-4 text-xs text-amber-200">
+                <span>{selectedCommitError || 'Tag writing failed.'}</span>
+                <button className="underline" onClick={async () => {
+                  try {
+                    const count = await tauriBridge.commitRetryCurateItems(
+                      selectedCommitRows.filter(row => row.status === 'failed').map(row => row.id),
+                    )
+                    await onCommitQueued?.()
+                    showToast(count ? `Queued ${count} failed track(s) for retry.` : 'No failed tracks remain to retry.')
+                  } catch (err) {
+                    showToast(`Could not retry failed tracks: ${String(err)}`)
+                  }
+                }}>Retry failed tracks</button>
               </div>
             )}
-            <CurateCommitOutcomes tracks={selectedAlbum.tracks} rows={selectedCommitRows} draft={selectedDraft || undefined} />
             {loadedDrafts.current.get(selectedAlbum.id)?.restored && !loadedDrafts.current.get(selectedAlbum.id)?.draft.revision && !selectedCommitConfirmed && (
               <p role="status" className="px-4 text-xs text-amber-200">
                 Saved provider proposals without verified dependencies need review. Refresh evidence to evaluate them against this album.
@@ -2430,50 +2189,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                   onToggleRationale={toggleTraceDrawer}
                   hasTrace={Boolean(selectedAlbum)}
                 />
-                <button type="button" onClick={captureDiagnosticSnapshot}
-                  className="px-2.5 py-1 rounded border border-zinc-700 text-zinc-300 text-xs hover:bg-zinc-800"
-                  title="Capture this album's current Curate state in memory; no files or network requests">
-                  Capture Snapshot
-                </button>
               </form>
-            )}
-
-            {diagnosticSnapshot && (
-              <section className="rounded-lg border border-cyan-700/50 bg-zinc-950 p-3" aria-label="Curate diagnostic snapshot">
-                <div className="flex items-center justify-between mb-2 text-xs text-cyan-300">
-                  <span>Selected-album memory snapshot · local only</span>
-                  <div className="flex gap-3">
-                    {tauriBridge.isTauri() && (
-                      <button type="button" onClick={() => void tauriBridge.curationExportSnapshot(diagnosticSnapshot)
-                        .then(path => showToast(`Snapshot saved locally: ${path}`))
-                        .catch(err => showToast(`Snapshot export failed: ${String(err)}`))}
-                        className="text-cyan-300 hover:text-white">Export locally</button>
-                    )}
-                    <button type="button" onClick={() => void navigator.clipboard.writeText(diagnosticSnapshot)
-                      .then(() => showToast('Snapshot copied. Paste it only where you choose.'))
-                      .catch(() => showToast('Could not copy snapshot; select the text manually.'))}
-                      className="text-cyan-300 hover:text-white">Copy</button>
-                    <button type="button" onClick={() => setDiagnosticSnapshot(null)} className="text-zinc-400 hover:text-white">Close</button>
-                  </div>
-                </div>
-                <textarea readOnly value={diagnosticSnapshot} className="w-full h-48 bg-zinc-900 p-2 text-xs font-mono text-zinc-200" />
-              </section>
-            )}
-
-            {savedAppleEvidence && (
-              <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2 text-xs text-zinc-300" data-testid="saved-apple-evidence">
-                <span className="font-semibold text-amber-300">Saved Apple evidence:</span>{' '}
-                {savedAppleEvidence.title || 'Untitled release'} · {savedAppleEvidence.artist || 'Unknown artist'}
-                {savedAppleEvidence.year ? ` · ${savedAppleEvidence.year}` : ''}
-                {` · ${savedAppleEvidence.trackCount ?? 0} tracks returned`}
-                {savedAppleEvidence.releaseId && /^\d+$/.test(savedAppleEvidence.releaseId) && (
-                  <a href={`https://music.apple.com/album/${savedAppleEvidence.releaseId}`} target="_blank" rel="noopener noreferrer"
-                    className="ml-2 text-cyan-300 underline">Open Apple release</a>
-                )}
-                <span className="block text-zinc-400">{savedAppleEvidence.rejectionReason
-                  ? `Candidate excluded: ${savedAppleEvidence.rejectionReason}`
-                  : 'Saved candidates are shown beside local tracks where a recorded mapping is available.'}</span>
-              </div>
             )}
 
             {/* Interactive Learned Rule Confirmation Banners */}
@@ -2599,6 +2315,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 </span>
               </div>
 
+              {selectedChanges && (
+                <SelectedOutputCard albumCount={selectedChanges.albumCount} trackCount={selectedChanges.trackCount} />
+              )}
               <div className="rounded-xl border border-white/[0.08] overflow-hidden bg-[#121318]/40 shadow-xl">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
@@ -2610,13 +2329,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                       <th className="py-2.5 px-4 w-1/5 text-cyan-400">Gemini AI Master</th>
                       <th className="py-2.5 px-4 w-1/4 text-emerald-400 font-semibold bg-emerald-500/[0.03]">
                         Selected Output
-                        {selectedChanges && (
-                          <span data-testid="curate-change-summary" className="mt-0.5 block font-sans font-normal text-zinc-300" aria-live="polite">
-                            {selectedChanges.albumCount || selectedChanges.trackCount
-                              ? `${selectedChanges.albumCount} album ${selectedChanges.albumCount === 1 ? 'field' : 'fields'} · ${selectedChanges.trackCount} ${selectedChanges.trackCount === 1 ? 'track' : 'tracks'} changed`
-                              : 'No changes from local tags'}
-                          </span>
-                        )}
+                        <button type="button" onClick={acceptSuggestions}
+                          disabled={Boolean(stagingAlbumId || queuingAlbumId || isBatchCommitting)}
+                          className="mt-1 block rounded border border-emerald-500/40 px-2 py-1 text-[10px] hover:bg-emerald-500/15 disabled:opacity-50">
+                          Accept Suggestions
+                        </button>
                       </th>
                     </tr>
                   </thead>
@@ -2699,7 +2416,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                         decision.mapping?.provider === 'apple' && decision.mapping.status === 'conflicted') ||
                         (savedAppleTrack?.conflicted && (!hasLiveAppleTrack ||
                           (appleTitle === savedAppleTrack.title && appleCredit === savedAppleTrack.artist)))
-                      const selectableAppleCredit = appleConflict ? undefined : trk.appleArtists
+                      const selectableAppleCredit = appleConflict ? undefined : appleCredit
                       const isEditing = editingTrack?.trackId === trk.trackId
                       const change = selectedChanges?.tracks.get(trk.trackId)
                       const hasChange = change && Object.values(change).some(Boolean)
@@ -2989,6 +2706,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         )}
       </div>
 
+      <CurateCommitPreviewModal isOpen={preview !== null} albumsToCommit={preview ?? []}
+        isTransportBusy={isPlaying} onCancel={() => { if (!isBatchCommitting) setPreview(null) }}
+        onConfirm={ids => void confirmBatch(ids)} />
       {/* 3. Learned Rules Modal */}
       {isRulesModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
@@ -3009,6 +2729,21 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               Cadence learns your spelling, punctuation, and initials preferences and auto-elevates matches to Tier 1.
             </p>
 
+            <section className="space-y-2">
+              <h3 className="text-xs font-semibold text-white/70">Dismissed Problem Exemptions</h3>
+              {Array.from(albumItems.values()).flatMap(album => {
+                const keys = curateReviewKeys(album.id, album.rawTracks)
+                const categories = (keys[1] && dismissedProblems[keys[1]]) || dismissedProblems[album.id] || []
+                return categories.map(category => (
+                  <div key={`${album.id}:${category}`} className="flex justify-between gap-3 text-xs text-white/70">
+                    <span>{album.currentTitle} · {labels[category]}</span>
+                    <button type="button" className="text-cyan-300" onClick={() =>
+                      updateDismissals(removeDismissedProblem(album.id, category, album.rawTracks))
+                    }>Restore</button>
+                  </div>
+                ))
+              })}
+            </section>
             {/* Automated Semantic Conventions */}
             <div className="mt-4 p-4 rounded-xl bg-white/[0.03] border border-white/[0.08] space-y-3">
               <h4 className="text-xs font-semibold text-white/80 uppercase tracking-wider">
@@ -3115,12 +2850,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
                 <div className="text-[11px] text-white/50">Curated / Total Releases</div>
                 <div className="text-xl font-semibold text-emerald-300 mt-0.5">
-                  {releases.length - tier2Items.length} / {releases.length}
+                  {releases.length - filteredAlbums.length} / {releases.length}
                 </div>
               </div>
               <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
                 <div className="text-[11px] text-white/50">Pending Review (Tier 2)</div>
-                <div className="text-xl font-semibold text-[#D4AF37] mt-0.5">{tier2Items.length}</div>
+                <div className="text-xl font-semibold text-[#D4AF37] mt-0.5">{filteredAlbums.length}</div>
               </div>
 
               {auditIssues.length > 0 && (

@@ -13,7 +13,6 @@ import {
   RotateCcw,
   Music4,
   Compass,
-  Bot,
   WifiOff,
   AlertTriangle,
   RefreshCw,
@@ -24,7 +23,9 @@ import {
 } from 'lucide-react'
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope, NavigationAnchor } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
-import { curateReviewKeys, projectCurateCommits, reconcileCurateReviewState, type CurateCommitRow, type CurateReviewState } from './core/curateCommit'
+import type { CurateCommitRow } from './core/curateCommit'
+import { buildCurateCockpitCatalogProps } from './core/curateWorkflow'
+import { loadPrioritySettings, loadDismissedProblems } from './core/curatePriorities'
 import type { CurateDraft } from './core/curateDraft'
 import { auditService } from './services/auditService'
 import { storagePersistence } from './core/storagePersistence'
@@ -45,9 +46,6 @@ import { BatchDiffTracksModal } from './components/Modals/BatchDiffTracksModal'
 import { CompilationProvenanceModal } from './components/Modals/CompilationProvenanceModal'
 import { GuidedTutorialModal } from './components/Tutorial/GuidedTutorialModal'
 import { TutorialActions } from './tutorial/tutorialSteps'
-import { EmbeddedAgentDrawer } from './components/Agent/EmbeddedAgentDrawer'
-import { BatchProposalSheet, BatchProposalData } from './components/Agent/BatchProposalSheet'
-import { AgentDispatcherContext } from './services/agentActionDispatcher'
 import { AudioPlayerProvider, useAudioPlayer } from './context/AudioPlayerContext'
 import { NowPlayingBar } from './components/AudioPlayer/NowPlayingBar'
 import { sqliteLibraryService } from './services/sqliteLibraryService'
@@ -75,46 +73,11 @@ import { CadenceLogo } from './components/common/CadenceLogo'
 import { useStagedChanges } from './hooks/useStagedChanges'
 import { GeminiSetupScreen } from './components/GeminiSetupScreen'
 
-const curateReviewStorageKey = 'cadence.curate.review-status.v1'
-
-function loadCurateReviewState(): CurateReviewState {
-  try {
-    return new Map(JSON.parse(localStorage.getItem(curateReviewStorageKey) ?? '[]'))
-  } catch {
-    return new Map()
-  }
-}
-
 function AppContent() {
   // Primary Graph State
   const [catalogTracks, setTracks] = useState<Track[]>(() => graphEngine.getAllTracks())
   const [catalogReleases, setReleases] = useState<Release[]>(() => graphEngine.getAllReleases())
   const [curateCommits, setCurateCommits] = useState<CurateCommitRow[]>([])
-  const [savedCurateReviews, setSavedCurateReviews] = useState(loadCurateReviewState)
-  const [curateHistoryReady, setCurateHistoryReady] = useState(() => !tauriBridge.isTauri())
-  const curateReviews = useMemo(
-    () => reconcileCurateReviewState(savedCurateReviews, catalogTracks, curateCommits),
-    [savedCurateReviews, catalogTracks, curateCommits],
-  )
-  useEffect(() => {
-    if (curateReviews !== savedCurateReviews) setSavedCurateReviews(curateReviews)
-    try {
-      localStorage.setItem(curateReviewStorageKey, JSON.stringify(Array.from(curateReviews)))
-    } catch (err) {
-      console.warn('[Curate] Could not persist album review status:', err)
-    }
-  }, [curateReviews, savedCurateReviews])
-  const curateReleases = useMemo(
-    () => curateHistoryReady ? catalogReleases.filter(release => curateReviews.get(release.id) !== true) : [],
-    [catalogReleases, curateReviews, curateHistoryReady],
-  )
-  const supersededCurateRows = useMemo(() => {
-    const ids = new Set<string>()
-    for (const value of curateReviews.values()) {
-      if (value !== true) for (const id of value) ids.add(id)
-    }
-    return ids
-  }, [curateReviews])
   const commitReadVersion = useRef(0)
   const draftSaveVersion = useRef(0)
   const refreshCurateCommits = useCallback(async () => {
@@ -123,7 +86,6 @@ function AppContent() {
     try {
       const rows = await tauriBridge.commitGetCurateProjection()
       if (version === commitReadVersion.current) {
-        setCurateHistoryReady(true)
         setCurateCommits(current => {
           // A read started before a draft save can still report useful write
           // outcomes, but must not clear the newer draft marker for that item.
@@ -171,10 +133,13 @@ function AppContent() {
       unsubscribe?.()
     }
   }, [refreshCurateCommits])
-  const { tracks, releases } = useMemo(
-    () => projectCurateCommits(catalogTracks, catalogReleases, curateCommits),
-    [catalogTracks, catalogReleases, curateCommits],
+  const [prioritySettings, setPrioritySettings] = useState(loadPrioritySettings)
+  const [dismissedProblems, setDismissedProblems] = useState(loadDismissedProblems)
+  const curateCatalog = useMemo(
+    () => buildCurateCockpitCatalogProps(catalogTracks, catalogReleases, curateCommits, prioritySettings, dismissedProblems),
+    [catalogTracks, catalogReleases, curateCommits, prioritySettings, dismissedProblems],
   )
+  const { tracks, releases } = curateCatalog
   const [works, setWorks] = useState<Work[]>(() => graphEngine.getAllWorks())
   const [storageMounts, setStorageMounts] = useState<StorageMount[]>(() => graphEngine.getAllStorageMounts())
   const [auditIssues, setAuditIssues] = useState<AuditIssue[]>(() => graphEngine.getAllAuditIssues())
@@ -224,7 +189,7 @@ function AppContent() {
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set())
 
   // Canonical staged mutations hook
-  const { stagedAlbumsCount, stagedTracksCount, hasPendingCommits } = useStagedChanges(tracks, releases)
+  const { stagedAlbumsCount } = useStagedChanges(tracks, releases)
 
   // View & Filter State
   const [viewMode, setViewMode] = useState<CanvasViewMode>('cover_grid')
@@ -276,7 +241,6 @@ function AppContent() {
   }, [selectedAlbumId, selectedComposer, selectedArtist, releases])
 
   // Modals & Overlays
-  const [isAgentDrawerOpen, setIsAgentDrawerOpen] = useState(false)
   const [isTutorialOpen, setIsTutorialOpen] = useState(false)
   const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>('credits')
   const [isCommandBarOpen, setIsCommandBarOpen] = useState(false)
@@ -309,6 +273,7 @@ function AppContent() {
   const [skippedFiles, setSkippedFiles] = useState<SkippedFile[]>([])
 
   // Top-Level Unified Product Model: Library vs Maintain vs Curate & Sanctuary Lounge
+  const [curateQueueHost, setCurateQueueHost] = useState<HTMLDivElement | null>(null)
   const [topMode, setTopMode] = useState<'library' | 'curate' | 'maintain'>('library')
   const [maintainSubTab, setMaintainSubTab] = useState<MaintainSubTab>('needs_attention')
   const [isSanctuaryOpen, setIsSanctuaryOpen] = useState<boolean>(false)
@@ -324,7 +289,6 @@ function AppContent() {
   const [isAddTracksModalOpen, setIsAddTracksModalOpen] = useState(false)
   const [tracksToAdd, setTracksToAdd] = useState<Track[]>([])
   const [initialPlaylistTracks, setInitialPlaylistTracks] = useState<Track[]>([])
-  const [activeBatchProposal, setActiveBatchProposal] = useState<BatchProposalData | null>(null)
 
   const {
     isPlaying,
@@ -1439,47 +1403,10 @@ function AppContent() {
     [tracks, releases, currentRelease]
   )
 
-  // Agent Dispatcher Context: bridge between AI Copilot and UI state
-  const agentDispatcherContext: AgentDispatcherContext = useMemo(
-    () => ({
-      setViewMode: (mode) => setViewMode(mode),
-      setFacets: (newFacets) => setFacets(newFacets),
-      setSearchQuery: (query) => setSearchQuery(query),
-      setSelectedTrackId: (id) => setSelectedTrackId(id),
-      openModal: (modalName: string, payload?: any) => {
-        if (modalName === 'import') setIsImportModalOpen(true)
-        else if (modalName === 'commit' || modalName === 'twophase') setIsCommitModalOpen(true)
-        else if (modalName === 'curate') {
-          setTopMode('curate')
-          setFocusedWorkbenchTrack(null)
-        }
-        else if (modalName === 'pathrule') setIsPathRuleModalOpen(true)
-        else if (modalName === 'batch_diff' || modalName === 'batch_ai') setIsBatchDiffModalOpen(true)
-        else if (modalName === 'tutorial') setIsTutorialOpen(true)
-        else if (modalName === 'command_bar' || modalName === 'spotlight') setIsCommandBarOpen(true)
-        else if (modalName === 'agent') setIsAgentDrawerOpen(true)
-        else if (modalName === 'customize') {
-          const target = payload || currentRelease || releases[0]
-          if (target) handleInspectRelease(target.id)
-        }
-      },
-      openBatchProposal: (data: BatchProposalData) => setActiveBatchProposal(data),
-      refreshFromEngine: () => {
-        refreshFromEngine()
-        persistCurrentLibrary()
-      },
-      showToast: (msg) => showToast(msg),
-    }),
-    [currentRelease]
-  )
-
   // Keyboard shortcut listener
   useEffect(() => {
     const handleGlobalKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
-        e.preventDefault()
-        setIsAgentDrawerOpen((prev) => !prev)
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setIsCommandBarOpen((prev) => !prev)
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
@@ -1496,14 +1423,6 @@ function AppContent() {
 
   // Command palette items
   const commands: CommandItem[] = [
-    {
-      id: 'cmd-cadence-agent',
-      title: 'Open Cadence AI Copilot (Chat, Statistics & Auto-Remediations)',
-      category: 'ACTION',
-      shortcut: '⌘J',
-      icon: <Bot className="w-4 h-4 text-[#ADFF2F]" />,
-      action: () => setIsAgentDrawerOpen(true),
-    },
     {
       id: 'cmd-guided-tutorial',
       title: 'Cadence Quick Tour',
@@ -1650,7 +1569,6 @@ function AppContent() {
   ]
 
   const uncommittedCount = tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
-  const curateBadgeCount = curateReleases.length
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0D0E12] text-[#F1F5F9] select-none font-sans">
@@ -1714,34 +1632,12 @@ function AppContent() {
             }`}
           >
             <span>Curate</span>
-            {curateBadgeCount > 0 && (
-              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-[#D4AF37]/20 text-[#D4AF37] font-mono font-medium">
-                {curateBadgeCount}
-              </span>
-            )}
             <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘2</span>
           </button>
         </div>
 
         {/* Right Toolbar Actions */}
         <div className="flex items-center gap-2">
-          {/* Canonical Staged Changes Badge */}
-          {hasPendingCommits && (
-            <button
-              onClick={() => {
-                if (isPlaying) {
-                  showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
-                }
-                setIsCommitModalOpen(true)
-              }}
-              title="Review and commit staged metadata and artwork changes"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-[7px] bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 text-[11px] font-mono transition-all cursor-pointer shadow-sm"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>{stagedAlbumsCount} Albums · {stagedTracksCount} Staged</span>
-            </button>
-          )}
-
           {/* Unified Spotlight Search Trigger */}
           <button
             data-tutorial-id="btn-spotlight-cmd"
@@ -1755,7 +1651,13 @@ function AppContent() {
           </button>
 
           {/* Background Save Queue status pill */}
-          <CommitStatusPill />
+          {(topMode !== 'curate' || curateQueueHost) && <CommitStatusPill
+            portalTarget={topMode === 'curate' ? curateQueueHost : null}
+            alwaysVisible={topMode === 'curate'}
+            commitRows={topMode === 'curate' ? curateCommits : undefined}
+            tracks={topMode === 'curate' ? catalogTracks : undefined}
+            releases={topMode === 'curate' ? catalogReleases : undefined}
+          />}
 
           {/* Activity telemetry */}
           <ActivityPill
@@ -1773,20 +1675,6 @@ function AppContent() {
             }}
             onDismissAllSkipped={handleIgnoreAllSkippedFiles}
           />
-
-          {/* AI Copilot Drawer */}
-          <button
-            data-tutorial-id="btn-cadence-agent"
-            onClick={() => setIsAgentDrawerOpen((prev) => !prev)}
-            title="Cadence Music Agent Copilot (⌘J)"
-            className={`p-1.5 rounded-[7px] border transition-all cursor-pointer ${
-              isAgentDrawerOpen
-                ? 'bg-[#D4AF37]/20 border-[#D4AF37]/40 text-[#D4AF37]'
-                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-          </button>
 
           {/* Mobile Remote Modal */}
           <button
@@ -1941,21 +1829,17 @@ function AppContent() {
           />
         ) : topMode === 'curate' ? (
           <UnifiedCurateCockpit
-            tracks={catalogTracks}
-            releases={curateReleases}
+            {...curateCatalog}
+            prioritySettings={prioritySettings}
+            onPrioritySettingsChange={setPrioritySettings}
+            dismissedProblems={dismissedProblems}
+            onDismissedProblemsChange={setDismissedProblems}
             commitRows={curateCommits}
+            commitQueueHostRef={setCurateQueueHost}
             onCommitQueued={refreshCurateCommits}
             onDraftSaved={noteCurateDraftSaved}
-            onReviewComplete={albumId => {
-              const albumTracks = catalogTracks.filter(track => track.releaseId === albumId)
-              const next = new Map(curateReviews)
-              for (const key of curateReviewKeys(albumId, albumTracks)) next.set(key, true)
-              setSavedCurateReviews(next)
-            }}
-            supersededCommitIds={supersededCurateRows}
             auditIssues={auditIssues}
-            initialSelectedAlbumId={selectedAlbumId}
-            navigationAnchor={navigationAnchor}
+            initialSelectedAlbumId={navigationAnchor?.selectedAlbumId}
             onReturnToAnchor={() => {
               if (navigationAnchor) {
                 setSelectedAlbumId(navigationAnchor.selectedAlbumId)
@@ -1968,12 +1852,6 @@ function AppContent() {
               } else {
                 setTopMode('library')
               }
-            }}
-            onOpenCommitModal={() => {
-              if (isPlaying) {
-                showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
-              }
-              setIsCommitModalOpen(true)
             }}
             onBackToLibrary={() => {
               setNavigationAnchor(null)
@@ -2158,17 +2036,7 @@ function AppContent() {
                 onSelectAllTracks={handleSelectAllTracks}
                 onSelectVariant={handleSelectVariant}
                 onInspectRelease={handleInspectRelease}
-                onCustomizeRelease={rel => {
-                  if (curateReviews.get(rel.id) === true) {
-                    const albumTracks = catalogTracks.filter(track => track.releaseId === rel.id)
-                    const trackIds = new Set(albumTracks.map(track => track.id))
-                    const ignored = curateCommits.filter(row => trackIds.has(row.trackId)).map(row => row.id)
-                    const next = new Map(curateReviews)
-                    for (const key of curateReviewKeys(rel.id, albumTracks)) next.set(key, ignored)
-                    setSavedCurateReviews(next)
-                  }
-                  handleInspectRelease(rel.id)
-                }}
+                onCustomizeRelease={rel => handleInspectRelease(rel.id)}
                 onUpdateReleaseDetails={handleUpdateReleaseDetails}
                 onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
                 onApplyBatchEdits={handleApplyBatchEdits}
@@ -2274,12 +2142,6 @@ function AppContent() {
         onClose={() => setIsCommandBarOpen(false)}
         commands={commands}
         initialQuery={searchQuery}
-        onOpenAgent={(prompt) => {
-          setIsAgentDrawerOpen(true)
-          if (prompt) {
-            window.dispatchEvent(new CustomEvent('cadence:agent:prompt', { detail: prompt }))
-          }
-        }}
         onSelectEntity={(entity) => {
           // Safe navigation: selects/focuses entity, never mutates AudioEngine playback!
           if (entity.type === 'album') {
@@ -2458,28 +2320,6 @@ function AppContent() {
             persistCurrentLibrary()
           }
         }}
-        showToast={showToast}
-      />
-
-      {/* Cadence Core Embedded AI Agent Copilot Drawer */}
-      <EmbeddedAgentDrawer
-        isOpen={isAgentDrawerOpen}
-        onClose={() => setIsAgentDrawerOpen(false)}
-        dispatcherContext={agentDispatcherContext}
-        tracks={tracks}
-        releases={releases}
-        currentRelease={currentRelease}
-        currentTrack={currentTrack}
-        activeTriageLabel={activeTriageIssue?.title}
-        activeFilterCount={gridScopedTracks.length}
-        isGridFiltered={isGridFilterActive}
-      />
-
-      {/* Copilot Batch Proposal Safety Layer Modal */}
-      <BatchProposalSheet
-        proposal={activeBatchProposal}
-        isOpen={Boolean(activeBatchProposal)}
-        onClose={() => setActiveBatchProposal(null)}
         showToast={showToast}
       />
 

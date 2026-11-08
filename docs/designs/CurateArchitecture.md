@@ -694,3 +694,24 @@ Curate confirms a frozen draft revision and records the track's catalog lineage 
 A refresh uses the effective confirmed values at its start and merges into the latest editable draft, preserving explicit choices. If the confirmed item or identity changes before the refresh is saved, Curate archives the response as superseded. Restored generated proposals without verified dependencies fall back to catalog values for review. Explicit track edits stay attached to their local IDs, and edits whose tracks are absent are held.
 
 The revision regression first failed because identical tag values let a completed write retire a newer draft. It now passes. The 40 Curate checks, 30 native checks, and production build passed. The native fixture covers pending replacement, an immutable in-flight revision, a superseded refresh, restart, and a detached target. Headless line coverage was 97% for the commit helpers and 100% for the draft helpers. Live desktop verification requires a connected QA target.
+
+#### Milestone E verification checkpoint
+
+Run the repeatable fixtures from the repository root:
+
+```powershell
+npx tsx --tsconfig tsconfig.app.json --test src/test/testCurate*.ts
+cargo test --manifest-path src-tauri/Cargo.toml --lib --test curate_identity
+npm run build
+```
+
+The 42 Curate checks, 32 native checks, and production build passed. The fixtures cover edition and disc identity, cross-disc source groups, restart, regrouping, provider mismatch, and per-file outcomes. A seven-local/eight-provider mismatch preserves the local selection and its review reason. The lookahead fixture verifies cancellation when playback starts, suppression during Loading, Playing, and Paused, and immediate idle resumption limited to two albums. The native scan guard and temporary WAV commit fixture verify that their respective operations defer while playback is active.
+
+| Desktop acceptance check | Evidence to capture |
+| --- | --- |
+| Real multi-disc edition and compilation | Run `npx tsx scripts/qa/curateQaAgent.ts "<fixture album>"` against a debug desktop instance started with `./scripts/launch-debug-cadence.ps1`. Compare the selected fields, source assignments, and review reasons with the fixture. Reopen Curate and restart Cadence to compare the queue and draft. |
+| Startup and Curate open | On a representative large catalog, record catalog size, cold-start and Curate-open times, and the commands and provider requests issued before selecting an album. Check that opening the queue reads compact projection rows without loading per-album evidence or drafts. |
+| Playback transitions | On a test mount, trace music-file accesses attributable to Curate while loading, playing, paused, and stopped. Account for the player's own track reads separately. Verify that pending writes remain visible during playback and resume after stop. Count automatic selected-album provider calls and confirm the four-call bound. |
+| Invalidation reasons | Exercise a provider edition mismatch and a catalog regroup. Confirm the prior proposal and reason remain visible, the local selection is retained when applicability is uncertain, and a manual edit stays with its original track. |
+
+Desktop acceptance remains open. The QA agent could not connect to the WebView2 debug endpoint on port 9222. The current cockpit still computes its base queue from loaded catalog tracks and releases, and the edition projection has no production queue reader. The fixtures establish neither a measured UI load bound nor a filesystem trace during real playback.

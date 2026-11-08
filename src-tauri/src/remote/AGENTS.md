@@ -6,6 +6,7 @@ Houses the embedded HTTP and WebSocket server enabling mobile device remote cont
 ## Interface
 - `start_remote_server`: Binds HTTP/WebSocket listener on local network interfaces and serves the mobile web client.
 - `discover_lan_interfaces`: Enumerates active local IPv4 adapters for QR code pairing generation.
+- `generate_pairing_token`, `load_or_create_pairing_token`, `save_pairing_token`: Manages secure pairing authentication tokens.
 - `RemoteState` & `RemoteEvent`: Event contracts broadcast to connected mobile remote clients (play/pause, now playing, seek, queue changes).
 - `artwork_cache.rs`: Serves down-sampled cover art images to mobile remote clients with HTTP cache headers.
 - `pwa_assets.rs`: Embedded web assets (HTML, manifest, icons) for zero-dependency remote client serving.
@@ -20,4 +21,4 @@ Houses the embedded HTTP and WebSocket server enabling mobile device remote cont
 - Reads cached artwork from disk and serves image byte streams over HTTP.
 
 ## Verification
-- Run: `cargo test`
+- Run: `cargo test --manifest-path src-tauri/Cargo.toml`

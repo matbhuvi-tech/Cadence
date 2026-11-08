@@ -7,7 +7,6 @@ Houses modal dialogs and overlays for Cadence. Covers library import, playlist l
 - `TwoPhaseCommitModal`: Critical review dialog displaying atomic diffs, dry-run outcomes, and safety confirmations before writing tags to physical audio files.
 - `BatchDiffTracksModal`: Multi-track comparison view for evaluating batch proposed changes across tracks.
 - `ImportLibraryModal`: Directory picker and scan options dialog for adding music library paths.
-- `CustomizeAlbumModal`: Release metadata and artwork override editor with sidecar persistence options.
 - `MobileRemoteModal`: QR code display and network pairing status modal for the mobile PWA web remote.
 - `NormalizationRulesModal`: Configurator for title/artist casing, leading zero track numbers, and character sanitization rules.
 - `CreatePlaylistModal` / `EditPlaylistModal` / `AddTracksToPlaylistModal`: Dialogs managing custom playlist collections.

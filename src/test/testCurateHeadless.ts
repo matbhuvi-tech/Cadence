@@ -6,9 +6,10 @@ import {
   reconcileCurateReviewState, type CurateCommitRow, type CurateReviewState,
 } from '../core/curateCommit'
 import { captureCurateDraft, mergeCurateProposal, restoreCurateDraft, selectCurateTrackFields } from '../core/curateDraft'
-import { computeCurationQueue } from '../services/curationQueueService'
+import { computeCurationQueue, LookaheadQueuePrefetcher } from '../services/curationQueueService'
 import { captureTrackDecisions, type CurateProviderAttempt } from '../services/curateEvidenceService'
-import { FederatedResolversService } from '../services/federatedResolvers'
+import { FederatedResolversService, federatedResolversService } from '../services/federatedResolvers'
+import { tauriBridge } from '../services/tauriBridge'
 
 const release = {
   id: 'local-seven', title: 'Harbor Lights', artistCredit: 'Fixture Ensemble',
@@ -20,6 +21,62 @@ const tracks: Track[] = Array.from({ length: 7 }, (_, i) => ({
   title: `Track ${i + 1}`, artistCredit: 'Local Singer', format: 'WAV',
   storageMountId: 'fixture', filePath: `fixture/${i + 1}.wav`,
 } as Track))
+
+test('lookahead aborts on playback start and resumes only the next two albums when stopped', async t => {
+  const releases = ['current', 'next', 'second', 'outside'].map(id => ({ ...release, id }))
+  const catalog = releases.flatMap(album => tracks.map(track => ({
+    ...track, id: `${album.id}-${track.id}`, releaseId: album.id,
+  })))
+  const queue = releases.map(album => ({ albumId: album.id })) as ReturnType<typeof computeCurationQueue>
+  let playbackState = 'Stopped'
+  let onPlaybackChanged!: (state: string) => void
+  t.mock.method(tauriBridge, 'onPlaybackStateChanged', (listener: typeof onPlaybackChanged) => {
+    onPlaybackChanged = listener
+    return () => {}
+  })
+  t.mock.method(tauriBridge, 'getPlaybackStatus', async () => ({ playbackState }))
+  const prefetcher = new LookaheadQueuePrefetcher()
+  const transition = (state: string) => {
+    playbackState = state
+    onPlaybackChanged(state)
+  }
+  const requests: { id: string; signal?: AbortSignal }[] = []
+  let requestStarted!: () => void
+  const started = new Promise<void>(resolve => { requestStarted = resolve })
+  const result = {} as Awaited<ReturnType<typeof federatedResolversService.resolve2of3ReleaseConsensus>>
+  const resolver: typeof federatedResolversService.resolve2of3ReleaseConsensus = async (
+    album, _tracks, _prefetch, _steer, _progress, _options, signal,
+  ) => {
+    requests.push({ id: album.id, signal })
+    if (requests.length === 1) {
+      await new Promise<void>(resolve => {
+        signal?.addEventListener('abort', () => resolve(), { once: true })
+        requestStarted()
+      })
+    }
+    return result
+  }
+  t.mock.method(federatedResolversService, 'resolve2of3ReleaseConsensus', resolver)
+
+  const prefetch = () => prefetcher.prefetchLookahead(queue, 0, releases, catalog)
+  const interrupted = prefetch()
+  await started
+  transition('Loading')
+  assert.equal(requests[0].signal?.aborted, true)
+  await interrupted
+  assert.equal(prefetcher.getCachedConsensus('next'), undefined)
+  for (const state of ['Loading', 'Playing', 'Paused']) {
+    transition(state)
+    await prefetch()
+    assert.equal(requests.length, 1, state)
+  }
+
+  transition('Stopped')
+  await prefetch()
+  await prefetch()
+  assert.deepEqual(requests.map(request => request.id), ['next', 'next', 'second'])
+  assert.equal(prefetcher.getCachedConsensus('second'), result)
+})
 
 function field<T>(local: T): MetadataFieldState<T> {
   return { local, selected: local, source: 'local_fallback', confidence: 1 }

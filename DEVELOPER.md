@@ -4,7 +4,7 @@ This document contains repository architecture and development guidance. It is f
 
 ## System Overview
 
-Cadence is a Windows desktop music player and catalog curation engine. It combines a Tauri v2 Rust native audio core (WASAPI Exclusive, memory-pinned buffers via `VirtualLock`, MMCSS Pro Audio pacing, and UPnP streaming) with a React/TypeScript user interface for catalog navigation, diagnostics, and two-phase metadata commits.
+Cadence is a Windows desktop music player and catalog curation engine. It combines a Tauri v2 Rust native audio core (WASAPI Exclusive, memory-pinned buffers via `VirtualLock`, MMCSS Pro Audio pacing, and UPnP streaming) with a React/TypeScript user interface for catalog navigation, diagnostics, and two-phase metadata commits, plus a companion mobile remote PWA.
 
 ## Repository Entry Points
 
@@ -12,7 +12,8 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 - `vite.config.ts`: React plugin, Tailwind CSS v4, path aliases, and development proxy settings.
 - `index.html`: Web application entry point.
 - `src/AGENTS.md`: Frontend components, contexts, domain core, hooks, services, onboarding, and contracts.
-- `src-tauri/AGENTS.md`: Native Rust backend, including the audio engine, SQLite database, scanner, maintenance workers, and remote PWA server.
+- `src-tauri/AGENTS.md`: Native Rust backend, including the audio engine, SQLite database, scanner, curation storage, maintenance workers, and remote server.
+- `pwa/AGENTS.md`: Mobile Remote Progressive Web App (React 19 / Vite / Tailwind) served to local Wi-Fi handsets.
 
 ## Build Invariants
 
@@ -37,6 +38,11 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 ## Subsystems
 
+### Curation Workbench & Decision Trace Engine
+- Unifies defect triage queues, automated federated candidate resolution (MusicBrainz, Apple Music, Gemini AI), artwork inspection, and inline sidecar review in `UnifiedCurateCockpit.tsx`.
+- Playback-guarded decision traces buffer in RAM (`MEMORY_BUFFER`) while audio plays, flushing to SQLite only when transport is idle.
+- Multi-Soundtrack Compilation Clusters (`isCaseB`) isolate film/album provenance while reconciling shared attributes across candidate records.
+
 ### Compilation Soundtrack Provenance Engine
 - Automatically identifies original film/motion picture score and release year for tracks on multi-source compilation albums via single-pass Gemini inference (`src/services/geminiClient.ts`).
 - Results are cached in SQLite via `provenanceCacheService.ts`, keyed by SHA-256 parameter hash computed over normalized album title, artist, composer, and track signatures (`cleanConsensusTitle`).
@@ -47,4 +53,4 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 - Frontend: `npm run build`
 - Native backend: `cargo test --manifest-path src-tauri/Cargo.toml`
-- Windows installer `npm run tauri:build -- --bundles nsis`
+- Windows installer: `npm run tauri:build -- --bundles nsis`

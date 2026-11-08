@@ -168,7 +168,11 @@ export const OmniCommandBar: React.FC<OmniCommandBarProps> = ({
     })
   }, [debouncedQuery, entityHits, facetIntent, commands, mode])
 
-  const { rows, badge } = classifiedState
+  const rows = useMemo(
+    () => onOpenAgent ? classifiedState.rows : classifiedState.rows.filter(row => row.kind !== 'agent'),
+    [classifiedState.rows, onOpenAgent],
+  )
+  const { badge } = classifiedState
 
   // Keep selected index within bounds
   useEffect(() => {
@@ -200,7 +204,7 @@ export const OmniCommandBar: React.FC<OmniCommandBarProps> = ({
       }
 
       // Explicit Copilot escalation via ⌘+Enter (or Ctrl+Enter)
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      if (onOpenAgent && (e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault()
         onOpenAgent?.(query)
         onClose()
@@ -445,8 +449,7 @@ export const OmniCommandBar: React.FC<OmniCommandBarProps> = ({
           {/* Dynamic Reactive Intent Badge */}
           {renderBadge()}
 
-          {/* Explicit Copilot Mode Switcher Button */}
-          <button
+          {onOpenAgent && <button
             type="button"
             onClick={() => {
               setMode((m) => (m === 'search' ? 'agent' : 'search'))
@@ -461,7 +464,7 @@ export const OmniCommandBar: React.FC<OmniCommandBarProps> = ({
           >
             <Sparkles className="w-2.5 h-2.5" />
             <span>{mode === 'agent' ? 'Copilot Active' : 'Copilot (⌘↵)'}</span>
-          </button>
+          </button>}
         </div>
 
         {/* 4-Tier Zero-Latency Results Stream */}

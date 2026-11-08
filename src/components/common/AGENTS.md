@@ -1,10 +1,11 @@
-# Common Components
+# Common Components (`src/components/common`)
 
 ## Overview
-Houses shared visual and presentation utility components used throughout the Cadence desktop user interface. Includes floating cover art hover previews and dynamic atmospheric ambient background canvas renderers.
+Houses shared visual and presentation utility components used throughout the Cadence desktop user interface. Includes floating cover art hover previews, local artwork fallback renderers, concentric-C vector logos, and dynamic atmospheric ambient background canvas renderers.
 
 ## Interface
 - `ArtworkHoverPreview`: High-resolution floating image hover tooltip for previewing album artwork over table rows and grid cells.
+- `LocalArtworkImage`: Robust local artwork image component supporting custom cache keys, placeholder fallbacks, and disk URI loading.
 - `CadenceLogo`: Scalable concentric-C geometric vector logo component supporting `gold`, `white`, and `currentColor` variants.
 - `PanoramicAtmosphericBackdrop`: Canvas/CSS background component that analyzes current album artwork palette to generate immersive, subtle ambient gradients.
 

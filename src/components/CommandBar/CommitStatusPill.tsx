@@ -1,24 +1,33 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   RotateCw,
   Pause,
-  Play,
   AlertTriangle,
   CheckCircle2,
-  HardDrive,
-  XCircle,
-  Undo2,
   Clock,
-  Sparkles,
 } from 'lucide-react'
 import { tauriBridge } from '../../services/tauriBridge'
 import type { CommitTelemetryPayload } from '../../types/commit'
+import type { CurateCommitRow } from '../../core/curateCommit'
+import type { Release, Track } from '../../core/types'
+import { CommitQueueDrawer, buildCommitQueueDrawerModel, type CommitQueueTrackIdentity } from './CommitQueueDrawer'
+
+// oxlint-disable-next-line react/only-export-components
+export { buildCommitQueueDrawerModel, type CommitQueueDrawerModel } from './CommitQueueDrawer'
+
+const emptyRows: readonly CurateCommitRow[] = []
 
 interface CommitStatusPillProps {
   onOpenQuarantine?: () => void
+  alwaysVisible?: boolean
+  commitRows?: readonly CurateCommitRow[]
+  tracks?: Track[]
+  releases?: Release[]
+  portalTarget?: HTMLElement | null
 }
 
-export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
+export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisible = false, commitRows = emptyRows, tracks, releases, portalTarget }) => {
   const [telemetry, setTelemetry] = useState<CommitTelemetryPayload>({
     state: 'idle',
     pendingItems: 0,
@@ -32,6 +41,12 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
   })
 
   const [isOpen, setIsOpen] = useState(false)
+  const [previousTarget, setPreviousTarget] = useState(portalTarget)
+  if (previousTarget !== portalTarget) {
+    setPreviousTarget(portalTarget)
+    setIsOpen(false)
+  }
+  const drawerId = useId()
   const [showCompletedBanner, setShowCompletedBanner] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -82,13 +97,14 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
       if (!isOpen) return
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopImmediatePropagation()
         setIsOpen(false)
         triggerRef.current?.focus()
       }
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [isOpen])
 
   // Dismiss on click outside
@@ -114,24 +130,37 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
     pendingItems,
     inflightItems,
     completedItems,
-    failedItems,
     totalItems,
     percent,
-    throughputItemsPerSec,
     cooldownRemainingSecs,
-    offlineMounts,
     activeBatchId,
-    activeBatchDescription,
-    currentTrackTitle,
-    currentTrackFilePath,
-    errorMessage,
   } = telemetry
+
+  const catalog = useMemo(() => {
+    if (!isOpen || !tracks || !releases) return
+    const releaseTitles = new Map(releases.map(release => [release.id, release.title]))
+    const identities = new Map<string, CommitQueueTrackIdentity>()
+    const queuedTrackIds = new Set(commitRows.map(row => row.trackId))
+    for (const track of tracks) {
+      if (!queuedTrackIds.has(track.id)) continue
+      identities.set(track.id, {
+        albumId: track.releaseId,
+        albumTitle: releaseTitles.get(track.releaseId) || 'Unknown album',
+        trackTitle: track.title,
+      })
+    }
+    return identities
+  }, [commitRows, isOpen, releases, tracks])
+  const model = useMemo(
+    () => buildCommitQueueDrawerModel(isOpen ? commitRows : emptyRows, telemetry, catalog),
+    [catalog, commitRows, isOpen, telemetry],
+  )
 
   const hasActiveWork = pendingItems > 0 || inflightItems > 0
   const isIdle = !hasActiveWork && state === 'idle'
 
   // If idle and not showing recent completion banner, render nothing (pure silence)
-  if (isIdle && !showCompletedBanner) {
+  if (!alwaysVisible && isIdle && !showCompletedBanner) {
     return null
   }
 
@@ -183,7 +212,15 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
     pillText = 'All Changes Saved'
   }
 
-  return (
+  if (alwaysVisible) {
+    const activeCount = isOpen ? model.activeCount : Math.max(
+      pendingItems + inflightItems,
+      commitRows.filter(row => row.status === 'pending' || row.status === 'in_flight').length,
+    )
+    pillText = 'Commit Queue (' + activeCount + ')'
+  }
+
+  const control = (
     <div className="relative inline-block text-left">
       <button
         ref={triggerRef}
@@ -191,6 +228,7 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
         role="button"
         aria-haspopup="dialog"
         aria-expanded={isOpen}
+        aria-controls={isOpen ? drawerId : undefined}
         onClick={() => setIsOpen((prev) => !prev)}
         title="Background Save Queue (Enter or Space to view details)"
         className={`h-8 px-3 rounded-full text-xs font-medium flex items-center gap-2 transition-all duration-200 select-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#00F5FF]/50 ${
@@ -235,176 +273,23 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = () => {
 
       {/* Accessible Popover Dialog */}
       {isOpen && (
-        <div
-          ref={popoverRef}
-          role="dialog"
-          aria-label="Background Save Queue"
-          className="absolute right-0 mt-2 w-96 rounded-xl bg-[#1C1C1E]/95 backdrop-blur-xl border border-white/15 p-4 shadow-2xl z-50 text-white animate-in fade-in zoom-in-95 duration-150"
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between pb-3 border-b border-white/10">
-            <div className="flex items-center gap-2">
-              <HardDrive className="w-4 h-4 text-[#00F5FF]" />
-              <span className="text-xs font-semibold uppercase tracking-wider text-white/80">
-                Background Save Queue
-              </span>
-            </div>
-            <span
-              className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                state === 'writing'
-                  ? 'bg-[#00F5FF]/10 border-[#00F5FF]/30 text-[#00F5FF]'
-                  : state === 'paused_playback' || state === 'cooldown' || state === 'user_paused'
-                  ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-                  : state === 'paused_mount_offline'
-                  ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
-                  : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-              }`}
-            >
-              {state.toUpperCase().replace('_', ' ')}
-            </span>
-          </div>
-
-          {/* Active Batch Summary */}
-          <div className="py-3">
-            <div className="flex items-center justify-between text-xs mb-1.5">
-              <span className="text-[#8E8E93]">
-                {activeBatchDescription || 'Batch Metadata Commit'}
-              </span>
-              <span className="font-mono text-white/90">
-                {completedItems} of {totalItems} saved ({percent.toFixed(0)}%)
-              </span>
-            </div>
-
-            {/* Progress Bar */}
-            <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden mb-2">
-              <div
-                className={`h-full transition-all duration-300 ${
-                  state === 'paused_playback' || state === 'cooldown' || state === 'user_paused'
-                    ? 'bg-amber-400'
-                    : 'bg-[#00F5FF]'
-                }`}
-                style={{ width: `${Math.max(2, percent)}%` }}
-              />
-            </div>
-
-            <div className="flex items-center justify-between text-[11px] text-[#8E8E93] font-mono">
-              <span>Throughput: {throughputItemsPerSec.toFixed(1)} files/sec</span>
-              {failedItems > 0 && (
-                <span className="text-rose-400 font-semibold">{failedItems} failed</span>
-              )}
-            </div>
-          </div>
-
-          {/* Current track writing indicator */}
-          {currentTrackTitle && (
-            <div className="p-2.5 rounded-lg bg-black/30 border border-white/5 mb-3 text-xs">
-              <div className="text-[10px] text-[#8E8E93] uppercase tracking-wider mb-0.5">
-                Current File
-              </div>
-              <div className="font-medium text-white truncate">{currentTrackTitle}</div>
-              {currentTrackFilePath && (
-                <div className="text-[10px] text-white/40 truncate font-mono">
-                  {currentTrackFilePath}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Transport Preemption Advisory Banner */}
-          {state === 'paused_playback' && (
-            <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs mb-3">
-              <div className="font-semibold flex items-center gap-1.5 mb-1">
-                <Pause className="w-3.5 h-3.5" />
-                Listening Quietness Active
-              </div>
-              <p className="text-[11px] text-amber-300/80 leading-relaxed mb-2">
-                Tag writing resumes when playback stops.
-              </p>
-            </div>
-          )}
-
-          {/* Cooldown Timer Banner */}
-          {state === 'cooldown' && (
-            <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs mb-3">
-              <div className="font-semibold flex items-center gap-1.5 mb-1">
-                <Clock className="w-3.5 h-3.5" />
-                Storage Quietness Cooldown
-              </div>
-              <p className="text-[11px] text-amber-300/80 leading-relaxed">
-                Waiting for playback bus settling... Resuming writes in{' '}
-                <span className="font-mono font-bold">{cooldownRemainingSecs || 30}s</span>.
-              </p>
-            </div>
-          )}
-
-          {/* Mount Offline Alert */}
-          {offlineMounts.length > 0 && (
-            <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs mb-3">
-              <div className="font-semibold flex items-center gap-1.5 mb-1">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                Drive Offline
-              </div>
-              <p className="text-[11px] text-rose-300/80 leading-relaxed mb-2">
-                Mount <span className="font-mono">{offlineMounts.join(', ')}</span> is currently
-                unreachable. Reconnect drive to continue saving.
-              </p>
-              <button
-                onClick={handleRetryMounts}
-                className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-[10px] font-medium transition cursor-pointer"
-              >
-                Retry Mount Connection
-              </button>
-            </div>
-          )}
-
-          {/* Error Message */}
-          {errorMessage && (
-            <div className="p-2 rounded bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px] mb-3">
-              {errorMessage}
-            </div>
-          )}
-
-          {/* Actions Bar */}
-          <div className="flex items-center justify-between pt-3 border-t border-white/10 text-xs">
-            <button
-              onClick={handleTogglePause}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-white/80 hover:text-white transition cursor-pointer"
-            >
-              {state === 'user_paused' ? (
-                <>
-                  <Play className="w-3 h-3 text-[#00F5FF]" /> Resume
-                </>
-              ) : (
-                <>
-                  <Pause className="w-3 h-3 text-amber-400" /> Pause
-                </>
-              )}
-            </button>
-
-            <div className="flex items-center gap-2">
-              {hasActiveWork && (
-                <button
-                  onClick={handleCancelPending}
-                  title="Stop remaining unwritten tracks in this batch"
-                  className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/5 hover:bg-rose-500/20 text-white/70 hover:text-rose-300 transition cursor-pointer"
-                >
-                  <XCircle className="w-3 h-3" /> Cancel Pending
-                </button>
-              )}
-
-              {completedItems > 0 && (
-                <button
-                  onClick={handleUndoBatch}
-                  title="Revert already committed tracks using pre-commit snapshot"
-                  className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/5 hover:bg-[#00F5FF]/20 text-white/70 hover:text-[#00F5FF] transition cursor-pointer"
-                >
-                  <Undo2 className="w-3 h-3" /> Undo Batch
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <CommitQueueDrawer
+          id={drawerId}
+          drawerRef={popoverRef}
+          telemetry={telemetry}
+          model={model}
+          isCurate={alwaysVisible}
+          onClose={() => {
+            setIsOpen(false)
+            triggerRef.current?.focus()
+          }}
+          onTogglePause={handleTogglePause}
+          onCancelPending={handleCancelPending}
+          onUndoBatch={handleUndoBatch}
+          onRetryMounts={handleRetryMounts}
+        />
       )}
     </div>
   )
+  return portalTarget ? createPortal(control, portalTarget) : control
 }
