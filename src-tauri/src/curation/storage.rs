@@ -460,6 +460,24 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn lists_latest_drafts_and_skips_corrupt_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::initialize_schema(&conn).unwrap();
+        let db = AppDb { conn: std::sync::Arc::new(Mutex::new(conn)) };
+        assert!(CurationStorage::list_drafts(&db).unwrap().is_empty());
+        CurationStorage::save_draft(&db, "album", &serde_json::json!({"staged": true})).unwrap();
+        CurationStorage::save_draft(&db, "album", &serde_json::json!({"staged": false})).unwrap();
+        CurationStorage::save_draft(&db, "other", &serde_json::json!({"staged": true})).unwrap();
+        db.conn.lock().execute(
+            "INSERT INTO curation_drafts VALUES ('corrupt', '{', CURRENT_TIMESTAMP)", [],
+        ).unwrap();
+        assert_eq!(CurationStorage::list_drafts(&db).unwrap(), HashMap::from([
+            ("album".into(), serde_json::json!({"staged": false})),
+            ("other".into(), serde_json::json!({"staged": true})),
+        ]));
+    }
+
+    #[test]
     fn refresh_saves_on_legacy_trace_schema() {
         let path = std::env::temp_dir().join(format!("cadence-legacy-trace-{}.sqlite", uuid::Uuid::new_v4()));
         {
