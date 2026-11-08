@@ -1302,6 +1302,26 @@ class TauriBridgeService {
     return draft
   }
 
+  public async curationListDrafts(): Promise<Record<string, CurateDraft>> {
+    const prefix = 'cadence:curate-draft:'
+    const drafts: Record<string, CurateDraft> = this.isTauri()
+      ? await invoke<Record<string, CurateDraft>>('curation_list_drafts')
+      : Object.fromEntries(Array.from({ length: localStorage.length }, (_, index) => {
+        const key = localStorage.key(index)
+        if (!key?.startsWith(prefix)) return []
+        try {
+          return [[key.slice(prefix.length), JSON.parse(localStorage.getItem(key) ?? 'null') as CurateDraft] as const]
+        } catch {
+          return []
+        }
+      }).flat())
+    return Object.fromEntries(Object.entries(drafts).filter(([, draft]) => draft?.version === 1))
+  }
+
+  public listCurationDrafts(): Promise<Record<string, CurateDraft>> {
+    return this.curationListDrafts()
+  }
+
   public async curationSaveDraft(albumId: string, draft: CurateDraft): Promise<void> {
     const write = (this.curateDraftWrites.get(albumId) ?? Promise.resolve()).catch(() => {}).then(async () => {
       if (this.isTauri()) {

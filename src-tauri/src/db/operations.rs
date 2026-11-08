@@ -2556,7 +2556,7 @@ impl DbOperations {
             for item in items {
                 let exists: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM commit_queue_items
-                     WHERE track_id = ?1 AND status IN ('pending', 'in_flight', 'failed')
+                     WHERE track_id = ?1 AND status IN ('in_flight', 'failed')
                        AND rowid = (SELECT i.rowid FROM commit_queue_items i
                            JOIN commit_queue_batches b ON b.id = i.batch_id
                            WHERE i.track_id = ?1 AND i.status <> 'cancelled'
@@ -2570,9 +2570,22 @@ impl DbOperations {
             }
         }
         for (album_id, draft) in drafts {
+            let saved_revision: Option<String> = tx.query_row(
+                "SELECT CASE WHEN json_valid(draft_json) THEN json_extract(draft_json, '$.revision') END
+                 FROM curation_drafts WHERE album_id = ?1",
+                [album_id], |row| row.get(0),
+            ).optional()?.flatten();
+            if let Some(saved) = saved_revision {
+                let Some(incoming) = draft["revision"].as_str() else { return Ok(false) };
+                let current = Self::record_curate_draft_revision(&tx, album_id, &saved)?;
+                let next = Self::record_curate_draft_revision(&tx, album_id, incoming)?;
+                if next < current {
+                    return Ok(false);
+                }
+            }
             tx.execute(
                 "INSERT INTO curation_drafts (album_id, draft_json, updated_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(album_id) DO NOTHING",
+                 ON CONFLICT(album_id) DO UPDATE SET draft_json = excluded.draft_json, updated_at = excluded.updated_at",
                 params![album_id, draft.to_string(), batch.created_at],
             )?;
         }

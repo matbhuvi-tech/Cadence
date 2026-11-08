@@ -65,6 +65,16 @@ pub fn curation_get_draft(
 }
 
 #[tauri::command]
+pub fn curation_list_drafts(
+    db: State<AppDb>,
+    engine: State<AudioEngine>,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    let _permit = engine.try_curate_draft_read()
+        .ok_or("Curate drafts can be listed after playback is idle for 30 seconds.")?;
+    CurationStorage::list_drafts(&db)
+}
+
+#[tauri::command]
 pub fn curation_save_trace(
     db: State<AppDb>,
     engine: State<AudioEngine>,

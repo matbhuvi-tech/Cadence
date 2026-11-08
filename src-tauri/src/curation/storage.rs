@@ -204,6 +204,23 @@ impl CurationStorage {
             .map_err(|err| err.to_string())
     }
 
+    pub fn list_drafts(db: &AppDb) -> Result<HashMap<String, serde_json::Value>, String> {
+        let conn = db.conn.lock();
+        let mut stmt = conn.prepare("SELECT album_id, draft_json FROM curation_drafts")
+            .map_err(|err| err.to_string())?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|err| err.to_string())?;
+        let mut drafts = HashMap::new();
+        for row in rows {
+            let (id, json) = row.map_err(|err| err.to_string())?;
+            match serde_json::from_str(&json) {
+                Ok(draft) => { drafts.insert(id, draft); }
+                Err(err) => eprintln!("Skipping malformed Curate draft {id}: {err}"),
+            }
+        }
+        Ok(drafts)
+    }
+
     /// Saves a curation decision trace with audiophile idle-guarding and field-level merge semantics.
     pub fn save_trace(
         db: &AppDb,

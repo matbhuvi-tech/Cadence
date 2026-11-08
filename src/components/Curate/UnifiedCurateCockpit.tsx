@@ -694,9 +694,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       // Reopening for a new review hides prior commits from the active proposal,
       // but those commits still prove that the matching old draft was written.
       const rows = new Map((commitRows ?? []).map(row => [row.trackId, row]))
-      const completedDraft = draft && isReconciledCurateDraft(draft, rows)
+      const completedDraft = draft && isReconciledCurateDraft(draft, rows, activeItem.rawTracks, activeItem.rawRelease)
       const restoredDraft = draft && !completedDraft
-        ? matchesCurateConfirmation(draft, rows) ? draft : migrateCurateDraft(draft, captureCurateBaseline(activeItem))
+        ? matchesCurateConfirmation(draft, rows, false, activeItem.rawTracks, activeItem.rawRelease) ? draft : migrateCurateDraft(draft, captureCurateBaseline(activeItem))
         : null
       const restored = restoredDraft ? restoreCurateDraft(activeItem, restoredDraft) : activeItem
       const snapshot = restoredDraft
@@ -757,8 +757,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   if (selectedDraft && loadedSelection?.serialized === JSON.stringify(selectedDraft)) {
     selectedDraft.revision = loadedSelection.draft.revision
   }
-  const selectedCommitConfirmed = Boolean(selectedDraft && matchesCurateConfirmation(selectedDraft, commitsByTrack))
-  const selectedCommitReconciled = Boolean(selectedDraft && isReconciledCurateDraft(selectedDraft, commitsByTrack))
+  const selectedCommitConfirmed = Boolean(selectedAlbum && selectedDraft && matchesCurateConfirmation(selectedDraft, commitsByTrack, false, selectedAlbum.rawTracks, selectedAlbum.rawRelease))
+  const selectedCommitReconciled = Boolean(selectedAlbum && selectedDraft && isReconciledCurateDraft(selectedDraft, commitsByTrack, selectedAlbum.rawTracks, selectedAlbum.rawRelease))
   const selectedCommitStatuses = new Set(selectedCommitRows.map(row => row.status))
   const selectedCommitError = selectedCommitRows.find(row => row.status === 'failed' && row.errorMessage)?.errorMessage
   const selectedCommitStatus = selectedCommitStatuses.has('failed')

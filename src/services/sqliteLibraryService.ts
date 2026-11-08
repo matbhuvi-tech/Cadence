@@ -422,6 +422,7 @@ export class SqliteLibraryService {
           releaseTitle: t.albumTitle || t.folderName,
           albumTitle: t.albumTitle || t.folderName,
           canonicalReleaseYear: t.releaseYear || undefined,
+          genre: t.genre || undefined,
           credits: [],
           masterReleaseId: t.releaseId,
         }

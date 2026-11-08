@@ -65,7 +65,9 @@ test('persists and removes dismissals across release ID changes', () => {
   assert.equal(evaluate().totalActionableAlbums, 0)
   removeDismissedProblem(rescanned.id, 'artist_as_album_title', tracks, storage)
   assert.equal(evaluate().totalActionableAlbums, 1)
-  assert.deepEqual(loadDismissedProblems(storage), {})
+  const restored = evaluateCatalogProblems([track], [{ ...rescanned, id: release.id }],
+    DEFAULT_PRIORITY_SETTINGS, loadDismissedProblems(storage))
+  assert.equal(restored.totalActionableAlbums, 1)
 })
 
 test('matches both filter groups on the same instance and distinguishes reset from completion', () => {

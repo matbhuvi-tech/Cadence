@@ -288,6 +288,7 @@ export interface Track {
   canonicalAlbumTitle?: string
   canonicalReleaseId?: string
   canonicalReleaseYear?: number
+  genre?: string
   isCanonicalAlbumTrack?: boolean
   isCompilation?: boolean
   albumArtist?: string

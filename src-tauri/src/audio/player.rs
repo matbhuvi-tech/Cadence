@@ -93,6 +93,7 @@ pub struct AudioEngine {
     is_playing_atomic: Arc<AtomicBool>,
     is_paused_atomic: Arc<AtomicBool>,
     library_scan_io: Arc<parking_lot::Mutex<()>>,
+    playback_stopped_at: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 impl AudioEngine {
@@ -104,6 +105,8 @@ impl AudioEngine {
         let is_playing_worker = Arc::clone(&is_playing_atomic);
         let is_paused_atomic = Arc::new(AtomicBool::new(false));
         let is_paused_worker = Arc::clone(&is_paused_atomic);
+        let playback_stopped_at = Arc::new(parking_lot::Mutex::new(None));
+        let stopped_at_worker = Arc::clone(&playback_stopped_at);
 
         // Run initial background SSDP scan on engine startup so devices like HiFi Rose are ready immediately
         let bg_upnp = Arc::clone(&upnp_manager);
@@ -575,6 +578,9 @@ impl AudioEngine {
                         is_paused = false;
                         current_file = None;
                         is_upnp_active = false;
+                        if is_playing_worker.load(Ordering::Relaxed) || is_paused_worker.load(Ordering::Relaxed) {
+                            *stopped_at_worker.lock() = Some(Instant::now());
+                        }
                         is_playing_worker.store(false, Ordering::Release);
                         is_paused_worker.store(false, Ordering::Release);
                     }
@@ -781,6 +787,9 @@ impl AudioEngine {
                         } else {
                             sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
                         };
+                        if !is_playing && !is_paused && is_playing_worker.load(Ordering::Relaxed) {
+                            *stopped_at_worker.lock() = Some(Instant::now());
+                        }
                         is_playing_worker.store(is_playing, Ordering::Release);
                         is_paused_worker.store(is_paused, Ordering::Release);
 
@@ -884,6 +893,7 @@ impl AudioEngine {
             is_playing_atomic,
             is_paused_atomic,
             library_scan_io: Arc::new(parking_lot::Mutex::new(())),
+            playback_stopped_at,
         }
     }
 
@@ -897,6 +907,13 @@ impl AudioEngine {
 
     pub(crate) fn try_library_scan_io(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
         try_scan_io(&self.library_scan_io, || self.is_playing() || self.is_paused())
+    }
+
+    pub(crate) fn try_curate_draft_read(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+        let permit = self.try_library_scan_io()?;
+        let cooled_down = self.playback_stopped_at.lock()
+            .is_none_or(|stopped_at| stopped_at.elapsed() >= Duration::from_secs(30));
+        cooled_down.then_some(permit)
     }
 
     pub fn play_track(&self, file_path: &str) -> Result<AudioStreamInfo, String> {

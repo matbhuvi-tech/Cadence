@@ -289,6 +289,7 @@ pub fn run() {
             // Curation Decision Trace commands
             curation_save_draft,
             curation_get_draft,
+            curation_list_drafts,
             curation_save_trace,
             curation_get_identity,
             curation_save_evidence,
