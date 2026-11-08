@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Release, Track } from '../core/types'
-import { getCurateChange, isReconciledCurateDraft, makeCurateCommitItems, prepareTier1Commit, projectCurateCommits, reconcileCurateReviewState } from '../core/curateCommit'
+import { getCurateChange, isReconciledCurateDraft, makeCurateCommitItems, makeStagedCurateCommitItems, prepareTier1Commit, projectCurateCommits, reconcileCurateReviewState } from '../core/curateCommit'
 import type { CurateDraft } from '../core/curateDraft'
 
 test('shows proposed replacements and additions without treating missing selections as clears', () => {
@@ -233,4 +233,30 @@ test('folds partial queue rows and cascades release year and genre to siblings',
   assert.equal(result.releases[0].releaseYear, 1995)
   assert.deepEqual(result.releases[0].genreTags, ['Soundtrack'])
   assert.deepEqual(result.tracks.map(t => [t.canonicalReleaseYear, t.genre]), [[1995, 'Soundtrack'], [1995, 'Soundtrack']])
+})
+
+test('a repeated commit carries the cumulative physical delta and staged eligibility follows confirmation', () => {
+  const rawTrack = {
+    id: 'one', releaseId: 'album', title: 'Song', filePath: 'song.flac', storageMountId: 'disk',
+  } as Track
+  const release = { id: 'album', title: 'Album' } as Release
+  const draft = {
+    staged: true, revision: 'first',
+    fields: {
+      albumTitle: { selected: 'Album' }, albumArtist: { selected: '' },
+      composer: {}, year: {}, genre: {}, coverArt: { selected: 'https://example.test/art.png' },
+    },
+    tracks: [{ trackId: 'one', matchedTitle: 'Song' }],
+  } as CurateDraft
+  const [first] = makeCurateCommitItems(draft, [rawTrack], release)
+  const rows = new Map([['one', { ...first, status: 'pending' as const }]])
+  assert.deepEqual(makeStagedCurateCommitItems(draft, [rawTrack], release, rows), [])
+  const next = { ...draft, revision: 'second', fields: {
+    ...draft.fields, albumArtist: { ...draft.fields.albumArtist, selected: 'Singer', userOverridden: true },
+  } }
+  assert.deepEqual(makeStagedCurateCommitItems({ ...next, staged: false }, [rawTrack], release, rows), [])
+  const [item] = makeStagedCurateCommitItems(next, [rawTrack], release, rows)
+  const payload = JSON.parse(item.payloadJson)
+  assert.equal(payload.albumArtist, 'Singer')
+  assert.equal(payload.coverArtUrl, draft.fields.coverArt.selected)
 })
