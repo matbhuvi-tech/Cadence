@@ -200,3 +200,37 @@ test('keeps an album open when a completed write has a newer saved draft', () =>
   assert.equal(closed.get('album'), true)
   assert.equal(reconcileCurateReviewState(closed, tracks, [{ ...row, hasNewerDraft: true }]).has('album'), false)
 })
+
+test('queues and confirms only tracks that differ from the physical baseline', () => {
+  const draft = {
+    fields: {
+      albumTitle: { selected: 'Album' }, albumArtist: { selected: '' },
+      composer: { selected: '' }, year: {}, genre: {}, coverArt: {},
+    },
+    tracks: [{ trackId: 'one', matchedTitle: 'Song' }, { trackId: 'two', matchedTitle: 'Corrected' }],
+  } as CurateDraft
+  const tracks = ['one', 'two'].map(id =>
+    ({ id, releaseId: 'album', title: 'Song', filePath: id, storageMountId: 'disk' }) as Track)
+  const release = { id: 'album', title: 'Album' } as Release
+  const items = makeCurateCommitItems(draft, tracks, release)
+  assert.deepEqual(items.map(item => item.trackId), ['two'])
+  assert.equal(JSON.parse(items[0].payloadJson).curateTrackCount, 1)
+  const completed = { ...items[0], status: 'completed' as const }
+  assert.equal(isReconciledCurateDraft(draft, new Map([['two', completed]])), true)
+  assert.equal(reconcileCurateReviewState(new Map(), tracks, [completed]).get('album'), true)
+  draft.tracks[1].matchedTitle = 'Song'
+  assert.deepEqual(makeCurateCommitItems(draft, tracks, release), [])
+})
+
+test('folds partial queue rows and cascades release year and genre to siblings', () => {
+  const tracks = ['one', 'two'].map(id => ({ id, releaseId: 'album', title: 'Local' }) as Track)
+  const release = { id: 'album', genreTags: [] } as unknown as Release
+  const result = projectCurateCommits(tracks, [release], [
+    { id: 'first', trackId: 'one', status: 'pending', payloadJson: '{"title":"Corrected","year":1995}' },
+    { id: 'second', trackId: 'one', status: 'pending', payloadJson: '{"genre":"Soundtrack"}' },
+  ])
+  assert.equal(result.tracks[0].title, 'Corrected')
+  assert.equal(result.releases[0].releaseYear, 1995)
+  assert.deepEqual(result.releases[0].genreTags, ['Soundtrack'])
+  assert.deepEqual(result.tracks.map(t => [t.canonicalReleaseYear, t.genre]), [[1995, 'Soundtrack'], [1995, 'Soundtrack']])
+})
