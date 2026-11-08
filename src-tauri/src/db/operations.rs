@@ -3142,7 +3142,7 @@ mod tests {
     use crate::db::schema::initialize_schema;
 
     #[test]
-    fn tier1_batch_saves_new_drafts_and_preserves_existing_queue_intent() {
+    fn curate_batch_replaces_pending_intent_and_updates_staging_atomically() {
         let mut conn = Connection::open_in_memory().unwrap();
         initialize_schema(&conn).unwrap();
         conn.execute(
@@ -3169,18 +3169,18 @@ mod tests {
             "SELECT json_extract(draft_json, '$.staged') FROM curation_drafts WHERE album_id = 'existing'",
             [], |row| row.get(0),
         ).unwrap();
-        assert!(staged);
+        assert!(!staged);
         batch.id = "conflicting".into();
         item.id = "second-item".into();
-        item.payload_json = "{}".into();
-        assert!(!DbOperations::insert_commit_with_curate_drafts(
+        item.payload_json = r#"{"curate":true,"genre":"Updated"}"#.into();
+        assert!(DbOperations::insert_commit_with_curate_drafts(
             &mut conn, &batch, &[item], &[("unconfirmed".into(), new_draft)], true,
         ).unwrap());
         let draft_count: i64 = conn.query_row("SELECT COUNT(*) FROM curation_drafts", [], |r| r.get(0)).unwrap();
-        assert_eq!(draft_count, 2);
+        assert_eq!(draft_count, 3);
         let queued = DbOperations::fetch_next_pending_commit_item(&conn, &[]).unwrap().unwrap();
         assert_eq!(queued.id, "first-item");
-        assert!(queued.payload_json.contains("Confirmed"));
+        assert!(queued.payload_json.contains("Updated"));
     }
 
     #[test]
