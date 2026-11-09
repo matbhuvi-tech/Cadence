@@ -9,7 +9,6 @@ import {
   Lock,
   Unlock,
   ShieldCheck,
-  CheckCircle2,
   AlertTriangle,
   Folder,
   Server,
@@ -165,10 +164,10 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-semibold tracking-wide">
-                Library & Storage Management
+                Storage & Library Folders
               </h2>
               <p className="text-xs text-white/50">
-                Manage watched roots, network shares, offline storage policies, and SQLite indexing.
+                Manage watched roots, network shares, and storage drives.
               </p>
             </div>
           </div>
@@ -200,10 +199,6 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
               <span className="font-mono font-semibold text-white">
                 {mounts.length}
               </span>
-            </div>
-            <div className="flex items-center gap-1.5 text-emerald-400">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Native SQLite WAL Active</span>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -498,26 +493,10 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
               })}
             </div>
           </div>
-
-          {/* 3. Non-Destructive Ghost Track Safety Note */}
-          <div className="p-4 rounded-xl bg-blue-500/[0.06] border border-blue-500/20 text-xs text-blue-200/80 flex items-start gap-3">
-            <ShieldCheck className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
-            <div>
-              <div className="font-semibold text-blue-300 mb-0.5">
-                Non-Destructive Library Integrity Guarantee
-              </div>
-              <p className="text-[11px] leading-relaxed">
-                When external USB drives or NAS shares disconnect, Cadence Core protects your library by flagging records as offline rather than deleting them. All play statistics, dynamic range ratings, and sidecar edits remain safe in SQLite.
-              </p>
-            </div>
-          </div>
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 bg-[#12151E] border-t border-white/[0.08] flex items-center justify-between text-xs">
-          <div className="text-white/40">
-            Database location: <span className="font-mono text-white/60">%APPDATA%/com.cadence.core/cadence.db</span>
-          </div>
+        <div className="px-6 py-4 bg-[#12151E] border-t border-white/[0.08] flex items-center justify-end text-xs">
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium transition-colors"

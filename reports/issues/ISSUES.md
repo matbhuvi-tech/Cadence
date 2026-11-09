@@ -1,5 +1,16 @@
 # Issue Log
 
+## Issue #20 — Refactor storage manager modal and Left Rail storage entry: remove SQLite jargon and fix sidebar label
+
+- **Reproduction:** In the main desktop window, the Left Rail sidebar under "STORAGE MOUNTS" renders a button with the arbitrary first mount name ("Drive E: [4]"). Clicking it unexpectedly opens a global modal titled "Library & Storage Management" which controls all mounts and watched folders. In that modal, the telemetry bar displays internal SQLite details ("Native SQLite WAL Active"), the body has a static educational banner ("Non-Destructive Library Integrity Guarantee"), and the footer shows the raw file path "Database location: %APPDATA%/com.cadence.core/cadence.db".
+- **Resolution:**
+  1. In `LeftRail.tsx`, rename the section header to `STORAGE` and label the button clearly as `Storage & Folders`, providing a predictable management target.
+  2. In `StorageManagerModal.tsx`, update modal title to `Storage & Library Folders` and subtitle to describe managing storage roots, watched folders, and disk health.
+  3. Remove the internal "Native SQLite WAL Active" pill from the top telemetry bar.
+  4. Remove the static "Non-Destructive Library Integrity Guarantee" instructional callout.
+  5. Remove the raw database path from the footer, providing a clean Apple HIG-aligned modal.
+- **Status:** In progress. [GitHub issue #20](https://github.com/matbhuvi-tech/Cadence/issues/20)
+
 ## Issue #19 — Unfreeze artwork indexing worker and retire redundant Audit first-class navigation
 
 - **Reproduction:** Ingest a music library containing both un-cached artist portraits and embedded album covers. Once artist portraits finish syncing, background artwork indexing stalls permanently at partial progress (e.g. 130/381 scanned) reporting "Idle: All artist portraits synchronized" while remaining marked "Active". In the UI, "Audit & Hygiene" exists as an over-promoted ⌘3 mode and Left Rail entry with conflicting defect numbers (130) compared to Curate & Metadata Cockpit (222 P0 / 922 total defects), creating contradictory stories and fractured mental models.

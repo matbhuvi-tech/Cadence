@@ -314,7 +314,7 @@ export const LeftRail: React.FC<LeftRailProps> = ({
         <div className={`space-y-1 pt-1 ${isIconOnly ? 'w-full flex flex-col items-center' : ''}`}>
           {!isIconOnly && (
             <div className="text-[10px] uppercase font-mono text-[#8E8E93]/70 font-semibold px-2 py-1 tracking-wider flex items-center justify-between">
-              <span>Storage Mounts</span>
+              <span>Storage</span>
               <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" title="Storage subsystem active & online" />
             </div>
           )}
@@ -326,13 +326,13 @@ export const LeftRail: React.FC<LeftRailProps> = ({
                 ? 'w-10 h-10 justify-center text-[#8E8E93] hover:text-[#F5F5F7] hover:bg-white/[0.04]'
                 : 'w-full px-2.5 py-1.5 justify-between text-[#8E8E93] hover:text-[#F5F5F7] hover:bg-white/[0.04]'
             }`}
-            title={`Manage Storage Mounts (${watchedFolders.length} Watched)`}
+            title={`Manage Storage & Folders (${watchedFolders.length} Watched Folders, ${storageMounts.length} Mounts)`}
           >
             <div className={`flex items-center truncate ${isIconOnly ? 'justify-center' : 'gap-2'}`}>
               <HardDrive className="w-3.5 h-3.5 text-[#8E8E93] group-hover:text-white shrink-0" />
               {!isIconOnly && (
                 <span className="truncate">
-                  {storageMounts[0]?.name?.split('(')[0]?.trim() || 'Local Storage'}
+                  Storage & Folders
                 </span>
               )}
             </div>
