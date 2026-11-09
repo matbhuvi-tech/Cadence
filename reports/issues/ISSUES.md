@@ -9,7 +9,7 @@
   3. Remove the internal "Native SQLite WAL Active" pill from the top telemetry bar.
   4. Remove the static "Non-Destructive Library Integrity Guarantee" instructional callout.
   5. Remove the raw database path from the footer, providing a clean Apple HIG-aligned modal.
-- **Status:** In progress. [GitHub issue #20](https://github.com/matbhuvi-tech/Cadence/issues/20)
+- **Status:** Resolved and verified by user. [GitHub issue #20](https://github.com/matbhuvi-tech/Cadence/issues/20)
 
 ## Issue #19 — Unfreeze artwork indexing worker and retire redundant Audit first-class navigation
 
