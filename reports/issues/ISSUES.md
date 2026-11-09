@@ -7,7 +7,7 @@
   1. Do not aggressively force the full popover open when starting a library scan in `App.tsx`; instead, notify via toast and allow the user to view progress via the existing top bar `ActivityPill`.
   2. Modernize the stage pills in `ActivityCenterPopover` with user-centric, clean labels ("Discovery", "Tags & Metadata", "Database Index", "Audio & Art") that accurately map to scanner and maintenance states.
   3. Contextualize the Gemini AI section so it only displays when AI requests are active, cooling down, rate-limited, or when specifically monitoring AI operations, keeping local scans clean and focused.
-- **Status:** In progress. [GitHub issue #18](https://github.com/matbhuvi-tech/Cadence/issues/18)
+- **Status:** Resolved and verified in commit `b19e1d5`. [GitHub issue #18](https://github.com/matbhuvi-tech/Cadence/issues/18)
 
 ## Issue #15 — Gemini API calls always return 429 when Google Search grounding quota is exhausted
 
