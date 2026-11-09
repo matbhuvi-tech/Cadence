@@ -2083,6 +2083,7 @@ function AppContent() {
           {/* 3. Unified Right Sidebar: Queue & Playlists */}
           {isRightSidebarOpen && (
             <UnifiedRightSidebar
+              allReleases={releases}
               onOpenCreatePlaylist={(trks) => {
                 setInitialPlaylistTracks(trks || [])
                 setIsCreatePlaylistOpen(true)
