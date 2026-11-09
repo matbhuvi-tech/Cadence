@@ -13,19 +13,69 @@ export interface RemoteQueueSyncState {
   latestHydrationRevision: number
   queue: Track[]
   queueIndex: number
+  currentTrack?: Track | null
+  isPlaying?: boolean
+  isPaused?: boolean
+}
+
+export function reconcileActiveTrack(
+  file: string | null | undefined,
+  queue: Track[],
+  currentTrack: Track | null | undefined
+): { matchedTrack: Track | null; matchedIndex: number } {
+  if (!file) return { matchedTrack: null, matchedIndex: -1 }
+  const normalizedFile = file.replace(/\\/g, '/').toLowerCase()
+
+  const foundIdx = queue.findIndex((t) => {
+    const p = (t.filePath || t.folderPath || '').replace(/\\/g, '/').toLowerCase()
+    return p === normalizedFile || t.id === file
+  })
+
+  if (foundIdx >= 0) {
+    return { matchedTrack: queue[foundIdx], matchedIndex: foundIdx }
+  }
+  return { matchedTrack: null, matchedIndex: -1 }
+}
+
+export function handleRemoteStateEvent(
+  data: any,
+  state: RemoteQueueSyncState
+) {
+  if (!data) return
+  const isPlaying = data.isPlaying ?? data.is_playing
+  const isPaused = data.isPaused ?? data.is_paused
+  const currentFile = data.currentFile ?? data.current_file
+
+  if (isPlaying !== undefined) state.isPlaying = Boolean(isPlaying)
+  if (isPaused !== undefined) state.isPaused = Boolean(isPaused)
+
+  if (currentFile) {
+    const { matchedTrack, matchedIndex } = reconcileActiveTrack(currentFile, state.queue, state.currentTrack)
+    if (matchedTrack && matchedIndex >= 0) {
+      state.currentTrack = matchedTrack
+      state.queueIndex = matchedIndex
+    }
+  }
 }
 
 export async function handleRemoteQueueEvent(
   payload: {
-    items: Array<{ id: string; title: string; filePath: string }>
-    currentIndex: number
+    items: Array<{ id: string; title: string; filePath?: string; file_path?: string; queueEntryId?: string; queue_entry_id?: string }>
+    currentIndex?: number
+    current_index?: number
     revision: number
   },
   state: RemoteQueueSyncState,
   fetchTracksFromDb: (ids: string[]) => Promise<Track[]>,
   commitState: (tracks: Track[], index: number) => void
 ) {
-  const { items, currentIndex, revision } = payload
+  const { items, revision } = payload
+  const effectiveIndex = typeof payload.currentIndex === 'number'
+    ? payload.currentIndex
+    : typeof payload.current_index === 'number'
+    ? payload.current_index
+    : 0
+
   if (revision <= state.appliedServerRevision) {
     return false // Ignore stale or echo revision
   }
@@ -43,18 +93,23 @@ export async function handleRemoteQueueEvent(
   const orderedTracks = items.map((item) => {
     const found = hydrated.find((t) => t.id === item.id)
     if (found) return found
+    const fp = item.filePath || item.file_path || ''
     return {
       id: item.id,
       title: item.title,
-      folderPath: item.filePath,
+      folderPath: fp,
+      filePath: fp,
       format: 'FLAC',
       durationSeconds: 180,
     } as Track
   })
 
-  commitState(orderedTracks, currentIndex)
+  commitState(orderedTracks, effectiveIndex)
   state.queue = orderedTracks
-  state.queueIndex = currentIndex
+  state.queueIndex = effectiveIndex
+  if (effectiveIndex >= 0 && effectiveIndex < orderedTracks.length) {
+    state.currentTrack = orderedTracks[effectiveIndex]
+  }
   return true
 }
 
@@ -146,6 +201,57 @@ async function runTestSuite() {
   assert(state.queue[0].title === 'Fast Rev 3', 'State contains revision 3 data')
   assert(state.appliedServerRevision === 3, 'Applied server revision is 3')
 
+  // --- TEST 4: Snake_Case Remote Event Normalization & Active Track Update ---
+  console.log('\n--- Test 4: Snake_case remote event normalization & active track update ---')
+  // Setup multi-track queue: [Track 1 (Adho Mega Oorvalam), Track 2 (Kalakalakum), Track 3 (Thendral Kaatre), Track 4 (Vaa Vaa Anbe)]
+  const albumTracks = [
+    { id: 'trk-1', title: 'Adho Mega Oorvalam', file_path: 'D:/Music/01.flac' },
+    { id: 'trk-2', title: 'Kalakalakum Maniosai', file_path: 'D:/Music/02.flac' },
+    { id: 'trk-3', title: 'Thendral Kaatre', file_path: 'D:/Music/03.flac' },
+    { id: 'trk-4', title: 'Vaa Vaa Anbe', file_path: 'D:/Music/04.flac' },
+  ]
+  await handleRemoteQueueEvent(
+    { items: albumTracks, current_index: 0, revision: 4 },
+    state,
+    async () => [],
+    () => {}
+  )
+  assert(state.queue.length === 4, 'Queue has 4 tracks loaded')
+  assert(state.queueIndex === 0, 'Initial queue index is 0')
+  assert(state.currentTrack?.title === 'Adho Mega Oorvalam', 'Current track initialized to Track 1')
+
+  // Native backend sends snake_case state change advancing to Track 3 (Thendral Kaatre)
+  handleRemoteStateEvent(
+    {
+      type: 'STATE_CHANGE',
+      is_playing: true,
+      is_paused: false,
+      current_file: 'D:/Music/03.flac',
+      position_secs: 12.5,
+      duration_secs: 304.0,
+    },
+    state
+  )
+  assert(state.queueIndex === 2, 'Queue index reconciled to Track 3 (index 2)')
+  assert(state.currentTrack?.title === 'Thendral Kaatre', 'Now Playing updated to Thendral Kaatre')
+  assert(state.isPlaying === true, 'Playback state is playing')
+
+  // --- TEST 5: Native Backend advances to Track 4 (Vaa Vaa Anbe) ---
+  console.log('\n--- Test 5: Reconciling Track 4 (Vaa Vaa Anbe) from current_file ---')
+  handleRemoteStateEvent(
+    {
+      type: 'STATE_CHANGE',
+      is_playing: true,
+      is_paused: false,
+      current_file: 'D:/Music/04.flac',
+      position_secs: 0.0,
+      duration_secs: 291.0,
+    },
+    state
+  )
+  assert(state.queueIndex === 3, 'Queue index reconciled to Track 4 (index 3)')
+  assert(state.currentTrack?.title === 'Vaa Vaa Anbe', 'Now Playing updated to Vaa Vaa Anbe')
+
   console.log('\n=====================================================')
   console.log('All Remote Queue Sync tests passed successfully!')
   console.log('=====================================================')
@@ -155,3 +261,4 @@ runTestSuite().catch((e) => {
   console.error(e)
   process.exit(1)
 })
+

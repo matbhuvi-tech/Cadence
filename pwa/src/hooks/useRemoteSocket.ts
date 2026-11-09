@@ -145,25 +145,45 @@ export function useRemoteSocket() {
               durationSecs: data.duration_secs,
             }));
           } else if (data.type === 'QUEUE_UPDATED') {
+            const mappedItems = (data.items || []).map((t: any) => ({
+              ...t,
+              queueEntryId: t.queueEntryId ?? t.queue_entry_id,
+              filePath: t.filePath ?? t.file_path,
+              durationSecs: t.durationSecs ?? t.duration_secs,
+              sampleRate: t.sampleRate ?? t.sample_rate,
+              bitDepth: t.bitDepth ?? t.bit_depth,
+              isHighRes: t.isHighRes ?? t.is_high_res,
+            }));
+            const currIdx = typeof data.current_index === 'number' ? data.current_index : -1;
             setQueue((prev) => ({
               ...prev,
-              items: data.items,
-              currentIndex: data.current_index,
+              items: mappedItems,
+              currentIndex: currIdx,
               revision: data.revision ?? prev.revision,
               currentQueueEntryId: data.current_queue_entry_id,
             }));
             setConflictEvent(null);
           } else if (data.type === 'QUEUE_CONFLICT') {
+            const mappedItems = (data.items || []).map((t: any) => ({
+              ...t,
+              queueEntryId: t.queueEntryId ?? t.queue_entry_id,
+              filePath: t.filePath ?? t.file_path,
+              durationSecs: t.durationSecs ?? t.duration_secs,
+              sampleRate: t.sampleRate ?? t.sample_rate,
+              bitDepth: t.bitDepth ?? t.bit_depth,
+              isHighRes: t.isHighRes ?? t.is_high_res,
+            }));
+            const currIdx = typeof data.current_index === 'number' ? data.current_index : -1;
             setQueue((prev) => ({
               ...prev,
-              items: data.items,
-              currentIndex: data.current_index,
+              items: mappedItems,
+              currentIndex: currIdx,
               revision: data.current_revision,
             }));
             setConflictEvent({
               currentRevision: data.current_revision,
-              items: data.items,
-              currentIndex: data.current_index,
+              items: mappedItems,
+              currentIndex: currIdx,
             });
           } else if (data.type === 'DEVICE_UNAVAILABLE') {
             setDeviceUnavailableEvent({

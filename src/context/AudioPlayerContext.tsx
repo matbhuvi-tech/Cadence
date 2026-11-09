@@ -188,6 +188,47 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const latestHydrationRevisionRef = useRef<number>(0)
   const isInternalQueueUpdateRef = useRef<boolean>(false)
 
+  const reconcileActiveTrack = useCallback((file: string | null | undefined) => {
+    if (!file) return
+    const normalizedFile = file.replace(/\\/g, '/').toLowerCase()
+    const { queue: q, queueIndex: qIdx, currentTrack: cTrack } = stateRef.current
+
+    // Check if currentTrack is already this file
+    const currentPath = (cTrack?.filePath || cTrack?.folderPath || '').replace(/\\/g, '/').toLowerCase()
+    if (
+      currentPath === normalizedFile &&
+      qIdx >= 0 &&
+      (q[qIdx]?.filePath || q[qIdx]?.folderPath || '').replace(/\\/g, '/').toLowerCase() === normalizedFile
+    ) {
+      return
+    }
+
+    // Search in current queue
+    const foundIdx = q.findIndex((t) => {
+      const p = (t.filePath || t.folderPath || '').replace(/\\/g, '/').toLowerCase()
+      return p === normalizedFile || t.id === file
+    })
+
+    if (foundIdx >= 0) {
+      const matched = q[foundIdx]
+      setQueueIndex(foundIdx)
+      setCurrentTrack(matched)
+      stateRef.current.queueIndex = foundIdx
+      stateRef.current.currentTrack = matched
+      return
+    }
+
+    // If not found in queue, check memory graph
+    const memoryTrack = graphEngine.getAllTracks().find((t) => {
+      const p = (t.filePath || t.folderPath || '').replace(/\\/g, '/').toLowerCase()
+      return p === normalizedFile || t.id === file
+    }) || graphEngine.getTrackById(file)
+    if (memoryTrack) {
+      setCurrentTrack(memoryTrack)
+      stateRef.current.currentTrack = memoryTrack
+    }
+  }, [])
+
   useEffect(() => {
     stateRef.current = { queue, queueIndex, repeatMode, isShuffle, currentTrack }
     if (isInternalQueueUpdateRef.current) {
@@ -216,22 +257,41 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         listen<any>('cadence:remote-state-changed', (event) => {
           const data = event.payload
           if (data) {
-            if (data.isPlaying !== undefined) setIsPlaying(Boolean(data.isPlaying))
-            if (data.isPaused !== undefined) setIsPaused(Boolean(data.isPaused))
-            if (data.positionSecs !== undefined) setCurrentTime(data.positionSecs)
-            if (data.durationSecs !== undefined) setDuration(data.durationSecs)
+            const isPlayingVal = data.isPlaying ?? data.is_playing
+            const isPausedVal = data.isPaused ?? data.is_paused
+            const positionSecsVal = data.positionSecs ?? data.position_secs
+            const durationSecsVal = data.durationSecs ?? data.duration_secs
+            const isPurityModeVal = data.isPurityMode ?? data.is_purity_mode
+            const isBitPerfectVal = data.isBitPerfect ?? data.is_bit_perfect
+            const activeDeviceVal = data.activeDevice ?? data.active_device
+            const streamInfoVal = data.streamInfo ?? data.stream_info
+            const currentFileVal = data.currentFile ?? data.current_file
+
+            if (isPlayingVal !== undefined) setIsPlaying(Boolean(isPlayingVal))
+            if (isPausedVal !== undefined) setIsPaused(Boolean(isPausedVal))
+            if (positionSecsVal !== undefined) setCurrentTime(positionSecsVal)
+            if (durationSecsVal !== undefined) setDuration(durationSecsVal)
             if (data.volume !== undefined) setVolumeState(data.volume)
-            if (data.isPurityMode !== undefined) setIsPurityMode(data.isPurityMode)
-            if (data.isBitPerfect !== undefined) setIsBitPerfect(data.isBitPerfect)
-            if (data.activeDevice) setActiveDevice(data.activeDevice)
-            if (data.streamInfo) setStreamTelemetry(data.streamInfo)
+            if (isPurityModeVal !== undefined) setIsPurityMode(isPurityModeVal)
+            if (isBitPerfectVal !== undefined) setIsBitPerfect(isBitPerfectVal)
+            if (activeDeviceVal) setActiveDevice(activeDeviceVal)
+            if (streamInfoVal) setStreamTelemetry(streamInfoVal)
+            if (currentFileVal) reconcileActiveTrack(currentFileVal)
           }
         }).catch(() => {})
 
         listen<any>('cadence:remote-queue-changed', async (event) => {
           const payload = event.payload
           if (!payload) return
-          const { items, currentIndex, revision } = payload
+          const items = payload.items
+          const currentIndex = typeof payload.currentIndex === 'number'
+            ? payload.currentIndex
+            : typeof payload.current_index === 'number'
+            ? payload.current_index
+            : 0
+          const revision = payload.revision
+          const currentQueueEntryId = payload.currentQueueEntryId ?? payload.current_queue_entry_id
+
           if (typeof revision === 'number') {
             if (revision <= appliedServerRevisionRef.current) {
               return
@@ -244,28 +304,33 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
           const currentRev = revision
           const rehydratedTracks: Track[] = items.map((item: any) => {
+            const entryId = item.queueEntryId ?? item.queue_entry_id
+            const fp = item.filePath ?? item.file_path ?? ''
+            const dur = item.durationSecs ?? item.duration_secs ?? 0
+            const sr = item.sampleRate ?? item.sample_rate
+            const bd = item.bitDepth ?? item.bit_depth
             const memoryTrack = graphEngine.getTrackById(item.id)
             if (memoryTrack) {
-              return { ...memoryTrack, queueEntryId: item.queueEntryId } as Track
+              return { ...memoryTrack, queueEntryId: entryId } as Track
             }
             return {
               id: item.id,
-              queueEntryId: item.queueEntryId,
+              queueEntryId: entryId,
               releaseId: item.releaseId || '',
               recordingId: item.id,
               trackNumber: 1,
               discNumber: 1,
               title: item.title,
               artistCredit: item.artist,
-              filePath: item.filePath,
+              filePath: fp,
               fileSize: 0,
               storageMountId: '',
-              folderPath: item.filePath,
-              durationSeconds: item.durationSecs || 0,
+              folderPath: fp,
+              durationSeconds: dur,
               format: item.format || 'FLAC',
-              sampleRate: item.sampleRate,
-              bitDepth: item.bitDepth,
-              sampleRateStr: item.sampleRate ? `${item.sampleRate / 1000}kHz` : undefined,
+              sampleRate: sr,
+              bitDepth: bd,
+              sampleRateStr: sr ? `${sr / 1000}kHz` : undefined,
             } as Track
           })
 
@@ -276,7 +341,20 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
           isInternalQueueUpdateRef.current = true
           setQueue(rehydratedTracks)
-          setQueueIndex(currentIndex)
+          if (typeof currentIndex === 'number' && currentIndex >= 0 && currentIndex < rehydratedTracks.length) {
+            setQueueIndex(currentIndex)
+            setCurrentTrack(rehydratedTracks[currentIndex])
+            stateRef.current.queueIndex = currentIndex
+            stateRef.current.currentTrack = rehydratedTracks[currentIndex]
+          } else if (currentQueueEntryId) {
+            const matchIdx = rehydratedTracks.findIndex((t) => t.queueEntryId === currentQueueEntryId)
+            if (matchIdx >= 0) {
+              setQueueIndex(matchIdx)
+              setCurrentTrack(rehydratedTracks[matchIdx])
+              stateRef.current.queueIndex = matchIdx
+              stateRef.current.currentTrack = rehydratedTracks[matchIdx]
+            }
+          }
         }).catch(() => {})
       }).catch(() => {})
     }
@@ -285,15 +363,23 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Poll position and status for native Tauri playback
   useEffect(() => {
     const isTauri = isNativeTauri || tauriBridge.isTauri()
-    if (isPlaying && !isPaused && isTauri) {
+    if ((isPlaying || isPaused) && isTauri) {
       pollIntervalRef.current = setInterval(async () => {
         try {
           const status = await tauriBridge.getPlaybackStatus()
+          if (!status) return
+
           if (typeof status.positionSecs === 'number' && !isNaN(status.positionSecs)) {
             setCurrentTime(status.positionSecs)
           }
           if (status.durationSecs && status.durationSecs > 0) {
             setDuration(status.durationSecs)
+          }
+          if (status.isPlaying !== undefined) {
+            setIsPlaying(status.isPlaying)
+          }
+          if (status.isPaused !== undefined) {
+            setIsPaused(status.isPaused)
           }
           if (status.streamInfo) {
             setStreamTelemetry(status.streamInfo)
@@ -309,6 +395,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           }
           if (status.deviceType !== undefined) {
             setDeviceType(status.deviceType)
+          }
+
+          // Reconcile current track if native audio engine is playing a different file
+          if (status.currentFile) {
+            reconcileActiveTrack(status.currentFile)
           }
 
           // Audiophile Invariant #1 & #3 Gapless Pre-loading Check:
@@ -406,11 +497,16 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
         if (queueContext && queueContext.length > 0) {
           setQueue(queueContext)
-          const idx = queueContext.findIndex((t) => t.id === track.id)
+          const idx = queueContext.findIndex((t) => t.id === track.id || t.filePath === track.filePath)
           setQueueIndex(idx >= 0 ? idx : 0)
         } else if (queue.length === 0) {
           setQueue([track])
           setQueueIndex(0)
+        } else {
+          const idx = queue.findIndex((t) => t.id === track.id || t.filePath === track.filePath)
+          if (idx >= 0) {
+            setQueueIndex(idx)
+          }
         }
 
         setCurrentTrack(track)

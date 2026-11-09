@@ -162,3 +162,4 @@ fn test_revision_conflict_rejection() {
     let is_conflict_matching = matching_revision.map_or(false, |exp| exp != q.revision);
     assert!(!is_conflict_matching);
 }
+
