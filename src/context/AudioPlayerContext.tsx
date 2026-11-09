@@ -195,13 +195,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     // Check if currentTrack is already this file
     const currentPath = (cTrack?.filePath || cTrack?.folderPath || '').replace(/\\/g, '/').toLowerCase()
-    if (
-      currentPath === normalizedFile &&
-      qIdx >= 0 &&
-      (q[qIdx]?.filePath || q[qIdx]?.folderPath || '').replace(/\\/g, '/').toLowerCase() === normalizedFile
-    ) {
-      return
-    }
+    const isSameTrack = currentPath === normalizedFile
 
     // Search in current queue
     const foundIdx = q.findIndex((t) => {
@@ -210,11 +204,24 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     })
 
     if (foundIdx >= 0) {
-      const matched = q[foundIdx]
-      setQueueIndex(foundIdx)
-      setCurrentTrack(matched)
-      stateRef.current.queueIndex = foundIdx
-      stateRef.current.currentTrack = matched
+      if (qIdx !== foundIdx) {
+        setQueueIndex(foundIdx)
+        stateRef.current.queueIndex = foundIdx
+      }
+      if (!isSameTrack) {
+        const matched = q[foundIdx]
+        setCurrentTrack(matched)
+        stateRef.current.currentTrack = matched
+        if (matched.releaseId) {
+          const rel = graphEngine.getReleaseById(matched.releaseId)
+          if (rel) setCurrentRelease(rel)
+        }
+      }
+      return
+    }
+
+    // If already playing this track (even if outside current queue), return early to prevent re-render loops
+    if (isSameTrack) {
       return
     }
 
@@ -223,9 +230,15 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       const p = (t.filePath || t.folderPath || '').replace(/\\/g, '/').toLowerCase()
       return p === normalizedFile || t.id === file
     }) || graphEngine.getTrackById(file)
+
     if (memoryTrack) {
+      isInternalQueueUpdateRef.current = true
       setCurrentTrack(memoryTrack)
       stateRef.current.currentTrack = memoryTrack
+      if (memoryTrack.releaseId) {
+        const rel = graphEngine.getReleaseById(memoryTrack.releaseId)
+        if (rel) setCurrentRelease(rel)
+      }
     }
   }, [])
 
@@ -341,24 +354,43 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
           isInternalQueueUpdateRef.current = true
           setQueue(rehydratedTracks)
+          let activeTrack: Track | null = null
           if (typeof currentIndex === 'number' && currentIndex >= 0 && currentIndex < rehydratedTracks.length) {
             setQueueIndex(currentIndex)
-            setCurrentTrack(rehydratedTracks[currentIndex])
+            activeTrack = rehydratedTracks[currentIndex]
+            setCurrentTrack(activeTrack)
             stateRef.current.queueIndex = currentIndex
-            stateRef.current.currentTrack = rehydratedTracks[currentIndex]
+            stateRef.current.currentTrack = activeTrack
           } else if (currentQueueEntryId) {
             const matchIdx = rehydratedTracks.findIndex((t) => t.queueEntryId === currentQueueEntryId)
             if (matchIdx >= 0) {
               setQueueIndex(matchIdx)
-              setCurrentTrack(rehydratedTracks[matchIdx])
+              activeTrack = rehydratedTracks[matchIdx]
+              setCurrentTrack(activeTrack)
               stateRef.current.queueIndex = matchIdx
-              stateRef.current.currentTrack = rehydratedTracks[matchIdx]
+              stateRef.current.currentTrack = activeTrack
+            }
+          }
+          if (activeTrack?.releaseId) {
+            const rel = graphEngine.getReleaseById(activeTrack.releaseId)
+            if (rel) {
+              setCurrentRelease(rel)
             }
           }
         }).catch(() => {})
       }).catch(() => {})
     }
   }, [])
+
+  // Synchronize currentRelease whenever currentTrack changes
+  useEffect(() => {
+    if (currentTrack?.releaseId) {
+      const rel = graphEngine.getReleaseById(currentTrack.releaseId)
+      if (rel) {
+        setCurrentRelease(rel)
+      }
+    }
+  }, [currentTrack?.releaseId])
 
   // Poll position and status for native Tauri playback
   useEffect(() => {

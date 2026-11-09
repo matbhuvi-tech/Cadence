@@ -21,25 +21,59 @@ export interface RemoteQueueSyncState {
 export function reconcileActiveTrack(
   file: string | null | undefined,
   queue: Track[],
-  currentTrack: Track | null | undefined
-): { matchedTrack: Track | null; matchedIndex: number } {
-  if (!file) return { matchedTrack: null, matchedIndex: -1 }
+  currentTrack: Track | null | undefined,
+  queueIndex: number,
+  fallbackTracks: Track[] = [],
+  callbacks?: {
+    onSetCurrentTrack?: (t: Track) => void
+    onSetQueueIndex?: (i: number) => void
+  }
+): { matchedTrack: Track | null; matchedIndex: number; didUpdateTrack: boolean } {
+  if (!file) return { matchedTrack: null, matchedIndex: -1, didUpdateTrack: false }
   const normalizedFile = file.replace(/\\/g, '/').toLowerCase()
 
+  const currentPath = (currentTrack?.filePath || currentTrack?.folderPath || '').replace(/\\/g, '/').toLowerCase()
+  const isSameTrack = currentPath === normalizedFile
+
+  // Search in current queue
   const foundIdx = queue.findIndex((t) => {
     const p = (t.filePath || t.folderPath || '').replace(/\\/g, '/').toLowerCase()
     return p === normalizedFile || t.id === file
   })
 
   if (foundIdx >= 0) {
-    return { matchedTrack: queue[foundIdx], matchedIndex: foundIdx }
+    if (queueIndex !== foundIdx) {
+      callbacks?.onSetQueueIndex?.(foundIdx)
+    }
+    if (!isSameTrack) {
+      callbacks?.onSetCurrentTrack?.(queue[foundIdx])
+      return { matchedTrack: queue[foundIdx], matchedIndex: foundIdx, didUpdateTrack: true }
+    }
+    return { matchedTrack: queue[foundIdx], matchedIndex: foundIdx, didUpdateTrack: false }
   }
-  return { matchedTrack: null, matchedIndex: -1 }
+
+  // If already playing this track (even if outside current queue), return early without re-triggering state
+  if (isSameTrack) {
+    return { matchedTrack: currentTrack || null, matchedIndex: -1, didUpdateTrack: false }
+  }
+
+  // If not found in queue, search fallback tracks (e.g. from graphEngine)
+  const memoryTrack = fallbackTracks.find((t) => {
+    const p = (t.filePath || t.folderPath || '').replace(/\\/g, '/').toLowerCase()
+    return p === normalizedFile || t.id === file
+  })
+  if (memoryTrack) {
+    callbacks?.onSetCurrentTrack?.(memoryTrack)
+    return { matchedTrack: memoryTrack, matchedIndex: -1, didUpdateTrack: true }
+  }
+
+  return { matchedTrack: null, matchedIndex: -1, didUpdateTrack: false }
 }
 
 export function handleRemoteStateEvent(
   data: any,
-  state: RemoteQueueSyncState
+  state: RemoteQueueSyncState,
+  fallbackTracks: Track[] = []
 ) {
   if (!data) return
   const isPlaying = data.isPlaying ?? data.is_playing
@@ -50,11 +84,17 @@ export function handleRemoteStateEvent(
   if (isPaused !== undefined) state.isPaused = Boolean(isPaused)
 
   if (currentFile) {
-    const { matchedTrack, matchedIndex } = reconcileActiveTrack(currentFile, state.queue, state.currentTrack)
-    if (matchedTrack && matchedIndex >= 0) {
-      state.currentTrack = matchedTrack
-      state.queueIndex = matchedIndex
-    }
+    reconcileActiveTrack(
+      currentFile,
+      state.queue,
+      state.currentTrack,
+      state.queueIndex,
+      fallbackTracks,
+      {
+        onSetCurrentTrack: (t) => { state.currentTrack = t },
+        onSetQueueIndex: (i) => { state.queueIndex = i },
+      }
+    )
   }
 }
 
@@ -251,6 +291,51 @@ async function runTestSuite() {
   )
   assert(state.queueIndex === 3, 'Queue index reconciled to Track 4 (index 3)')
   assert(state.currentTrack?.title === 'Vaa Vaa Anbe', 'Now Playing updated to Vaa Vaa Anbe')
+
+  // --- TEST 6: Out-of-queue track played from mobile (idempotency, zero flickering) ---
+  console.log('\n--- Test 6: Out-of-queue track played from mobile (idempotency, zero flickering) ---')
+  const outOfQueueTrack = {
+    id: 'trk-out-1',
+    title: 'Nee Paathi Naan Paathi',
+    filePath: 'D:/Music/Yesudas/01.flac',
+    folderPath: 'D:/Music/Yesudas/01.flac',
+    releaseId: 'rel-yesudas',
+    format: 'FLAC',
+    durationSeconds: 277,
+  } as Track
+
+  let updateCount = 0
+  const callbacks = {
+    onSetCurrentTrack: () => { updateCount++ },
+  }
+
+  // First tick: track is detected from mobile
+  const res1 = reconcileActiveTrack(
+    'D:/Music/Yesudas/01.flac',
+    state.queue,
+    state.currentTrack,
+    state.queueIndex,
+    [outOfQueueTrack],
+    callbacks
+  )
+  assert(res1.didUpdateTrack === true, 'Track updated on first occurrence')
+  assert(updateCount === 1, 'onSetCurrentTrack called exactly once on first occurrence')
+  state.currentTrack = res1.matchedTrack
+
+  // Subsequent polling ticks (250ms later, 500ms later, etc.)
+  for (let tick = 0; tick < 10; tick++) {
+    const resLoop = reconcileActiveTrack(
+      'D:/Music/Yesudas/01.flac',
+      state.queue,
+      state.currentTrack,
+      state.queueIndex,
+      [outOfQueueTrack],
+      callbacks
+    )
+    assert(resLoop.didUpdateTrack === false, `Tick ${tick}: must NOT re-trigger track update`)
+  }
+  assert(updateCount === 1, 'Total track update calls remains 1 (zero flickering)')
+  assert(state.currentTrack?.title === 'Nee Paathi Naan Paathi', 'Current track remains Nee Paathi Naan Paathi')
 
   console.log('\n=====================================================')
   console.log('All Remote Queue Sync tests passed successfully!')

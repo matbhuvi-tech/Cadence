@@ -163,3 +163,30 @@ fn test_revision_conflict_rejection() {
     assert!(!is_conflict_matching);
 }
 
+#[test]
+fn test_play_track_updates_queue_index_and_entry_id() {
+    let mut q = RemoteQueue::default();
+    let t1 = make_item("t1", "Track 1", "D:/Music/Album/01.flac");
+    let t2 = make_item("t2", "Track 2", "D:/Music/Album/02.flac");
+    let t3 = make_item("t3", "Track 3", "D:/Music/Album/03.flac");
+    q.items = vec![t1, t2.clone(), t3];
+    q.current_index = 0;
+    q.current_queue_entry_id = Some(q.items[0].queue_entry_id.clone());
+
+    // Playing track 2 (e.g., from mobile) with different slash convention
+    let target_file = "D:\\Music\\Album\\02.flac";
+    let norm_target = target_file.replace('\\', "/").to_lowercase();
+    let pos = q.items.iter().position(|t| {
+        t.file_path.replace('\\', "/").to_lowercase() == norm_target || t.id == target_file
+    });
+
+    assert_eq!(pos, Some(1));
+    let matched_pos = pos.unwrap();
+    q.current_index = matched_pos as isize;
+    q.current_queue_entry_id = q.items.get(matched_pos).map(|t| t.queue_entry_id.clone());
+
+    assert_eq!(q.current_index, 1);
+    assert_eq!(q.current_queue_entry_id, Some(t2.queue_entry_id));
+}
+
+

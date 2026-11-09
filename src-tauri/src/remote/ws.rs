@@ -261,9 +261,53 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
 async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
     match cmd {
         ClientCommand::PlayTrack { file_path } => {
-            let _ = state.engine.play_track(&file_path);
-            let status = state.engine.get_status();
-            state.broadcast_state_change(&status);
+            let found_idx = {
+                let mut q = state.queue.lock();
+                let norm_target = file_path.replace('\\', "/").to_lowercase();
+                if let Some(pos) = q.items.iter().position(|t| {
+                    t.file_path.replace('\\', "/").to_lowercase() == norm_target || t.id == file_path
+                }) {
+                    q.current_index = pos as isize;
+                    q.current_queue_entry_id = q.items.get(pos).map(|t| t.queue_entry_id.clone());
+                    Some(pos)
+                } else {
+                    None
+                }
+            };
+
+            if found_idx.is_some() {
+                let _ = state.engine.play_track(&file_path);
+                let status = state.engine.get_status();
+                state.broadcast_state_change(&status);
+                state.broadcast_queue_update();
+            } else {
+                let alt_path = if file_path.contains('/') {
+                    file_path.replace('/', "\\")
+                } else {
+                    file_path.replace('\\', "/")
+                };
+                let release_match: Option<(String, String)> = {
+                    let conn = state.db.conn.lock();
+                    let stmt = conn.prepare(
+                        "SELECT release_id, id FROM tracks WHERE file_path = ?1 OR file_path = ?2 OR id = ?1 LIMIT 1"
+                    ).ok();
+                    stmt.and_then(|mut s| {
+                        s.query_row([&file_path, &alt_path], |row| {
+                            let r_id: Option<String> = row.get(0)?;
+                            let t_id: String = row.get(1)?;
+                            Ok((r_id, t_id))
+                        }).ok()
+                    }).and_then(|(r_id, t_id)| r_id.map(|r| (r, t_id)))
+                };
+
+                if let Some((rel_id, trk_id)) = release_match {
+                    play_release_track(state, &rel_id, &trk_id).await;
+                } else {
+                    let _ = state.engine.play_track(&file_path);
+                    let status = state.engine.get_status();
+                    state.broadcast_state_change(&status);
+                }
+            }
         }
         ClientCommand::Pause => {
             let _ = state.engine.pause();

@@ -13,6 +13,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { graphEngine } from '../../core/graphEngine'
 
 interface SanctuaryListeningLoungeProps {
   isOpen: boolean
@@ -61,7 +62,9 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
 
   const effectiveDuration = duration > 0 ? duration : currentTrack?.durationSeconds || currentTrack?.duration || 0
   const progressPercent = effectiveDuration > 0 ? (currentTime / effectiveDuration) * 100 : 0
-  const coverUrl = currentRelease?.coverArtUrl || currentRelease?.artwork?.frontCoverUrl
+  const resolvedRelease =
+    currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
+  const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
 
   const formatTime = (seconds: number) => {
     if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'

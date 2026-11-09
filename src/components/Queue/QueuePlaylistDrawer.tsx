@@ -27,6 +27,7 @@ import {
 import { Track, Playlist, Release, SampleRateTransition } from '../../core/types'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { sqliteLibraryService, generatePlaylist4GridArtwork } from '../../services/sqliteLibraryService'
+import { graphEngine } from '../../core/graphEngine'
 
 interface QueuePlaylistDrawerProps {
   isOpen: boolean
@@ -277,17 +278,23 @@ export const QueuePlaylistDrawer: React.FC<QueuePlaylistDrawerProps> = ({
                     <div className="flex items-center gap-3.5">
                       {/* Album Art Thumbnail or Wave Visualizer */}
                       <div className="relative h-14 w-14 flex-shrink-0 overflow-hidden rounded-xl bg-neutral-900 border border-white/10">
-                        {currentRelease?.coverArtUrl || currentTrack.releaseId ? (
-                          <img
-                            src={currentRelease?.coverArtUrl}
-                            alt=""
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center text-neutral-600">
-                            <Disc3 className="h-6 w-6" />
-                          </div>
-                        )}
+                        {(() => {
+                          const activeCoverUrl =
+                            currentRelease?.coverArtUrl ||
+                            currentRelease?.artwork?.frontCoverUrl ||
+                            (currentTrack.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId)?.coverArtUrl : undefined)
+                          return activeCoverUrl ? (
+                            <img
+                              src={activeCoverUrl}
+                              alt=""
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-neutral-600">
+                              <Disc3 className="h-6 w-6" />
+                            </div>
+                          )
+                        })()}
 
                         {/* Animated Equalizer Overlay when Playing */}
                         {isPlaying && !isPaused && (

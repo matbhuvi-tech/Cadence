@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
+import { graphEngine } from '../../core/graphEngine'
 
 interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
@@ -86,7 +87,9 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
 
   const effectiveDuration = duration > 0 ? duration : currentTrack?.durationSeconds || currentTrack?.duration || 0
   const progressPercent = effectiveDuration > 0 ? (currentTime / effectiveDuration) * 100 : 0
-  const coverUrl = currentRelease?.coverArtUrl || currentRelease?.artwork?.frontCoverUrl
+  const resolvedRelease =
+    currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
+  const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
 
   const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
   const isHiRes = streamTelemetry?.isHighRes || currentTrack?.isHighRes

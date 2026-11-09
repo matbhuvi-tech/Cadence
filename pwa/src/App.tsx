@@ -46,6 +46,7 @@ export function App() {
     togglePurity,
     playTrack,
     playRelease,
+    playTrackInRelease,
     queueTrack,
     queueRelease,
     jumpToQueueIndex,
@@ -138,6 +139,7 @@ export function App() {
             onPlayRelease={playRelease}
             onQueueRelease={queueRelease}
             onPlayTrack={playTrack}
+            onPlayTrackInRelease={playTrackInRelease}
             onQueueTrack={queueTrack}
             onTriggerToast={showToast}
           />

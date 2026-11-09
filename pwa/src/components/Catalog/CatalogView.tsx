@@ -12,6 +12,7 @@ interface CatalogViewProps {
   onPlayRelease: (releaseId: string) => void;
   onQueueRelease: (releaseId: string, playNext?: boolean) => void;
   onPlayTrack: (filePath: string) => void;
+  onPlayTrackInRelease?: (releaseId: string, trackId: string) => void;
   onQueueTrack: (filePath: string, playNext?: boolean) => void;
   onTriggerToast?: (message: string, onUndo?: () => void) => void;
 }
@@ -21,6 +22,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   onPlayRelease,
   onQueueRelease,
   onPlayTrack,
+  onPlayTrackInRelease,
   onQueueTrack,
   onTriggerToast,
 }) => {
@@ -208,6 +210,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
         onPlayRelease={onPlayRelease}
         onQueueRelease={onQueueRelease}
         onPlayTrack={onPlayTrack}
+        onPlayTrackInRelease={onPlayTrackInRelease}
         onQueueTrack={onQueueTrack}
         onTriggerToast={onTriggerToast}
       />

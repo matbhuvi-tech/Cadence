@@ -262,7 +262,23 @@ async fn handle_playback(
     match action.as_str() {
         "play" => {
             if let Some(path) = payload.file_path {
+                let found = {
+                    let mut q = state.queue.lock();
+                    let norm_target = path.replace('\\', "/").to_lowercase();
+                    if let Some(pos) = q.items.iter().position(|t| {
+                        t.file_path.replace('\\', "/").to_lowercase() == norm_target || t.id == path
+                    }) {
+                        q.current_index = pos as isize;
+                        q.current_queue_entry_id = q.items.get(pos).map(|t| t.queue_entry_id.clone());
+                        true
+                    } else {
+                        false
+                    }
+                };
                 let _ = state.engine.play_track(&path);
+                if found {
+                    state.broadcast_queue_update();
+                }
             } else {
                 let _ = state.engine.resume();
             }

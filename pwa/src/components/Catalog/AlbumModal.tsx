@@ -10,6 +10,7 @@ interface AlbumModalProps {
   onPlayRelease: (releaseId: string) => void;
   onQueueRelease: (releaseId: string, playNext?: boolean) => void;
   onPlayTrack: (filePath: string) => void;
+  onPlayTrackInRelease?: (releaseId: string, trackId: string) => void;
   onQueueTrack: (filePath: string, playNext?: boolean) => void;
   onTriggerToast?: (message: string, onUndo?: () => void) => void;
 }
@@ -36,6 +37,7 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
   onPlayRelease,
   onQueueRelease,
   onPlayTrack,
+  onPlayTrackInRelease,
   onQueueTrack,
   onTriggerToast,
 }) => {
@@ -210,7 +212,11 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
               >
                 <div
                   onClick={() => {
-                    onPlayTrack(track.filePath);
+                    if (onPlayTrackInRelease) {
+                      onPlayTrackInRelease(activeReleaseId, track.id);
+                    } else {
+                      onPlayTrack(track.filePath);
+                    }
                     onClose();
                   }}
                   className="flex items-center space-x-3 flex-1 min-w-0 cursor-pointer"
