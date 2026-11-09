@@ -1,7 +1,7 @@
 import React from 'react';
-import { Disc3, Library, ListMusic } from 'lucide-react';
+import { Library, ListMusic } from 'lucide-react';
 
-export type TabId = 'now_playing' | 'catalog' | 'queue';
+export type TabId = 'catalog' | 'queue';
 
 interface TabBarProps {
   activeTab: TabId;
@@ -16,29 +16,11 @@ export const TabBar: React.FC<TabBarProps> = ({
 }) => {
   return (
     <nav className="shrink-0 bg-[#0D0E11]/95 backdrop-blur-md border-t border-zinc-800/60 px-6 pt-2 pb-[calc(var(--sab)+0.5rem)] z-30">
-      <div className="flex items-center justify-around max-w-md mx-auto">
-        {/* Now Playing Tab */}
-        <button
-          onClick={() => onSelectTab('now_playing')}
-          className={`flex flex-col items-center justify-center py-1.5 px-3 min-w-[64px] min-h-[48px] rounded-xl transition-all ${
-            activeTab === 'now_playing'
-              ? 'text-[#D4AF37]'
-              : 'text-zinc-500 hover:text-zinc-300'
-          }`}
-        >
-          <Disc3
-            className={`w-6 h-6 transition-transform ${
-              activeTab === 'now_playing' ? 'scale-110 animate-spin-slow' : ''
-            }`}
-            style={{ animationDuration: '8s' }}
-          />
-          <span className="text-[11px] font-medium mt-1">Playing</span>
-        </button>
-
+      <div className="flex items-center justify-around max-w-sm mx-auto">
         {/* Catalog Tab */}
         <button
           onClick={() => onSelectTab('catalog')}
-          className={`flex flex-col items-center justify-center py-1.5 px-3 min-w-[64px] min-h-[48px] rounded-xl transition-all ${
+          className={`flex flex-col items-center justify-center py-1.5 px-6 min-w-[72px] min-h-[48px] rounded-xl transition-all ${
             activeTab === 'catalog'
               ? 'text-[#D4AF37]'
               : 'text-zinc-500 hover:text-zinc-300'
@@ -55,7 +37,7 @@ export const TabBar: React.FC<TabBarProps> = ({
         {/* Queue Tab */}
         <button
           onClick={() => onSelectTab('queue')}
-          className={`relative flex flex-col items-center justify-center py-1.5 px-3 min-w-[64px] min-h-[48px] rounded-xl transition-all ${
+          className={`relative flex flex-col items-center justify-center py-1.5 px-6 min-w-[72px] min-h-[48px] rounded-xl transition-all ${
             activeTab === 'queue'
               ? 'text-[#D4AF37]'
               : 'text-zinc-500 hover:text-zinc-300'

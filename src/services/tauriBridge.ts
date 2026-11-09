@@ -779,26 +779,33 @@ class TauriBridgeService {
     return '4242'
   }
 
-  public async syncDesktopQueueToRemote(items: any[], currentIndex: number): Promise<void> {
+  public async syncDesktopQueueToRemote(items: any[], currentIndex: number, expectedRevision?: number): Promise<number | null> {
     if (this.isTauri()) {
       try {
         const payload = items.map((t) => ({
-          id: t.id || t.filePath,
+          queueEntryId: t.queueEntryId || '',
+          id: t.id || t.filePath || t.folderPath,
           title: t.title || 'Unknown',
           artist: t.artist || t.artistCredit || 'Unknown Artist',
           album: t.album || t.albumTitle || 'Unknown Album',
-          filePath: t.filePath,
-          durationSecs: t.durationSecs || 0,
+          filePath: t.filePath || t.folderPath || '',
+          durationSecs: t.durationSecs || t.durationSeconds || 0,
           format: t.format || 'AUDIO',
           sampleRate: t.sampleRate,
           bitDepth: t.bitDepth,
           isHighRes: Boolean(t.isHighRes),
         }))
-        await invoke('sync_desktop_queue_to_remote', { items: payload, currentIndex })
+        return await invoke<number>('sync_desktop_queue_to_remote', {
+          items: payload,
+          currentIndex,
+          expectedRevision: expectedRevision ?? null,
+        })
       } catch (err) {
-        console.error('[TauriBridge] sync_desktop_queue_to_remote error:', err)
+        console.warn('[TauriBridge] sync_desktop_queue_to_remote warning:', err)
+        return null
       }
     }
+    return null
   }
 
   public async getMaintenanceStats(): Promise<MaintenanceStats | null> {
@@ -1390,6 +1397,66 @@ class TauriBridgeService {
       }
     }
   }
+
+  // Master Albums & Versions Model
+  public async getMasterAlbums(): Promise<DbMasterAlbum[]> {
+    return this.isTauri() ? invoke<DbMasterAlbum[]>('db_get_master_albums') : []
+  }
+
+  public async getAlbumVersions(masterAlbumId: string): Promise<AlbumVersionSummary[]> {
+    return this.isTauri() ? invoke<AlbumVersionSummary[]>('db_get_album_versions', { masterAlbumId }) : []
+  }
+
+  public async setDefaultReleaseVersion(masterAlbumId: string, releaseId: string): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_set_default_release_version', { masterAlbumId, releaseId })
+    }
+  }
+
+  public async groupReleasesIntoMaster(
+    canonicalTitle: string,
+    canonicalArtist: string,
+    releaseIds: string[],
+    defaultReleaseId?: string,
+    masterAlbumId?: string,
+  ): Promise<string> {
+    if (!this.isTauri()) return masterAlbumId || 'local-master'
+    return invoke<string>('db_group_releases_into_master', {
+      masterAlbumId: masterAlbumId || null,
+      canonicalTitle,
+      canonicalArtist,
+      releaseIds,
+      defaultReleaseId: defaultReleaseId || null,
+    })
+  }
+
+  public async ungroupReleaseFromMaster(releaseId: string): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_ungroup_release_from_master', { releaseId })
+    }
+  }
+}
+
+export interface DbMasterAlbum {
+  id: string
+  canonicalTitle: string
+  canonicalArtist: string
+  defaultReleaseId: string | null
+  createdAt: number
+}
+
+export interface AlbumVersionSummary {
+  releaseId: string
+  title: string
+  releaseYear: number | null
+  formatSummary: string
+  maxSampleRate: number | null
+  maxBitDepth: number | null
+  avgDrScore: number | null
+  trackCount: number
+  isDefault: boolean
+  isOnline: boolean
+  folderPath: string
 }
 
 export interface PortraitSyncProgressPayload {

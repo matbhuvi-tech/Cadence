@@ -10,5 +10,5 @@ pub use net_discovery::{
     save_pairing_token, LanInterfaceInfo, RemoteDiscoveryInfo,
 };
 pub use server::start_remote_server;
-pub use state::{RemoteEvent, RemoteState, RemoteTrackItem};
+pub use state::{RemoteEvent, RemoteQueue, RemoteState, RemoteTrackItem};
 pub use ws::get_connected_client_count;

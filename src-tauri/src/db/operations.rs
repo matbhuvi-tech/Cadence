@@ -54,6 +54,34 @@ pub struct DbRelease {
     pub is_compilation: bool,
     pub physical_combo_title: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub master_album_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbMasterAlbum {
+    pub id: String,
+    pub canonical_title: String,
+    pub canonical_artist: String,
+    pub default_release_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumVersionSummary {
+    pub release_id: String,
+    pub title: String,
+    pub release_year: Option<i32>,
+    pub format_summary: String,
+    pub max_sample_rate: Option<u32>,
+    pub max_bit_depth: Option<u8>,
+    pub avg_dr_score: Option<f64>,
+    pub track_count: i64,
+    pub is_default: bool,
+    pub is_online: bool,
+    pub folder_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -672,14 +700,14 @@ impl DbOperations {
         let sql = if only_online.unwrap_or(false) {
             "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
                     r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path,
-                    r.is_compilation, r.physical_combo_title, r.created_at
+                    r.is_compilation, r.physical_combo_title, r.created_at, r.master_album_id
              FROM releases r
              WHERE r.id IN (SELECT DISTINCT release_id FROM tracks WHERE is_online = 1)
              ORDER BY r.title ASC"
         } else {
             "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
                     release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
-                    is_compilation, physical_combo_title, created_at
+                    is_compilation, physical_combo_title, created_at, master_album_id
              FROM releases ORDER BY title ASC"
         };
 
@@ -701,6 +729,7 @@ impl DbOperations {
                 is_compilation: row.get::<_, i32>(11).unwrap_or(0) != 0,
                 physical_combo_title: row.get(12)?,
                 created_at: row.get(13)?,
+                master_album_id: row.get(14)?,
             })
         })?;
 
@@ -718,8 +747,8 @@ impl DbOperations {
                 "INSERT INTO releases (
                     id, title, folder_path, folder_name, artist_credit, composer_name,
                     release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
-                    is_compilation, physical_combo_title, created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                    is_compilation, physical_combo_title, created_at, master_album_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     folder_path=excluded.folder_path,
@@ -732,7 +761,8 @@ impl DbOperations {
                     backdrop_url=COALESCE(excluded.backdrop_url, releases.backdrop_url),
                     target_folder_path=COALESCE(excluded.target_folder_path, releases.target_folder_path),
                     is_compilation=excluded.is_compilation,
-                    physical_combo_title=COALESCE(excluded.physical_combo_title, releases.physical_combo_title)",
+                    physical_combo_title=COALESCE(excluded.physical_combo_title, releases.physical_combo_title),
+                    master_album_id=COALESCE(excluded.master_album_id, releases.master_album_id)",
             )?;
 
             for rel in releases {
@@ -751,7 +781,223 @@ impl DbOperations {
                     if rel.is_compilation { 1 } else { 0 },
                     rel.physical_combo_title,
                     rel.created_at,
+                    rel.master_album_id,
                 ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // Master Albums & Versions
+    pub fn get_master_albums(conn: &Connection) -> Result<Vec<DbMasterAlbum>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, canonical_title, canonical_artist, default_release_id, created_at
+             FROM master_albums
+             ORDER BY canonical_title ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DbMasterAlbum {
+                id: row.get(0)?,
+                canonical_title: row.get(1)?,
+                canonical_artist: row.get(2)?,
+                default_release_id: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn get_album_versions(conn: &Connection, master_album_id: &str) -> Result<Vec<AlbumVersionSummary>> {
+        let mut stmt = conn.prepare(
+            "SELECT 
+                r.id,
+                r.title,
+                r.release_year,
+                r.folder_path,
+                (COALESCE(m.default_release_id, '') = r.id) AS is_default,
+                COALESCE(MAX(t.is_online), 0) AS is_online,
+                COUNT(t.id) AS track_count,
+                MAX(t.sample_rate) AS max_sample_rate,
+                MAX(t.bit_depth) AS max_bit_depth,
+                AVG(CASE WHEN t.dr_score IS NOT NULL AND t.dr_score > 0 THEN t.dr_score ELSE NULL END) AS avg_dr_score,
+                GROUP_CONCAT(DISTINCT t.format) AS formats,
+                MAX(CASE WHEN upper(t.format) IN ('DSF', 'DFF', 'DSDIFF') THEN 1 ELSE 0 END) AS has_dsd
+             FROM releases r
+             LEFT JOIN master_albums m ON m.id = r.master_album_id
+             LEFT JOIN tracks t ON t.release_id = r.id
+             WHERE r.master_album_id = ?1
+             GROUP BY r.id
+             ORDER BY (COALESCE(m.default_release_id, '') = r.id) DESC, r.release_year ASC, r.title ASC",
+        )?;
+
+        let rows = stmt.query_map(params![master_album_id], |row| {
+            let release_id: String = row.get(0)?;
+            let title: String = row.get(1)?;
+            let release_year: Option<i32> = row.get(2)?;
+            let folder_path: String = row.get(3)?;
+            let is_default: bool = row.get::<_, i32>(4)? != 0;
+            let is_online: bool = row.get::<_, i32>(5)? != 0;
+            let track_count: i64 = row.get(6)?;
+            let max_sample_rate: Option<u32> = row.get(7)?;
+            let max_bit_depth: Option<u8> = row.get(8)?;
+            let avg_dr_score: Option<f64> = row.get(9)?;
+            let formats_str: Option<String> = row.get(10)?;
+            let has_dsd: bool = row.get::<_, i32>(11)? != 0;
+
+            let format_summary = if has_dsd {
+                match max_sample_rate {
+                    Some(2_822_400) => "DSD64 (2.8MHz)".to_string(),
+                    Some(5_644_800) => "DSD128 (5.6MHz)".to_string(),
+                    Some(11_289_600) => "DSD256 (11.2MHz)".to_string(),
+                    Some(22_579_200) => "DSD512 (22.6MHz)".to_string(),
+                    Some(r) => format!("DSD ({:.1}MHz)", r as f64 / 1_000_000.0),
+                    None => "DSD".to_string(),
+                }
+            } else {
+                let fmt = formats_str.as_deref().unwrap_or("FLAC");
+                match (max_sample_rate, max_bit_depth) {
+                    (Some(rate), Some(bits)) => {
+                        let khz = if rate % 1000 == 0 {
+                            format!("{}kHz", rate / 1000)
+                        } else {
+                            format!("{:.1}kHz", rate as f64 / 1000.0)
+                        };
+                        format!("{} {}/{}bit", fmt, khz, bits)
+                    }
+                    (Some(rate), None) => {
+                        let khz = if rate % 1000 == 0 {
+                            format!("{}kHz", rate / 1000)
+                        } else {
+                            format!("{:.1}kHz", rate as f64 / 1000.0)
+                        };
+                        format!("{} {}", fmt, khz)
+                    }
+                    _ => fmt.to_string(),
+                }
+            };
+
+            Ok(AlbumVersionSummary {
+                release_id,
+                title,
+                release_year,
+                format_summary,
+                max_sample_rate,
+                max_bit_depth,
+                avg_dr_score,
+                track_count,
+                is_default,
+                is_online,
+                folder_path,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn set_default_release_version(
+        conn: &mut Connection,
+        master_album_id: &str,
+        release_id: &str,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE master_albums SET default_release_id = ?1 WHERE id = ?2",
+            params![release_id, master_album_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn group_releases_into_master(
+        conn: &mut Connection,
+        master_album_id: Option<String>,
+        canonical_title: &str,
+        canonical_artist: &str,
+        release_ids: &[String],
+        default_release_id: Option<String>,
+    ) -> Result<String> {
+        let master_id = master_album_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let now = chrono::Utc::now().timestamp();
+        let default_rel = default_release_id.or_else(|| release_ids.first().cloned());
+
+        let tx = conn.transaction()?;
+        {
+            tx.execute(
+                "INSERT INTO master_albums (id, canonical_title, canonical_artist, default_release_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                     canonical_title = excluded.canonical_title,
+                     canonical_artist = excluded.canonical_artist,
+                     default_release_id = COALESCE(excluded.default_release_id, master_albums.default_release_id)",
+                params![master_id, canonical_title, canonical_artist, default_rel, now],
+            )?;
+
+            for rel_id in release_ids {
+                tx.execute(
+                    "UPDATE releases SET master_album_id = ?1 WHERE id = ?2",
+                    params![master_id, rel_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(master_id)
+    }
+
+    pub fn ungroup_release_from_master(conn: &mut Connection, release_id: &str) -> Result<()> {
+        let tx = conn.transaction()?;
+        {
+            let master_id: Option<String> = tx
+                .query_row(
+                    "SELECT master_album_id FROM releases WHERE id = ?1",
+                    params![release_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            tx.execute(
+                "UPDATE releases SET master_album_id = NULL WHERE id = ?1",
+                params![release_id],
+            )?;
+
+            if let Some(mid) = master_id {
+                let remaining: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM releases WHERE master_album_id = ?1",
+                    params![mid],
+                    |row| row.get(0),
+                )?;
+                if remaining == 0 {
+                    tx.execute("DELETE FROM master_albums WHERE id = ?1", params![mid])?;
+                } else {
+                    let default_rel: Option<String> = tx
+                        .query_row(
+                            "SELECT default_release_id FROM master_albums WHERE id = ?1",
+                            params![mid],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    if default_rel.as_deref() == Some(release_id) {
+                        let next_default: Option<String> = tx
+                            .query_row(
+                                "SELECT id FROM releases WHERE master_album_id = ?1 LIMIT 1",
+                                params![mid],
+                                |row| row.get(0),
+                            )
+                            .optional()?;
+                        tx.execute(
+                            "UPDATE master_albums SET default_release_id = ?1 WHERE id = ?2",
+                            params![next_default, mid],
+                        )?;
+                    }
+                }
             }
         }
         tx.commit()?;
@@ -1649,7 +1895,7 @@ impl DbOperations {
         let mut rel_stmt = conn.prepare(
             "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
                              r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path,
-                             r.is_compilation, r.physical_combo_title, r.created_at
+                             r.is_compilation, r.physical_combo_title, r.created_at, r.master_album_id
              FROM releases r
              JOIN tracks t ON t.release_id = r.id
              JOIN track_artist_credits tac ON tac.track_id = t.id
@@ -1673,6 +1919,7 @@ impl DbOperations {
                 is_compilation: row.get::<_, i32>(11).unwrap_or(0) != 0,
                 physical_combo_title: row.get(12)?,
                 created_at: row.get(13)?,
+                master_album_id: row.get(14)?,
             })
         })?;
 
@@ -2045,7 +2292,7 @@ impl DbOperations {
             let mut stmt = conn.prepare(
                 "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
                         release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
-                        is_compilation, physical_combo_title, created_at
+                        is_compilation, physical_combo_title, created_at, master_album_id
                  FROM releases
                  WHERE title LIKE ?1 OR artist_credit LIKE ?1 OR composer_name LIKE ?1 OR folder_name LIKE ?1
                  LIMIT ?2"
@@ -2066,6 +2313,7 @@ impl DbOperations {
                     is_compilation: row.get::<_, i32>(11).unwrap_or(0) != 0,
                     physical_combo_title: row.get(12)?,
                     created_at: row.get(13)?,
+                    master_album_id: row.get(14)?,
                 })
             })?;
             for r in rows.flatten() {

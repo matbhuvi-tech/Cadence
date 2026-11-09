@@ -91,10 +91,42 @@ pub enum ClientCommand {
     JumpToQueueIndex { index: usize },
     PlayRelease { release_id: String },
     PlayTrackInRelease { release_id: String, track_id: String },
-    QueueTrack { file_path: String, #[serde(default)] play_next: Option<bool> },
-    QueueRelease { release_id: String, #[serde(default)] play_next: Option<bool> },
-    RemoveFromQueue { index: usize, #[serde(default)] track_id: Option<String> },
-    ClearQueue,
+    QueueTrack {
+        file_path: String,
+        #[serde(default)]
+        play_next: Option<bool>,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+    QueueRelease {
+        release_id: String,
+        #[serde(default)]
+        play_next: Option<bool>,
+        #[serde(default)]
+        play_now: Option<bool>,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+    RemoveFromQueue {
+        #[serde(default)]
+        index: Option<usize>,
+        #[serde(default)]
+        track_id: Option<String>,
+        #[serde(default)]
+        queue_entry_id: Option<String>,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+    ReorderQueue {
+        queue_entry_id: String,
+        target_queue_entry_id: String,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
+    ClearQueue {
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
 }
 
 pub async fn ws_handler(
@@ -147,13 +179,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
         let _ = sender.send(Message::Text(json)).await;
     }
 
-    let (queue_items, queue_idx) = {
+    let (queue_items, queue_idx, queue_rev, current_entry_id) = {
         let q = state.queue.lock();
-        (q.items.clone(), q.current_index)
+        (
+            q.items.clone(),
+            q.current_index,
+            q.revision,
+            q.current_queue_entry_id.clone(),
+        )
     };
     let initial_queue_event = RemoteEvent::QueueUpdated {
         items: queue_items,
         current_index: queue_idx,
+        revision: queue_rev,
+        current_queue_entry_id: current_entry_id,
     };
     if let Ok(json) = serde_json::to_string(&initial_queue_event) {
         let _ = sender.send(Message::Text(json)).await;
@@ -271,19 +310,43 @@ async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
         ClientCommand::PlayTrackInRelease { release_id, track_id } => {
             play_release_track(state, &release_id, &track_id).await;
         }
-        ClientCommand::QueueTrack { file_path, play_next } => {
-            queue_track(state, &file_path, play_next.unwrap_or(false)).await;
+        ClientCommand::QueueTrack { file_path, play_next, expected_revision } => {
+            queue_track(state, &file_path, play_next.unwrap_or(false), expected_revision).await;
         }
-        ClientCommand::QueueRelease { release_id, play_next } => {
-            queue_release(state, &release_id, play_next.unwrap_or(false)).await;
+        ClientCommand::QueueRelease { release_id, play_next, play_now, expected_revision } => {
+            queue_release(
+                state,
+                &release_id,
+                play_next.unwrap_or(false),
+                play_now.unwrap_or(false),
+                expected_revision,
+            )
+            .await;
         }
-        ClientCommand::RemoveFromQueue { index, track_id } => {
-            remove_from_queue(state, index, track_id).await;
+        ClientCommand::RemoveFromQueue { index, track_id, queue_entry_id, expected_revision } => {
+            remove_from_queue(state, index, track_id, queue_entry_id, expected_revision).await;
         }
-        ClientCommand::ClearQueue => {
-            clear_queue(state).await;
+        ClientCommand::ReorderQueue { queue_entry_id, target_queue_entry_id, expected_revision } => {
+            reorder_queue(state, &queue_entry_id, &target_queue_entry_id, expected_revision).await;
+        }
+        ClientCommand::ClearQueue { expected_revision } => {
+            clear_queue(state, expected_revision).await;
         }
     }
+}
+
+fn check_revision(state: &RemoteState, expected_revision: Option<u64>) -> Result<(), RemoteEvent> {
+    if let Some(exp) = expected_revision {
+        let q = state.queue.lock();
+        if exp != q.revision {
+            return Err(RemoteEvent::QueueConflict {
+                current_revision: q.revision,
+                items: q.items.clone(),
+                current_index: q.current_index,
+            });
+        }
+    }
+    Ok(())
 }
 
 async fn advance_queue(state: &RemoteState, delta: isize) {
@@ -303,6 +366,7 @@ async fn advance_queue(state: &RemoteState, delta: isize) {
                 next_idx = 0;
             }
             q.current_index = next_idx;
+            q.current_queue_entry_id = q.items.get(next_idx as usize).map(|t| t.queue_entry_id.clone());
             q.items.get(next_idx as usize).map(|t| t.file_path.clone())
         }
     };
@@ -320,6 +384,7 @@ async fn jump_queue(state: &RemoteState, index: usize) {
         let mut q = state.queue.lock();
         if index < q.items.len() {
             q.current_index = index as isize;
+            q.current_queue_entry_id = q.items.get(index).map(|t| t.queue_entry_id.clone());
             q.items.get(index).map(|t| t.file_path.clone())
         } else {
             None
@@ -351,6 +416,7 @@ fn query_release_tracks(state: &RemoteState, release_id: &str) -> Vec<crate::rem
             let bd: Option<u8> = row.get(19)?;
             let is_high_res = sr.unwrap_or(0) > 48000 || bd.unwrap_or(0) > 16;
             Ok(crate::remote::state::RemoteTrackItem {
+                queue_entry_id: uuid::Uuid::new_v4().to_string(),
                 id: row.get(0)?,
                 title: row.get(9)?,
                 artist: row.get(10)?,
@@ -375,19 +441,7 @@ fn query_release_tracks(state: &RemoteState, release_id: &str) -> Vec<crate::rem
 }
 
 async fn play_release(state: &RemoteState, release_id: &str) {
-    let tracks = query_release_tracks(state, release_id);
-    if !tracks.is_empty() {
-        let first_path = tracks[0].file_path.clone();
-        {
-            let mut q = state.queue.lock();
-            q.items = tracks;
-            q.current_index = 0;
-        }
-        let _ = state.engine.play_track(&first_path);
-        let status = state.engine.get_status();
-        state.broadcast_state_change(&status);
-        state.broadcast_queue_update();
-    }
+    queue_release(state, release_id, false, true, None).await;
 }
 
 async fn play_release_track(state: &RemoteState, release_id: &str, track_id: &str) {
@@ -397,8 +451,19 @@ async fn play_release_track(state: &RemoteState, release_id: &str, track_id: &st
         let target_path = tracks[target_idx].file_path.clone();
         {
             let mut q = state.queue.lock();
-            q.items = tracks;
+            let split_at = (q.current_index as usize) + 1;
+            let remaining_upcoming = if q.current_index >= 0 && split_at < q.items.len() {
+                q.items.split_off(split_at)
+            } else {
+                Vec::new()
+            };
+            let mut new_items = tracks;
+            new_items.extend(remaining_upcoming);
+            q.items = new_items;
             q.current_index = target_idx as isize;
+            q.current_queue_entry_id = q.items.get(target_idx).map(|t| t.queue_entry_id.clone());
+            q.next_up_end_index = None;
+            q.revision += 1;
         }
         let _ = state.engine.play_track(&target_path);
         let status = state.engine.get_status();
@@ -407,7 +472,17 @@ async fn play_release_track(state: &RemoteState, release_id: &str, track_id: &st
     }
 }
 
-async fn queue_track(state: &RemoteState, file_path: &str, play_next: bool) {
+async fn queue_track(
+    state: &RemoteState,
+    file_path: &str,
+    play_next: bool,
+    expected_revision: Option<u64>,
+) {
+    if let Err(conflict) = check_revision(state, expected_revision) {
+        let _ = state.event_tx.send(conflict);
+        return;
+    }
+
     let item: Option<crate::remote::state::RemoteTrackItem> = {
         let conn = state.db.conn.lock();
         let query = (|| -> rusqlite::Result<Option<crate::remote::state::RemoteTrackItem>> {
@@ -420,6 +495,7 @@ async fn queue_track(state: &RemoteState, file_path: &str, play_next: bool) {
                 let bd: Option<u8> = row.get(8)?;
                 let is_high_res = sr.unwrap_or(0) > 48000 || bd.unwrap_or(0) > 16;
                 Ok(crate::remote::state::RemoteTrackItem {
+                    queue_entry_id: uuid::Uuid::new_v4().to_string(),
                     id: row.get(0)?,
                     title: row.get(1)?,
                     artist: row.get(2)?,
@@ -445,40 +521,104 @@ async fn queue_track(state: &RemoteState, file_path: &str, play_next: bool) {
         {
             let mut q = state.queue.lock();
             if play_next && !q.items.is_empty() && q.current_index >= 0 {
-                let insert_idx = ((q.current_index as usize) + 1).min(q.items.len());
+                let insert_idx = q
+                    .next_up_end_index
+                    .unwrap_or(((q.current_index as usize) + 1).min(q.items.len()));
                 q.items.insert(insert_idx, track);
+                q.next_up_end_index = Some(insert_idx + 1);
             } else {
                 q.items.push(track);
             }
+            q.revision += 1;
         }
         state.broadcast_queue_update();
     }
 }
 
-async fn queue_release(state: &RemoteState, release_id: &str, play_next: bool) {
+async fn queue_release(
+    state: &RemoteState,
+    release_id: &str,
+    play_next: bool,
+    play_now: bool,
+    expected_revision: Option<u64>,
+) {
+    if let Err(conflict) = check_revision(state, expected_revision) {
+        let _ = state.event_tx.send(conflict);
+        return;
+    }
+
     let tracks = query_release_tracks(state, release_id);
-    if !tracks.is_empty() {
+    if tracks.is_empty() {
+        return;
+    }
+
+    if play_now {
+        let first_path = tracks[0].file_path.clone();
         {
             let mut q = state.queue.lock();
+            let split_at = (q.current_index as usize) + 1;
+            let remaining_upcoming = if q.current_index >= 0 && split_at < q.items.len() {
+                q.items.split_off(split_at)
+            } else {
+                Vec::new()
+            };
+            let mut new_items = tracks;
+            new_items.extend(remaining_upcoming);
+            q.items = new_items;
+            q.current_index = 0;
+            q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+            q.next_up_end_index = None;
+            q.revision += 1;
+        }
+        let _ = state.engine.play_track(&first_path);
+        let status = state.engine.get_status();
+        state.broadcast_state_change(&status);
+        state.broadcast_queue_update();
+    } else {
+        {
+            let mut q = state.queue.lock();
+            let count = tracks.len();
             if play_next && !q.items.is_empty() && q.current_index >= 0 {
-                let mut insert_idx = ((q.current_index as usize) + 1).min(q.items.len());
-                for t in tracks {
-                    q.items.insert(insert_idx, t);
-                    insert_idx += 1;
+                let insert_idx = q
+                    .next_up_end_index
+                    .unwrap_or(((q.current_index as usize) + 1).min(q.items.len()));
+                for (offset, t) in tracks.into_iter().enumerate() {
+                    q.items.insert(insert_idx + offset, t);
                 }
+                q.next_up_end_index = Some(insert_idx + count);
             } else {
                 q.items.extend(tracks);
             }
+            q.revision += 1;
         }
         state.broadcast_queue_update();
     }
 }
 
-async fn remove_from_queue(state: &RemoteState, index: usize, track_id: Option<String>) {
+async fn remove_from_queue(
+    state: &RemoteState,
+    index: Option<usize>,
+    track_id: Option<String>,
+    queue_entry_id: Option<String>,
+    expected_revision: Option<u64>,
+) {
+    if let Err(conflict) = check_revision(state, expected_revision) {
+        let _ = state.event_tx.send(conflict);
+        return;
+    }
+
     let removed = {
         let mut q = state.queue.lock();
-        let target_idx = if index < q.items.len() && (track_id.is_none() || Some(&q.items[index].id) == track_id.as_ref()) {
-            Some(index)
+        let target_idx = if let Some(ref qid) = queue_entry_id {
+            q.items.iter().position(|t| &t.queue_entry_id == qid)
+        } else if let Some(idx) = index {
+            if idx < q.items.len() && (track_id.is_none() || Some(&q.items[idx].id) == track_id.as_ref()) {
+                Some(idx)
+            } else if let Some(ref tid) = track_id {
+                q.items.iter().position(|t| &t.id == tid)
+            } else {
+                None
+            }
         } else if let Some(ref tid) = track_id {
             q.items.iter().position(|t| &t.id == tid)
         } else {
@@ -488,14 +628,18 @@ async fn remove_from_queue(state: &RemoteState, index: usize, track_id: Option<S
         if let Some(idx) = target_idx {
             q.items.remove(idx);
             let cur = q.current_index;
+            q.revision += 1;
             if (idx as isize) < cur {
                 q.current_index = cur - 1;
+                q.current_queue_entry_id = q.items.get(q.current_index as usize).map(|t| t.queue_entry_id.clone());
                 None
             } else if (idx as isize) == cur {
                 if idx < q.items.len() {
+                    q.current_queue_entry_id = Some(q.items[idx].queue_entry_id.clone());
                     Some(q.items[idx].file_path.clone())
                 } else {
                     q.current_index = -1;
+                    q.current_queue_entry_id = None;
                     None
                 }
             } else {
@@ -514,17 +658,53 @@ async fn remove_from_queue(state: &RemoteState, index: usize, track_id: Option<S
     state.broadcast_queue_update();
 }
 
-async fn clear_queue(state: &RemoteState) {
+async fn reorder_queue(
+    state: &RemoteState,
+    queue_entry_id: &str,
+    target_queue_entry_id: &str,
+    expected_revision: Option<u64>,
+) {
+    if let Err(conflict) = check_revision(state, expected_revision) {
+        let _ = state.event_tx.send(conflict);
+        return;
+    }
+    {
+        let mut q = state.queue.lock();
+        let src_idx = q.items.iter().position(|t| t.queue_entry_id == queue_entry_id);
+        let tgt_idx = q.items.iter().position(|t| t.queue_entry_id == target_queue_entry_id);
+        if let (Some(src), Some(tgt)) = (src_idx, tgt_idx) {
+            let item = q.items.remove(src);
+            q.items.insert(tgt, item);
+            if let Some(ref cur_id) = q.current_queue_entry_id {
+                if let Some(new_cur) = q.items.iter().position(|t| &t.queue_entry_id == cur_id) {
+                    q.current_index = new_cur as isize;
+                }
+            }
+            q.revision += 1;
+        }
+    }
+    state.broadcast_queue_update();
+}
+
+async fn clear_queue(state: &RemoteState, expected_revision: Option<u64>) {
+    if let Err(conflict) = check_revision(state, expected_revision) {
+        let _ = state.event_tx.send(conflict);
+        return;
+    }
     {
         let mut q = state.queue.lock();
         if q.current_index >= 0 && (q.current_index as usize) < q.items.len() {
             let active = q.items[q.current_index as usize].clone();
             q.items = vec![active];
             q.current_index = 0;
+            q.current_queue_entry_id = Some(q.items[0].queue_entry_id.clone());
         } else {
             q.items.clear();
             q.current_index = -1;
+            q.current_queue_entry_id = None;
         }
+        q.next_up_end_index = None;
+        q.revision += 1;
     }
     state.broadcast_queue_update();
 }

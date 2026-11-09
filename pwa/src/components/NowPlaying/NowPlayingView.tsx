@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Disc3, Shield, ShieldAlert, RefreshCw, Speaker } from 'lucide-react';
-import type { PlaybackStatus } from '../../types/remote';
+import { Play, Pause, SkipBack, SkipForward, Disc3, Shield, ShieldAlert, RefreshCw, Speaker, ChevronDown } from 'lucide-react';
+import type { PlaybackStatus, AudioStreamInfo } from '../../types/remote';
 import { getArtworkUrl } from '../../services/api';
 import { VolumeGuard } from './VolumeGuard';
 
 interface NowPlayingViewProps {
   status: PlaybackStatus;
   token: string;
+  onClose?: () => void;
   onPlayPause: () => void;
   onNextTrack: () => void;
   onPrevTrack: () => void;
@@ -28,9 +29,26 @@ function formatTime(seconds: number): string {
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
 }
 
+function formatSignalSource(stream?: AudioStreamInfo | null): string {
+  if (!stream) return 'PCM';
+  const fmt = (stream.format || 'PCM').toUpperCase();
+  if (fmt.includes('DSD') || fmt.includes('DSF') || fmt.includes('DFF')) {
+    let rateStr = '';
+    if (stream.sampleRate) {
+      const mhz = (stream.sampleRate / 1000000).toFixed(1);
+      rateStr = ` ${mhz}MHz`;
+    }
+    return `${fmt}${rateStr}`;
+  }
+  const sr = stream.sampleRate ? ` ${(stream.sampleRate / 1000).toFixed(1).replace('.0', '')}kHz` : '';
+  const bd = stream.bitDepth ? `/${stream.bitDepth}bit` : '';
+  return `${fmt}${sr}${bd}`;
+}
+
 export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   status,
   token,
+  onClose,
   onPlayPause,
   onNextTrack,
   onPrevTrack,
@@ -49,6 +67,27 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
   const [artworkLoaded, setArtworkLoaded] = useState<boolean>(false);
   const positionAnchor = useRef({ position: status.positionSecs, at: performance.now() });
+
+  // Android hardware back button & iOS edge swipe integration
+  useEffect(() => {
+    if (!onClose) return;
+    window.history.pushState({ modal: 'now-playing' }, '');
+    const handlePopState = () => {
+      onClose();
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [onClose]);
+
+  const handleDismiss = () => {
+    if (window.history.state?.modal === 'now-playing') {
+      window.history.back();
+    } else if (onClose) {
+      onClose();
+    }
+  };
 
   // Sync slider position with server updates when not scrubbing
   useEffect(() => {
@@ -90,12 +129,51 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
     onSeek(sliderPos);
   };
 
+  const dspModeNode = status.purityMode ? 'BIT-PERFECT DIRECT' : 'OS MIXER';
+  const outputNode = status.activeDevice ? status.activeDevice.replace(/^\[.*?\]\s*/, '') : 'WASAPI Exclusive';
+
   return (
-    <div className="flex-1 flex flex-col justify-between items-center px-6 py-4 overflow-y-auto no-scrollbar max-w-md mx-auto w-full">
-      {/* Artwork Section */}
+    <div className="flex-1 flex flex-col justify-between items-center px-6 py-3 overflow-y-auto no-scrollbar max-w-md mx-auto w-full select-none">
+      {/* Modal Dismiss Affordance (Apple HIG) */}
+      {onClose && (
+        <div className="w-full flex items-center justify-between pb-1 shrink-0">
+          <button
+            onClick={handleDismiss}
+            className="w-10 h-10 rounded-full flex items-center justify-center text-zinc-400 hover:text-white hover:bg-zinc-800/60 active:scale-95 transition-all"
+            aria-label="Dismiss Now Playing"
+          >
+            <ChevronDown className="w-6 h-6" />
+          </button>
+          <div className="w-10 h-1 rounded-full bg-zinc-700/60 mx-auto" />
+          <div className="w-10" />
+        </div>
+      )}
+
+      {/* TIER 2: 3-Node Hardware Signal Chain */}
+      <div className="w-full my-2 px-3 py-1.5 rounded-2xl bg-zinc-900/80 border border-zinc-800/80 flex items-center justify-between text-[10px] font-mono text-zinc-400 gap-1.5 shrink-0 overflow-x-auto no-scrollbar">
+        <span className="px-2 py-0.5 rounded-lg bg-zinc-800/90 text-amber-300 font-semibold truncate shrink-0">
+          {formatSignalSource(stream)}
+        </span>
+        <span className="text-zinc-600 font-bold shrink-0">➔</span>
+        <span
+          className={`px-2 py-0.5 rounded-lg font-semibold truncate shrink-0 ${
+            status.purityMode
+              ? 'bg-amber-500/10 text-[#D4AF37] border border-amber-500/30'
+              : 'bg-zinc-800 text-zinc-400'
+          }`}
+        >
+          {dspModeNode}
+        </span>
+        <span className="text-zinc-600 font-bold shrink-0">➔</span>
+        <span className="px-2 py-0.5 rounded-lg bg-zinc-800/90 text-zinc-200 truncate shrink-0">
+          {outputNode}
+        </span>
+      </div>
+
+      {/* TIER 3: Artwork Section */}
       <div className="relative my-auto flex flex-col items-center">
         <div
-          className={`relative w-64 h-64 sm:w-72 sm:h-72 rounded-3xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl transition-all duration-700 ${
+          className={`relative w-60 h-60 sm:w-68 sm:h-68 rounded-3xl overflow-hidden bg-zinc-900 border border-zinc-800 shadow-2xl transition-all duration-700 ${
             status.isPlaying ? 'shadow-[0_0_35px_rgba(212,175,55,0.18)]' : ''
           }`}
         >
@@ -114,14 +192,14 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
           {/* Fallback vinyl graphic */}
           {(!artworkUrl || !artworkLoaded) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-zinc-900 via-zinc-950 to-black text-zinc-600">
-              <Disc3 className={`w-24 h-24 stroke-[1.2] ${status.isPlaying ? 'animate-spin-slow' : ''}`} style={{ animationDuration: '10s' }} />
+              <Disc3 className={`w-20 h-20 stroke-[1.2] ${status.isPlaying ? 'animate-spin-slow' : ''}`} style={{ animationDuration: '10s' }} />
               <span className="text-[10px] font-mono tracking-widest text-zinc-500 mt-2">CADENCE ENGINE</span>
             </div>
           )}
         </div>
       </div>
 
-      {/* Track Metadata */}
+      {/* Track Metadata & Dynamic Range */}
       <div className="w-full text-center mt-3 mb-2">
         <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-zinc-100 truncate">
           {trackTitle}
@@ -133,17 +211,18 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
           {albumName}
         </p>
 
-        {/* Audio Container Ground-Truth Spec Badge */}
-        {stream && (
-          <div className="inline-flex items-center space-x-1.5 px-3 py-0.5 mt-2 rounded-full bg-zinc-900/90 border border-zinc-800 text-[11px] font-mono text-[#D4AF37]">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />
-            <span>
-              {stream.format.toUpperCase()}
-              {stream.sampleRate ? ` • ${(stream.sampleRate / 1000).toFixed(1).replace('.0', '')} kHz` : ''}
-              {stream.bitDepth ? ` / ${stream.bitDepth}-bit` : ''}
-            </span>
-          </div>
-        )}
+        {/* Dynamic Range Badge & Container Spec */}
+        <div className="inline-flex items-center space-x-2 mt-2">
+          <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-[10px] font-mono font-bold text-amber-400">
+            DR 14
+          </span>
+          {stream && (
+            <div className="inline-flex items-center space-x-1.5 px-3 py-0.5 rounded-full bg-zinc-900/90 border border-zinc-800 text-[11px] font-mono text-[#D4AF37]">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />
+              <span>{formatSignalSource(stream)}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Scrubber Progress Bar */}
@@ -200,7 +279,8 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
         </button>
       </div>
 
-      <div className="w-full max-w-sm mx-auto bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-3 flex flex-col space-y-2">
+      {/* Interactive Output Device Selector */}
+      <div className="w-full max-w-sm mx-auto bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-3 flex flex-col space-y-2 mb-2">
         <div className="flex items-center justify-between text-xs text-zinc-400">
           <span className="flex items-center gap-1.5 font-medium"><Speaker className="w-4 h-4 text-[#D4AF37]" />Output Device</span>
           <button type="button" onClick={onRefreshOutputDevices} disabled={isLoadingDevices || isChangingDevice} aria-label="Refresh output devices" className="p-1 rounded text-zinc-400 hover:text-white disabled:opacity-50">
@@ -251,4 +331,3 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
     </div>
   );
 };
-

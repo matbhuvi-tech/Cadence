@@ -58,13 +58,32 @@ pub fn regenerate_pairing_token(
 #[tauri::command]
 pub fn sync_desktop_queue_to_remote(
     remote_state: State<'_, Arc<RemoteState>>,
-    items: Vec<crate::remote::RemoteTrackItem>,
+    mut items: Vec<crate::remote::RemoteTrackItem>,
     current_index: isize,
-) {
-    {
-        let mut q = remote_state.queue.lock();
-        q.items = items;
-        q.current_index = current_index;
+    expected_revision: Option<u64>,
+) -> Result<u64, String> {
+    let mut q = remote_state.queue.lock();
+    if let Some(expected) = expected_revision {
+        if expected != q.revision {
+            return Err("revision_conflict".to_string());
+        }
     }
+    for item in &mut items {
+        if item.queue_entry_id.is_empty() {
+            item.queue_entry_id = uuid::Uuid::new_v4().to_string();
+        }
+    }
+    let cur_entry_id = if current_index >= 0 && (current_index as usize) < items.len() {
+        Some(items[current_index as usize].queue_entry_id.clone())
+    } else {
+        None
+    };
+    q.items = items;
+    q.current_index = current_index;
+    q.current_queue_entry_id = cur_entry_id;
+    q.revision += 1;
+    let rev = q.revision;
+    drop(q);
     remote_state.broadcast_queue_update();
+    Ok(rev)
 }

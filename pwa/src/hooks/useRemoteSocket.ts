@@ -20,6 +20,7 @@ const INITIAL_QUEUE: RemoteQueue = {
   currentIndex: -1,
   repeatMode: 'off',
   isShuffle: false,
+  revision: 0,
 };
 
 export function useRemoteSocket() {
@@ -33,6 +34,15 @@ export function useRemoteSocket() {
   const [isLoadingDevices, setIsLoadingDevices] = useState(false);
   const [isChangingDevice, setIsChangingDevice] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [conflictEvent, setConflictEvent] = useState<{
+    currentRevision: number;
+    items: any[];
+    currentIndex: number;
+  } | null>(null);
+  const [deviceUnavailableEvent, setDeviceUnavailableEvent] = useState<{
+    deviceName: string;
+    availableDevices: string[];
+  } | null>(null);
 
   const refreshOutputDevices = useCallback(async () => {
     if (!token) return;
@@ -139,7 +149,27 @@ export function useRemoteSocket() {
               ...prev,
               items: data.items,
               currentIndex: data.current_index,
+              revision: data.revision ?? prev.revision,
+              currentQueueEntryId: data.current_queue_entry_id,
             }));
+            setConflictEvent(null);
+          } else if (data.type === 'QUEUE_CONFLICT') {
+            setQueue((prev) => ({
+              ...prev,
+              items: data.items,
+              currentIndex: data.current_index,
+              revision: data.current_revision,
+            }));
+            setConflictEvent({
+              currentRevision: data.current_revision,
+              items: data.items,
+              currentIndex: data.current_index,
+            });
+          } else if (data.type === 'DEVICE_UNAVAILABLE') {
+            setDeviceUnavailableEvent({
+              deviceName: data.device_name,
+              availableDevices: data.available_devices,
+            });
           }
         } catch (err) {
           console.error('[RemoteSocket] Parse error:', err);
@@ -279,24 +309,45 @@ export function useRemoteSocket() {
   }, [sendCommand]);
 
   const queueTrack = useCallback((filePath: string, playNext = false) => {
-    sendCommand({ action: 'queue_track', file_path: filePath, play_next: playNext });
-  }, [sendCommand]);
+    sendCommand({ action: 'queue_track', file_path: filePath, play_next: playNext, expected_revision: queue.revision });
+  }, [sendCommand, queue.revision]);
 
-  const queueRelease = useCallback((releaseId: string, playNext = false) => {
-    sendCommand({ action: 'queue_release', release_id: releaseId, play_next: playNext });
-  }, [sendCommand]);
+  const queueRelease = useCallback((releaseId: string, playNext = false, playNow = false) => {
+    sendCommand({
+      action: 'queue_release',
+      release_id: releaseId,
+      play_next: playNext,
+      play_now: playNow,
+      expected_revision: queue.revision,
+    });
+  }, [sendCommand, queue.revision]);
+
+  const reorderQueue = useCallback((queueEntryId: string, targetQueueEntryId: string) => {
+    sendCommand({
+      action: 'reorder_queue',
+      queue_entry_id: queueEntryId,
+      target_queue_entry_id: targetQueueEntryId,
+      expected_revision: queue.revision,
+    });
+  }, [sendCommand, queue.revision]);
 
   const jumpToQueueIndex = useCallback((index: number) => {
     sendCommand({ action: 'jump_to_queue_index', index });
   }, [sendCommand]);
 
-  const removeFromQueue = useCallback((index: number, trackId?: string) => {
-    sendCommand({ action: 'remove_from_queue', index, track_id: trackId });
-  }, [sendCommand]);
+  const removeFromQueue = useCallback((index?: number, trackId?: string, queueEntryId?: string) => {
+    sendCommand({
+      action: 'remove_from_queue',
+      index,
+      track_id: trackId,
+      queue_entry_id: queueEntryId,
+      expected_revision: queue.revision,
+    });
+  }, [sendCommand, queue.revision]);
 
   const clearQueue = useCallback(() => {
-    sendCommand({ action: 'clear_queue' });
-  }, [sendCommand]);
+    sendCommand({ action: 'clear_queue', expected_revision: queue.revision });
+  }, [sendCommand, queue.revision]);
 
   return {
     token,
@@ -310,6 +361,10 @@ export function useRemoteSocket() {
     isLoadingDevices,
     isChangingDevice,
     deviceError,
+    conflictEvent,
+    setConflictEvent,
+    deviceUnavailableEvent,
+    setDeviceUnavailableEvent,
     refreshOutputDevices,
     changeOutputDevice,
     connect,
@@ -326,6 +381,7 @@ export function useRemoteSocket() {
     playTrackInRelease,
     queueTrack,
     queueRelease,
+    reorderQueue,
     jumpToQueueIndex,
     removeFromQueue,
     clearQueue,

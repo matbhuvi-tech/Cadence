@@ -740,6 +740,7 @@ impl ScannerController {
                                         is_compilation,
                                         physical_combo_title: None,
                                         created_at: Utc::now().to_rfc3339(),
+                                        master_album_id: None,
                                     },
                                 );
                             }
@@ -919,6 +920,7 @@ impl ScannerController {
                                             is_compilation: false,
                                             physical_combo_title: None,
                                             created_at: Utc::now().to_rfc3339(),
+                                            master_album_id: None,
                                         },
                                     );
                                 }

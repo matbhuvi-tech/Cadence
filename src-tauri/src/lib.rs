@@ -311,6 +311,12 @@ pub fn run() {
             db_set_release_split,
             db_remove_release_split,
             db_get_split_releases,
+            // Master Albums & Versions
+            db_get_master_albums,
+            db_get_album_versions,
+            db_set_default_release_version,
+            db_group_releases_into_master,
+            db_ungroup_release_from_master,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cadence Core application");

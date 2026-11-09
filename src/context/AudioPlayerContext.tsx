@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import { Track, Release, Playlist, SampleRateTransition } from '../core/types'
 import { tauriBridge, AudioStreamTelemetry } from '../services/tauriBridge'
 import { sqliteLibraryService } from '../services/sqliteLibraryService'
+import { graphEngine } from '../core/graphEngine'
 
 export function computeSampleRateTransition(
   current: Track | null,
@@ -183,10 +184,24 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const prevVolumeRef = useRef<number>(1)
   const pollIntervalRef = useRef<any>(null)
   const stateRef = useRef({ queue, queueIndex, repeatMode, isShuffle, currentTrack })
+  const appliedServerRevisionRef = useRef<number>(0)
+  const latestHydrationRevisionRef = useRef<number>(0)
+  const isInternalQueueUpdateRef = useRef<boolean>(false)
 
   useEffect(() => {
     stateRef.current = { queue, queueIndex, repeatMode, isShuffle, currentTrack }
-    tauriBridge.syncDesktopQueueToRemote(queue, queueIndex)
+    if (isInternalQueueUpdateRef.current) {
+      isInternalQueueUpdateRef.current = false
+      return
+    }
+    tauriBridge
+      .syncDesktopQueueToRemote(queue, queueIndex, appliedServerRevisionRef.current)
+      .then((rev) => {
+        if (typeof rev === 'number') {
+          appliedServerRevisionRef.current = rev
+        }
+      })
+      .catch(() => {})
   }, [queue, queueIndex, repeatMode, isShuffle, currentTrack])
 
   // Detect environment on mount & load audio devices & purity mode & listen to Remote Controller events
@@ -211,6 +226,57 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
             if (data.activeDevice) setActiveDevice(data.activeDevice)
             if (data.streamInfo) setStreamTelemetry(data.streamInfo)
           }
+        }).catch(() => {})
+
+        listen<any>('cadence:remote-queue-changed', async (event) => {
+          const payload = event.payload
+          if (!payload) return
+          const { items, currentIndex, revision } = payload
+          if (typeof revision === 'number') {
+            if (revision <= appliedServerRevisionRef.current) {
+              return
+            }
+            appliedServerRevisionRef.current = revision
+            latestHydrationRevisionRef.current = revision
+          }
+
+          if (!Array.isArray(items)) return
+
+          const currentRev = revision
+          const rehydratedTracks: Track[] = items.map((item: any) => {
+            const memoryTrack = graphEngine.getTrackById(item.id)
+            if (memoryTrack) {
+              return { ...memoryTrack, queueEntryId: item.queueEntryId } as Track
+            }
+            return {
+              id: item.id,
+              queueEntryId: item.queueEntryId,
+              releaseId: item.releaseId || '',
+              recordingId: item.id,
+              trackNumber: 1,
+              discNumber: 1,
+              title: item.title,
+              artistCredit: item.artist,
+              filePath: item.filePath,
+              fileSize: 0,
+              storageMountId: '',
+              folderPath: item.filePath,
+              durationSeconds: item.durationSecs || 0,
+              format: item.format || 'FLAC',
+              sampleRate: item.sampleRate,
+              bitDepth: item.bitDepth,
+              sampleRateStr: item.sampleRate ? `${item.sampleRate / 1000}kHz` : undefined,
+            } as Track
+          })
+
+          // Guard against async race: if a newer revision arrived while awaiting, drop
+          if (latestHydrationRevisionRef.current !== currentRev) {
+            return
+          }
+
+          isInternalQueueUpdateRef.current = true
+          setQueue(rehydratedTracks)
+          setQueueIndex(currentIndex)
         }).catch(() => {})
       }).catch(() => {})
     }

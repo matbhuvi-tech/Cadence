@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, Play, Plus, ListPlus, Disc3, Clock } from 'lucide-react';
-import type { DbRelease, DbTrack } from '../../types/remote';
+import { X, Play, Plus, ListPlus, Disc3, Clock, AlertTriangle } from 'lucide-react';
+import type { DbRelease, DbTrack, AlbumVersionSummary } from '../../types/remote';
 import { fetchTracks, getArtworkUrl } from '../../services/api';
 
 interface AlbumModalProps {
@@ -11,6 +11,7 @@ interface AlbumModalProps {
   onQueueRelease: (releaseId: string, playNext?: boolean) => void;
   onPlayTrack: (filePath: string) => void;
   onQueueTrack: (filePath: string, playNext?: boolean) => void;
+  onTriggerToast?: (message: string, onUndo?: () => void) => void;
 }
 
 function formatDuration(seconds: number): string {
@@ -18,6 +19,14 @@ function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+}
+
+function formatVersionLabel(version: AlbumVersionSummary): string {
+  const parts: string[] = [];
+  if (version.releaseYear) parts.push(String(version.releaseYear));
+  if (version.formatSummary) parts.push(version.formatSummary);
+  if (version.avgDrScore) parts.push(`DR${version.avgDrScore}`);
+  return parts.length > 0 ? parts.join(' • ') : version.title;
 }
 
 export const AlbumModal: React.FC<AlbumModalProps> = ({
@@ -28,16 +37,28 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
   onQueueRelease,
   onPlayTrack,
   onQueueTrack,
+  onTriggerToast,
 }) => {
+  const [activeReleaseId, setActiveReleaseId] = useState<string>(release?.id || '');
   const [tracks, setTracks] = useState<DbTrack[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
+  const versions = release?.versions || [];
+
+  // Determine active release id upon initial mount or release change
   useEffect(() => {
     if (!release) return;
+    const defaultVer = versions.find((v) => v.isDefault);
+    setActiveReleaseId(defaultVer ? defaultVer.releaseId : release.id);
+  }, [release]);
+
+  // Fetch tracks whenever activeReleaseId changes
+  useEffect(() => {
+    if (!activeReleaseId) return;
     setLoading(true);
     setError(null);
-    fetchTracks(token, release.id)
+    fetchTracks(token, activeReleaseId)
       .then((data) => {
         setTracks(data);
         setLoading(false);
@@ -47,11 +68,22 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
         setLoading(false);
         console.error(err);
       });
-  }, [release, token]);
+  }, [activeReleaseId, token]);
 
   if (!release) return null;
 
-  const artworkUrl = getArtworkUrl(release.id, token);
+  const activeVersion = versions.find((v) => v.releaseId === activeReleaseId);
+  const isSelectedOffline = activeVersion ? !activeVersion.isOnline : false;
+  const artworkUrl = getArtworkUrl(activeReleaseId || release.id, token);
+
+  const handlePlayAlbum = () => {
+    if (isSelectedOffline) return;
+    onPlayRelease(activeReleaseId);
+    if (onTriggerToast) {
+      onTriggerToast(`▶ Playing ${release.title} • Previous queue preserved`);
+    }
+    onClose();
+  };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col justify-end animate-in fade-in duration-200">
@@ -82,28 +114,77 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
           </button>
         </div>
 
+        {/* Segmented Version Carousel (if multiple versions exist) */}
+        {versions.length > 1 && (
+          <div className="px-4 py-2.5 bg-zinc-950/60 border-b border-zinc-800/50 flex flex-col gap-1.5 shrink-0">
+            <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
+              <span className="font-semibold text-zinc-300">Versions ({versions.length})</span>
+              <span className="text-[10px] text-zinc-500">Mastering Integrity</span>
+            </div>
+            <div className="flex items-center space-x-2 overflow-x-auto no-scrollbar py-1">
+              {versions.map((ver) => {
+                const isSelected = ver.releaseId === activeReleaseId;
+                return (
+                  <button
+                    key={ver.releaseId}
+                    onClick={() => setActiveReleaseId(ver.releaseId)}
+                    className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-mono shrink-0 transition-all ${
+                      isSelected
+                        ? 'bg-[#D4AF37]/20 border border-[#D4AF37] text-[#D4AF37] font-semibold shadow-sm'
+                        : 'bg-zinc-900/80 border border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {!ver.isOnline && (
+                      <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
+                    )}
+                    <span>{formatVersionLabel(ver)}</span>
+                    {ver.isDefault && (
+                      <span className="px-1 py-0.2 rounded bg-amber-500/30 text-[9px] font-bold text-amber-300">
+                        MASTER
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Offline Warning Banner */}
+        {isSelectedOffline && (
+          <div className="mx-4 my-2 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center space-x-2 text-rose-300 text-xs">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+            <div className="flex-1">
+              <p className="font-semibold">Drive Offline</p>
+              <p className="text-[10px] text-rose-400">
+                Storage drive is disconnected. Select an available online edition above.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Action Row */}
-        <div className="flex items-center space-x-2 px-4 py-3 bg-zinc-900/50 border-b border-zinc-800/50">
+        <div className="flex items-center space-x-2 px-4 py-3 bg-zinc-900/50 border-b border-zinc-800/50 shrink-0">
           <button
-            onClick={() => {
-              onPlayRelease(release.id);
-              onClose();
-            }}
-            className="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-xl bg-[#D4AF37] text-zinc-950 font-semibold text-xs active:scale-95 transition-all"
+            onClick={handlePlayAlbum}
+            disabled={isSelectedOffline}
+            className="flex-1 flex items-center justify-center space-x-2 py-2.5 px-4 rounded-xl bg-[#D4AF37] text-zinc-950 font-semibold text-xs active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
             <span>Play Album</span>
           </button>
           <button
-            onClick={() => onQueueRelease(release.id, true)}
-            className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs active:scale-95 transition-all"
+            onClick={() => onQueueRelease(activeReleaseId, true)}
+            disabled={isSelectedOffline}
+            className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ListPlus className="w-3.5 h-3.5" />
             <span>Play Next</span>
           </button>
           <button
-            onClick={() => onQueueRelease(release.id, false)}
-            className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs active:scale-95 transition-all"
+            onClick={() => onQueueRelease(activeReleaseId, false)}
+            disabled={isSelectedOffline}
+            className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Queue</span>
@@ -164,4 +245,3 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
     </div>
   );
 };
-

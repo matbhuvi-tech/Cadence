@@ -65,6 +65,14 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             FOREIGN KEY(mount_id) REFERENCES storage_mounts(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS master_albums (
+            id TEXT PRIMARY KEY,
+            canonical_title TEXT NOT NULL,
+            canonical_artist TEXT NOT NULL,
+            default_release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS releases (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -79,6 +87,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             target_folder_path TEXT,
             is_compilation INTEGER NOT NULL DEFAULT 0,
             physical_combo_title TEXT,
+            master_album_id TEXT REFERENCES master_albums(id) ON DELETE SET NULL,
             created_at TEXT NOT NULL
         );
 
@@ -300,6 +309,26 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     )?;
 
     // Non-destructive column additions for existing databases
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS master_albums (
+            id TEXT PRIMARY KEY,
+            canonical_title TEXT NOT NULL,
+            canonical_artist TEXT NOT NULL,
+            default_release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    );
+    let has_master_album_id = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('releases') WHERE name = 'master_album_id')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_master_album_id {
+        let _ = conn.execute("ALTER TABLE releases ADD COLUMN master_album_id TEXT REFERENCES master_albums(id) ON DELETE SET NULL", []);
+    }
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_releases_master_album ON releases(master_album_id)", []);
+
     let _ = conn.execute("ALTER TABLE canonical_artists ADD COLUMN portrait_status TEXT NOT NULL DEFAULT 'pending'", []);
     let _ = conn.execute("ALTER TABLE canonical_artists ADD COLUMN portrait_checked_at INTEGER", []);
     let _ = conn.execute("ALTER TABLE skipped_files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0", []);

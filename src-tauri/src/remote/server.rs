@@ -54,16 +54,18 @@ struct RemoteRelease {
     has_dsd: bool,
     has_high_res: bool,
     has_flac: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    versions: Vec<crate::db::AlbumVersionSummary>,
 }
 
 pub async fn start_remote_server(
     state: Arc<RemoteState>,
     preferred_port: u16,
 ) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Artwork route protected by ConcurrencyLimitLayer (Capped at 4 requests to avoid network bursts)
+    // 1. Artwork route protected by ConcurrencyLimitLayer (Capped at 3 concurrent requests to avoid network bursts)
     let artwork_router = Router::new()
         .route("/:id", get(get_artwork))
-        .layer(ConcurrencyLimitLayer::new(4))
+        .layer(ConcurrencyLimitLayer::new(3))
         .with_state(Arc::clone(&state));
 
     // 2. Main API & PWA Router
@@ -386,11 +388,17 @@ async fn get_releases(
         .map(|release| {
             let (has_dsd, has_high_res, has_flac) =
                 facets.get(&release.id).copied().unwrap_or_default();
+            let versions = if let Some(ref mid) = release.master_album_id {
+                crate::db::DbOperations::get_album_versions(&conn, mid).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             RemoteRelease {
                 release,
                 has_dsd,
                 has_high_res,
                 has_flac,
+                versions,
             }
         })
         .collect();
@@ -508,7 +516,15 @@ async fn get_artwork(
         }
     }
 
-    // 3. Fallback: Generate thumbnail if audio engine is idle
+    // 3. Audiophile Rule 1: Storage Bus Silence during active playback.
+    // If not in NVMe cache and playback is active, return 204 No Content immediately
+    // without reading or seeking the music library storage drives.
+    let status = state.engine.get_status();
+    if status.is_playing && !status.is_paused {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    // 4. Fallback: Generate thumbnail if audio engine is idle
     let target_key = release_id.as_deref().unwrap_or(&id);
     let resolved_source = source_path.or_else(|| {
         let conn = state.db.conn.lock();

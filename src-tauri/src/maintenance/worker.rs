@@ -380,6 +380,8 @@ impl MaintenanceWorker {
                     }
                 }
                 *self.current_artist.lock() = None;
+                // Interleave release artwork caching so thumbnails are not starved behind artist portraits
+                let _ = self.process_next_artwork_item();
                 continue;
             }
 

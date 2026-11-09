@@ -13,6 +13,7 @@ interface CatalogViewProps {
   onQueueRelease: (releaseId: string, playNext?: boolean) => void;
   onPlayTrack: (filePath: string) => void;
   onQueueTrack: (filePath: string, playNext?: boolean) => void;
+  onTriggerToast?: (message: string, onUndo?: () => void) => void;
 }
 
 export const CatalogView: React.FC<CatalogViewProps> = ({
@@ -21,6 +22,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   onQueueRelease,
   onPlayTrack,
   onQueueTrack,
+  onTriggerToast,
 }) => {
   const [releases, setReleases] = useState<DbRelease[]>(() => releaseCache.get(token) ?? []);
   const [loading, setLoading] = useState<boolean>(true);
@@ -127,7 +129,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
       <FacetShelf activeFilter={filter} onSelectFilter={setFilter} />
 
       {/* Album Grid */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-6">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-28">
         {loading ? (
           <div className="flex flex-col items-center justify-center py-24 text-zinc-500">
             <RefreshCw className="w-8 h-8 animate-spin text-[#D4AF37]" />
@@ -148,6 +150,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {filteredReleases.map((release) => {
               const artUrl = getArtworkUrl(release.id, token);
+              const versionCount = release.versions ? release.versions.length : 0;
               return (
                 <div
                   key={release.id}
@@ -175,11 +178,20 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
                     <p className="text-[11px] text-zinc-400 truncate mt-0.5">
                       {release.artistCredit}
                     </p>
-                    {release.releaseYear ? (
-                      <span className="text-[10px] font-mono text-zinc-600 mt-1">
-                        {release.releaseYear}
-                      </span>
-                    ) : null}
+                    <div className="flex items-center justify-between mt-1">
+                      {release.releaseYear ? (
+                        <span className="text-[10px] font-mono text-zinc-600">
+                          {release.releaseYear}
+                        </span>
+                      ) : (
+                        <span />
+                      )}
+                      {versionCount > 1 && (
+                        <span className="px-1.5 py-0.2 rounded bg-zinc-800/90 border border-zinc-700/60 text-[9px] font-mono text-amber-300">
+                          {versionCount} Versions
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               );
@@ -197,6 +209,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
         onQueueRelease={onQueueRelease}
         onPlayTrack={onPlayTrack}
         onQueueTrack={onQueueTrack}
+        onTriggerToast={onTriggerToast}
       />
     </div>
   );

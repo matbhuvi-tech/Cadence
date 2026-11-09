@@ -248,6 +248,7 @@ export type SidecarStatus = 'synced' | 'uncommitted_sidecar' | 'committed'
 
 export interface Track {
   id: string
+  queueEntryId?: string
   releaseId: string
   recordingId: string
   workId?: string

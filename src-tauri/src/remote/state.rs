@@ -14,9 +14,15 @@ use super::net_discovery::{
     generate_pairing_token, load_or_create_pairing_token, save_pairing_token,
 };
 
+fn default_queue_entry_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteTrackItem {
+    #[serde(default = "default_queue_entry_id")]
+    pub queue_entry_id: String,
     pub id: String,
     pub title: String,
     pub artist: String,
@@ -34,8 +40,11 @@ pub struct RemoteTrackItem {
 pub struct RemoteQueue {
     pub items: Vec<RemoteTrackItem>,
     pub current_index: isize,
+    pub current_queue_entry_id: Option<String>,
+    pub next_up_end_index: Option<usize>,
     pub repeat_mode: String, // "off" | "all" | "one"
     pub is_shuffle: bool,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +73,17 @@ pub enum RemoteEvent {
     QueueUpdated {
         items: Vec<RemoteTrackItem>,
         current_index: isize,
+        revision: u64,
+        current_queue_entry_id: Option<String>,
+    },
+    QueueConflict {
+        current_revision: u64,
+        items: Vec<RemoteTrackItem>,
+        current_index: isize,
+    },
+    DeviceUnavailable {
+        device_name: String,
+        available_devices: Vec<String>,
     },
 }
 
@@ -158,14 +178,21 @@ impl RemoteState {
 
     /// Dispatches queue updates to mobile and desktop
     pub fn broadcast_queue_update(&self) {
-        let (items, current_index) = {
+        let (items, current_index, revision, current_queue_entry_id) = {
             let q = self.queue.lock();
-            (q.items.clone(), q.current_index)
+            (
+                q.items.clone(),
+                q.current_index,
+                q.revision,
+                q.current_queue_entry_id.clone(),
+            )
         };
 
         let event = RemoteEvent::QueueUpdated {
             items,
             current_index,
+            revision,
+            current_queue_entry_id,
         };
 
         let _ = self.event_tx.send(event.clone());

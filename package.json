@@ -21,6 +21,7 @@
     "test:startup": "tsx src/test/testAppStartup.ts",
     "test:provenance": "tsx src/test/testCanonicalProvenance.ts",
     "test:trace": "tsx src/test/testCurationDecisionTrace.ts",
+    "test:queue-sync": "tsx src/test/testRemoteQueueSync.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

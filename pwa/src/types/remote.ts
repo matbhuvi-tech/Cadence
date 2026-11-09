@@ -15,6 +15,7 @@ export interface PlaybackStatus {
   isPlaying: boolean;
   isPaused: boolean;
   currentFile?: string | null;
+  currentQueueEntryId?: string | null;
   positionSecs: number;
   durationSecs: number;
   volume: number;
@@ -25,6 +26,7 @@ export interface PlaybackStatus {
 }
 
 export interface RemoteTrackItem {
+  queueEntryId?: string;
   id: string;
   title: string;
   artist: string;
@@ -40,8 +42,11 @@ export interface RemoteTrackItem {
 export interface RemoteQueue {
   items: RemoteTrackItem[];
   currentIndex: number;
+  currentQueueEntryId?: string;
+  nextUpEndIndex?: number;
   repeatMode: 'off' | 'all' | 'one';
   isShuffle: boolean;
+  revision: number;
 }
 
 export type RemoteEvent =
@@ -82,9 +87,36 @@ export type RemoteEvent =
       type: 'QUEUE_UPDATED';
       items: RemoteTrackItem[];
       current_index: number;
+      revision?: number;
+      current_queue_entry_id?: string;
+    }
+  | {
+      type: 'QUEUE_CONFLICT';
+      current_revision: number;
+      items: RemoteTrackItem[];
+      current_index: number;
+    }
+  | {
+      type: 'DEVICE_UNAVAILABLE';
+      device_name: string;
+      available_devices: string[];
     };
 
 type f64_or_number = number;
+
+export interface AlbumVersionSummary {
+  releaseId: string;
+  title: string;
+  releaseYear?: number | null;
+  formatSummary: string;
+  maxSampleRate?: number | null;
+  maxBitDepth?: number | null;
+  avgDrScore?: number | null;
+  trackCount: number;
+  isDefault: boolean;
+  isOnline: boolean;
+  folderPath: string;
+}
 
 export interface DbRelease {
   id: string;
@@ -98,6 +130,8 @@ export interface DbRelease {
   frontCoverUrl?: string | null;
   backdropUrl?: string | null;
   isCompilation: boolean;
+  masterAlbumId?: string | null;
+  versions?: AlbumVersionSummary[];
   hasDsd: boolean;
   hasHighRes: boolean;
   hasFlac: boolean;

@@ -2,8 +2,9 @@ use std::process::Command;
 use tauri::{AppHandle, State};
 
 use crate::db::{
-    is_directory_accessible, AppDb, DbOperations, DbPlaylist, DbPlaylistWithTracks, DbRelease,
-    DbSkippedFile, DbStorageMount, DbTrack, DbWatchedFolder, StorageAccessibilityReport,
+    is_directory_accessible, AlbumVersionSummary, AppDb, DbMasterAlbum, DbOperations, DbPlaylist,
+    DbPlaylistWithTracks, DbRelease, DbSkippedFile, DbStorageMount, DbTrack, DbWatchedFolder,
+    StorageAccessibilityReport,
 };
 use crate::scanner::{ScanProgressPayload, ScannerController};
 
@@ -483,5 +484,64 @@ pub fn db_get_split_releases(
 ) -> Result<Vec<String>, String> {
     let conn = db.conn.lock();
     DbOperations::get_all_split_releases(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn db_get_master_albums(
+    db: State<'_, AppDb>,
+) -> Result<Vec<DbMasterAlbum>, String> {
+    let conn = db.conn.lock();
+    DbOperations::get_master_albums(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn db_get_album_versions(
+    db: State<'_, AppDb>,
+    master_album_id: String,
+) -> Result<Vec<AlbumVersionSummary>, String> {
+    let conn = db.conn.lock();
+    DbOperations::get_album_versions(&conn, &master_album_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn db_set_default_release_version(
+    db: State<'_, AppDb>,
+    master_album_id: String,
+    release_id: String,
+) -> Result<(), String> {
+    let mut conn = db.conn.lock();
+    DbOperations::set_default_release_version(&mut conn, &master_album_id, &release_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn db_group_releases_into_master(
+    db: State<'_, AppDb>,
+    master_album_id: Option<String>,
+    canonical_title: String,
+    canonical_artist: String,
+    release_ids: Vec<String>,
+    default_release_id: Option<String>,
+) -> Result<String, String> {
+    let mut conn = db.conn.lock();
+    DbOperations::group_releases_into_master(
+        &mut conn,
+        master_album_id,
+        &canonical_title,
+        &canonical_artist,
+        &release_ids,
+        default_release_id,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn db_ungroup_release_from_master(
+    db: State<'_, AppDb>,
+    release_id: String,
+) -> Result<(), String> {
+    let mut conn = db.conn.lock();
+    DbOperations::ungroup_release_from_master(&mut conn, &release_id)
+        .map_err(|e| e.to_string())
 }
 
