@@ -364,6 +364,51 @@ async function runTestSuite() {
   assert(reconcileRes.matchedTrack?.title === 'Guruvaayurappa', 'Track matched correctly')
   assert(state.queue.length === 4, 'Desktop queue maintains all 4 tracks for remote sync')
 
+  // --- TEST 8: Prune past played tracks when jumping or advancing queue ---
+  console.log('\n--- Test 8: Prune past played tracks when jumping or advancing queue ---')
+  const initialFiveTracks: Track[] = [
+    { id: 't1', title: 'Yaaru Pottadhu', filePath: 'D:/Music/01.flac' } as Track,
+    { id: 't2', title: 'Maalayil Yaaro', filePath: 'D:/Music/02.flac' } as Track,
+    { id: 't3', title: 'Poottukkal Potaalum', filePath: 'D:/Music/03.flac' } as Track,
+    { id: 't4', title: 'Unna Nenachen', filePath: 'D:/Music/04.flac' } as Track,
+    { id: 't5', title: 'Aanenna Pennanna', filePath: 'D:/Music/05.flac' } as Track,
+  ]
+
+  // Helper simulating queue prune on playTrack / jump
+  function pruneQueueToTrack(q: Track[], targetTrack: Track): { prunedQueue: Track[]; newIndex: number } {
+    const idx = q.findIndex((t) => t.id === targetTrack.id || t.filePath === targetTrack.filePath)
+    if (idx > 0) {
+      return { prunedQueue: q.slice(idx), newIndex: 0 }
+    }
+    return { prunedQueue: q, newIndex: Math.max(0, idx) }
+  }
+
+  // Jump to Track 4 (Unna Nenachen)
+  const jumpResult = pruneQueueToTrack(initialFiveTracks, initialFiveTracks[3])
+  assert(jumpResult.prunedQueue.length === 2, 'Past tracks (0..2) pruned; queue length is 2')
+  assert(jumpResult.prunedQueue[0].title === 'Unna Nenachen', 'Unna Nenachen is now at index 0')
+  assert(jumpResult.prunedQueue[1].title === 'Aanenna Pennanna', 'Aanenna Pennanna is the only upcoming track')
+  assert(jumpResult.newIndex === 0, 'Current index reset to 0')
+
+  // Advance to next track (from Unna Nenachen to Aanenna Pennanna)
+  function advancePrunedQueue(q: Track[], repeatMode: 'off' | 'all' | 'one' = 'off'): Track[] {
+    if (q.length <= 1) {
+      return repeatMode === 'all' && q.length === 1 ? q : []
+    }
+    if (repeatMode === 'all') {
+      return [...q.slice(1), q[0]]
+    }
+    return q.slice(1)
+  }
+
+  const advancedQueue = advancePrunedQueue(jumpResult.prunedQueue, 'off')
+  assert(advancedQueue.length === 1, 'Finished track dropped; queue length is 1')
+  assert(advancedQueue[0].title === 'Aanenna Pennanna', 'Aanenna Pennanna is now at index 0')
+
+  // Advance again (final track ends with repeat off)
+  const finalQueue = advancePrunedQueue(advancedQueue, 'off')
+  assert(finalQueue.length === 0, 'Queue is empty when last track finishes')
+
   console.log('\n=====================================================')
   console.log('All Remote Queue Sync tests passed successfully!')
   console.log('=====================================================')

@@ -268,8 +268,12 @@ async fn handle_playback(
                     if let Some(pos) = q.items.iter().position(|t| {
                         t.file_path.replace('\\', "/").to_lowercase() == norm_target || t.id == path
                     }) {
-                        q.current_index = pos as isize;
-                        q.current_queue_entry_id = q.items.get(pos).map(|t| t.queue_entry_id.clone());
+                        if pos > 0 {
+                            q.items = q.items.split_off(pos);
+                        }
+                        q.current_index = 0;
+                        q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+                        q.revision += 1;
                         true
                     } else {
                         false

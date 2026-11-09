@@ -267,9 +267,13 @@ async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
                 if let Some(pos) = q.items.iter().position(|t| {
                     t.file_path.replace('\\', "/").to_lowercase() == norm_target || t.id == file_path
                 }) {
-                    q.current_index = pos as isize;
-                    q.current_queue_entry_id = q.items.get(pos).map(|t| t.queue_entry_id.clone());
-                    Some(pos)
+                    if pos > 0 {
+                        q.items = q.items.split_off(pos);
+                    }
+                    q.current_index = 0;
+                    q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+                    q.revision += 1;
+                    Some(0)
                 } else {
                     None
                 }
@@ -398,25 +402,44 @@ async fn advance_queue(state: &RemoteState, delta: isize) {
         let mut q = state.queue.lock();
         if q.items.is_empty() {
             None
-        } else {
-            let mut next_idx = q.current_index + delta;
-            if next_idx >= q.items.len() as isize {
+        } else if delta > 0 {
+            if q.items.len() > 1 {
                 if q.repeat_mode == "all" {
-                    next_idx = 0;
+                    let finished = q.items.remove(0);
+                    q.items.push(finished);
                 } else {
-                    return;
+                    q.items.remove(0);
                 }
-            } else if next_idx < 0 {
-                next_idx = 0;
+                q.current_index = 0;
+                q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+                q.revision += 1;
+                q.items.first().map(|t| t.file_path.clone())
+            } else if q.repeat_mode == "all" {
+                q.current_index = 0;
+                q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+                q.revision += 1;
+                q.items.first().map(|t| t.file_path.clone())
+            } else {
+                q.items.clear();
+                q.current_index = -1;
+                q.current_queue_entry_id = None;
+                q.revision += 1;
+                None
             }
-            q.current_index = next_idx;
-            q.current_queue_entry_id = q.items.get(next_idx as usize).map(|t| t.queue_entry_id.clone());
-            q.items.get(next_idx as usize).map(|t| t.file_path.clone())
+        } else {
+            // Restart or seek to beginning of active track
+            q.current_index = 0;
+            q.items.first().map(|t| t.file_path.clone())
         }
     };
 
     if let Some(path) = next_file {
         let _ = state.engine.play_track(&path);
+        let status = state.engine.get_status();
+        state.broadcast_state_change(&status);
+        state.broadcast_queue_update();
+    } else {
+        let _ = state.engine.stop();
         let status = state.engine.get_status();
         state.broadcast_state_change(&status);
         state.broadcast_queue_update();
@@ -427,9 +450,13 @@ async fn jump_queue(state: &RemoteState, index: usize) {
     let target_file: Option<String> = {
         let mut q = state.queue.lock();
         if index < q.items.len() {
-            q.current_index = index as isize;
-            q.current_queue_entry_id = q.items.get(index).map(|t| t.queue_entry_id.clone());
-            q.items.get(index).map(|t| t.file_path.clone())
+            if index > 0 {
+                q.items = q.items.split_off(index);
+            }
+            q.current_index = 0;
+            q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+            q.revision += 1;
+            q.items.first().map(|t| t.file_path.clone())
         } else {
             None
         }
@@ -501,11 +528,13 @@ async fn play_release_track(state: &RemoteState, release_id: &str, track_id: &st
             } else {
                 Vec::new()
             };
-            let mut new_items = tracks;
+            // Prune tracks preceding target_idx so past tracks are excluded from queue
+            let mut new_items: Vec<crate::remote::state::RemoteTrackItem> =
+                tracks.into_iter().skip(target_idx).collect();
             new_items.extend(remaining_upcoming);
             q.items = new_items;
-            q.current_index = target_idx as isize;
-            q.current_queue_entry_id = q.items.get(target_idx).map(|t| t.queue_entry_id.clone());
+            q.current_index = 0;
+            q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
             q.next_up_end_index = None;
             q.revision += 1;
         }

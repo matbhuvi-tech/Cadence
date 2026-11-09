@@ -31,6 +31,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
   onClearQueue,
 }) => {
   const isPlaybackActive = (status.isPlaying || status.isPaused) && Boolean(status.currentFile);
+  const upcomingCount = isPlaybackActive && queue.items.length > 0 ? queue.items.length - 1 : queue.items.length;
   const totalDurationSecs = queue.items.reduce((acc, t) => acc + (t.durationSecs || 0), 0);
 
   return (
@@ -41,8 +42,17 @@ export const QueueView: React.FC<QueueViewProps> = ({
           <div>
             <h2 className="text-sm font-semibold text-zinc-100">Playback Queue</h2>
             <p className="text-[11px] text-zinc-500 font-mono">
-              {queue.items.length} {queue.items.length === 1 ? 'track' : 'tracks'}
-              {totalDurationSecs > 0 && ` • ${formatDuration(totalDurationSecs)}`}
+              {isPlaybackActive ? (
+                <>
+                  {upcomingCount} upcoming {upcomingCount === 1 ? 'track' : 'tracks'}
+                  {totalDurationSecs > 0 && ` • ${formatDuration(totalDurationSecs)}`}
+                </>
+              ) : (
+                <>
+                  {queue.items.length} {queue.items.length === 1 ? 'track' : 'tracks'}
+                  {totalDurationSecs > 0 && ` • ${formatDuration(totalDurationSecs)}`}
+                </>
+              )}
             </p>
           </div>
 
@@ -136,7 +146,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                     ) : isPaused ? (
                       <Pause className="w-4 h-4 text-[#D4AF37]" />
                     ) : (
-                      <span className="text-xs font-mono text-zinc-500">{idx + 1}</span>
+                      <span className="text-xs font-mono text-zinc-500">{isPlaybackActive ? idx : idx + 1}</span>
                     )}
                   </div>
 

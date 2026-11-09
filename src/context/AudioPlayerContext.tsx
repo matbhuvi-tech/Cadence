@@ -204,17 +204,34 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     })
 
     if (foundIdx >= 0) {
-      if (qIdx !== foundIdx) {
-        setQueueIndex(foundIdx)
-        stateRef.current.queueIndex = foundIdx
-      }
-      if (!isSameTrack) {
-        const matched = q[foundIdx]
-        setCurrentTrack(matched)
-        stateRef.current.currentTrack = matched
-        if (matched.releaseId) {
-          const rel = graphEngine.getReleaseById(matched.releaseId)
-          if (rel) setCurrentRelease(rel)
+      if (foundIdx > 0) {
+        const pruned = q.slice(foundIdx)
+        setQueue(pruned)
+        setQueueIndex(0)
+        stateRef.current.queue = pruned
+        stateRef.current.queueIndex = 0
+        const matched = pruned[0]
+        if (!isSameTrack) {
+          setCurrentTrack(matched)
+          stateRef.current.currentTrack = matched
+          if (matched.releaseId) {
+            const rel = graphEngine.getReleaseById(matched.releaseId)
+            if (rel) setCurrentRelease(rel)
+          }
+        }
+      } else {
+        if (qIdx !== 0) {
+          setQueueIndex(0)
+          stateRef.current.queueIndex = 0
+        }
+        if (!isSameTrack) {
+          const matched = q[0]
+          setCurrentTrack(matched)
+          stateRef.current.currentTrack = matched
+          if (matched.releaseId) {
+            const rel = graphEngine.getReleaseById(matched.releaseId)
+            if (rel) setCurrentRelease(rel)
+          }
         }
       }
       return
@@ -352,23 +369,25 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           }
 
           isInternalQueueUpdateRef.current = true
-          setQueue(rehydratedTracks)
-          let activeTrack: Track | null = null
+          let effectiveIndex = 0
           if (typeof currentIndex === 'number' && currentIndex >= 0 && currentIndex < rehydratedTracks.length) {
-            setQueueIndex(currentIndex)
-            activeTrack = rehydratedTracks[currentIndex]
-            setCurrentTrack(activeTrack)
-            stateRef.current.queueIndex = currentIndex
-            stateRef.current.currentTrack = activeTrack
+            effectiveIndex = currentIndex
           } else if (currentQueueEntryId) {
             const matchIdx = rehydratedTracks.findIndex((t) => t.queueEntryId === currentQueueEntryId)
             if (matchIdx >= 0) {
-              setQueueIndex(matchIdx)
-              activeTrack = rehydratedTracks[matchIdx]
-              setCurrentTrack(activeTrack)
-              stateRef.current.queueIndex = matchIdx
-              stateRef.current.currentTrack = activeTrack
+              effectiveIndex = matchIdx
             }
+          }
+
+          const prunedTracks = effectiveIndex > 0 ? rehydratedTracks.slice(effectiveIndex) : rehydratedTracks
+          setQueue(prunedTracks)
+          setQueueIndex(0)
+          const activeTrack: Track | null = prunedTracks.length > 0 ? prunedTracks[0] : null
+          if (activeTrack) {
+            setCurrentTrack(activeTrack)
+            stateRef.current.queueIndex = 0
+            stateRef.current.currentTrack = activeTrack
+            stateRef.current.queue = prunedTracks
           }
           if (activeTrack?.releaseId) {
             const rel = graphEngine.getReleaseById(activeTrack.releaseId)
@@ -484,29 +503,35 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   // Auto advance helper
   const handleAutoAdvance = useCallback(() => {
-    const { queue: q, queueIndex: qIdx, repeatMode: rMode, isShuffle: isShuf, currentTrack: cTrack } = stateRef.current
+    const { queue: q, repeatMode: rMode, isShuffle: isShuf, currentTrack: cTrack } = stateRef.current
 
     if (rMode === 'one' && cTrack) {
       playTrack(cTrack)
       return
     }
 
-    if (q.length > 0 && qIdx >= 0) {
+    if (q.length > 1) {
+      let nextQueue: Track[]
       if (isShuf) {
-        const nextIdx = Math.floor(Math.random() * q.length)
-        setQueueIndex(nextIdx)
-        playTrack(q[nextIdx])
-      } else if (qIdx + 1 < q.length) {
-        const nextIdx = qIdx + 1
-        setQueueIndex(nextIdx)
-        playTrack(q[nextIdx])
+        const randIdx = 1 + Math.floor(Math.random() * (q.length - 1))
+        const picked = q[randIdx]
+        nextQueue = [picked, ...q.slice(1, randIdx), ...q.slice(randIdx + 1)]
       } else if (rMode === 'all') {
-        setQueueIndex(0)
-        playTrack(q[0])
+        const finished = q[0]
+        nextQueue = [...q.slice(1), finished]
       } else {
-        setIsPlaying(false)
-        setIsPaused(false)
+        nextQueue = q.slice(1)
       }
+      setQueue(nextQueue)
+      setQueueIndex(0)
+      playTrack(nextQueue[0], nextQueue)
+    } else if (q.length === 1 && rMode === 'all') {
+      playTrack(q[0])
+    } else {
+      setQueue([])
+      setQueueIndex(-1)
+      setIsPlaying(false)
+      setIsPaused(false)
     }
   }, [])
 
@@ -527,29 +552,38 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         }
 
         let newQueue = queue
-        let newIndex = queueIndex
         if (queueContext && queueContext.length > 0) {
-          newQueue = queueContext
-          setQueue(queueContext)
           const idx = queueContext.findIndex((t) => t.id === track.id || t.filePath === track.filePath)
-          newIndex = idx >= 0 ? idx : 0
-          setQueueIndex(newIndex)
+          if (idx > 0) {
+            newQueue = queueContext.slice(idx)
+          } else {
+            newQueue = queueContext
+          }
+          setQueue(newQueue)
+          setQueueIndex(0)
         } else if (queue.length === 0) {
           newQueue = [track]
           setQueue([track])
-          newIndex = 0
           setQueueIndex(0)
         } else {
           const idx = queue.findIndex((t) => t.id === track.id || t.filePath === track.filePath)
-          if (idx >= 0) {
-            newIndex = idx
-            setQueueIndex(idx)
+          if (idx > 0) {
+            newQueue = queue.slice(idx)
+            setQueue(newQueue)
+            setQueueIndex(0)
+          } else if (idx === 0) {
+            newQueue = queue
+            setQueueIndex(0)
+          } else {
+            newQueue = [track, ...queue.slice(1)]
+            setQueue(newQueue)
+            setQueueIndex(0)
           }
         }
 
         setCurrentTrack(track)
         stateRef.current.queue = newQueue
-        stateRef.current.queueIndex = newIndex
+        stateRef.current.queueIndex = 0
         stateRef.current.currentTrack = track
         if (release) {
           setCurrentRelease(release)
@@ -651,24 +685,30 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   // Next Track
   const nextTrack = useCallback(async () => {
-    if (queue.length === 0) return
-
-    let nextIdx = queueIndex + 1
-    if (isShuffle) {
-      nextIdx = Math.floor(Math.random() * queue.length)
-    } else if (nextIdx >= queue.length) {
-      nextIdx = repeatMode === 'all' ? 0 : -1
+    const { queue: q, repeatMode: rMode, isShuffle: isShuf } = stateRef.current
+    if (q.length > 1) {
+      let nextQueue: Track[]
+      if (isShuf) {
+        const randIdx = 1 + Math.floor(Math.random() * (q.length - 1))
+        const picked = q[randIdx]
+        nextQueue = [picked, ...q.slice(1, randIdx), ...q.slice(randIdx + 1)]
+      } else if (rMode === 'all') {
+        const finished = q[0]
+        nextQueue = [...q.slice(1), finished]
+      } else {
+        nextQueue = q.slice(1)
+      }
+      setQueue(nextQueue)
+      setQueueIndex(0)
+      await playTrack(nextQueue[0], nextQueue)
+    } else if (q.length === 1 && rMode === 'all') {
+      await playTrack(q[0])
     }
-
-    if (nextIdx >= 0 && nextIdx < queue.length) {
-      setQueueIndex(nextIdx)
-      await playTrack(queue[nextIdx])
-    }
-  }, [queue, queueIndex, isShuffle, repeatMode, playTrack])
+  }, [playTrack])
 
   // Previous Track
   const prevTrack = useCallback(async () => {
-    if (queue.length === 0) return
+    if (stateRef.current.queue.length === 0) return
 
     // If more than 3 seconds in, restart current track
     if (currentTime > 3) {
@@ -677,16 +717,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       return
     }
 
-    let prevIdx = queueIndex - 1
-    if (prevIdx < 0) {
-      prevIdx = repeatMode === 'all' ? queue.length - 1 : 0
-    }
-
-    if (prevIdx >= 0 && prevIdx < queue.length) {
-      setQueueIndex(prevIdx)
-      await playTrack(queue[prevIdx])
-    }
-  }, [queue, queueIndex, currentTime, repeatMode, playTrack])
+    // Since past tracks are pruned from queue, previous restarts the current track
+    await tauriBridge.seek(0)
+    setCurrentTime(0)
+  }, [currentTime])
 
   // Seek
   const seek = useCallback(async (seconds: number) => {
@@ -827,8 +861,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   // Upcoming tracks derived from current queue & queueIndex
   const upcomingTracks = useMemo(() => {
-    if (queueIndex < 0 || queueIndex >= queue.length - 1) return []
-    return queue.slice(queueIndex + 1)
+    if (queue.length <= 1) return []
+    const startIdx = queueIndex >= 0 ? queueIndex : 0
+    return queue.slice(startIdx + 1)
   }, [queue, queueIndex])
 
   const nextTrackCandidate = upcomingTracks.length > 0 ? upcomingTracks[0] : null
@@ -1007,10 +1042,12 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const setFullQueue = useCallback((tracks: Track[], startIndex: number = 0) => {
     hasPreloadedNextRef.current = null
     tauriBridge.invalidateNextTrack().catch(() => {})
-    setQueue(tracks)
-    setQueueIndex(startIndex)
-    if (startIndex >= 0 && startIndex < tracks.length) {
-      playTrack(tracks[startIndex], tracks)
+    const start = startIndex >= 0 && startIndex < tracks.length ? startIndex : 0
+    const pruned = tracks.slice(start)
+    setQueue(pruned)
+    setQueueIndex(0)
+    if (pruned.length > 0) {
+      playTrack(pruned[0], pruned)
     }
   }, [playTrack])
 

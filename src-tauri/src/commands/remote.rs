@@ -59,7 +59,7 @@ pub fn regenerate_pairing_token(
 pub fn sync_desktop_queue_to_remote(
     remote_state: State<'_, Arc<RemoteState>>,
     mut items: Vec<crate::remote::RemoteTrackItem>,
-    current_index: isize,
+    mut current_index: isize,
     _expected_revision: Option<u64>,
 ) -> Result<u64, String> {
     let mut q = remote_state.queue.lock();
@@ -67,6 +67,11 @@ pub fn sync_desktop_queue_to_remote(
         if item.queue_entry_id.is_empty() {
             item.queue_entry_id = uuid::Uuid::new_v4().to_string();
         }
+    }
+    // Prune past tracks so queue only contains active track (index 0) and upcoming tracks
+    if current_index > 0 && (current_index as usize) < items.len() {
+        items = items.split_off(current_index as usize);
+        current_index = 0;
     }
     let cur_entry_id = if current_index >= 0 && (current_index as usize) < items.len() {
         Some(items[current_index as usize].queue_entry_id.clone())

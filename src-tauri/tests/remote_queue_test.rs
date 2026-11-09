@@ -218,5 +218,60 @@ fn test_sync_desktop_queue_always_succeeds() {
     assert_eq!(q.items[0].title, "Guruvaayurappa");
 }
 
+#[test]
+fn test_prune_past_tracks_on_jump_and_advance() {
+    let mut q = RemoteQueue::default();
+    let t1 = make_item("1", "Yaaru Pottadhu", "D:/01.flac");
+    let t2 = make_item("2", "Maalayil Yaaro", "D:/02.flac");
+    let t3 = make_item("3", "Poottukkal Potaalum", "D:/03.flac");
+    let t4 = make_item("4", "Unna Nenachen", "D:/04.flac");
+    let t5 = make_item("5", "Aanenna Pennanna", "D:/05.flac");
+
+    q.items = vec![t1, t2, t3, t4.clone(), t5.clone()];
+    q.current_index = 0;
+    q.current_queue_entry_id = Some(q.items[0].queue_entry_id.clone());
+    q.revision = 1;
+
+    // Jumping to track 4 (index 3: "Unna Nenachen") prunes preceding tracks 0..3
+    let jump_idx = 3;
+    if jump_idx < q.items.len() {
+        if jump_idx > 0 {
+            q.items = q.items.split_off(jump_idx);
+        }
+        q.current_index = 0;
+        q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+        q.revision += 1;
+    }
+
+    assert_eq!(q.items.len(), 2, "Preceding tracks pruned");
+    assert_eq!(q.current_index, 0, "Current index reset to 0");
+    assert_eq!(q.items[0].title, "Unna Nenachen");
+    assert_eq!(q.items[1].title, "Aanenna Pennanna");
+
+    // Advancing forward (repeat off) drops finished track 0
+    if q.items.len() > 1 {
+        q.items.remove(0);
+        q.current_index = 0;
+        q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+        q.revision += 1;
+    }
+
+    assert_eq!(q.items.len(), 1, "Finished track removed");
+    assert_eq!(q.current_index, 0);
+    assert_eq!(q.items[0].title, "Aanenna Pennanna");
+
+    // Advancing again with repeat off clears the queue
+    if q.items.len() == 1 {
+        q.items.clear();
+        q.current_index = -1;
+        q.current_queue_entry_id = None;
+        q.revision += 1;
+    }
+
+    assert!(q.items.is_empty(), "Queue empty after final track");
+    assert_eq!(q.current_index, -1);
+}
+
+
 
 

@@ -5,3 +5,4 @@
 - [#21](https://github.com/matbhuvi-tech/Cadence/issues/21): Desktop Now Playing stuck on initial track and desynchronized from audio engine and mobile remote.
 - [#22](https://github.com/matbhuvi-tech/Cadence/issues/22): Desktop Now Playing card flickers and bottom player controls stall when playing track from mobile.
 - [#23](https://github.com/matbhuvi-tech/Cadence/issues/23): Desktop playback queue is not synchronized to mobile remote queue.
+- [#24](https://github.com/matbhuvi-tech/Cadence/issues/24): Remove past played tracks from playback queue on both desktop and mobile.

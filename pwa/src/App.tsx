@@ -192,7 +192,11 @@ export function App() {
       <TabBar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        queueCount={queue.items.length}
+        queueCount={
+          (status.isPlaying || status.isPaused) && queue.items.length > 0
+            ? Math.max(0, queue.items.length - 1)
+            : queue.items.length
+        }
       />
 
       {/* Full Sheet NowPlaying Modal Overlay */}
