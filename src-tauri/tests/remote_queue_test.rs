@@ -189,4 +189,34 @@ fn test_play_track_updates_queue_index_and_entry_id() {
     assert_eq!(q.current_queue_entry_id, Some(t2.queue_entry_id));
 }
 
+#[test]
+fn test_sync_desktop_queue_always_succeeds() {
+    let mut q = RemoteQueue::default();
+    q.revision = 5; // Previous server revision from remote actions
+
+    let mut new_items = vec![
+        make_item("p1", "Guruvaayurappa", "D:/Music/Pudhu/01.flac"),
+        make_item("p2", "Kalyaana Maalai", "D:/Music/Pudhu/02.flac"),
+        make_item("p3", "Keladi Kanmani", "D:/Music/Pudhu/03.flac"),
+        make_item("p4", "Ellorum Maavaatta", "D:/Music/Pudhu/04.flac"),
+    ];
+
+    for item in &mut new_items {
+        if item.queue_entry_id.is_empty() {
+            item.queue_entry_id = uuid::Uuid::new_v4().to_string();
+        }
+    }
+    let cur_entry_id = Some(new_items[0].queue_entry_id.clone());
+    q.items = new_items;
+    q.current_index = 0;
+    q.current_queue_entry_id = cur_entry_id;
+    q.revision += 1;
+
+    assert_eq!(q.items.len(), 4);
+    assert_eq!(q.current_index, 0);
+    assert_eq!(q.revision, 6);
+    assert_eq!(q.items[0].title, "Guruvaayurappa");
+}
+
+
 

@@ -60,14 +60,9 @@ pub fn sync_desktop_queue_to_remote(
     remote_state: State<'_, Arc<RemoteState>>,
     mut items: Vec<crate::remote::RemoteTrackItem>,
     current_index: isize,
-    expected_revision: Option<u64>,
+    _expected_revision: Option<u64>,
 ) -> Result<u64, String> {
     let mut q = remote_state.queue.lock();
-    if let Some(expected) = expected_revision {
-        if expected != q.revision {
-            return Err("revision_conflict".to_string());
-        }
-    }
     for item in &mut items {
         if item.queue_entry_id.is_empty() {
             item.queue_entry_id = uuid::Uuid::new_v4().to_string();

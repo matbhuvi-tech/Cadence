@@ -232,7 +232,6 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }) || graphEngine.getTrackById(file)
 
     if (memoryTrack) {
-      isInternalQueueUpdateRef.current = true
       setCurrentTrack(memoryTrack)
       stateRef.current.currentTrack = memoryTrack
       if (memoryTrack.releaseId) {
@@ -256,7 +255,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         }
       })
       .catch(() => {})
-  }, [queue, queueIndex, repeatMode, isShuffle, currentTrack])
+  }, [queue, queueIndex, repeatMode, isShuffle])
 
   // Detect environment on mount & load audio devices & purity mode & listen to Remote Controller events
   useEffect(() => {
@@ -527,21 +526,31 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           return
         }
 
+        let newQueue = queue
+        let newIndex = queueIndex
         if (queueContext && queueContext.length > 0) {
+          newQueue = queueContext
           setQueue(queueContext)
           const idx = queueContext.findIndex((t) => t.id === track.id || t.filePath === track.filePath)
-          setQueueIndex(idx >= 0 ? idx : 0)
+          newIndex = idx >= 0 ? idx : 0
+          setQueueIndex(newIndex)
         } else if (queue.length === 0) {
+          newQueue = [track]
           setQueue([track])
+          newIndex = 0
           setQueueIndex(0)
         } else {
           const idx = queue.findIndex((t) => t.id === track.id || t.filePath === track.filePath)
           if (idx >= 0) {
+            newIndex = idx
             setQueueIndex(idx)
           }
         }
 
         setCurrentTrack(track)
+        stateRef.current.queue = newQueue
+        stateRef.current.queueIndex = newIndex
+        stateRef.current.currentTrack = track
         if (release) {
           setCurrentRelease(release)
         }

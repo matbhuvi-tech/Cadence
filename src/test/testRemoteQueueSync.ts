@@ -337,6 +337,33 @@ async function runTestSuite() {
   assert(updateCount === 1, 'Total track update calls remains 1 (zero flickering)')
   assert(state.currentTrack?.title === 'Nee Paathi Naan Paathi', 'Current track remains Nee Paathi Naan Paathi')
 
+  // --- TEST 7: Desktop Queue push to Remote is never cancelled by track reconciliation ---
+  console.log('\n--- Test 7: Desktop queue sync to Remote updates remote queue ---')
+  const desktopAlbumTracks: Track[] = [
+    { id: 'trk-1', title: 'Guruvaayurappa', filePath: 'D:/Music/Pudhu/01.flac', folderPath: 'D:/Music/Pudhu/01.flac', format: 'FLAC', durationSeconds: 273 } as Track,
+    { id: 'trk-2', title: 'Kalyaana Maalai', filePath: 'D:/Music/Pudhu/02.flac', folderPath: 'D:/Music/Pudhu/02.flac', format: 'FLAC', durationSeconds: 278 } as Track,
+    { id: 'trk-3', title: 'Keladi Kanmani', filePath: 'D:/Music/Pudhu/03.flac', folderPath: 'D:/Music/Pudhu/03.flac', format: 'FLAC', durationSeconds: 274 } as Track,
+    { id: 'trk-4', title: 'Ellorum Maavaatta', filePath: 'D:/Music/Pudhu/04.flac', folderPath: 'D:/Music/Pudhu/04.flac', format: 'FLAC', durationSeconds: 270 } as Track,
+  ]
+
+  // Simulate Desktop playTrack(desktopAlbumTracks[0], desktopAlbumTracks)
+  state.queue = desktopAlbumTracks
+  state.queueIndex = 0
+  state.currentTrack = desktopAlbumTracks[0]
+
+  // Track reconciliation tick immediately verifies track is found in current queue
+  const reconcileRes = reconcileActiveTrack(
+    'D:/Music/Pudhu/01.flac',
+    state.queue,
+    state.currentTrack,
+    state.queueIndex,
+    [],
+    callbacks
+  )
+  assert(reconcileRes.matchedIndex === 0, 'Guruvaayurappa found at index 0')
+  assert(reconcileRes.matchedTrack?.title === 'Guruvaayurappa', 'Track matched correctly')
+  assert(state.queue.length === 4, 'Desktop queue maintains all 4 tracks for remote sync')
+
   console.log('\n=====================================================')
   console.log('All Remote Queue Sync tests passed successfully!')
   console.log('=====================================================')

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { PlaybackStatus, RemoteQueue, RemoteEvent } from '../types/remote';
-import { fetchOutputDevices, getStoredToken, selectOutputDevice, sendPlaybackAction } from '../services/api';
+import { fetchOutputDevices, fetchQueue, getStoredToken, selectOutputDevice, sendPlaybackAction } from '../services/api';
 
 const INITIAL_STATUS: PlaybackStatus = {
   isPlaying: false,
@@ -44,6 +44,31 @@ export function useRemoteSocket() {
     availableDevices: string[];
   } | null>(null);
 
+  const applyRemoteQueue = useCallback((remoteQueue: any) => {
+    if (!remoteQueue || !Array.isArray(remoteQueue.items)) return;
+    const mappedItems = remoteQueue.items.map((t: any) => ({
+      ...t,
+      queueEntryId: t.queueEntryId ?? t.queue_entry_id,
+      filePath: t.filePath ?? t.file_path,
+      durationSecs: t.durationSecs ?? t.duration_secs,
+      sampleRate: t.sampleRate ?? t.sample_rate,
+      bitDepth: t.bitDepth ?? t.bit_depth,
+      isHighRes: t.isHighRes ?? t.is_high_res,
+    }));
+    const currIdx = typeof remoteQueue.currentIndex === 'number'
+      ? remoteQueue.currentIndex
+      : typeof remoteQueue.current_index === 'number'
+      ? remoteQueue.current_index
+      : -1;
+    setQueue((prev) => ({
+      ...prev,
+      items: mappedItems,
+      currentIndex: currIdx,
+      revision: remoteQueue.revision ?? prev.revision,
+      currentQueueEntryId: remoteQueue.currentQueueEntryId ?? remoteQueue.current_queue_entry_id,
+    }));
+  }, []);
+
   const refreshOutputDevices = useCallback(async () => {
     if (!token) return;
     setIsLoadingDevices(true);
@@ -73,7 +98,10 @@ export function useRemoteSocket() {
 
   useEffect(() => {
     void refreshOutputDevices();
-  }, [refreshOutputDevices]);
+    if (token) {
+      fetchQueue(token).then(applyRemoteQueue).catch(() => {});
+    }
+  }, [refreshOutputDevices, token, applyRemoteQueue]);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -107,6 +135,9 @@ export function useRemoteSocket() {
         setIsConnected(true);
         setIsConnecting(false);
         setError(null);
+        if (token) {
+          fetchQueue(token).then(applyRemoteQueue).catch(() => {});
+        }
       };
 
       ws.onmessage = (event) => {
@@ -145,44 +176,22 @@ export function useRemoteSocket() {
               durationSecs: data.duration_secs,
             }));
           } else if (data.type === 'QUEUE_UPDATED') {
-            const mappedItems = (data.items || []).map((t: any) => ({
-              ...t,
-              queueEntryId: t.queueEntryId ?? t.queue_entry_id,
-              filePath: t.filePath ?? t.file_path,
-              durationSecs: t.durationSecs ?? t.duration_secs,
-              sampleRate: t.sampleRate ?? t.sample_rate,
-              bitDepth: t.bitDepth ?? t.bit_depth,
-              isHighRes: t.isHighRes ?? t.is_high_res,
-            }));
-            const currIdx = typeof data.current_index === 'number' ? data.current_index : -1;
-            setQueue((prev) => ({
-              ...prev,
-              items: mappedItems,
-              currentIndex: currIdx,
-              revision: data.revision ?? prev.revision,
-              currentQueueEntryId: data.current_queue_entry_id,
-            }));
+            applyRemoteQueue(data);
             setConflictEvent(null);
           } else if (data.type === 'QUEUE_CONFLICT') {
-            const mappedItems = (data.items || []).map((t: any) => ({
-              ...t,
-              queueEntryId: t.queueEntryId ?? t.queue_entry_id,
-              filePath: t.filePath ?? t.file_path,
-              durationSecs: t.durationSecs ?? t.duration_secs,
-              sampleRate: t.sampleRate ?? t.sample_rate,
-              bitDepth: t.bitDepth ?? t.bit_depth,
-              isHighRes: t.isHighRes ?? t.is_high_res,
-            }));
+            applyRemoteQueue(data);
             const currIdx = typeof data.current_index === 'number' ? data.current_index : -1;
-            setQueue((prev) => ({
-              ...prev,
-              items: mappedItems,
-              currentIndex: currIdx,
-              revision: data.current_revision,
-            }));
             setConflictEvent({
               currentRevision: data.current_revision,
-              items: mappedItems,
+              items: (data.items || []).map((t: any) => ({
+                ...t,
+                queueEntryId: t.queueEntryId ?? t.queue_entry_id,
+                filePath: t.filePath ?? t.file_path,
+                durationSecs: t.durationSecs ?? t.duration_secs,
+                sampleRate: t.sampleRate ?? t.sample_rate,
+                bitDepth: t.bitDepth ?? t.bit_depth,
+                isHighRes: t.isHighRes ?? t.is_high_res,
+              })),
               currentIndex: currIdx,
             });
           } else if (data.type === 'DEVICE_UNAVAILABLE') {
