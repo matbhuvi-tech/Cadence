@@ -1,5 +1,14 @@
 # Issue Log
 
+## Issue #18 — Refactor Activity Center popover: remove obsolete jargon, contextualize Gemini AI, and refine scan trigger UX
+
+- **Reproduction:** Add a new library mount or trigger a scan on a folder. The full 440px Activity Center popover immediately forces itself open over the UI. It displays developer-centric labels ("Lofty Tags", "SQLite FTS") across pipeline stages that don't match the modern streaming architecture, and it prominently renders a Gemini AI Cloud Pipeline bento even when Gemini is completely idle during local file ingestion, causing confusion about local audio privacy.
+- **Resolution:**
+  1. Do not aggressively force the full popover open when starting a library scan in `App.tsx`; instead, notify via toast and allow the user to view progress via the existing top bar `ActivityPill`.
+  2. Modernize the stage pills in `ActivityCenterPopover` with user-centric, clean labels ("Discovery", "Tags & Metadata", "Database Index", "Audio & Art") that accurately map to scanner and maintenance states.
+  3. Contextualize the Gemini AI section so it only displays when AI requests are active, cooling down, rate-limited, or when specifically monitoring AI operations, keeping local scans clean and focused.
+- **Status:** In progress. [GitHub issue #18](https://github.com/matbhuvi-tech/Cadence/issues/18)
+
 ## Issue #15 — Gemini API calls always return 429 when Google Search grounding quota is exhausted
 
 - **Reproduction:** Open Curate and refresh/resolve an album using a Gemini API key whose Google Search Grounding (`google_search`) quota is 0 or exhausted while standard `generateContent` quota is healthy. Every call fails with `Gemini request failed (429)`.

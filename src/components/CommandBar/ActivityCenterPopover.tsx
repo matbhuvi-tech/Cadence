@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   X,
   Pause,
@@ -13,6 +13,7 @@ import {
   Sparkles,
   Cpu,
   Image as ImageIcon,
+  ChevronDown,
 } from 'lucide-react'
 import { ScanProgressPayload } from '../../core/types'
 import { tauriBridge } from '../../services/tauriBridge'
@@ -35,10 +36,46 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
   onOpenQuarantineModal,
   onDismissAllSkipped,
 }) => {
+  const popoverRef = useRef<HTMLDivElement>(null)
   const { maintenanceStats } = useMaintenanceWorker(isOpen)
   const [aiQuota, setAiQuota] = useState<GeminiQuotaTelemetry | null>(null)
+  const [isAiExpanded, setIsAiExpanded] = useState(false)
 
   const [bgArtState, setBgArtState] = useState<BackgroundArtworkState>(() => backgroundArtworkService.getState())
+
+  // Dismiss on Escape key
+  useEffect(() => {
+    if (!isOpen) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isOpen, onClose])
+
+  // Dismiss on click outside
+  useEffect(() => {
+    if (!isOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        const target = e.target as HTMLElement
+        if (target.closest?.('[title*="Activity Center"]')) {
+          return
+        }
+        onClose()
+      }
+    }
+    const timer = setTimeout(() => {
+      window.addEventListener('mousedown', handleClickOutside)
+    }, 50)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [isOpen, onClose])
 
   useEffect(() => {
     if (!isOpen) return
@@ -100,9 +137,9 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
 
   const stages = [
     { key: 'discovery', label: 'Discovery', icon: FileSearch },
-    { key: 'extraction', label: 'Lofty Tags', icon: Tag },
-    { key: 'database', label: 'SQLite FTS', icon: Database },
-    { key: 'audio_analysis', label: 'DR & Audio', icon: Activity },
+    { key: 'extraction', label: 'Metadata & Tags', icon: Tag },
+    { key: 'database', label: 'Search Index', icon: Database },
+    { key: 'audio_analysis', label: 'Audio & Artwork', icon: Activity },
   ]
 
   const getCurrentStageIndex = () => {
@@ -116,7 +153,10 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
   const currentStageIdx = getCurrentStageIndex()
 
   return (
-    <div className="absolute top-14 right-6 z-50 w-[440px] rounded-2xl border border-white/[0.12] bg-[#12151D]/95 backdrop-blur-2xl shadow-2xl p-5 text-white animate-in fade-in zoom-in-95 duration-150">
+    <div
+      ref={popoverRef}
+      className="absolute top-14 right-6 z-50 w-[440px] rounded-2xl border border-white/[0.12] bg-[#12151D]/95 backdrop-blur-2xl shadow-2xl p-5 text-white animate-in fade-in zoom-in-95 duration-150"
+    >
       {/* Header */}
       <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
         <div className="flex items-center gap-2">
@@ -484,36 +524,79 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
         </div>
       )}
 
-      {/* Gemini AI Quota & Pacing Telemetry Bento */}
-      <div className="mb-4 p-3 rounded-xl bg-black/40 border border-white/[0.08] flex flex-col gap-2">
-        <div className="flex items-center justify-between">
+      {/* Cloud AI Pipeline (Contextual / Collapsible) */}
+      <div className="mb-4 rounded-xl bg-black/40 border border-white/[0.08] overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setIsAiExpanded((prev) => !prev)}
+          className="w-full p-3 flex items-center justify-between text-left hover:bg-white/[0.02] transition-colors"
+        >
           <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300">
             <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Gemini AI Cloud Pipeline</span>
+            <span>Cloud AI Services (Curate & Provenance)</span>
           </div>
-        </div>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] text-[#94A3B8]">
-          <dt>{aiQuota?.inFlightModel ? 'In use' : 'Last successful model'}</dt>
-          <dd className="min-w-0 break-all text-right font-mono text-white">{aiQuota?.currentModel ?? '—'}</dd>
-          <dt>Preferred model</dt>
-          <dd className="min-w-0 break-all text-right font-mono text-white">{aiQuota?.preferredModel || '—'}</dd>
-          <dt>Request pacing</dt>
-          <dd className="text-right text-white">
-            {nextSlotMs > 0 ? `${Math.ceil(nextSlotMs / 1000)}s until next slot` : 'Ready'}
-          </dd>
-        </dl>
-        {cooldowns.length > 0 && (
-          <ul className="space-y-1 border-t border-white/[0.08] pt-2 text-[11px] text-amber-300">
-            {cooldowns.map(block => (
-              <li key={block.model}>
-                <span className="break-all font-mono">{block.model}</span>
-                {' · '}{quotaReasons[block.reason] ?? block.reason}
-                {block.observedLimit && ['daily_quota', 'requests_per_minute', 'tokens_per_minute'].includes(block.reason)
-                  ? ' (limit ' + block.observedLimit + ')' : ''}
-                {' · Check again after '}{new Date(block.blockedUntil).toLocaleString()}
-              </li>
-            ))}
-          </ul>
+          <div className="flex items-center gap-2">
+            <span
+              className={`text-[9px] font-mono px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                aiQuota?.inFlightModel
+                  ? 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/20'
+                  : cooldowns.length > 0
+                  ? 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                  : 'bg-white/[0.05] text-white/50 border border-white/10'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  aiQuota?.inFlightModel
+                    ? 'bg-cyan-400 animate-pulse'
+                    : cooldowns.length > 0
+                    ? 'bg-amber-400 animate-pulse'
+                    : 'bg-emerald-400'
+                }`}
+              />
+              {aiQuota?.inFlightModel
+                ? 'Active'
+                : cooldowns.length > 0
+                ? 'Cooldown'
+                : 'Idle'}
+            </span>
+            <ChevronDown
+              className={`w-3.5 h-3.5 text-white/40 transition-transform duration-200 ${
+                isAiExpanded || aiQuota?.inFlightModel || cooldowns.length > 0 ? 'rotate-180' : ''
+              }`}
+            />
+          </div>
+        </button>
+
+        {(isAiExpanded || aiQuota?.inFlightModel || cooldowns.length > 0) && (
+          <div className="px-3 pb-3 pt-1 border-t border-white/[0.05] flex flex-col gap-2">
+            <p className="text-[10px] text-white/40 italic">
+              Cloud AI is invoked on-demand for metadata curation and album provenance. Local library indexing never transmits audio or private tags to cloud services.
+            </p>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] text-[#94A3B8]">
+              <dt>{aiQuota?.inFlightModel ? 'In use' : 'Last successful model'}</dt>
+              <dd className="min-w-0 break-all text-right font-mono text-white">{aiQuota?.currentModel ?? '—'}</dd>
+              <dt>Preferred model</dt>
+              <dd className="min-w-0 break-all text-right font-mono text-white">{aiQuota?.preferredModel || '—'}</dd>
+              <dt>Request pacing</dt>
+              <dd className="text-right text-white">
+                {nextSlotMs > 0 ? `${Math.ceil(nextSlotMs / 1000)}s until next slot` : 'Ready'}
+              </dd>
+            </dl>
+            {cooldowns.length > 0 && (
+              <ul className="space-y-1 border-t border-white/[0.08] pt-2 text-[11px] text-amber-300">
+                {cooldowns.map(block => (
+                  <li key={block.model}>
+                    <span className="break-all font-mono">{block.model}</span>
+                    {' · '}{quotaReasons[block.reason] ?? block.reason}
+                    {block.observedLimit && ['daily_quota', 'requests_per_minute', 'tokens_per_minute'].includes(block.reason)
+                      ? ' (limit ' + block.observedLimit + ')' : ''}
+                    {' · Check again after '}{new Date(block.blockedUntil).toLocaleString()}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
       </div>
 
@@ -556,7 +639,7 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
           </>
         ) : (
           <div className="w-full flex items-center justify-between text-xs text-white/50">
-            <span>Database ready in WAL mode</span>
+            <span>Library catalog indexed and ready</span>
             <button
               onClick={onClose}
               className="px-3 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-white text-xs font-medium transition-colors"

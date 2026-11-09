@@ -700,7 +700,6 @@ function AppContent() {
   const handleTriggerScan = async (folderPath: string, forceFull: boolean = false) => {
     try {
       await tauriBridge.startLibraryScan(folderPath, undefined, forceFull)
-      setIsActivityPopoverOpen(true)
       showToast(`Started scan of "${folderPath}"...`)
     } catch (err: any) {
       showToast(`Scan error: ${err.message || err}`)
