@@ -1,5 +1,15 @@
 # Issue Log
 
+## Issue #19 — Unfreeze artwork indexing worker and retire redundant Audit first-class navigation
+
+- **Reproduction:** Ingest a music library containing both un-cached artist portraits and embedded album covers. Once artist portraits finish syncing, background artwork indexing stalls permanently at partial progress (e.g. 130/381 scanned) reporting "Idle: All artist portraits synchronized" while remaining marked "Active". In the UI, "Audit & Hygiene" exists as an over-promoted ⌘3 mode and Left Rail entry with conflicting defect numbers (130) compared to Curate & Metadata Cockpit (222 P0 / 922 total defects), creating contradictory stories and fractured mental models.
+- **Diagnosis:** In `src-tauri/src/maintenance/worker.rs`, when `pending_count == 0` for artist portraits, an early `continue;` statement short-circuits the maintenance loop before reaching `process_next_artwork_item()` or `process_next_fingerprint_item()`. Meanwhile, `MaintainCockpit.tsx` operates on a legacy audit service detached from Curate's authoritative P0–P3 priority engine, duplicating triage, commit, and storage hubs.
+- **Resolution:**
+  1. Fix the maintenance worker loop in `src-tauri/src/maintenance/worker.rs` so artist portrait completion transitions cleanly to artwork indexing and acoustic fingerprinting without short-circuiting, while strictly preserving audio-idle playback guards and thread pacing.
+  2. Simplify primary navigation in `App.tsx` and `LeftRail.tsx` around Listen (⌘1) and Curate (⌘2), retiring Audit as an over-elevated first-class mode and cleaning up the Left Rail.
+  3. Ensure the top bar `ActivityPill` remains interactive and visible whenever background indexing or maintenance tasks are running.
+- **Status:** Resolved and verified by user. [GitHub issue #19](https://github.com/matbhuvi-tech/Cadence/issues/19)
+
 ## Issue #18 — Refactor Activity Center popover: remove obsolete jargon, contextualize Gemini AI, and refine scan trigger UX
 
 - **Reproduction:** Add a new library mount or trigger a scan on a folder. The full 440px Activity Center popover immediately forces itself open over the UI. It displays developer-centric labels ("Lofty Tags", "SQLite FTS") across pipeline stages that don't match the modern streaming architecture, and it prominently renders a Gemini AI Cloud Pipeline bento even when Gemini is completely idle during local file ingestion, causing confusion about local audio privacy.

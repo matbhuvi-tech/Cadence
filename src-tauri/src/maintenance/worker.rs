@@ -303,34 +303,14 @@ impl MaintenanceWorker {
             if self.user_paused.load(Ordering::Relaxed) {
                 if last_reported_state != "user_paused" {
                     last_reported_state = "user_paused".to_string();
-                    self.set_status("Suspended: Artist portrait sync paused by user".to_string());
+                    self.set_status("Suspended: Background maintenance paused by user".to_string());
                     self.emit_current_state();
                 }
                 thread::sleep(Duration::from_millis(1000));
                 continue;
             }
 
-            // 1. Check if all items are already complete
-            let pending_count: i64 = {
-                let conn = self.db.conn.lock();
-                conn.query_row(
-                    "SELECT COUNT(*) FROM canonical_artists WHERE portrait_status = 'pending' AND (portrait_url IS NULL OR portrait_url = '')",
-                    [],
-                    |r| r.get(0),
-                ).unwrap_or(0)
-            };
-
-            if pending_count == 0 {
-                if last_reported_state != "complete" {
-                    last_reported_state = "complete".to_string();
-                    self.set_status("Idle: All artist portraits synchronized".to_string());
-                    self.emit_current_state();
-                }
-                thread::sleep(Duration::from_millis(2000));
-                continue;
-            }
-
-            // 2. Check if the audio engine is idle (not playing, not paused, and past 30s cooldown)
+            // 1. Check if the audio engine is idle (not playing, not paused, and past 30s cooldown)
             if !self.is_audio_idle() {
                 let status = self.engine.get_status();
                 let (current_state, msg) = if status.is_playing || status.is_paused {
@@ -364,7 +344,7 @@ impl MaintenanceWorker {
             }
 
             // 2. Audio is idle (>30s cooldown elapsed):
-            // Check for pending artist portraits
+            // Priority 1: Check for pending artist portraits
             let next_artist = {
                 let conn = self.db.conn.lock();
                 DbOperations::get_pending_portrait_artists(&conn, 1)
@@ -454,6 +434,11 @@ impl MaintenanceWorker {
         };
 
         if let Some((release_id, folder_path, sample_track)) = pending_release {
+            let label = Path::new(&folder_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&release_id);
+            self.set_status(format!("Active: Indexing artwork for {}", label));
             self.process_release_artwork(&release_id, &folder_path, sample_track.as_deref());
             return true;
         }
@@ -467,6 +452,11 @@ impl MaintenanceWorker {
         };
 
         if let Some((track_id, _release_id, file_path, mtime)) = pending_track {
+            let label = Path::new(&file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&track_id);
+            self.set_status(format!("Active: Extracting track artwork for {}", label));
             self.process_track_artwork(&track_id, &file_path, mtime);
             return true;
         }

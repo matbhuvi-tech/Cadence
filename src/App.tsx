@@ -71,6 +71,7 @@ import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
 import { backgroundArtworkService } from './services/backgroundArtworkService'
 import { CadenceLogo } from './components/common/CadenceLogo'
 import { useStagedChanges } from './hooks/useStagedChanges'
+import { useMaintenanceWorker } from './hooks/useMaintenanceWorker'
 import { GeminiSetupScreen } from './components/GeminiSetupScreen'
 
 function AppContent() {
@@ -190,6 +191,7 @@ function AppContent() {
 
   // Canonical staged mutations hook
   const { stagedAlbumsCount } = useStagedChanges(tracks, releases)
+  const { maintenanceStats } = useMaintenanceWorker(true)
 
   // View & Filter State
   const [viewMode, setViewMode] = useState<CanvasViewMode>('cover_grid')
@@ -369,7 +371,7 @@ function AppContent() {
         setFocusedWorkbenchTrack(null)
       } else if ((e.ctrlKey || e.metaKey) && e.key === '3') {
         e.preventDefault()
-        setTopMode('maintain')
+        setTopMode('curate')
         setFocusedWorkbenchTrack(null)
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'i' || e.key === 'I')) {
         e.preventDefault()
@@ -1661,6 +1663,7 @@ function AppContent() {
           {/* Activity telemetry */}
           <ActivityPill
             telemetry={scanTelemetry}
+            maintenanceStats={maintenanceStats}
             onClick={() => setIsActivityPopoverOpen((prev) => !prev)}
             isOpen={isActivityPopoverOpen}
           />
@@ -1669,7 +1672,7 @@ function AppContent() {
             onClose={() => setIsActivityPopoverOpen(false)}
             telemetry={scanTelemetry}
             onOpenQuarantineModal={() => {
-              setTopMode('maintain')
+              setTopMode('curate')
               setIsActivityPopoverOpen(false)
             }}
             onDismissAllSkipped={handleIgnoreAllSkippedFiles}
@@ -1727,8 +1730,7 @@ function AppContent() {
           selectedFolderFilter={selectedFolderFilter}
           onSelectFolderFilter={setSelectedFolderFilter}
           onOpenStorageManager={() => {
-            setTopMode('maintain')
-            setMaintainSubTab('storage_mounts')
+            setIsStorageManagerOpen(true)
           }}
           onOpenImportModal={() => setIsImportModalOpen(true)}
           watchedFolders={watchedFolders}
@@ -1972,8 +1974,7 @@ function AppContent() {
 
                   <button
                     onClick={() => {
-                      setTopMode('maintain')
-                      setMaintainSubTab('storage_mounts')
+                      setIsStorageManagerOpen(true)
                     }}
                     className="px-4 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white/80 border border-white/[0.1] text-xs font-medium transition-colors"
                   >
@@ -2005,8 +2006,7 @@ function AppContent() {
                     </button>
                     <button
                       onClick={() => {
-                        setTopMode('maintain')
-                        setMaintainSubTab('storage_mounts')
+                        setIsStorageManagerOpen(true)
                       }}
                       className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 text-[11px] transition-colors"
                     >

@@ -1,6 +1,89 @@
 import { Track, Release, AuditIssue, ActiveEntityScope } from './types'
 import { splitMultiArtistCredits } from './taxonomyUtils'
-import { getIssueCanonicalTarget } from '../components/Maintain/MaintainCockpit'
+
+/**
+ * Resolves the canonical target display name for an audit issue.
+ */
+export const getIssueCanonicalTarget = (
+  issue: AuditIssue,
+  tracks: Track[] = [],
+  releases: Release[] = []
+): string => {
+  // 1. Explicit canonicalTarget property
+  if (issue.canonicalTarget && issue.canonicalTarget.trim()) {
+    return issue.canonicalTarget.trim()
+  }
+
+  // 2. Explicit targetValue property for normalization
+  if (issue.targetValue && issue.targetValue.trim() && issue.category === 'inconsistent_name') {
+    return issue.targetValue.trim()
+  }
+
+  // 3. Parent entity (e.g. composer / album artist authority for role conflicts)
+  if (issue.parentEntity && issue.parentEntity.trim()) {
+    return issue.parentEntity.trim()
+  }
+
+  // 4. Regex extraction from proposedAction or suggestedFix
+  const actionText = `${issue.proposedAction || ''} ${issue.suggestedFix || ''}`
+  const match = actionText.match(
+    /(?:ALBUMARTIST\s*=\s*|to\s+(?:canonical\s+authority\s+)?|Standardize to\s+)["']([^"']+)["']/i
+  )
+  if (match && match[1] && match[1].trim()) {
+    return match[1].trim()
+  }
+
+  // 5. Category-level domain groupings
+  if (issue.category === 'unformatted_backdrop' || issue.category === 'low_res_art') {
+    return 'Artwork & Media Integrity'
+  }
+  if (issue.category === 'missing_track_num') {
+    return 'Sequential Track Indexing'
+  }
+  if (issue.category === 'checksum_mismatch') {
+    return 'Bitstream & Checksum Integrity'
+  }
+  if (issue.category === 'empty_composer') {
+    return 'Untagged Audio Standards'
+  }
+  if (issue.category === 'uncommitted_sidecar') {
+    return 'Pending Metadata Changes'
+  }
+
+  // 6. Track/Release-scoped resolution
+  if (issue.sampleTrackIds && issue.sampleTrackIds.length > 0) {
+    const firstTrack = tracks.find((t) => t.id === issue.sampleTrackIds[0])
+    if (firstTrack) {
+      const rel = releases.find((r) => r.id === firstTrack.releaseId)
+      if (
+        rel?.artistCredit &&
+        rel.artistCredit.trim() &&
+        !/^(various artists|soundtrack|unknown)$/i.test(rel.artistCredit)
+      ) {
+        return rel.artistCredit.trim()
+      }
+      if (rel?.composerName && rel.composerName.trim()) {
+        return rel.composerName.trim()
+      }
+      if (
+        firstTrack.composerName &&
+        firstTrack.composerName.trim() &&
+        !/^(unknown)$/i.test(firstTrack.composerName)
+      ) {
+        return firstTrack.composerName.trim()
+      }
+      if (
+        firstTrack.artistCredit &&
+        firstTrack.artistCredit.trim() &&
+        !/^(unknown)$/i.test(firstTrack.artistCredit)
+      ) {
+        return firstTrack.artistCredit.trim()
+      }
+    }
+  }
+
+  return 'Catalog Standards'
+}
 
 /**
  * Checks whether a track belongs to an artist, supporting raw string match, parent release match,

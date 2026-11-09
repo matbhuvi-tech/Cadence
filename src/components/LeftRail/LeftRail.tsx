@@ -113,7 +113,7 @@ export const LeftRail: React.FC<LeftRailProps> = ({
     }
   }
 
-  type LeftRailNavId = CanvasViewMode | 'audit'
+  type LeftRailNavId = CanvasViewMode
 
   const libraryNavItems: Array<{
     id: LeftRailNavId
@@ -137,12 +137,6 @@ export const LeftRail: React.FC<LeftRailProps> = ({
       id: 'folder_tree',
       label: 'Physical Folder Tree',
       icon: FolderTree,
-    },
-    {
-      id: 'audit',
-      label: 'Audit & Hygiene',
-      icon: ShieldAlert,
-      count: auditIssues.length,
     },
   ]
 
@@ -187,18 +181,14 @@ export const LeftRail: React.FC<LeftRailProps> = ({
           {libraryNavItems.map((item) => {
             const Icon = item.icon
             const isActive =
-              item.id === 'audit'
-                ? topMode === 'maintain'
-                : topMode === 'library' && (viewMode === item.id || (item.id === 'cover_grid' && (viewMode === 'cover_grid' || viewMode === 'virtual_table')))
+              topMode === 'library' && (viewMode === item.id || (item.id === 'cover_grid' && (viewMode === 'cover_grid' || viewMode === 'virtual_table')))
 
             return (
               <button
                 key={item.id}
                 title={`${item.label}${item.count !== undefined ? ` (${item.count})` : ''}`}
                 onClick={() => {
-                  if (item.id === 'audit') {
-                    onTopModeChange?.('maintain')
-                  } else if (item.id === 'playlist_detail') {
+                  if (item.id === 'playlist_detail') {
                     onTopModeChange?.('library')
                     if (playlists.length > 0) {
                       onSelectPlaylist?.(playlists[0])
