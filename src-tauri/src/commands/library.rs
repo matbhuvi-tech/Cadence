@@ -167,7 +167,21 @@ pub fn db_save_tracks_batch(
     let _scan_permit = if tracks.is_empty() {
         None
     } else {
-        Some(engine.try_library_scan_io().ok_or("Track import requires idle playback.")?)
+        match engine.try_library_scan_io() {
+            Some(permit) => Some(permit),
+            None => {
+                crate::diag_log!(
+                    crate::diagnostics::DiagCategory::AudioHygiene,
+                    0,
+                    0,
+                    0,
+                    "hygiene_import_blocked",
+                    "tracks={} reason=playback_active",
+                    tracks.len()
+                );
+                return Err("Track import requires idle playback.".to_string());
+            }
+        }
     };
     let mut conn = db.conn.lock();
     if !releases.is_empty() {

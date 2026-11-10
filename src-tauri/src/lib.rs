@@ -2,6 +2,7 @@ pub mod audio;
 pub mod commands;
 pub mod curation;
 pub mod db;
+pub mod diagnostics;
 pub mod maintenance;
 pub mod remote;
 pub mod scanner;
@@ -10,6 +11,7 @@ use audio::AudioEngine;
 use commands::audio::*;
 use commands::artist_portrait::*;
 use commands::curation::*;
+use commands::diagnostics::*;
 use commands::gemini_config::*;
 use commands::library::*;
 use commands::maintenance::*;
@@ -23,10 +25,12 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    diagnostics::init_from_env();
     let audio_engine = AudioEngine::new();
     let engine_for_remote = audio_engine.clone();
     let engine_for_maintenance = audio_engine.clone();
     let engine_for_commit = audio_engine.clone();
+    let engine_for_diag = audio_engine.clone();
     let scanner_controller = ScannerController::new(Some(audio_engine.clone()));
 
     tauri::Builder::default()
@@ -40,6 +44,11 @@ pub fn run() {
         .manage(scanner_controller)
         .setup(move |app| {
             let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let diag_engine = engine_for_diag.clone();
+            let _ = diagnostics::configure_persistence(
+                app_data_dir.clone(),
+                std::sync::Arc::new(move || diag_engine.hygiene_state()),
+            );
             let db_path = app_data_dir.join("cadence.db");
             println!("[Cadence Core] Initializing SQLite database at: {:?}", db_path);
             let app_db = AppDb::new(db_path.clone()).expect("Failed to initialize SQLite database");
@@ -319,6 +328,14 @@ pub fn run() {
             db_set_default_release_version,
             db_group_releases_into_master,
             db_ungroup_release_from_master,
+            // Diagnostics & Debug Logging commands
+            get_debug_log_state,
+            set_debug_logging,
+            get_recent_debug_logs,
+            clear_debug_logs,
+            flush_debug_logs_if_idle,
+            open_debug_log_folder,
+            log_frontend_debug_batch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cadence Core application");

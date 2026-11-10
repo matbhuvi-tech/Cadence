@@ -48,7 +48,7 @@ pub fn set_audio_device(
     engine: State<'_, AudioEngine>,
     device_name: String,
 ) -> Result<(), String> {
-    engine.set_audio_device(&device_name)
+    engine.set_audio_device_with_source(&device_name, "tauri_legacy_device")
 }
 
 #[tauri::command]
@@ -56,7 +56,7 @@ pub fn set_audio_endpoint(
     engine: State<'_, AudioEngine>,
     endpoint: AudioEndpoint,
 ) -> Result<(), String> {
-    engine.set_audio_endpoint(endpoint)
+    engine.set_audio_endpoint_with_source(endpoint, "desktop_ui")
 }
 
 #[tauri::command]

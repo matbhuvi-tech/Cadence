@@ -21,6 +21,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 use crate::audio::AudioEngine;
 use crate::db::{AppDb, DbOperations};
+use crate::diag_log;
+use crate::diagnostics::{self, DiagCategory};
 
 struct CommitWriteError {
     message: String,
@@ -403,7 +405,13 @@ impl CommitQueueWorker {
             self.emit_telemetry_with_summary(&inflight_summary, "writing", None, None, true);
 
             // 6. Execute atomic write
+            let write_t0 = diagnostics::is_active().then(std::time::Instant::now);
             let write_result = self.process_commit_item(&item, &payload);
+            let write_us = write_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+            match &write_result {
+                Ok(b) => diag_log!(DiagCategory::BackgroundWorkers, 0, 0, write_us, "commit_item_written", "track={} bytes={}", item.track_id, b),
+                Err(e) => diag_log!(DiagCategory::BackgroundWorkers, 0, 0, write_us, "commit_item_failed", "track={} err={}", item.track_id, e.message),
+            }
 
             // 7. Update status based on result using single atomic lock acquisition
             match write_result {
@@ -879,6 +887,18 @@ impl CommitQueueWorker {
     ) {
         let mut last_state = self.last_emitted_state.lock();
         let force = *last_state != state;
+        if force && (state == "paused_playback" || state == "user_paused") {
+            diag_log!(
+                DiagCategory::AudioHygiene,
+                0,
+                0,
+                0,
+                "hygiene_commit_suppressed",
+                "prev={} state={}",
+                *last_state,
+                state
+            );
+        }
         *last_state = state.to_string();
         drop(last_state);
 

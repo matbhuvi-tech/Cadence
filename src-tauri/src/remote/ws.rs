@@ -10,6 +10,8 @@ use serde::Deserialize;
 use tokio::time::interval;
 
 use super::state::{RemoteEvent, RemoteState};
+use crate::diag_log;
+use crate::diagnostics::DiagCategory;
 
 static CONNECTED_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -65,7 +67,28 @@ pub async fn monitor_queue_completion(state: Arc<RemoteState>) {
         };
         if is_current_queue_item {
             advanced_file = Some(current_file.clone());
+            let q_rev = state.queue.lock().revision;
+            diag_log!(
+                DiagCategory::QueueCoordination,
+                q_rev,
+                0,
+                0,
+                "monitor_auto_advance",
+                "owner=ws_monitor rev={} file={}",
+                q_rev,
+                current_file
+            );
             advance_queue(&state, 1).await;
+        } else {
+            diag_log!(
+                DiagCategory::QueueCoordination,
+                0,
+                0,
+                0,
+                "stale_advance_rejected",
+                "owner=ws_monitor reason=not_current_queue_item file={}",
+                current_file
+            );
         }
     }
 }
@@ -386,6 +409,16 @@ fn check_revision(state: &RemoteState, expected_revision: Option<u64>) -> Result
     if let Some(exp) = expected_revision {
         let q = state.queue.lock();
         if exp != q.revision {
+            diag_log!(
+                DiagCategory::QueueCoordination,
+                q.revision,
+                0,
+                0,
+                "stale_revision_rejected",
+                "expected_rev={} current_rev={}",
+                exp,
+                q.revision
+            );
             return Err(RemoteEvent::QueueConflict {
                 current_revision: q.revision,
                 items: q.items.clone(),
@@ -397,10 +430,10 @@ fn check_revision(state: &RemoteState, expected_revision: Option<u64>) -> Result
 }
 
 async fn advance_queue(state: &RemoteState, delta: isize) {
-    let next_file: Option<String> = {
+    let (next_file, new_rev, entry_id): (Option<String>, u64, Option<String>) = {
         let mut q = state.queue.lock();
         if q.items.is_empty() {
-            None
+            (None, q.revision, None)
         } else if delta > 0 {
             if q.items.len() > 1 {
                 if q.repeat_mode == "all" {
@@ -412,25 +445,50 @@ async fn advance_queue(state: &RemoteState, delta: isize) {
                 q.current_index = 0;
                 q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
                 q.revision += 1;
-                q.items.first().map(|t| t.file_path.clone())
+                (
+                    q.items.first().map(|t| t.file_path.clone()),
+                    q.revision,
+                    q.current_queue_entry_id.clone(),
+                )
             } else if q.repeat_mode == "all" {
                 q.current_index = 0;
                 q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
                 q.revision += 1;
-                q.items.first().map(|t| t.file_path.clone())
+                (
+                    q.items.first().map(|t| t.file_path.clone()),
+                    q.revision,
+                    q.current_queue_entry_id.clone(),
+                )
             } else {
                 q.items.clear();
                 q.current_index = -1;
                 q.current_queue_entry_id = None;
                 q.revision += 1;
-                None
+                (None, q.revision, None)
             }
         } else {
             // Restart or seek to beginning of active track
             q.current_index = 0;
-            q.items.first().map(|t| t.file_path.clone())
+            (
+                q.items.first().map(|t| t.file_path.clone()),
+                q.revision,
+                q.current_queue_entry_id.clone(),
+            )
         }
     };
+
+    diag_log!(
+        DiagCategory::QueueCoordination,
+        new_rev,
+        0,
+        0,
+        "remote_queue_advance",
+        "owner=remote_ws delta={} rev={} entry={:?} next={:?}",
+        delta,
+        new_rev,
+        entry_id,
+        next_file
+    );
 
     if let Some(path) = next_file {
         let _ = state.engine.play_track(&path);

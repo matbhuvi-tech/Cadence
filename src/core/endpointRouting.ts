@@ -1,3 +1,5 @@
+import { emitDiag, isDebugActive } from './diagnostics'
+
 export interface UpnpDeviceInfo {
   id: string
   friendlyName: string
@@ -483,7 +485,15 @@ export function createEndpointRoutingController(
     },
 
     async selectEndpoint(endpoint: AudioEndpoint): Promise<{ ok: boolean; error?: string }> {
+      const prevEndpoint = state.selectedEndpoint
       const epoch = ++state.selectionEpoch
+      const t0 = isDebugActive() ? performance.now() : 0
+      emitDiag(
+        'device_selection',
+        'frontend_select_requested',
+        `epoch=${epoch} prev=${getEndpointId(prevEndpoint)} next=${getEndpointId(endpoint)}`,
+        { correlationId: epoch }
+      )
       state.selectedEndpoint = endpoint
       state.endpointError = null
       persistSelected(endpoint)
@@ -492,6 +502,12 @@ export function createEndpointRoutingController(
       try {
         await bridge.setAudioEndpoint(endpoint)
         if (epoch !== state.selectionEpoch) {
+          emitDiag(
+            'device_selection',
+            'stale_selection_ignored',
+            `stale_epoch=${epoch} active_epoch=${state.selectionEpoch}`,
+            { correlationId: epoch }
+          )
           return { ok: true }
         }
         const status = await bridge.getPlaybackStatus()
@@ -499,9 +515,17 @@ export function createEndpointRoutingController(
           applyStatusSnapshot(status, false)
           emit()
         }
+        const execUs = t0 > 0 ? Math.round((performance.now() - t0) * 1000) : 0
+        emitDiag(
+          'device_selection',
+          'frontend_select_completed',
+          `epoch=${epoch} selected=${getEndpointId(endpoint)} actual=${state.activeBackendEndpoint ? getEndpointId(state.activeBackendEndpoint) : 'none'}`,
+          { correlationId: epoch, execUs }
+        )
         return { ok: true }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
+        const execUs = t0 > 0 ? Math.round((performance.now() - t0) * 1000) : 0
         if (epoch === state.selectionEpoch) {
           // Preserve user's selectedEndpoint independently of active backend state.
           state.activeBackendEndpoint = null
@@ -512,6 +536,12 @@ export function createEndpointRoutingController(
           state.endpointError = msg
           emit()
         }
+        emitDiag(
+          'device_selection',
+          'frontend_select_failed',
+          `epoch=${epoch} preserved_selected=${getEndpointId(endpoint)} err=${msg}`,
+          { correlationId: epoch, execUs }
+        )
         return { ok: false, error: msg }
       } finally {
         state.inFlightSelections = Math.max(0, state.inFlightSelections - 1)
@@ -524,6 +554,14 @@ export function createEndpointRoutingController(
      */
     async refreshInventory(): Promise<AudioEndpointInfo[]> {
       const seq = ++state.inventorySeq
+      const capturedEpoch = state.selectionEpoch
+      const t0 = isDebugActive() ? performance.now() : 0
+      emitDiag(
+        'device_discovery',
+        'inventory_refresh_started',
+        `seq=${seq} selection_epoch=${capturedEpoch}`,
+        { correlationId: seq }
+      )
       const [endpoints, netDevices] = await Promise.all([
         bridge.listAudioEndpoints(),
         bridge.discoverUpnpDevices(),
@@ -531,6 +569,12 @@ export function createEndpointRoutingController(
 
       // Drop stale discovery results if a newer discovery request finished or started after us.
       if (seq < state.inventorySeq) {
+        emitDiag(
+          'device_discovery',
+          'inventory_refresh_stale_dropped',
+          `stale_seq=${seq} latest_seq=${state.inventorySeq}`,
+          { correlationId: seq }
+        )
         return state.availableEndpoints
       }
 
@@ -555,6 +599,13 @@ export function createEndpointRoutingController(
 
       state.upnpDevices = netDevices
       state.availableEndpoints = merged
+      const execUs = t0 > 0 ? Math.round((performance.now() - t0) * 1000) : 0
+      emitDiag(
+        'device_discovery',
+        'inventory_refresh_completed',
+        `seq=${seq} endpoints=${merged.length} upnp=${netDevices.length} selected_unchanged=${getEndpointId(state.selectedEndpoint)}`,
+        { correlationId: seq, execUs }
+      )
       emit()
       return merged
     },
@@ -595,6 +646,13 @@ export function createEndpointRoutingController(
       if (capturedEpoch === state.selectionEpoch && state.inFlightSelections === 0) {
         applyStatusSnapshot(status, true)
         emit()
+      } else {
+        emitDiag(
+          'device_selection',
+          'stale_poll_ignored',
+          `captured_epoch=${capturedEpoch} current_epoch=${state.selectionEpoch} inflight=${state.inFlightSelections}`,
+          { correlationId: capturedEpoch }
+        )
       }
     },
 

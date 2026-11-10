@@ -2,6 +2,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
+use crate::diag_log;
+use crate::diagnostics::DiagCategory;
 use crate::remote::{
     discover_lan_interfaces, get_connected_client_count, LanInterfaceInfo, RemoteState,
 };
@@ -83,7 +85,21 @@ pub fn sync_desktop_queue_to_remote(
     q.current_queue_entry_id = cur_entry_id;
     q.revision += 1;
     let rev = q.revision;
+    let count = q.items.len();
+    let active_eid = q.current_queue_entry_id.clone();
     drop(q);
+    diag_log!(
+        DiagCategory::QueueCoordination,
+        rev,
+        0,
+        0,
+        "desktop_queue_sync",
+        "owner=desktop rev={} items={} idx={} entry={:?}",
+        rev,
+        count,
+        current_index,
+        active_eid
+    );
     remote_state.broadcast_queue_update();
     Ok(rev)
 }

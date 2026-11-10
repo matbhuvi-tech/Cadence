@@ -7,6 +7,9 @@ use image::imageops::FilterType;
 use lofty::file::TaggedFileExt;
 use lofty::probe::Probe;
 
+use crate::diag_log;
+use crate::diagnostics::{self, DiagCategory};
+
 #[derive(Clone)]
 pub struct ArtworkCache {
     cache_dir: PathBuf,
@@ -53,8 +56,19 @@ impl ArtworkCache {
 
         // 2. AUDIOPHILE GUARD: If audio is currently playing, DO NOT touch the audio storage bus!
         if (self.is_playing_fn)() {
+            diag_log!(
+                DiagCategory::AudioHygiene,
+                0,
+                0,
+                0,
+                "hygiene_artwork_blocked",
+                "id={} reason=playback_active",
+                id
+            );
             return None;
         }
+
+        let t0 = diagnostics::is_active().then(std::time::Instant::now);
 
         // 3. Audio is idle: Attempt extraction and resize to 300x300
         let audio_path_str = source_audio_path?;
@@ -113,6 +127,17 @@ impl ArtworkCache {
             if thumb.write_to(&mut out, image::ImageFormat::Jpeg).is_ok() {
                 let thumb_bytes = out.into_inner();
                 let _ = fs::write(&cached_path, &thumb_bytes);
+                let dur_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                diag_log!(
+                    DiagCategory::BackgroundWorkers,
+                    0,
+                    0,
+                    dur_us,
+                    "artwork_thumb_cached",
+                    "id={} bytes={}",
+                    id,
+                    thumb_bytes.len()
+                );
                 return Some((thumb_bytes, "image/jpeg"));
             }
         }

@@ -16,6 +16,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::audio::AudioEngine;
 use crate::db::{AppDb, DbArtworkCacheState, DbOperations};
+use crate::diag_log;
+use crate::diagnostics::{self, DiagCategory};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -335,6 +337,16 @@ impl MaintenanceWorker {
 
                 // Zero-polling contract: Emit only on state transition to preserve quiet bus
                 if last_reported_state != current_state {
+                    diag_log!(
+                        DiagCategory::AudioHygiene,
+                        0,
+                        0,
+                        0,
+                        "hygiene_maintenance_suppressed",
+                        "prev={} state={}",
+                        last_reported_state,
+                        current_state
+                    );
                     last_reported_state = current_state;
                     self.emit_current_state();
                 }
@@ -440,8 +452,11 @@ impl MaintenanceWorker {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(&release_id);
+            let t0 = diagnostics::is_active().then(std::time::Instant::now);
             self.set_status(format!("Active: Indexing artwork for {}", label));
             self.process_release_artwork(&release_id, &folder_path, sample_track.as_deref());
+            let dur_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+            diag_log!(DiagCategory::BackgroundWorkers, 0, 0, dur_us, "maintenance_release_artwork", "release={}", label);
             return true;
         }
 
@@ -458,8 +473,11 @@ impl MaintenanceWorker {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(&track_id);
+            let t0 = diagnostics::is_active().then(std::time::Instant::now);
             self.set_status(format!("Active: Extracting track artwork for {}", label));
             self.process_track_artwork(&track_id, &file_path, mtime);
+            let dur_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+            diag_log!(DiagCategory::BackgroundWorkers, 0, 0, dur_us, "maintenance_track_artwork", "track={}", label);
             return true;
         }
 

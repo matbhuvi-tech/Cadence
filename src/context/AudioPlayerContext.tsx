@@ -3,6 +3,7 @@ import { Track, Release, Playlist, SampleRateTransition } from '../core/types'
 import { tauriBridge, AudioStreamTelemetry } from '../services/tauriBridge'
 import { sqliteLibraryService } from '../services/sqliteLibraryService'
 import { graphEngine } from '../core/graphEngine'
+import { emitDiag, setFrontendCaptureMode } from '../core/diagnostics'
 import {
   AudioEndpoint,
   AudioEndpointInfo,
@@ -344,6 +345,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   useEffect(() => {
     const tauri = tauriBridge.isTauri()
     setIsNativeTauri(tauri)
+    tauriBridge.getDebugLogState().then((s) => setFrontendCaptureMode(s.mode)).catch(() => {})
     tauriBridge.getPurityMode().then((p) => setIsPurityMode(p))
     const controller = routingControllerRef.current!
     controller.initializeStartup().catch(() => {})
@@ -388,6 +390,12 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
           if (typeof revision === 'number') {
             if (revision <= appliedServerRevisionRef.current) {
+              emitDiag(
+                'queue_coordination',
+                'stale_queue_revision_dropped',
+                `owner=desktop incoming_rev=${revision} applied_rev=${appliedServerRevisionRef.current}`,
+                { correlationId: revision }
+              )
               return
             }
             appliedServerRevisionRef.current = revision
@@ -430,8 +438,20 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
           // Guard against async race: if a newer revision arrived while awaiting, drop
           if (latestHydrationRevisionRef.current !== currentRev) {
+            emitDiag(
+              'queue_coordination',
+              'stale_hydration_dropped',
+              `owner=desktop current_rev=${currentRev} latest_rev=${latestHydrationRevisionRef.current}`,
+              { correlationId: Number(currentRev) || 0 }
+            )
             return
           }
+          emitDiag(
+            'queue_coordination',
+            'remote_queue_hydrated',
+            `owner=remote_push rev=${currentRev ?? 0} items=${rehydratedTracks.length} idx=${currentIndex}`,
+            { correlationId: Number(currentRev) || 0 }
+          )
 
           isInternalQueueUpdateRef.current = true
           let effectiveIndex = 0
@@ -563,6 +583,12 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Auto advance helper
   const handleAutoAdvance = useCallback(() => {
     const { queue: q, repeatMode: rMode, isShuffle: isShuf, currentTrack: cTrack } = stateRef.current
+    emitDiag(
+      'queue_coordination',
+      'auto_advance_triggered',
+      `owner=desktop_poll queue_len=${q.length} repeat=${rMode} shuffle=${isShuf} cur=${cTrack?.title ?? 'none'}`,
+      { correlationId: appliedServerRevisionRef.current }
+    )
 
     if (rMode === 'one' && cTrack) {
       playTrack(cTrack)
@@ -651,6 +677,12 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const initialDuration = track.durationSeconds || track.duration || 0
         setCurrentTime(0)
         setDuration(initialDuration)
+        emitDiag(
+          'playback_lifecycle',
+          'ui_play_requested',
+          `title=${track.title} path=${track.filePath || track.title} queue_len=${newQueue.length}`,
+          { correlationId: appliedServerRevisionRef.current }
+        )
 
         const telemetry = await tauriBridge.playTrack(
           track.filePath || track.title,
@@ -679,6 +711,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       } catch (err) {
         console.error('[AudioPlayer] Play track failed:', err)
         const errMsg = err instanceof Error ? err.message : String(err)
+        emitDiag('playback_lifecycle', 'ui_play_failed', `title=${track.title} err=${errMsg}`)
         setIsPlaying(false)
         setIsPaused(false)
         routingControllerRef.current?.setEndpointError(errMsg)

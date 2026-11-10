@@ -12,6 +12,8 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
 
 use super::stream_tuning::{self, LockedBuffer, StreamingThreadGuard};
+use crate::diag_log;
+use crate::diagnostics::{self, DiagCategory};
 
 /// How the current track's untouched bytes are held for serving.
 enum BufferMode {
@@ -577,6 +579,7 @@ pub struct UpnpManager {
     current_stream: Arc<Mutex<Option<Arc<StreamSource>>>>,
     /// Whole-track RAM limit in MB (0 = Auto, derived from available RAM).
     buffer_limit_mb: Arc<AtomicU64>,
+    discovery_gen: Arc<AtomicU64>,
 }
 
 impl UpnpManager {
@@ -589,6 +592,7 @@ impl UpnpManager {
             server_running: Arc::new(AtomicBool::new(false)),
             current_stream: Arc::new(Mutex::new(None)),
             buffer_limit_mb: Arc::new(AtomicU64::new(0)),
+            discovery_gen: Arc::new(AtomicU64::new(0)),
         };
 
         manager.ensure_http_server();
@@ -666,10 +670,12 @@ impl UpnpManager {
                     let listener = match TcpListener::bind(addr).await {
                         Ok(l) => {
                             eprintln!("[Cadence UPnP Streamer] Listening on http://0.0.0.0:{}", port);
+                            diag_log!(DiagCategory::UpnpLifecycle, 0, 0, 0, "upnp_http_server_listening", "port={}", port);
                             l
                         }
                         Err(e) => {
                             eprintln!("[Cadence UPnP Streamer] Failed to bind HTTP port {}: {}", port, e);
+                            diag_log!(DiagCategory::UpnpLifecycle, 0, 0, 0, "upnp_http_server_bind_failed", "port={} err={}", port, e);
                             return;
                         }
                     };
@@ -733,6 +739,7 @@ impl UpnpManager {
         let method = request.split_whitespace().next().unwrap_or("");
         let is_head = method == "HEAD";
         if method != "GET" && !is_head {
+            diag_log!(DiagCategory::UpnpLifecycle, 0, 0, 0, "upnp_http_error", "status=405 method={}", method);
             let _ = stream.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n");
             return;
         }
@@ -741,6 +748,7 @@ impl UpnpManager {
         let source = match snapshot {
             Some(s) if matches!(s.mode, BufferMode::WholeTrack(_)) || s.path.exists() => s,
             _ => {
+                diag_log!(DiagCategory::UpnpLifecycle, 0, 0, 0, "upnp_http_error", "status=404 reason=no_active_stream");
                 let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
                 return;
             }
@@ -816,8 +824,36 @@ impl UpnpManager {
         }
 
         if stream.write_all(header.as_bytes()).is_err() || is_head || len == 0 {
+            diag_log!(
+                DiagCategory::UpnpLifecycle,
+                0,
+                0,
+                0,
+                "upnp_http_connect",
+                "method={} range={}-{} len={} meta={}",
+                method,
+                start,
+                end,
+                len,
+                is_metadata_request
+            );
             return;
         }
+
+        diag_log!(
+            DiagCategory::UpnpLifecycle,
+            0,
+            0,
+            0,
+            "upnp_http_connect",
+            "method={} range={}-{} len={} meta={} range_cont={}",
+            method,
+            start,
+            end,
+            len,
+            is_metadata_request,
+            is_range_continuation
+        );
 
         if is_metadata_request {
             eprintln!(
@@ -874,7 +910,33 @@ impl UpnpManager {
                 .name("cadence-disk-prefetch".into())
                 .spawn(move || {
                     stream_tuning::set_prefetch_thread_priority();
-                    LockedBuffer::load_range(&p, offset, len)
+                    let t0 = diagnostics::is_active().then(Instant::now);
+                    let res = LockedBuffer::load_range(&p, offset, len);
+                    let dur_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                    match &res {
+                        Ok(b) => diag_log!(
+                            DiagCategory::BackgroundWorkers,
+                            0,
+                            0,
+                            dur_us,
+                            "window_prefetch_done",
+                            "offset={} bytes={}",
+                            offset,
+                            b.as_slice().len()
+                        ),
+                        Err(e) => diag_log!(
+                            DiagCategory::BackgroundWorkers,
+                            0,
+                            0,
+                            dur_us,
+                            "window_prefetch_failed",
+                            "offset={} req_len={} err={}",
+                            offset,
+                            len,
+                            e
+                        ),
+                    }
+                    res
                 })
                 .expect("failed to spawn disk prefetch thread")
         };
@@ -916,11 +978,33 @@ impl UpnpManager {
 
     /// Discover UPnP / DLNA MediaRenderer devices on the LAN using SSDP M-SEARCH
     pub async fn discover_devices(&self) -> Vec<UpnpDevice> {
+        let gen = self.discovery_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let disc_t0 = diagnostics::is_active().then(Instant::now);
+        diag_log!(
+            DiagCategory::DeviceDiscovery,
+            gen,
+            0,
+            0,
+            "ssdp_discovery_started",
+            "gen={}",
+            gen
+        );
         let mut discovered = Vec::new();
         let socket = match UdpSocket::bind("0.0.0.0:0").await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[Cadence UPnP] Failed to bind SSDP socket: {}", e);
+                let dur_us = disc_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                diag_log!(
+                    DiagCategory::DeviceDiscovery,
+                    gen,
+                    0,
+                    dur_us,
+                    "ssdp_discovery_failed",
+                    "gen={} err=bind_failed:{}",
+                    gen,
+                    e
+                );
                 return self.devices.lock().clone();
             }
         };
@@ -985,11 +1069,35 @@ impl UpnpManager {
         }
 
         // Fetch description XML for each unique location
+        let loc_count = locations.len();
         for loc in locations {
             if let Some(device) = Self::parse_device_description(&loc).await {
                 if !discovered.iter().any(|d: &UpnpDevice| d.id == device.id || d.control_url == device.control_url) {
+                    diag_log!(
+                        DiagCategory::DeviceDiscovery,
+                        gen,
+                        0,
+                        0,
+                        "ssdp_device_found",
+                        "gen={} udn={} name={} model={:?}",
+                        gen,
+                        device.id,
+                        device.friendly_name,
+                        device.model_name
+                    );
                     discovered.push(device);
                 }
+            } else {
+                diag_log!(
+                    DiagCategory::DeviceDiscovery,
+                    gen,
+                    0,
+                    0,
+                    "ssdp_desc_skipped",
+                    "gen={} location={}",
+                    gen,
+                    loc
+                );
             }
         }
 
@@ -997,6 +1105,19 @@ impl UpnpManager {
         // Dedicated audiophile streamers (HiFi Rose, Anthem AVM) will always be first,
         // while monitors/TVs (Odyssey OLED G8) will be sorted to the bottom.
         discovered.sort_by(|a, b| b.priority_score().cmp(&a.priority_score()));
+
+        let dur_us = disc_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+        diag_log!(
+            DiagCategory::DeviceDiscovery,
+            gen,
+            0,
+            dur_us,
+            "ssdp_discovery_completed",
+            "gen={} locations={} devices={}",
+            gen,
+            loc_count,
+            discovered.len()
+        );
 
         // Update cached devices
         let mut guard = self.devices.lock();
@@ -1218,6 +1339,18 @@ impl UpnpManager {
             device.model_name.as_deref().unwrap_or(""),
             device.control_url
         );
+        diag_log!(
+            DiagCategory::UpnpLifecycle,
+            0,
+            0,
+            0,
+            "upnp_play_dispatch",
+            "udn={} name={} ctrl={} file={}",
+            device.id,
+            device.friendly_name,
+            device.control_url,
+            file_path.display()
+        );
 
         // Pre-load the untouched file into page-locked RAM before the renderer
         // starts pulling, so storage is idle for the duration of playback.
@@ -1357,6 +1490,16 @@ impl UpnpManager {
         )
         .await?;
 
+        diag_log!(
+            DiagCategory::UpnpLifecycle,
+            0,
+            0,
+            0,
+            "upnp_transport_state",
+            "state=paused udn={}",
+            device.id
+        );
+
         let mut state = self.playback_state.lock();
         state.is_paused = true;
         state.is_playing = false;
@@ -1387,6 +1530,16 @@ impl UpnpManager {
         )
         .await?;
 
+        diag_log!(
+            DiagCategory::UpnpLifecycle,
+            0,
+            0,
+            0,
+            "upnp_transport_state",
+            "state=playing udn={}",
+            device.id
+        );
+
         let mut state = self.playback_state.lock();
         state.is_paused = false;
         state.is_playing = true;
@@ -1408,12 +1561,34 @@ impl UpnpManager {
                            </s:Body>\
                          </s:Envelope>";
 
-        let _ = Self::send_soap_action(
+        let stop_res = Self::send_soap_action(
             &device.control_url,
             "urn:schemas-upnp-org:service:AVTransport:1#Stop",
             stop_soap,
         )
         .await;
+        if let Err(ref e) = stop_res {
+            diag_log!(
+                DiagCategory::UpnpLifecycle,
+                0,
+                0,
+                0,
+                "upnp_transport_stop_err",
+                "udn={} err={}",
+                device.id,
+                e
+            );
+        } else {
+            diag_log!(
+                DiagCategory::UpnpLifecycle,
+                0,
+                0,
+                0,
+                "upnp_transport_state",
+                "state=stopped udn={}",
+                device.id
+            );
+        }
 
         let mut state = self.playback_state.lock();
         state.is_playing = false;
@@ -1432,14 +1607,37 @@ impl UpnpManager {
 
     /// Send a SOAP action over HTTP POST
     async fn send_soap_action(control_url: &str, soap_action: &str, body: &str) -> Result<String, String> {
+        let action_short = soap_action.rsplit('#').next().unwrap_or(soap_action);
+        let soap_t0 = diagnostics::is_active().then(Instant::now);
+        diag_log!(
+            DiagCategory::UpnpLifecycle,
+            0,
+            0,
+            0,
+            "soap_request_started",
+            "action={} url={}",
+            action_short,
+            control_url
+        );
+
         let (host, port, path) = Self::parse_url(control_url)
             .ok_or_else(|| format!("Invalid control URL: {}", control_url))?;
 
         let addr = format!("{}:{}", host, port);
-        let mut stream = timeout(Duration::from_millis(2000), TcpStream::connect(&addr))
-            .await
-            .map_err(|_| "UPnP connection timeout".to_string())?
-            .map_err(|e| format!("Failed to connect to UPnP renderer: {}", e))?;
+        let mut stream = match timeout(Duration::from_millis(2000), TcpStream::connect(&addr)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                let dur_us = soap_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                let msg = format!("Failed to connect to UPnP renderer: {}", e);
+                diag_log!(DiagCategory::UpnpLifecycle, 0, 0, dur_us, "soap_connect_failed", "action={} addr={} err={}", action_short, addr, e);
+                return Err(msg);
+            }
+            Err(_) => {
+                let dur_us = soap_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                diag_log!(DiagCategory::UpnpLifecycle, 0, 0, dur_us, "soap_connect_timeout", "action={} addr={}", action_short, addr);
+                return Err("UPnP connection timeout".to_string());
+            }
+        };
 
         let request = format!(
             "POST {} HTTP/1.1\r\n\
@@ -1457,23 +1655,28 @@ impl UpnpManager {
             body
         );
 
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to send SOAP request: {}", e))?;
+        if let Err(e) = stream.write_all(request.as_bytes()).await {
+            let dur_us = soap_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+            diag_log!(DiagCategory::UpnpLifecycle, 0, 0, dur_us, "soap_write_failed", "action={} err={}", action_short, e);
+            return Err(format!("Failed to send SOAP request: {}", e));
+        }
 
         let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .await
-            .map_err(|e| format!("Failed to read SOAP response: {}", e))?;
+        if let Err(e) = stream.read_to_string(&mut response).await {
+            let dur_us = soap_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+            diag_log!(DiagCategory::UpnpLifecycle, 0, 0, dur_us, "soap_read_failed", "action={} err={}", action_short, e);
+            return Err(format!("Failed to read SOAP response: {}", e));
+        }
 
+        let dur_us = soap_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
         if response.contains("200 OK") {
+            diag_log!(DiagCategory::UpnpLifecycle, 0, 0, dur_us, "soap_request_completed", "action={} status=200", action_short);
             Ok(response)
         } else {
             let err_desc = Self::extract_xml_tag(&response, "errorDescription")
                 .or_else(|| Self::extract_xml_tag(&response, "faultstring"))
                 .unwrap_or_else(|| response.lines().next().unwrap_or("Unknown error").to_string());
+            diag_log!(DiagCategory::UpnpLifecycle, 0, 0, dur_us, "soap_device_error", "action={} err={}", action_short, err_desc);
             Err(format!("UPnP device returned error: {}", err_desc))
         }
     }

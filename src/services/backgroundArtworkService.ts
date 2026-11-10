@@ -12,6 +12,7 @@
 import { graphEngine } from '../core/graphEngine'
 import { federatedResolversService } from './federatedResolvers'
 import { tauriBridge, PortraitSyncProgressPayload } from './tauriBridge'
+import { emitDiag } from '../core/diagnostics'
 
 export type BackgroundArtworkStatus =
   | 'idle'
@@ -173,6 +174,11 @@ class BackgroundArtworkService {
 
       if (this.status !== 'idle' && this.status !== 'complete' && !this.userPaused) {
         this.status = 'suspended_playback'
+        emitDiag(
+          'audio_hygiene',
+          'hygiene_artwork_suspended',
+          `pending=${this.queue.length} reason=playback_active`
+        )
         this.notify()
         this.flushCheckpoint().catch(() => {})
       }
@@ -226,6 +232,11 @@ class BackgroundArtworkService {
     this.stopCooldownTimer()
     this.status = 'cooldown'
     this.cooldownRemainingSecs = Math.max(1, seconds)
+    emitDiag(
+      'audio_hygiene',
+      'hygiene_artwork_cooldown',
+      `secs=${this.cooldownRemainingSecs} pending=${this.queue.length}`
+    )
     this.notify()
 
     this.cooldownTimer = setInterval(() => {

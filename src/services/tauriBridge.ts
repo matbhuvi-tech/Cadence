@@ -14,7 +14,15 @@ import {
   normalizeBackendEndpoint,
 } from '../core/endpointRouting'
 
-export type { AudioEndpoint, AudioEndpointInfo, SignalPathMode }
+import {
+  CaptureMode,
+  DebugLogState,
+  FrontendDebugEvent,
+  frontendDiagnostics,
+  setFrontendCaptureMode,
+} from '../core/diagnostics'
+
+export type { AudioEndpoint, AudioEndpointInfo, SignalPathMode, CaptureMode, DebugLogState }
 import type { CurationDecisionTrace, UpdateArtistEditorialPayload } from '../core/types'
 import type { CurateDraft } from '../core/curateDraft'
 import type { CurateEvidenceRun, CurateEvidenceSummary } from './curateEvidenceService'
@@ -1478,6 +1486,70 @@ class TauriBridgeService {
       await invoke('db_ungroup_release_from_master', { releaseId })
     }
   }
+
+  public async getDebugLogState(): Promise<DebugLogState> {
+    if (this.isTauri()) {
+      const state = await invoke<DebugLogState>('get_debug_log_state')
+      setFrontendCaptureMode(state.mode)
+      return state
+    }
+    return {
+      mode: frontendDiagnostics.getMode(),
+      ringCapacity: 256,
+      bufferedApprox: frontendDiagnostics.getBufferedCount(),
+      droppedCount: frontendDiagnostics.getDroppedCount(),
+      persistedCount: 0,
+      hygieneState: 'idle',
+      cooldownRemainingSecs: null,
+      logFilePath: null,
+      logDirPath: null,
+      lastFlushError: null,
+    }
+  }
+
+  public async setDebugLogging(mode: CaptureMode): Promise<DebugLogState> {
+    setFrontendCaptureMode(mode)
+    if (this.isTauri()) {
+      const state = await invoke<DebugLogState>('set_debug_logging', { mode })
+      setFrontendCaptureMode(state.mode)
+      return state
+    }
+    return this.getDebugLogState()
+  }
+
+  public async getRecentDebugLogs(): Promise<string[]> {
+    if (this.isTauri()) {
+      return await invoke<string[]>('get_recent_debug_logs')
+    }
+    return []
+  }
+
+  public async clearDebugLogs(): Promise<DebugLogState> {
+    if (this.isTauri()) {
+      return await invoke<DebugLogState>('clear_debug_logs')
+    }
+    return this.getDebugLogState()
+  }
+
+  public async flushDebugLogsIfIdle(): Promise<DebugLogState> {
+    if (this.isTauri()) {
+      return await invoke<DebugLogState>('flush_debug_logs_if_idle')
+    }
+    return this.getDebugLogState()
+  }
+
+  public async openDebugLogFolder(): Promise<string | null> {
+    if (this.isTauri()) {
+      return await invoke<string>('open_debug_log_folder')
+    }
+    return null
+  }
+
+  public async logFrontendDebugBatch(events: FrontendDebugEvent[]): Promise<void> {
+    if (this.isTauri() && events.length > 0) {
+      await invoke('log_frontend_debug_batch', { events })
+    }
+  }
 }
 
 export interface DbMasterAlbum {
@@ -1547,3 +1619,7 @@ export interface RemoteServerStatus {
 }
 
 export const tauriBridge = new TauriBridgeService()
+
+frontendDiagnostics.setSender(async (events) => {
+  await tauriBridge.logFrontendDebugBatch(events)
+})

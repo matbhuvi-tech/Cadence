@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +14,8 @@ use rodio::{Decoder, OutputStream, Sink};
 use serde::{Deserialize, Serialize};
 
 use super::upnp::{UpnpDevice, UpnpManager};
+use crate::diag_log;
+use crate::diagnostics::{self, DiagCategory, HygieneState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -360,41 +362,138 @@ pub struct PlaybackStatus {
     pub signal_path_mode: String,
 }
 
+#[derive(Clone, Copy)]
+struct CmdMeta {
+    id: u64,
+    queued_at: Option<Instant>,
+}
+
+impl CmdMeta {
+    const NONE: Self = Self {
+        id: 0,
+        queued_at: None,
+    };
+}
+
+struct LoadingGuard<'a>(&'a AtomicBool);
+impl Drop for LoadingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn diag_cmd_begin(pending_cmds: &AtomicUsize, cmd: &str, meta: CmdMeta) -> Option<Instant> {
+    if meta.id == 0 || !diagnostics::is_active() {
+        return None;
+    }
+    let q_rem = pending_cmds
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        })
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let wait_us = meta
+        .queued_at
+        .map(|t| t.elapsed().as_micros() as u64)
+        .unwrap_or(0);
+    diag_log!(
+        DiagCategory::AudioEngineCommands,
+        meta.id,
+        wait_us,
+        0,
+        "cmd_started",
+        "cmd={} remaining_queue={}",
+        cmd,
+        q_rem
+    );
+    Some(Instant::now())
+}
+
+fn diag_cmd_end(cmd: &str, meta: CmdMeta, started_at: Option<Instant>, error: Option<&str>) {
+    let Some(t0) = started_at else {
+        return;
+    };
+    let exec_us = t0.elapsed().as_micros() as u64;
+    let wait_us = meta
+        .queued_at
+        .map(|t| t.elapsed().as_micros() as u64)
+        .unwrap_or(0)
+        .saturating_sub(exec_us);
+    match error {
+        Some(err) => diag_log!(
+            DiagCategory::AudioEngineCommands,
+            meta.id,
+            wait_us,
+            exec_us,
+            "cmd_failed",
+            "cmd={} err={}",
+            cmd,
+            err
+        ),
+        None => diag_log!(
+            DiagCategory::AudioEngineCommands,
+            meta.id,
+            wait_us,
+            exec_us,
+            "cmd_completed",
+            "cmd={}",
+            cmd
+        ),
+    }
+}
+
 enum AudioWorkerMsg {
     Play {
         file_path: String,
+        meta: CmdMeta,
         responder: Sender<Result<AudioStreamInfo, String>>,
     },
-    Pause,
-    Resume,
-    Stop,
+    Pause {
+        meta: CmdMeta,
+    },
+    Resume {
+        meta: CmdMeta,
+    },
+    Stop {
+        meta: CmdMeta,
+    },
     Seek {
         position_secs: f64,
+        meta: CmdMeta,
     },
     SetVolume {
         volume: f32,
+        meta: CmdMeta,
     },
     SetEndpoint {
         endpoint: AudioEndpoint,
+        source: &'static str,
+        meta: CmdMeta,
         responder: Sender<Result<(), String>>,
     },
     SetPurityMode {
         enabled: bool,
+        meta: CmdMeta,
         responder: Sender<bool>,
     },
     GetPurityMode {
         responder: Sender<bool>,
     },
     GetStatus {
+        queued_at: Option<Instant>,
         responder: Sender<PlaybackStatus>,
     },
     PrepareNextTrack {
         file_path: String,
+        meta: CmdMeta,
         responder: Sender<Result<bool, String>>,
     },
-    InvalidateNextTrack,
+    InvalidateNextTrack {
+        meta: CmdMeta,
+    },
     SetSettlingDelayMs {
         delay_ms: u64,
+        meta: CmdMeta,
     },
 }
 
@@ -404,8 +503,11 @@ pub struct AudioEngine {
     upnp_manager: Arc<UpnpManager>,
     is_playing_atomic: Arc<AtomicBool>,
     is_paused_atomic: Arc<AtomicBool>,
+    is_loading_atomic: Arc<AtomicBool>,
     library_scan_io: Arc<parking_lot::Mutex<()>>,
     playback_stopped_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+    cmd_seq: Arc<AtomicU64>,
+    pending_cmds: Arc<AtomicUsize>,
 }
 
 impl AudioEngine {
@@ -417,8 +519,13 @@ impl AudioEngine {
         let is_playing_worker = Arc::clone(&is_playing_atomic);
         let is_paused_atomic = Arc::new(AtomicBool::new(false));
         let is_paused_worker = Arc::clone(&is_paused_atomic);
+        let is_loading_atomic = Arc::new(AtomicBool::new(false));
+        let is_loading_worker = Arc::clone(&is_loading_atomic);
         let playback_stopped_at = Arc::new(parking_lot::Mutex::new(None));
         let stopped_at_worker = Arc::clone(&playback_stopped_at);
+        let cmd_seq = Arc::new(AtomicU64::new(0));
+        let pending_cmds = Arc::new(AtomicUsize::new(0));
+        let pending_cmds_worker = Arc::clone(&pending_cmds);
 
         // Run initial background SSDP scan on engine startup so UPnP inventory is ready
         // Inventory discovery must never mutate the selected or active playback endpoint.
@@ -440,9 +547,34 @@ impl AudioEngine {
             let initial_config = initial_os_default
                 .as_ref()
                 .and_then(|d| d.default_output_config().ok());
+            let wasapi_init_t0 = diagnostics::is_active().then(Instant::now);
             let (mut _stream, mut stream_handle) = match OutputStream::try_default() {
-                Ok((s, h)) => (Some(s), Some(h)),
+                Ok((s, h)) => {
+                    let dur_us = wasapi_init_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                    diag_log!(
+                        DiagCategory::WasapiLifecycle,
+                        0,
+                        0,
+                        dur_us,
+                        "wasapi_initial_stream_ok",
+                        "device={} rate={:?} ch={:?}",
+                        active_os_default_name.as_deref().unwrap_or("Default"),
+                        initial_config.as_ref().map(|c| c.sample_rate().0),
+                        initial_config.as_ref().map(|c| c.channels())
+                    );
+                    (Some(s), Some(h))
+                }
                 Err(e) => {
+                    let dur_us = wasapi_init_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                    diag_log!(
+                        DiagCategory::WasapiLifecycle,
+                        0,
+                        0,
+                        dur_us,
+                        "wasapi_initial_stream_failed",
+                        "err={}",
+                        e
+                    );
                     eprintln!("[Cadence AudioEngine] Failed to init default output stream: {}", e);
                     (None, None)
                 }
@@ -478,7 +610,8 @@ impl AudioEngine {
 
             while let Ok(msg) = rx.recv() {
                 match msg {
-                    AudioWorkerMsg::SetPurityMode { enabled, responder } => {
+                    AudioWorkerMsg::SetPurityMode { enabled, meta, responder } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "SetPurityMode", meta);
                         purity_mode = enabled;
                         if purity_mode {
                             saved_user_volume = volume;
@@ -494,6 +627,17 @@ impl AudioEngine {
                             }
                             eprintln!("[Cadence AudioEngine] Bit-Perfect Purity Mode DISABLED. Volume restored to {}.", volume);
                         }
+                        diag_log!(
+                            DiagCategory::PlaybackLifecycle,
+                            meta.id,
+                            0,
+                            0,
+                            "purity_mode_changed",
+                            "enabled={} volume={:.2}",
+                            purity_mode,
+                            volume
+                        );
+                        diag_cmd_end("SetPurityMode", meta, cmd_t0, None);
                         let _ = responder.send(purity_mode);
                     }
 
@@ -501,7 +645,12 @@ impl AudioEngine {
                         let _ = responder.send(purity_mode);
                     }
 
-                    AudioWorkerMsg::Play { file_path, responder } => {
+                    AudioWorkerMsg::Play { file_path, meta, responder } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Play", meta);
+                        is_loading_worker.store(true, Ordering::Release);
+                        let _loading_guard = LoadingGuard(&is_loading_worker);
+                        let prev_file = current_file.clone();
+
                         let is_prev_dsd = current_info.as_ref().map(|i| {
                             i.format.to_uppercase().contains("DSD") || i.format.to_uppercase().contains("DSF") || i.format.to_uppercase().contains("DFF")
                         }).unwrap_or(false);
@@ -528,7 +677,10 @@ impl AudioEngine {
 
                         let path = Path::new(&file_path);
                         if !path.exists() {
-                            let _ = responder.send(Err(format!("File does not exist: {}", file_path)));
+                            let err = format!("File does not exist: {}", file_path);
+                            diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "play_failed", "reason=file_missing path={}", file_path);
+                            diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                            let _ = responder.send(Err(err));
                             continue;
                         }
 
@@ -536,6 +688,8 @@ impl AudioEngine {
                         let stream_info = match info_res {
                             Ok(i) => i,
                             Err(e) => {
+                                diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "play_failed", "reason=inspect_err err={}", e);
+                                diag_cmd_end("Play", meta, cmd_t0, Some(&e));
                                 let _ = responder.send(Err(e));
                                 continue;
                             }
@@ -551,14 +705,65 @@ impl AudioEngine {
 
                         let inventory = EndpointInventory::from_host(&upnp_worker_ref);
                         let route = match plan_play_route(&selected_endpoint, is_dsd, &inventory) {
-                            Ok(route) => route,
+                            Ok(route) => {
+                                match &route {
+                                    RouteTarget::LocalWasapi { selected, exact_wasapi_name } => {
+                                        diag_log!(
+                                            DiagCategory::AudioRouting,
+                                            meta.id,
+                                            0,
+                                            0,
+                                            "route_decision",
+                                            "requested={} actual={} decision=wasapi_shared exact={:?} is_dsd={}",
+                                            selected_endpoint.id(),
+                                            selected.id(),
+                                            exact_wasapi_name,
+                                            is_dsd
+                                        );
+                                    }
+                                    RouteTarget::Upnp { selected, udn } => {
+                                        diag_log!(
+                                            DiagCategory::AudioRouting,
+                                            meta.id,
+                                            0,
+                                            0,
+                                            "route_decision",
+                                            "requested={} actual={} decision=upnp_streamer udn={} is_dsd={}",
+                                            selected_endpoint.id(),
+                                            selected.id(),
+                                            udn,
+                                            is_dsd
+                                        );
+                                    }
+                                }
+                                route
+                            }
                             Err(err) => {
+                                diag_log!(
+                                    DiagCategory::AudioRouting,
+                                    meta.id,
+                                    0,
+                                    0,
+                                    "route_rejected",
+                                    "requested={} actual=none decision=rejected is_dsd={} fallback_rejected=true reason={}",
+                                    selected_endpoint.id(),
+                                    is_dsd,
+                                    err
+                                );
                                 is_upnp_active = false;
+                                if _stream.is_some() {
+                                    diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=route_rejected");
+                                    _stream = None;
+                                    stream_handle = None;
+                                    current_stream_rate = None;
+                                    current_stream_channels = None;
+                                }
                                 active_backend_endpoint = None;
                                 current_file = None;
                                 current_info = None;
                                 is_playing_worker.store(false, Ordering::Release);
                                 is_paused_worker.store(false, Ordering::Release);
+                                diag_cmd_end("Play", meta, cmd_t0, Some(&err));
                                 let _ = responder.send(Err(err));
                                 continue;
                             }
@@ -588,6 +793,9 @@ impl AudioEngine {
 
                                 match upnp_res {
                                     Ok(_) => {
+                                        if _stream.is_some() {
+                                            diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=switched_to_upnp");
+                                        }
                                         _stream = None;
                                         stream_handle = None;
                                         current_stream_rate = None;
@@ -602,6 +810,30 @@ impl AudioEngine {
                                         current_info = Some(stream_info.clone());
                                         is_playing_worker.store(true, Ordering::Release);
                                         is_paused_worker.store(false, Ordering::Release);
+                                        if let Some(ref pf) = prev_file {
+                                            diag_log!(
+                                                DiagCategory::PlaybackLifecycle,
+                                                meta.id,
+                                                0,
+                                                0,
+                                                "track_transition",
+                                                "from={} to={} transport=upnp",
+                                                pf,
+                                                file_path
+                                            );
+                                        }
+                                        diag_log!(
+                                            DiagCategory::PlaybackLifecycle,
+                                            meta.id,
+                                            0,
+                                            0,
+                                            "play_started",
+                                            "transport=upnp file={} fmt={} rate={:?}",
+                                            file_path,
+                                            stream_info.format,
+                                            stream_info.sample_rate
+                                        );
+                                        diag_cmd_end("Play", meta, cmd_t0, None);
                                         let _ = responder.send(Ok(stream_info));
                                         continue;
                                     }
@@ -617,7 +849,10 @@ impl AudioEngine {
                                         current_info = None;
                                         is_playing_worker.store(false, Ordering::Release);
                                         is_paused_worker.store(false, Ordering::Release);
-                                        let _ = responder.send(Err(format!("UPnP streamer error: {}", e)));
+                                        let err = format!("UPnP streamer error: {}", e);
+                                        diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "play_failed", "transport=upnp err={}", err);
+                                        diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                        let _ = responder.send(Err(err));
                                         continue;
                                     }
                                 }
@@ -675,15 +910,21 @@ impl AudioEngine {
                             };
 
                             let Some(device) = target_device else {
+                                if _stream.is_some() {
+                                    diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=device_unavailable");
+                                }
                                 _stream = None;
                                 stream_handle = None;
                                 current_stream_rate = None;
                                 current_stream_channels = None;
                                 active_backend_endpoint = None;
-                                let _ = responder.send(Err(format!(
+                                let err = format!(
                                     "Selected audio device '{}' is unavailable.",
                                     selected_endpoint.display_label()
-                                )));
+                                );
+                                diag_log!(DiagCategory::AudioRouting, meta.id, 0, 0, "route_rejected", "requested={} actual=none fallback_rejected=true reason=cpal_not_found", selected_endpoint.id());
+                                diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                let _ = responder.send(Err(err));
                                 continue;
                             };
 
@@ -701,12 +942,48 @@ impl AudioEngine {
                                 device.name().unwrap_or_default()
                             );
 
+                            let wasapi_open_t0 = diagnostics::is_active().then(Instant::now);
+                            if _stream.is_some() {
+                                diag_log!(
+                                    DiagCategory::WasapiLifecycle,
+                                    meta.id,
+                                    0,
+                                    0,
+                                    "wasapi_stream_disposed",
+                                    "reason=renegotiate_format old_rate={:?} old_ch={:?}",
+                                    current_stream_rate,
+                                    current_stream_channels
+                                );
+                            }
+                            diag_log!(
+                                DiagCategory::WasapiLifecycle,
+                                meta.id,
+                                0,
+                                0,
+                                "wasapi_stream_init_start",
+                                "endpoint={} req_rate={} req_ch={}",
+                                local_selected.id(),
+                                target_rate,
+                                target_channels
+                            );
+
                             match OutputStream::try_from_device_config(&device, stream_config) {
                                 Ok((s, h)) => {
                                     _stream = Some(s);
                                     stream_handle = Some(h);
                                     current_stream_rate = Some(target_rate);
                                     current_stream_channels = Some(target_channels);
+                                    let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                    diag_log!(
+                                        DiagCategory::WasapiLifecycle,
+                                        meta.id,
+                                        0,
+                                        dur_us,
+                                        "wasapi_stream_initialized",
+                                        "rate={} ch={} fmt=F32 same_dev_default=false",
+                                        target_rate,
+                                        target_channels
+                                    );
                                     eprintln!("[Cadence AudioEngine] WASAPI clock configured at {} Hz", target_rate);
                                 }
                                 Err(e) => {
@@ -722,18 +999,43 @@ impl AudioEngine {
                                                 current_stream_rate = Some(cfg.sample_rate().0);
                                                 current_stream_channels = Some(cfg.channels());
                                             }
+                                            let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                            diag_log!(
+                                                DiagCategory::WasapiLifecycle,
+                                                meta.id,
+                                                0,
+                                                dur_us,
+                                                "wasapi_stream_initialized",
+                                                "rate={:?} ch={:?} same_dev_default=true config_err={}",
+                                                current_stream_rate,
+                                                current_stream_channels,
+                                                e
+                                            );
                                         }
                                         Err(dev_err) => {
+                                            let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                            diag_log!(
+                                                DiagCategory::WasapiLifecycle,
+                                                meta.id,
+                                                0,
+                                                dur_us,
+                                                "wasapi_stream_init_failed",
+                                                "endpoint={} err={}",
+                                                local_selected.id(),
+                                                dev_err
+                                            );
                                             _stream = None;
                                             stream_handle = None;
                                             current_stream_rate = None;
                                             current_stream_channels = None;
                                             active_backend_endpoint = None;
-                                            let _ = responder.send(Err(format!(
+                                            let err = format!(
                                                 "Audio device '{}' failed to open output stream: {}",
                                                 selected_endpoint.display_label(),
                                                 dev_err
-                                            )));
+                                            );
+                                            diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                            let _ = responder.send(Err(err));
                                             continue;
                                         }
                                     }
@@ -743,10 +1045,12 @@ impl AudioEngine {
 
                         if stream_handle.is_none() {
                             active_backend_endpoint = None;
-                            let _ = responder.send(Err(format!(
+                            let err = format!(
                                 "Audio device '{}' is unavailable.",
                                 selected_endpoint.display_label()
-                            )));
+                            );
+                            diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                            let _ = responder.send(Err(err));
                             continue;
                         }
 
@@ -755,13 +1059,16 @@ impl AudioEngine {
                         } else {
                             None
                         };
+                        let ram_hit = mem_data.is_some();
                         staged_next_file = None;
 
                         let handle = stream_handle.as_ref().unwrap();
                         let new_sink = match Sink::try_new(handle) {
                             Ok(s) => s,
                             Err(sink_err) => {
+                                diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_sink_failed", "err={}", sink_err);
                                 eprintln!("[Cadence AudioEngine] Sink creation failed ({}), reopening selected device...", sink_err);
+                                let reopen_t0 = diagnostics::is_active().then(Instant::now);
                                 let host = cpal::default_host();
                                 let reopen_device = match exact_wasapi_name.as_ref() {
                                     Some(name) => host
@@ -779,6 +1086,8 @@ impl AudioEngine {
                                             current_stream_rate = Some(c.sample_rate().0);
                                             current_stream_channels = Some(c.channels());
                                         }
+                                        let dur_us = reopen_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                        diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, dur_us, "wasapi_stream_reopened", "rate={:?} ch={:?}", current_stream_rate, current_stream_channels);
                                         let sink_result = Sink::try_new(&h);
                                         _stream = Some(s);
                                         stream_handle = Some(h);
@@ -786,7 +1095,10 @@ impl AudioEngine {
                                             Ok(s) => s,
                                             Err(e) => {
                                                 active_backend_endpoint = None;
-                                                let _ = responder.send(Err(format!("Failed to create audio sink after refresh: {}", e)));
+                                                let err = format!("Failed to create audio sink after refresh: {}", e);
+                                                diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_sink_failed", "after_reopen=true err={}", err);
+                                                diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                                let _ = responder.send(Err(err));
                                                 continue;
                                             }
                                         }
@@ -797,11 +1109,13 @@ impl AudioEngine {
                                         current_stream_rate = None;
                                         current_stream_channels = None;
                                         active_backend_endpoint = None;
-                                        let _ = responder.send(Err(format!(
+                                        let err = format!(
                                             "Audio device '{}' is unavailable for playback ({}).",
                                             selected_endpoint.display_label(),
                                             sink_err
-                                        )));
+                                        );
+                                        diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                        let _ = responder.send(Err(err));
                                         continue;
                                     }
                                 }
@@ -816,7 +1130,9 @@ impl AudioEngine {
                             match Decoder::new(Cursor::new(bytes)) {
                                 Ok(src) => new_sink.append(src),
                                 Err(e) => {
-                                    let _ = responder.send(Err(format!("Decoder failed for in-memory stream: {}", e)));
+                                    let err = format!("Decoder failed for in-memory stream: {}", e);
+                                    diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                    let _ = responder.send(Err(err));
                                     continue;
                                 }
                             }
@@ -824,7 +1140,9 @@ impl AudioEngine {
                             let file = match File::open(path) {
                                 Ok(f) => f,
                                 Err(e) => {
-                                    let _ = responder.send(Err(format!("Failed to open file: {}", e)));
+                                    let err = format!("Failed to open file: {}", e);
+                                    diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                    let _ = responder.send(Err(err));
                                     continue;
                                 }
                             };
@@ -832,7 +1150,9 @@ impl AudioEngine {
                             match Decoder::new(reader) {
                                 Ok(src) => new_sink.append(src),
                                 Err(e) => {
-                                    let _ = responder.send(Err(format!("Decoder failed for audio stream: {}", e)));
+                                    let err = format!("Decoder failed for audio stream: {}", e);
+                                    diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                    let _ = responder.send(Err(err));
                                     continue;
                                 }
                             }
@@ -856,10 +1176,37 @@ impl AudioEngine {
                         is_playing_worker.store(true, Ordering::Release);
                         is_paused_worker.store(false, Ordering::Release);
 
+                        if let Some(ref pf) = prev_file {
+                            diag_log!(
+                                DiagCategory::PlaybackLifecycle,
+                                meta.id,
+                                0,
+                                0,
+                                "track_transition",
+                                "from={} to={} ram_prefetch={}",
+                                pf,
+                                file_path,
+                                ram_hit
+                            );
+                        }
+                        diag_log!(
+                            DiagCategory::PlaybackLifecycle,
+                            meta.id,
+                            0,
+                            0,
+                            "play_started",
+                            "transport=wasapi file={} fmt={} rate={:?} ram_prefetch={}",
+                            file_path,
+                            stream_info.format,
+                            current_stream_rate,
+                            ram_hit
+                        );
+                        diag_cmd_end("Play", meta, cmd_t0, None);
                         let _ = responder.send(Ok(stream_info));
                     }
 
-                    AudioWorkerMsg::Pause => {
+                    AudioWorkerMsg::Pause { meta } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Pause", meta);
                         if is_upnp_active {
                             let upnp_clone = Arc::clone(&upnp_worker_ref);
                             std::thread::spawn(move || {
@@ -883,9 +1230,12 @@ impl AudioEngine {
                         }
                         is_paused_worker.store(true, Ordering::Release);
                         is_playing_worker.store(false, Ordering::Release);
+                        diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "paused", "pos={:.2}", accumulated_position.as_secs_f64());
+                        diag_cmd_end("Pause", meta, cmd_t0, None);
                     }
 
-                    AudioWorkerMsg::Resume => {
+                    AudioWorkerMsg::Resume { meta } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Resume", meta);
                         if is_upnp_active {
                             let upnp_clone = Arc::clone(&upnp_worker_ref);
                             std::thread::spawn(move || {
@@ -906,9 +1256,12 @@ impl AudioEngine {
                         }
                         is_playing_worker.store(true, Ordering::Release);
                         is_paused_worker.store(false, Ordering::Release);
+                        diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "resumed", "pos={:.2}", accumulated_position.as_secs_f64());
+                        diag_cmd_end("Resume", meta, cmd_t0, None);
                     }
 
-                    AudioWorkerMsg::Stop => {
+                    AudioWorkerMsg::Stop { meta } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Stop", meta);
                         if is_upnp_active {
                             let upnp_clone = Arc::clone(&upnp_worker_ref);
                             std::thread::spawn(move || {
@@ -931,9 +1284,12 @@ impl AudioEngine {
                         }
                         is_playing_worker.store(false, Ordering::Release);
                         is_paused_worker.store(false, Ordering::Release);
+                        diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "stopped", "endpoint={}", selected_endpoint.id());
+                        diag_cmd_end("Stop", meta, cmd_t0, None);
                     }
 
-                    AudioWorkerMsg::Seek { position_secs } => {
+                    AudioWorkerMsg::Seek { position_secs, meta } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Seek", meta);
                         let target_pos = Duration::from_secs_f64(position_secs.max(0.0));
                         if !is_upnp_active && active_backend_endpoint.as_ref() == Some(&selected_endpoint) {
                             if let (Some(fp), Some(handle)) = (current_file.as_ref(), stream_handle.as_ref()) {
@@ -955,14 +1311,17 @@ impl AudioEngine {
                                             }
                                             sink = Some(new_sink);
                                             accumulated_position = target_pos;
+                                            diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "seeked", "pos={:.2}", target_pos.as_secs_f64());
                                         }
                                     }
                                 }
                             }
                         }
+                        diag_cmd_end("Seek", meta, cmd_t0, None);
                     }
 
-                    AudioWorkerMsg::SetVolume { volume: new_vol } => {
+                    AudioWorkerMsg::SetVolume { volume: new_vol, meta } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "SetVolume", meta);
                         saved_user_volume = new_vol.clamp(0.0, 1.0);
                         if purity_mode {
                             // Preserve bit-perfect stream: lock volume to 1.0
@@ -977,14 +1336,39 @@ impl AudioEngine {
                                 s.set_volume(volume);
                             }
                         }
+                        diag_cmd_end("SetVolume", meta, cmd_t0, None);
                     }
 
-                    AudioWorkerMsg::SetEndpoint { endpoint, responder } => {
+                    AudioWorkerMsg::SetEndpoint { endpoint, source, meta, responder } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "SetEndpoint", meta);
+                        let prev_endpoint = selected_endpoint.clone();
                         let inventory = EndpointInventory::from_host(&upnp_worker_ref);
                         selected_endpoint = endpoint.clone();
                         let resolved = resolve_endpoint_selection(&endpoint, &inventory);
                         let res = match resolved {
                             Err(err_msg) => {
+                                diag_log!(
+                                    DiagCategory::DeviceSelection,
+                                    meta.id,
+                                    0,
+                                    0,
+                                    "endpoint_selection_failed",
+                                    "prev={} requested={} source={} reason={}",
+                                    prev_endpoint.id(),
+                                    endpoint.id(),
+                                    source,
+                                    err_msg
+                                );
+                                diag_log!(
+                                    DiagCategory::AudioRouting,
+                                    meta.id,
+                                    0,
+                                    0,
+                                    "route_rejected",
+                                    "requested={} actual=none decision=unavailable fallback_rejected=true reason={}",
+                                    endpoint.id(),
+                                    err_msg
+                                );
                                 if is_upnp_active {
                                     let upnp_clone = Arc::clone(&upnp_worker_ref);
                                     std::thread::spawn(move || {
@@ -997,6 +1381,9 @@ impl AudioEngine {
                                 is_upnp_active = false;
                                 if let Some(s) = sink.take() {
                                     s.stop();
+                                }
+                                if _stream.is_some() {
+                                    diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=endpoint_unavailable");
                                 }
                                 _stream = None;
                                 stream_handle = None;
@@ -1018,15 +1405,42 @@ impl AudioEngine {
                                 if let Some(s) = sink.take() {
                                     s.stop();
                                 }
+                                if _stream.is_some() {
+                                    diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=set_endpoint_upnp");
+                                }
                                 _stream = None;
                                 stream_handle = None;
                                 current_stream_rate = None;
                                 current_stream_channels = None;
                                 is_upnp_active = true;
-                                active_backend_endpoint = Some(AudioEndpoint::Upnp {
+                                let active_ep = AudioEndpoint::Upnp {
                                     udn: udn.clone(),
                                     friendly_name: friendly_name.clone(),
-                                });
+                                };
+                                active_backend_endpoint = Some(active_ep.clone());
+
+                                diag_log!(
+                                    DiagCategory::DeviceSelection,
+                                    meta.id,
+                                    0,
+                                    0,
+                                    "endpoint_selected",
+                                    "prev={} selected={} source={} reason=user_or_api_switch",
+                                    prev_endpoint.id(),
+                                    active_ep.id(),
+                                    source
+                                );
+                                diag_log!(
+                                    DiagCategory::AudioRouting,
+                                    meta.id,
+                                    0,
+                                    0,
+                                    "route_decision",
+                                    "requested={} actual={} decision=upnp_streamer transfer_playing={}",
+                                    endpoint.id(),
+                                    active_ep.id(),
+                                    was_playing && !is_paused
+                                );
 
                                 if was_playing && !is_paused {
                                     if let Some(fp) = current_file.as_ref() {
@@ -1078,19 +1492,28 @@ impl AudioEngine {
                                         if let Some(s) = sink.take() {
                                             s.stop();
                                         }
+                                        if _stream.is_some() {
+                                            diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=cpal_not_found");
+                                        }
                                         _stream = None;
                                         stream_handle = None;
                                         current_stream_rate = None;
                                         current_stream_channels = None;
                                         active_backend_endpoint = None;
-                                        Err(format!("Audio device '{}' not found", local_ep.display_label()))
+                                        let err = format!("Audio device '{}' not found", local_ep.display_label());
+                                        diag_log!(DiagCategory::DeviceSelection, meta.id, 0, 0, "endpoint_selection_failed", "prev={} requested={} source={} reason=cpal_not_found", prev_endpoint.id(), endpoint.id(), source);
+                                        Err(err)
                                     }
                                     Some(device) => {
                                         if matches!(local_ep, AudioEndpoint::SystemDefault) {
                                             active_os_default_name = device.name().ok();
                                         }
+                                        let wasapi_open_t0 = diagnostics::is_active().then(Instant::now);
+                                        diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_init_start", "endpoint={} source={}", local_ep.id(), source);
                                         match OutputStream::try_from_device(&device) {
                                             Err(e) => {
+                                                let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                                diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, dur_us, "wasapi_stream_init_failed", "endpoint={} err={}", local_ep.id(), e);
                                                 if let Some(s) = sink.take() {
                                                     s.stop();
                                                 }
@@ -1109,6 +1532,18 @@ impl AudioEngine {
                                                     current_stream_rate = None;
                                                     current_stream_channels = None;
                                                 }
+                                                let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                                diag_log!(
+                                                    DiagCategory::WasapiLifecycle,
+                                                    meta.id,
+                                                    0,
+                                                    dur_us,
+                                                    "wasapi_stream_initialized",
+                                                    "endpoint={} rate={:?} ch={:?}",
+                                                    local_ep.id(),
+                                                    current_stream_rate,
+                                                    current_stream_channels
+                                                );
 
                                                 let mut current_pos = accumulated_position.as_secs_f64();
                                                 if let Some(start) = playback_start {
@@ -1122,7 +1557,29 @@ impl AudioEngine {
                                                 }
                                                 _stream = Some(new_s);
                                                 stream_handle = Some(new_h.clone());
-                                                active_backend_endpoint = Some(local_ep);
+                                                active_backend_endpoint = Some(local_ep.clone());
+
+                                                diag_log!(
+                                                    DiagCategory::DeviceSelection,
+                                                    meta.id,
+                                                    0,
+                                                    0,
+                                                    "endpoint_selected",
+                                                    "prev={} selected={} source={} reason=user_or_api_switch",
+                                                    prev_endpoint.id(),
+                                                    local_ep.id(),
+                                                    source
+                                                );
+                                                diag_log!(
+                                                    DiagCategory::AudioRouting,
+                                                    meta.id,
+                                                    0,
+                                                    0,
+                                                    "route_decision",
+                                                    "requested={} actual={} decision=wasapi_shared",
+                                                    endpoint.id(),
+                                                    local_ep.id()
+                                                );
 
                                                 if let Some(fp) = current_file.as_ref() {
                                                     let path = Path::new(fp);
@@ -1154,10 +1611,12 @@ impl AudioEngine {
                                 }
                             }
                         };
+                        diag_cmd_end("SetEndpoint", meta, cmd_t0, res.as_ref().err().map(|s| s.as_str()));
                         let _ = responder.send(res);
                     }
 
-                    AudioWorkerMsg::GetStatus { responder } => {
+                    AudioWorkerMsg::GetStatus { queued_at, responder } => {
+                        let start_t0 = diagnostics::is_active().then(Instant::now);
                         let mut current_pos = accumulated_position.as_secs_f64();
                         if let Some(start) = playback_start {
                             if !is_paused {
@@ -1210,24 +1669,56 @@ impl AudioEngine {
                             signal_path_mode,
                         };
 
+                        if let Some(t0) = start_t0 {
+                            let exec_us = t0.elapsed().as_micros() as u64;
+                            let wait_us = queued_at
+                                .map(|q| q.elapsed().as_micros() as u64)
+                                .unwrap_or(0)
+                                .saturating_sub(exec_us);
+                            if exec_us > 25_000 || wait_us > 50_000 {
+                                diag_log!(
+                                    DiagCategory::AudioEngineCommands,
+                                    0,
+                                    wait_us,
+                                    exec_us,
+                                    "slow_get_status",
+                                    "is_playing={} active={}",
+                                    is_playing,
+                                    status.active_device.as_deref().unwrap_or("none")
+                                );
+                            }
+                        }
+
                         let _ = responder.send(status);
                     }
 
-                    AudioWorkerMsg::SetSettlingDelayMs { delay_ms } => {
+                    AudioWorkerMsg::SetSettlingDelayMs { delay_ms, meta } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "SetSettlingDelayMs", meta);
                         settling_delay_ms = delay_ms.clamp(0, 2000);
                         eprintln!("[Cadence AudioEngine] DAC settling delay set to {} ms", settling_delay_ms);
+                        diag_cmd_end("SetSettlingDelayMs", meta, cmd_t0, None);
                     }
 
-                    AudioWorkerMsg::InvalidateNextTrack => {
+                    AudioWorkerMsg::InvalidateNextTrack { meta } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "InvalidateNextTrack", meta);
+                        let had_staged = staged_next_file.is_some();
                         staged_next_file = None;
                         staged_next_buffer = None;
                         eprintln!("[Cadence AudioEngine] Invalidated staged next-track buffer due to queue mutation.");
+                        if had_staged {
+                            diag_log!(DiagCategory::BackgroundWorkers, meta.id, 0, 0, "prefetch_invalidated", "reason=queue_mutation");
+                        }
+                        diag_cmd_end("InvalidateNextTrack", meta, cmd_t0, None);
                     }
 
-                    AudioWorkerMsg::PrepareNextTrack { file_path, responder } => {
+                    AudioWorkerMsg::PrepareNextTrack { file_path, meta, responder } => {
+                        let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "PrepareNextTrack", meta);
                         let path = Path::new(&file_path);
                         if !path.exists() {
-                            let _ = responder.send(Err(format!("File does not exist: {}", file_path)));
+                            let err = format!("File does not exist: {}", file_path);
+                            diag_log!(DiagCategory::BackgroundWorkers, meta.id, 0, 0, "prefetch_failed", "reason=file_missing path={}", file_path);
+                            diag_cmd_end("PrepareNextTrack", meta, cmd_t0, Some(&err));
+                            let _ = responder.send(Err(err));
                             continue;
                         }
 
@@ -1242,26 +1733,43 @@ impl AudioEngine {
                             );
                             staged_next_file = None;
                             staged_next_buffer = None;
+                            diag_log!(DiagCategory::BackgroundWorkers, meta.id, 0, 0, "prefetch_skipped_budget", "bytes={} path={}", file_size, file_path);
+                            diag_cmd_end("PrepareNextTrack", meta, cmd_t0, None);
                             let _ = responder.send(Ok(false));
                             continue;
                         }
 
                         match std::fs::read(path) {
                             Ok(bytes) => {
+                                let mb = bytes.len() as f64 / (1024.0 * 1024.0);
                                 eprintln!(
                                     "[Cadence AudioEngine] Pre-loaded next track '{}' ({:.1} MB) into RAM with zero disk I/O at transition.",
                                     path.display(),
-                                    bytes.len() as f64 / (1024.0 * 1024.0)
+                                    mb
+                                );
+                                diag_log!(
+                                    DiagCategory::BackgroundWorkers,
+                                    meta.id,
+                                    0,
+                                    cmd_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0),
+                                    "prefetch_loaded",
+                                    "mb={:.1} path={}",
+                                    mb,
+                                    file_path
                                 );
                                 staged_next_file = Some(file_path);
                                 staged_next_buffer = Some(bytes);
+                                diag_cmd_end("PrepareNextTrack", meta, cmd_t0, None);
                                 let _ = responder.send(Ok(true));
                             }
                             Err(e) => {
                                 eprintln!("[Cadence AudioEngine] Pre-load error for '{}': {}", path.display(), e);
                                 staged_next_file = None;
                                 staged_next_buffer = None;
-                                let _ = responder.send(Err(e.to_string()));
+                                let err = e.to_string();
+                                diag_log!(DiagCategory::BackgroundWorkers, meta.id, 0, 0, "prefetch_failed", "err={} path={}", err, file_path);
+                                diag_cmd_end("PrepareNextTrack", meta, cmd_t0, Some(&err));
+                                let _ = responder.send(Err(err));
                             }
                         }
                     }
@@ -1274,8 +1782,11 @@ impl AudioEngine {
             upnp_manager,
             is_playing_atomic,
             is_paused_atomic,
+            is_loading_atomic,
             library_scan_io: Arc::new(parking_lot::Mutex::new(())),
             playback_stopped_at,
+            cmd_seq,
+            pending_cmds,
         }
     }
 
@@ -1287,14 +1798,94 @@ impl AudioEngine {
         self.is_paused_atomic.load(Ordering::Relaxed)
     }
 
+    pub fn is_loading(&self) -> bool {
+        self.is_loading_atomic.load(Ordering::Relaxed)
+    }
+
+    pub fn hygiene_state(&self) -> HygieneState {
+        if self.is_playing() {
+            return HygieneState::Playing;
+        }
+        if self.is_paused() {
+            return HygieneState::Paused;
+        }
+        if self.is_loading() {
+            return HygieneState::Loading;
+        }
+        let stopped_guard = self.playback_stopped_at.lock();
+        match *stopped_guard {
+            Some(stopped_at) => {
+                let elapsed = stopped_at.elapsed();
+                if elapsed < crate::diagnostics::COOLDOWN_DURATION {
+                    let rem = crate::diagnostics::COOLDOWN_DURATION
+                        .saturating_sub(elapsed)
+                        .as_secs()
+                        .max(1);
+                    HygieneState::Cooldown {
+                        remaining_secs: rem,
+                    }
+                } else {
+                    HygieneState::Idle
+                }
+            }
+            None => HygieneState::Idle,
+        }
+    }
+
+    fn enqueue_cmd(&self, cmd_name: &'static str) -> CmdMeta {
+        if !diagnostics::is_active() {
+            return CmdMeta::NONE;
+        }
+        let id = self.cmd_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let depth = self.pending_cmds.fetch_add(1, Ordering::Relaxed) + 1;
+        let queued_at = Some(Instant::now());
+        diag_log!(
+            DiagCategory::AudioEngineCommands,
+            id,
+            0,
+            0,
+            "cmd_queued",
+            "cmd={} queue_depth={}",
+            cmd_name,
+            depth
+        );
+        CmdMeta { id, queued_at }
+    }
+
     pub(crate) fn try_library_scan_io(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
-        try_scan_io(&self.library_scan_io, || self.is_playing() || self.is_paused())
+        let res = try_scan_io(&self.library_scan_io, || {
+            self.is_playing() || self.is_paused() || self.is_loading()
+        });
+        if res.is_none() {
+            diag_log!(
+                DiagCategory::AudioHygiene,
+                0,
+                0,
+                0,
+                "hygiene_scan_io_blocked",
+                "playing={} paused={} loading={}",
+                self.is_playing(),
+                self.is_paused(),
+                self.is_loading()
+            );
+        }
+        res
     }
 
     pub(crate) fn try_curate_draft_read(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
         let permit = self.try_library_scan_io()?;
         let cooled_down = self.playback_stopped_at.lock()
             .is_none_or(|stopped_at| stopped_at.elapsed() >= Duration::from_secs(30));
+        if !cooled_down {
+            diag_log!(
+                DiagCategory::AudioHygiene,
+                0,
+                0,
+                0,
+                "hygiene_curate_read_deferred",
+                "reason=cooldown_active"
+            );
+        }
         cooled_down.then_some(permit)
     }
 
@@ -1303,9 +1894,11 @@ impl AudioEngine {
         // another operation while this request loads audio and publishes the playback state.
         let _scan_guard = self.library_scan_io.lock();
         let (resp_tx, resp_rx) = channel();
+        let meta = self.enqueue_cmd("Play");
         self.tx
             .send(AudioWorkerMsg::Play {
                 file_path: file_path.to_string(),
+                meta,
                 responder: resp_tx,
             })
             .map_err(|e| format!("Audio worker disconnected: {}", e))?;
@@ -1316,40 +1909,59 @@ impl AudioEngine {
     }
 
     pub fn pause(&self) -> Result<(), String> {
+        let meta = self.enqueue_cmd("Pause");
         self.tx
-            .send(AudioWorkerMsg::Pause)
+            .send(AudioWorkerMsg::Pause { meta })
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
     pub fn resume(&self) -> Result<(), String> {
+        let meta = self.enqueue_cmd("Resume");
         self.tx
-            .send(AudioWorkerMsg::Resume)
+            .send(AudioWorkerMsg::Resume { meta })
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
     pub fn stop(&self) -> Result<(), String> {
+        let meta = self.enqueue_cmd("Stop");
         self.tx
-            .send(AudioWorkerMsg::Stop)
+            .send(AudioWorkerMsg::Stop { meta })
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
     pub fn seek(&self, position_secs: f64) -> Result<(), String> {
+        let meta = self.enqueue_cmd("Seek");
         self.tx
-            .send(AudioWorkerMsg::Seek { position_secs })
+            .send(AudioWorkerMsg::Seek {
+                position_secs,
+                meta,
+            })
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
     pub fn set_volume(&self, volume: f32) -> Result<(), String> {
+        let meta = self.enqueue_cmd("SetVolume");
         self.tx
-            .send(AudioWorkerMsg::SetVolume { volume })
+            .send(AudioWorkerMsg::SetVolume { volume, meta })
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
     pub fn set_audio_endpoint(&self, endpoint: AudioEndpoint) -> Result<(), String> {
+        self.set_audio_endpoint_with_source(endpoint, "api")
+    }
+
+    pub fn set_audio_endpoint_with_source(
+        &self,
+        endpoint: AudioEndpoint,
+        source: &'static str,
+    ) -> Result<(), String> {
         let (resp_tx, resp_rx) = channel();
+        let meta = self.enqueue_cmd("SetEndpoint");
         self.tx
             .send(AudioWorkerMsg::SetEndpoint {
                 endpoint,
+                source,
+                meta,
                 responder: resp_tx,
             })
             .map_err(|e| format!("Audio worker error: {}", e))?;
@@ -1360,16 +1972,26 @@ impl AudioEngine {
     }
 
     pub fn set_audio_device(&self, device_name: &str) -> Result<(), String> {
+        self.set_audio_device_with_source(device_name, "legacy_api")
+    }
+
+    pub fn set_audio_device_with_source(
+        &self,
+        device_name: &str,
+        source: &'static str,
+    ) -> Result<(), String> {
         let upnp_devices = self.upnp_manager.get_devices();
         let endpoint = AudioEndpoint::from_legacy_string(device_name, &upnp_devices);
-        self.set_audio_endpoint(endpoint)
+        self.set_audio_endpoint_with_source(endpoint, source)
     }
 
     pub fn set_purity_mode(&self, enabled: bool) -> Result<bool, String> {
         let (resp_tx, resp_rx) = channel();
+        let meta = self.enqueue_cmd("SetPurityMode");
         self.tx
             .send(AudioWorkerMsg::SetPurityMode {
                 enabled,
+                meta,
                 responder: resp_tx,
             })
             .map_err(|e| format!("Audio worker error: {}", e))?;
@@ -1391,7 +2013,15 @@ impl AudioEngine {
 
     pub fn get_status(&self) -> PlaybackStatus {
         let (resp_tx, resp_rx) = channel();
-        if self.tx.send(AudioWorkerMsg::GetStatus { responder: resp_tx }).is_ok() {
+        let queued_at = diagnostics::is_active().then(Instant::now);
+        if self
+            .tx
+            .send(AudioWorkerMsg::GetStatus {
+                queued_at,
+                responder: resp_tx,
+            })
+            .is_ok()
+        {
             if let Ok(status) = resp_rx.recv() {
                 return status;
             }
@@ -1419,9 +2049,11 @@ impl AudioEngine {
 
     pub fn prepare_next_track(&self, file_path: &str) -> Result<bool, String> {
         let (resp_tx, resp_rx) = channel();
+        let meta = self.enqueue_cmd("PrepareNextTrack");
         self.tx
             .send(AudioWorkerMsg::PrepareNextTrack {
                 file_path: file_path.to_string(),
+                meta,
                 responder: resp_tx,
             })
             .map_err(|e| format!("Audio worker error: {}", e))?;
@@ -1429,14 +2061,16 @@ impl AudioEngine {
     }
 
     pub fn invalidate_next_track(&self) -> Result<(), String> {
+        let meta = self.enqueue_cmd("InvalidateNextTrack");
         self.tx
-            .send(AudioWorkerMsg::InvalidateNextTrack)
+            .send(AudioWorkerMsg::InvalidateNextTrack { meta })
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
     pub fn set_settling_delay_ms(&self, delay_ms: u64) -> Result<(), String> {
+        let meta = self.enqueue_cmd("SetSettlingDelayMs");
         self.tx
-            .send(AudioWorkerMsg::SetSettlingDelayMs { delay_ms })
+            .send(AudioWorkerMsg::SetSettlingDelayMs { delay_ms, meta })
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 

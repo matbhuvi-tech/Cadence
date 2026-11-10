@@ -342,7 +342,7 @@ async fn set_device(
     }
     state
         .engine
-        .set_audio_device(&payload.device_name)
+        .set_audio_device_with_source(&payload.device_name, "remote_http")
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let status = state.engine.get_status();
     state.broadcast_state_change(&status);
