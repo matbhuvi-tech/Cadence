@@ -20,12 +20,15 @@ import {
   Smartphone,
   PanelRight,
   KeyRound,
+  Settings,
+  SlidersHorizontal,
+  Activity,
 } from 'lucide-react'
 import { Track, Release, Work, Credit, StorageMount, AuditIssue, AlbumDisplayMode, Playlist, ActiveEntityScope, NavigationAnchor } from './core/types'
 import { graphEngine, FacetFilterState } from './core/graphEngine'
 import type { CurateCommitRow } from './core/curateCommit'
 import { buildCurateCockpitCatalogProps } from './core/curateWorkflow'
-import { loadPrioritySettings, loadDismissedProblems } from './core/curatePriorities'
+import { loadPrioritySettings, loadDismissedProblems, savePrioritySettings, type PrioritySettings } from './core/curatePriorities'
 import type { CurateDraft } from './core/curateDraft'
 import { auditService } from './services/auditService'
 import { storagePersistence } from './core/storagePersistence'
@@ -49,7 +52,7 @@ import { TutorialActions } from './tutorial/tutorialSteps'
 import { AudioPlayerProvider, useAudioPlayer } from './context/AudioPlayerContext'
 import { NowPlayingBar } from './components/AudioPlayer/NowPlayingBar'
 import { sqliteLibraryService } from './services/sqliteLibraryService'
-import { tauriBridge } from './services/tauriBridge'
+import { tauriBridge, type CaptureMode } from './services/tauriBridge'
 import { ActivityPill } from './components/CommandBar/ActivityPill'
 import { CommitStatusPill } from './components/CommandBar/CommitStatusPill'
 import { ActivityCenterPopover } from './components/CommandBar/ActivityCenterPopover'
@@ -57,6 +60,7 @@ import { StorageManagerModal } from './components/Modals/StorageManagerModal'
 import { QuarantineLogModal } from './components/Modals/QuarantineLogModal'
 import { NormalizationRulesModal } from './components/Modals/NormalizationRulesModal'
 import { MobileRemoteModal } from './components/Modals/MobileRemoteModal'
+import { CadenceSettingsModal, type CadenceSettingsTab } from './components/Modals/CadenceSettingsModal'
 import { MaintainCockpit, MaintainSubTab } from './components/Maintain/MaintainCockpit'
 import { FocusedWorkbench } from './components/CenterStage/FocusedWorkbench'
 import { CurationWorkbench } from './components/Curate/CurationWorkbench'
@@ -74,7 +78,7 @@ import { useStagedChanges } from './hooks/useStagedChanges'
 import { useMaintenanceWorker } from './hooks/useMaintenanceWorker'
 import { GeminiSetupScreen } from './components/GeminiSetupScreen'
 
-function AppContent() {
+export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   // Primary Graph State
   const [catalogTracks, setTracks] = useState<Track[]>(() => graphEngine.getAllTracks())
   const [catalogReleases, setReleases] = useState<Release[]>(() => graphEngine.getAllReleases())
@@ -259,6 +263,35 @@ function AppContent() {
   const [isQuarantineModalOpen, setIsQuarantineModalOpen] = useState(false)
   const [isNormalizationRulesModalOpen, setIsNormalizationRulesModalOpen] = useState(false)
   const [isRemoteModalOpen, setIsRemoteModalOpen] = useState(false)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<CadenceSettingsTab>('diagnostics')
+  const [debugMode, setDebugMode] = useState<CaptureMode>('off')
+
+  useEffect(() => {
+    let mounted = true
+    if (tauriBridge.isTauri()) {
+      tauriBridge.getDebugLogState().then((s) => {
+        if (mounted) setDebugMode(s.mode)
+      }).catch(() => {})
+    }
+    const unsub = tauriBridge.subscribeDebugLogState((s) => {
+      if (mounted) setDebugMode(s.mode)
+    })
+    return () => {
+      mounted = false
+      unsub()
+    }
+  }, [])
+
+  const openSettings = useCallback((tab: CadenceSettingsTab = 'diagnostics') => {
+    setSettingsTab(tab)
+    setIsSettingsOpen(true)
+  }, [])
+
+  const handleSavePrioritySettings = useCallback((next: PrioritySettings) => {
+    savePrioritySettings(next)
+    setPrioritySettings(next)
+  }, [])
   const [scanTelemetry, setScanTelemetry] = useState<ScanProgressPayload>({
     stage: 'idle',
     processedCount: 0,
@@ -409,6 +442,9 @@ function AppContent() {
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
         e.preventDefault()
         setIsImportModalOpen(true)
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === '<' || e.key === ',' || e.code === 'Comma')) {
+        e.preventDefault()
+        openSettings('diagnostics')
       } else if ((e.ctrlKey || e.metaKey) && e.key === ',') {
         e.preventDefault()
         setIsStorageManagerOpen(true)
@@ -1567,6 +1603,35 @@ function AppContent() {
       icon: <HardDrive className="w-4 h-4 text-[#00F5FF]" />,
       action: () => setIsStorageManagerOpen(true),
     },
+    {
+      id: 'cmd-open-cadence-settings',
+      title: 'Open Cadence Settings (Diagnostics, Priorities & Gemini)',
+      category: 'NAVIGATION',
+      shortcut: '⌘⇧,',
+      icon: <Settings className="w-4 h-4 text-[#D4AF37]" />,
+      action: () => openSettings('diagnostics'),
+    },
+    {
+      id: 'cmd-settings-diagnostics',
+      title: 'Settings: Diagnostics & Debug Logs',
+      category: 'ACTION',
+      icon: <Activity className="w-4 h-4 text-[#D4AF37]" />,
+      action: () => openSettings('diagnostics'),
+    },
+    {
+      id: 'cmd-settings-priorities',
+      title: 'Settings: Priority Settings (Curate Triage)',
+      category: 'ACTION',
+      icon: <SlidersHorizontal className="w-4 h-4 text-amber-400" />,
+      action: () => openSettings('priorities'),
+    },
+    {
+      id: 'cmd-settings-gemini',
+      title: 'Settings: Gemini API Key & Model',
+      category: 'ACTION',
+      icon: <KeyRound className="w-4 h-4 text-cyan-300" />,
+      action: () => openSettings('gemini'),
+    },
   ]
 
   const uncommittedCount = tracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
@@ -1685,6 +1750,32 @@ function AppContent() {
             className="p-1.5 rounded-[7px] bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED] transition-all cursor-pointer"
           >
             <Smartphone className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Always-Visible Cadence Settings */}
+          <button
+            type="button"
+            onClick={() => openSettings('diagnostics')}
+            aria-label="Open Cadence Settings"
+            title="Cadence Settings (⌘⇧,)"
+            className={`relative p-1.5 rounded-[7px] border transition-all cursor-pointer flex items-center gap-1.5 ${
+              isSettingsOpen
+                ? 'bg-white/[0.15] border-[#D4AF37]/50 text-[#D4AF37]'
+                : debugMode !== 'off'
+                ? 'bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 border-[#D4AF37]/30 text-[#EDEDED]'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED]'
+            }`}
+          >
+            <Settings className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline text-[11px] font-medium">Settings</span>
+            {debugMode !== 'off' && (
+              <span
+                aria-hidden="true"
+                className={`w-1.5 h-1.5 rounded-full ${
+                  debugMode === 'diagnostic_capture' ? 'bg-rose-400 animate-pulse' : 'bg-[#D4AF37]'
+                }`}
+              />
+            )}
           </button>
 
           {/* Sidecar Drawer Toggle (Queue / Playlists) */}
@@ -2367,6 +2458,22 @@ function AppContent() {
         onClose={() => setIsRemoteModalOpen(false)}
       />
 
+      {/* Unified Always-Accessible Cadence Settings */}
+      <CadenceSettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        activeTab={settingsTab}
+        onTabChange={setSettingsTab}
+        prioritySettings={prioritySettings}
+        prioritySummary={curateCatalog.summary}
+        onSavePrioritySettings={handleSavePrioritySettings}
+        onGeminiSaved={() => showToast('Gemini configuration updated')}
+        onGeminiRemoved={() => {
+          setIsSettingsOpen(false)
+          onGeminiRemoved?.()
+        }}
+      />
+
       {/* Audiophile Sanctuary Listening Lounge Overlay */}
       <SanctuaryListeningLounge
         isOpen={isSanctuaryOpen}
@@ -2448,7 +2555,6 @@ function AppContent() {
 
 export function App() {
   const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null)
-  const [showGeminiConfig, setShowGeminiConfig] = useState(false)
 
   useEffect(() => {
     if (!tauriBridge.isTauri()) {
@@ -2473,9 +2579,7 @@ export function App() {
 
   return (
     <AudioPlayerProvider>
-      <AppContent />
-      {tauriBridge.isTauri() && <button type="button" onClick={() => setShowGeminiConfig(true)} title="Gemini configuration" aria-label="Gemini configuration" className="fixed bottom-24 right-5 z-40 rounded-full border border-white/10 bg-[#141922] p-3 text-cyan-300 shadow-lg hover:bg-[#202936]"><KeyRound size={18} /></button>}
-      {showGeminiConfig && <div className="fixed inset-0 z-50 overflow-y-auto bg-black/80"><GeminiSetupScreen isConfigured onConfigured={() => setShowGeminiConfig(false)} onRemoved={() => { setGeminiConfigured(false); setShowGeminiConfig(false) }} onClose={() => setShowGeminiConfig(false)} /></div>}
+      <AppContent onGeminiRemoved={() => setGeminiConfigured(false)} />
     </AudioPlayerProvider>
   )
 }

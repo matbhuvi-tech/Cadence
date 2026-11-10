@@ -34,10 +34,9 @@ import {
   Disc,
 } from 'lucide-react'
 import { CurateArtworkThumbnail } from './CurateArtworkThumbnail'
-import { CuratePriorityPopover } from './CuratePriorityPopover'
 import { SelectedOutputCard } from './SelectedOutputCard'
 import {
-  evaluateCatalogProblems, filterAndRankCurateAlbums, loadDismissedProblems, loadPrioritySettings, savePrioritySettings,
+  evaluateCatalogProblems, filterAndRankCurateAlbums, loadDismissedProblems, loadPrioritySettings,
   loadCurateFilterState, saveCurateFilterState, resolveFilterTransition, saveDismissedProblem, removeDismissedProblem,
   type CurateFilterState, type CurateProblemCategoryId, type CatalogProblemSummary, type PrioritySettings, type DismissedProblemsMap,
 } from '../../core/curatePriorities'
@@ -388,7 +387,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   summary,
   prioritySettings: settingsProp,
   dismissedProblems: dismissalsProp,
-  onPrioritySettingsChange,
+  onPrioritySettingsChange: _onPrioritySettingsChange,
   onDismissedProblemsChange,
   auditIssues = emptyAuditIssues,
   initialSelectedAlbumId,
@@ -402,7 +401,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   supersededCommitIds,
   isPlaying = false,
 }) => {
-  const [localSettings, setPrioritySettings] = useState(loadPrioritySettings)
+  const [localSettings] = useState(loadPrioritySettings)
   const [localDismissals, setDismissedProblems] = useState(loadDismissedProblems)
   const prioritySettings = settingsProp ?? localSettings
   const dismissedProblems = dismissalsProp ?? localDismissals
@@ -638,8 +637,16 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   }, [rawReleases, rawTracks])
 
   const previousFiltered = useRef(filteredAlbums)
+  const previousPrioritySettings = useRef(prioritySettings)
   const preserveSelectionOnRank = useRef(false)
   const directSelection = useRef(initialSelectedAlbumId)
+  useEffect(() => {
+    if (previousPrioritySettings.current !== prioritySettings) {
+      previousPrioritySettings.current = prioritySettings
+      preserveSelectionOnRank.current = true
+      directSelection.current = selectedAlbumId
+    }
+  }, [prioritySettings, selectedAlbumId])
   useEffect(() => {
     directSelection.current = initialSelectedAlbumId
     if (initialSelectedAlbumId) setSelectedAlbumId(initialSelectedAlbumId)
@@ -1813,17 +1820,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         {/* Right Action Icons */}
         <div className="flex items-center gap-2">
           {commitQueueHostRef && <div ref={commitQueueHostRef} />}
-          <CuratePriorityPopover
-            settings={prioritySettings}
-            summary={problemSummary}
-            onSave={settings => {
-              preserveSelectionOnRank.current = true
-              directSelection.current = selectedAlbumId
-              savePrioritySettings(settings)
-              setPrioritySettings(settings)
-              onPrioritySettingsChange?.(settings)
-            }}
-          />
           {/* Audiophile Transport Status Indicator */}
           <div
             className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 ${

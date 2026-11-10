@@ -24,6 +24,7 @@
     "test:queue-sync": "tsx src/test/testRemoteQueueSync.ts",
     "test:endpoint-routing": "tsx src/test/testEndpointRouting.ts",
     "test:diagnostics": "tsx src/test/testDebugDiagnostics.ts",
+    "test:settings": "tsx src/test/testCadenceSettingsModal.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

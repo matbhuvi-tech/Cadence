@@ -331,3 +331,27 @@
   animation: pulse-subtle 2.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
+/* Native <dialog> modal scroll containment & backdrop */
+dialog.cadence-modal:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.cadence-modal::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: rgba(5, 7, 11, 0.78);
+  backdrop-filter: blur(8px);
+}
+
+/* Single-row accessible tabs with non-color active indicator */
+[role="tab"].cadence-settings-tab {
+  position: relative;
+}
+
+[role="tab"].cadence-settings-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  border-block-end: 2px solid var(--accent-gold, #D4AF37);
+}
+

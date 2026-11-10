@@ -103,6 +103,7 @@ class TauriBridgeService {
   private activeDeviceId: string = 'default'
   private currentVolume: number = 1
   private playbackStateListeners: ((state: string) => void)[] = []
+  private debugLogStateListeners: ((state: DebugLogState) => void)[] = []
 
   /**
    * Subscribe to playback state changes (Playing, Paused, Stopped, Loading).
@@ -112,6 +113,24 @@ class TauriBridgeService {
     return () => {
       this.playbackStateListeners = this.playbackStateListeners.filter((l) => l !== fn)
     }
+  }
+
+  /** Subscribe to updates whenever debug logging mode or diagnostics counts change. */
+  public subscribeDebugLogState(fn: (state: DebugLogState) => void): () => void {
+    this.debugLogStateListeners.push(fn)
+    return () => {
+      this.debugLogStateListeners = this.debugLogStateListeners.filter((l) => l !== fn)
+    }
+  }
+
+  private emitDebugLogState(state: DebugLogState): DebugLogState {
+    setFrontendCaptureMode(state.mode)
+    this.debugLogStateListeners.forEach((fn) => {
+      try {
+        fn(state)
+      } catch {}
+    })
+    return state
   }
 
   public notifyPlaybackState(state: string): void {
@@ -1488,31 +1507,28 @@ class TauriBridgeService {
   }
 
   public async getDebugLogState(): Promise<DebugLogState> {
-    if (this.isTauri()) {
-      const state = await invoke<DebugLogState>('get_debug_log_state')
-      setFrontendCaptureMode(state.mode)
-      return state
-    }
-    return {
-      mode: frontendDiagnostics.getMode(),
-      ringCapacity: 256,
-      bufferedApprox: frontendDiagnostics.getBufferedCount(),
-      droppedCount: frontendDiagnostics.getDroppedCount(),
-      persistedCount: 0,
-      hygieneState: 'idle',
-      cooldownRemainingSecs: null,
-      logFilePath: null,
-      logDirPath: null,
-      lastFlushError: null,
-    }
+    const state = this.isTauri()
+      ? await invoke<DebugLogState>('get_debug_log_state')
+      : {
+          mode: frontendDiagnostics.getMode(),
+          ringCapacity: 256,
+          bufferedApprox: frontendDiagnostics.getBufferedCount(),
+          droppedCount: frontendDiagnostics.getDroppedCount(),
+          persistedCount: 0,
+          hygieneState: 'idle',
+          cooldownRemainingSecs: null,
+          logFilePath: null,
+          logDirPath: null,
+          lastFlushError: null,
+        }
+    return this.emitDebugLogState(state)
   }
 
   public async setDebugLogging(mode: CaptureMode): Promise<DebugLogState> {
     setFrontendCaptureMode(mode)
     if (this.isTauri()) {
       const state = await invoke<DebugLogState>('set_debug_logging', { mode })
-      setFrontendCaptureMode(state.mode)
-      return state
+      return this.emitDebugLogState(state)
     }
     return this.getDebugLogState()
   }
@@ -1526,14 +1542,16 @@ class TauriBridgeService {
 
   public async clearDebugLogs(): Promise<DebugLogState> {
     if (this.isTauri()) {
-      return await invoke<DebugLogState>('clear_debug_logs')
+      const state = await invoke<DebugLogState>('clear_debug_logs')
+      return this.emitDebugLogState(state)
     }
     return this.getDebugLogState()
   }
 
   public async flushDebugLogsIfIdle(): Promise<DebugLogState> {
     if (this.isTauri()) {
-      return await invoke<DebugLogState>('flush_debug_logs_if_idle')
+      const state = await invoke<DebugLogState>('flush_debug_logs_if_idle')
+      return this.emitDebugLogState(state)
     }
     return this.getDebugLogState()
   }
