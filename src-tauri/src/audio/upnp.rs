@@ -498,7 +498,7 @@ fn parse_range(header_value: &str, len: u64) -> Result<(u64, u64), ()> {
     Ok((start, end))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpnpDevice {
     pub id: String,
@@ -1093,86 +1093,42 @@ impl UpnpManager {
         Self::extract_xml_tag(service_xml, "controlURL")
     }
 
-    /// Set active UPnP device by friendly name, ID, model, or partial match
-    pub fn set_active_device(&self, name_or_id: &str) -> Result<(), String> {
-        let clean = name_or_id.trim_start_matches("[UPnP]").trim();
-        let clean_lower = clean.to_lowercase();
+    /// Resolve a UPnP device from the cached inventory strictly by UDN (`upnp:<udn>` or `uuid:...`)
+    /// or exact `[UPnP] <friendly_name>` label. Never performs substring matching or network discovery.
+    pub fn find_device_exact(&self, target: &str) -> Option<UpnpDevice> {
         let devices = self.devices.lock();
+        if let Some(udn) = target.strip_prefix("upnp:") {
+            return devices.iter().find(|d| d.id == udn).cloned();
+        }
+        if target.starts_with("uuid:") {
+            return devices.iter().find(|d| d.id == target).cloned();
+        }
+        if let Some(friendly) = target.strip_prefix("[UPnP]") {
+            let clean = friendly.trim();
+            return devices.iter().find(|d| d.friendly_name == clean).cloned();
+        }
+        devices.iter().find(|d| d.id == target).cloned()
+    }
 
-        let matches_device = |d: &UpnpDevice| -> bool {
-            if d.id == name_or_id || d.friendly_name == name_or_id || format!("[UPnP] {}", d.friendly_name) == name_or_id {
-                return true;
-            }
-            let fn_lower = d.friendly_name.to_lowercase();
-            let mn_lower = d.model_name.as_deref().map(|s| s.to_lowercase()).unwrap_or_default();
-            let md_lower = d.model_description.as_deref().map(|s| s.to_lowercase()).unwrap_or_default();
-            let mfg_lower = d.manufacturer.as_deref().map(|s| s.to_lowercase()).unwrap_or_default();
+    pub fn set_active_device_exact(&self, device: UpnpDevice) {
+        eprintln!(
+            "[Cadence UPnP] Active device explicitly set to '{}' ({}) at {}",
+            device.friendly_name, device.id, device.control_url
+        );
+        let mut active = self.active_device.lock();
+        *active = Some(device);
+    }
 
-            // Direct equality (case-insensitive)
-            if fn_lower == clean_lower || mn_lower == clean_lower || md_lower == clean_lower {
-                return true;
-            }
-
-            // Mutual substring containment (e.g. "hifi rose (Rose-67)" contains "rose-67" or "hifi rose")
-            if fn_lower.contains(&clean_lower) || clean_lower.contains(&fn_lower) {
-                return true;
-            }
-            if !mn_lower.is_empty() && (mn_lower.contains(&clean_lower) || clean_lower.contains(&mn_lower)) {
-                return true;
-            }
-            if !md_lower.is_empty() && (md_lower.contains(&clean_lower) || clean_lower.contains(&md_lower)) {
-                return true;
-            }
-            if !mfg_lower.is_empty() && (mfg_lower.contains(&clean_lower) || clean_lower.contains(&mfg_lower)) {
-                return true;
-            }
-
-            // Keyword matching: e.g. "rose" in both
-            if (clean_lower.contains("rose") || clean_lower.contains("rs130"))
-                && (fn_lower.contains("rose") || md_lower.contains("rose") || mn_lower.contains("rs130")) {
-                return true;
-            }
-
-            // AVM / Anthem matching
-            if (clean_lower.contains("avm") || clean_lower.contains("anthem"))
-                && (fn_lower.contains("avm") || fn_lower.contains("anthem")) {
-                return true;
-            }
-
-            false
-        };
-
-        let found = devices.iter().find(|d| matches_device(d)).cloned();
-
+    /// Set active UPnP device strictly by UDN or exact `[UPnP] <friendly_name>` label.
+    /// Does not perform fuzzy substring matching or synchronous SSDP discovery.
+    pub fn set_active_device(&self, name_or_id: &str) -> Result<(), String> {
+        let found = self.find_device_exact(name_or_id);
         match found {
             Some(dev) => {
-                eprintln!(
-                    "[Cadence UPnP] Active device successfully set to '{}' ({:?}) at {}",
-                    dev.friendly_name, dev.model_name, dev.control_url
-                );
-                let mut active = self.active_device.lock();
-                *active = Some(dev);
+                self.set_active_device_exact(dev);
                 Ok(())
             }
-            None => {
-                drop(devices);
-                // Attempt synchronous SSDP discovery if cache was empty or device was newly connected
-                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-                if let Ok(runtime) = rt {
-                    let discovered = runtime.block_on(async { self.discover_devices().await });
-                    let found_retry = discovered.into_iter().find(|d| matches_device(d));
-                    if let Some(dev) = found_retry {
-                        eprintln!(
-                            "[Cadence UPnP] Discovered and set active device to '{}' ({:?}) at {}",
-                            dev.friendly_name, dev.model_name, dev.control_url
-                        );
-                        let mut active = self.active_device.lock();
-                        *active = Some(dev);
-                        return Ok(());
-                    }
-                }
-                Err(format!("UPnP device '{}' not found", name_or_id))
-            }
+            None => Err(format!("UPnP device '{}' is unavailable", name_or_id)),
         }
     }
 
@@ -1197,7 +1153,35 @@ impl UpnpManager {
             .replace('\'', "&apos;")
     }
 
-    /// Play a local file through the active UPnP renderer
+    /// Play a local file through an explicitly selected UPnP renderer by UDN.
+    pub async fn play_file_on_device(
+        &self,
+        target_udn: &str,
+        file_path: &Path,
+        duration_secs: f64,
+        title: &str,
+        artist: &str,
+        album: &str,
+    ) -> Result<(), String> {
+        let device = self
+            .devices
+            .lock()
+            .iter()
+            .find(|d| d.id == target_udn)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Selected UPnP renderer '{}' is unavailable.",
+                    target_udn
+                )
+            })?;
+        *self.active_device.lock() = Some(device.clone());
+
+        self.play_file_with_device(device, file_path, duration_secs, title, artist, album)
+            .await
+    }
+
+    /// Play a local file through the currently active UPnP renderer without implicit overrides.
     pub async fn play_file(
         &self,
         file_path: &Path,
@@ -1206,26 +1190,27 @@ impl UpnpManager {
         artist: &str,
         album: &str,
     ) -> Result<(), String> {
-        let device = {
-            let mut active = self.active_device.lock();
-            let should_reselect = match active.as_ref() {
-                None => true,
-                Some(current) => current.is_display_device(),
-            };
-            if should_reselect {
-                let devs = self.devices.lock();
-                if let Some(best) = devs.iter().find(|d| !d.is_display_device()).cloned() {
-                    eprintln!(
-                        "[Cadence UPnP Streamer] Overriding display device with dedicated network streamer '{}' (score {}) for playback",
-                        best.friendly_name, best.priority_score()
-                    );
-                    *active = Some(best);
-                }
-            }
-            active
-                .clone()
-                .ok_or_else(|| "No active UPnP audio streamer selected. Please select your network streamer in Audio Outputs.".to_string())?
-        };
+        let device = self
+            .active_device
+            .lock()
+            .clone()
+            .ok_or_else(|| {
+                "No active UPnP audio streamer selected. Please select your network streamer in Audio Outputs.".to_string()
+            })?;
+
+        self.play_file_with_device(device, file_path, duration_secs, title, artist, album)
+            .await
+    }
+
+    async fn play_file_with_device(
+        &self,
+        device: UpnpDevice,
+        file_path: &Path,
+        duration_secs: f64,
+        title: &str,
+        artist: &str,
+        album: &str,
+    ) -> Result<(), String> {
 
         eprintln!(
             "[Cadence UPnP Streamer] Initiating bit-perfect stream to '{}' [{}] at {}",
@@ -1543,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn test_smart_device_matching() {
+    fn test_exact_device_matching_rejects_fuzzy_substrings() {
         let manager = UpnpManager::new();
         let rose = UpnpDevice {
             id: "uuid:00000000-0000-0000-0000-000000000001".into(),
@@ -1565,27 +1550,85 @@ mod tests {
             control_url: "http://192.0.2.30:9197/action".into(),
         };
 
-        // Cache devices in reverse order (monitor first, as SSDP often returns)
         *manager.devices.lock() = vec![monitor, rose];
 
-        // 1. Match exact friendly name
-        assert!(manager.set_active_device("ROSE-67").is_ok());
+        // Typed ID & UDN must resolve strictly
+        assert!(manager
+            .set_active_device("upnp:uuid:00000000-0000-0000-0000-000000000001")
+            .is_ok());
         assert_eq!(manager.get_active_device().unwrap().friendly_name, "ROSE-67");
 
-        // 2. Match with [UPnP] prefix
+        // Switching explicitly to another UDN selects that exact renderer (no monitor override)
+        assert!(manager
+            .set_active_device("uuid:00000000-0000-0000-0000-000000000003")
+            .is_ok());
+        assert_eq!(
+            manager.get_active_device().unwrap().id,
+            "uuid:00000000-0000-0000-0000-000000000003"
+        );
+
+        // Explicit [UPnP] prefix + exact friendly_name works for legacy remote/PWA strings
         assert!(manager.set_active_device("[UPnP] ROSE-67").is_ok());
         assert_eq!(manager.get_active_device().unwrap().friendly_name, "ROSE-67");
 
-        // 3. Match user phrase "hifi rose (Rose-67)"
-        assert!(manager.set_active_device("hifi rose (Rose-67)").is_ok());
-        assert_eq!(manager.get_active_device().unwrap().friendly_name, "ROSE-67");
+        // Fuzzy substrings, model/brand names, and WASAPI names must never match a UPnP endpoint
+        for non_matching in [
+            "HiFi Rose",
+            "RS130",
+            "hifi rose (Rose-67)",
+            "ROSE-67",
+            "ROS",
+            "Speakers (Game-Audeze Maxwell)",
+            "Odyssey G85SB (NVIDIA High Definition Audio)",
+        ] {
+            assert!(
+                manager.find_device_exact(non_matching).is_none(),
+                "Expected '{}' not to match any UPnP endpoint",
+                non_matching
+            );
+            assert!(
+                manager.set_active_device(non_matching).is_err(),
+                "Expected set_active_device('{}') to fail",
+                non_matching
+            );
+        }
+    }
 
-        // 4. Match brand "HiFi Rose"
-        assert!(manager.set_active_device("HiFi Rose").is_ok());
-        assert_eq!(manager.get_active_device().unwrap().friendly_name, "ROSE-67");
+    #[test]
+    fn test_inventory_updates_and_missing_udn_behavior() {
+        let manager = UpnpManager::new();
+        assert!(manager.get_active_device().is_none());
 
-        // 5. Match model "RS130"
-        assert!(manager.set_active_device("RS130").is_ok());
-        assert_eq!(manager.get_active_device().unwrap().friendly_name, "ROSE-67");
+        let rose = UpnpDevice {
+            id: "uuid:00000000-0000-0000-0000-000000000001".into(),
+            friendly_name: "ROSE-67".into(),
+            model_name: Some("RS130".into()),
+            model_description: Some("HiFi ROSE".into()),
+            manufacturer: Some("CITECH".into()),
+            location: "http://192.0.2.10:34042/desc".into(),
+            control_url: "http://192.0.2.10:34042/action".into(),
+        };
+
+        // Updating inventory alone must never populate active_device
+        *manager.devices.lock() = vec![rose.clone()];
+        assert!(manager.get_active_device().is_none());
+
+        // Attempting to play on an unknown/unavailable UDN must fail cleanly without substituting ROSE-67
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(manager.play_file_on_device(
+                "uuid:00000000-0000-0000-0000-000000009999",
+                Path::new("nonexistent.flac"),
+                10.0,
+                "Title",
+                "Artist",
+                "Album",
+            ))
+            .unwrap_err();
+        assert!(err.contains("unavailable"));
+        assert!(manager.get_active_device().is_none());
     }
 }

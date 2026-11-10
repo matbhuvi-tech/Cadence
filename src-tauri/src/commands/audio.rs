@@ -1,5 +1,8 @@
 use tauri::State;
-use crate::audio::{AudioEngine, AudioStreamInfo, PlaybackStatus, StreamBufferInfo, UpnpDevice};
+use crate::audio::{
+    AudioEndpoint, AudioEndpointInfo, AudioEngine, AudioStreamInfo, PlaybackStatus,
+    StreamBufferInfo, UpnpDevice,
+};
 
 #[tauri::command]
 pub fn play_track(
@@ -49,6 +52,14 @@ pub fn set_audio_device(
 }
 
 #[tauri::command]
+pub fn set_audio_endpoint(
+    engine: State<'_, AudioEngine>,
+    endpoint: AudioEndpoint,
+) -> Result<(), String> {
+    engine.set_audio_endpoint(endpoint)
+}
+
+#[tauri::command]
 pub fn get_playback_status(engine: State<'_, AudioEngine>) -> PlaybackStatus {
     engine.get_status()
 }
@@ -56,6 +67,11 @@ pub fn get_playback_status(engine: State<'_, AudioEngine>) -> PlaybackStatus {
 #[tauri::command]
 pub fn list_audio_devices(engine: State<'_, AudioEngine>) -> Vec<String> {
     engine.list_output_devices()
+}
+
+#[tauri::command]
+pub fn list_audio_endpoints(engine: State<'_, AudioEngine>) -> Vec<AudioEndpointInfo> {
+    engine.list_audio_endpoints()
 }
 
 #[tauri::command]

@@ -1,15 +1,22 @@
 import React, { useMemo, useState } from 'react'
-import { Speaker, X, Check, RefreshCw, Radio, ShieldCheck, Wifi, Loader2 } from 'lucide-react'
+import { Speaker, X, Check, RefreshCw, Radio, ShieldCheck, Wifi, Loader2, AlertTriangle } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import {
+  AudioEndpoint,
+  AudioEndpointInfo,
+  describeSignalPath,
+  endpointFromInfo,
+  getEndpointDisplayName,
+  isSameEndpoint,
+} from '../../core/endpointRouting'
 
 interface AudioDeviceSelectorModalProps {
   isOpen: boolean
   onClose: () => void
 }
 
-function decodeDeviceName(raw: string): string {
+function decodeHtmlEntities(raw: string): string {
   return raw
-    .replace(/^\[UPnP\]\s*/, '')
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -22,41 +29,80 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
   onClose,
 }) => {
   const {
-    activeDevice,
-    availableDevices,
-    selectDevice,
+    selectedEndpoint,
+    activeBackendEndpoint,
+    availableEndpoints,
+    selectEndpoint,
     refreshDevices,
     streamTelemetry,
     isPurityMode,
     isBitPerfect,
     outputSampleRate,
+    deviceType,
+    signalPathMode,
+    endpointError,
+    volume,
+    isMuted,
     togglePurityMode,
-    discoverUpnpDevices,
     upnpDevices,
   } = useAudioPlayer()
 
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  const isUpnpDevice = (device: string) => device.startsWith('[UPnP]') || device.startsWith('uuid:')
+  // Segregate typed endpoints strictly by transport (never by friendly-name substrings)
+  const { hardwareEndpoints, networkEndpoints, selectedUnavailable } = useMemo(() => {
+    const hw: AudioEndpointInfo[] = []
+    const net: AudioEndpointInfo[] = []
+    let foundSelected = false
 
-  // Segregate devices into Direct Audio and Network Streamers
-  const { hardwareDevices, networkDevices } = useMemo(() => {
-    const hw: string[] = []
-    const net: string[] = []
-    for (const d of availableDevices) {
-      if (isUpnpDevice(d)) {
-        net.push(d)
+    for (const ep of availableEndpoints) {
+      if (isSameEndpoint(selectedEndpoint, endpointFromInfo(ep))) {
+        foundSelected = true
+      }
+      if (ep.transport === 'upnp') {
+        net.push(ep)
       } else {
-        hw.push(d)
+        hw.push(ep)
       }
     }
-    return { hardwareDevices: hw, networkDevices: net }
-  }, [availableDevices])
+
+    return {
+      hardwareEndpoints: hw,
+      networkEndpoints: net,
+      selectedUnavailable: !foundSelected ? selectedEndpoint : null,
+    }
+  }, [availableEndpoints, selectedEndpoint])
+
+  const signalDesc = useMemo(
+    () =>
+      describeSignalPath({
+        selectedEndpoint,
+        activeBackendEndpoint,
+        deviceType,
+        signalPathMode,
+        isPurityMode,
+        isBitPerfect,
+        volume,
+        isMuted,
+        outputSampleRate,
+      }),
+    [
+      selectedEndpoint,
+      activeBackendEndpoint,
+      deviceType,
+      signalPathMode,
+      isPurityMode,
+      isBitPerfect,
+      volume,
+      isMuted,
+      outputSampleRate,
+    ]
+  )
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
     try {
-      await Promise.all([refreshDevices(), discoverUpnpDevices()])
+      await refreshDevices()
     } finally {
       setIsRefreshing(false)
     }
@@ -64,48 +110,35 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
 
   if (!isOpen) return null
 
-  const getDeviceSubtitle = (device: string, isNetwork: boolean, cleanName: string, upnpMeta: any) => {
-    if (isNetwork) {
-      if (/rose/i.test(cleanName) || /rose/i.test(upnpMeta?.modelName || '')) {
-        return 'HiFi ROSE RS130 · UPnP'
-      }
-      if (/avm\s*70|anthem/i.test(cleanName) || /avm\s*70|anthem/i.test(upnpMeta?.modelName || '')) {
-        return 'Anthem AVM 70 · UPnP'
-      }
+  const getDeviceSubtitle = (ep: AudioEndpointInfo, upnpMeta: any) => {
+    if (ep.transport === 'upnp') {
       if (upnpMeta?.modelDescription || upnpMeta?.modelName) {
         return `${upnpMeta.modelDescription || upnpMeta.modelName} · UPnP`
       }
-      if (/odyssey|oled|tv|monitor|screen|display/i.test(cleanName)) {
-        return 'Smart Display · UPnP / DLNA'
-      }
       return 'Network Streamer · UPnP'
     }
-
-    if (device.toLowerCase().includes('dac') || device.toLowerCase().includes('maxwell') || device.toLowerCase().includes('usb')) {
-      return 'Hardware DAC · WASAPI Exclusive'
+    if (ep.transport === 'system_default') {
+      return ep.wasapiName
+        ? `Follows OS Default (${decodeHtmlEntities(ep.wasapiName)}) · WASAPI Shared`
+        : 'Follows Windows Default Output · WASAPI Shared'
     }
-    return 'WASAPI · Local Audio'
+    return 'WASAPI Shared · Local Windows Audio'
   }
 
-  const renderDeviceCard = (device: string) => {
-    const isSelected = activeDevice === device
-    const isNetwork = isUpnpDevice(device)
-    const cleanName = decodeDeviceName(device)
-    const upnpMeta = isNetwork
-      ? upnpDevices.find(
-          (u: any) =>
-            u.friendlyName === cleanName ||
-            `[UPnP] ${u.friendlyName}` === device ||
-            cleanName.toLowerCase().includes((u.friendlyName || '').toLowerCase())
-        )
-      : null
+  const renderEndpointCard = (ep: AudioEndpointInfo) => {
+    const typedEndpoint = endpointFromInfo(ep)
+    const isSelected = isSameEndpoint(selectedEndpoint, typedEndpoint)
+    const isBackendActive = isSameEndpoint(activeBackendEndpoint, typedEndpoint)
+    const isNetwork = ep.transport === 'upnp'
+    const cleanName = decodeHtmlEntities(ep.displayName)
+    const upnpMeta = isNetwork && ep.udn ? upnpDevices.find((u: any) => u.id === ep.udn) : null
     const modelDesc = upnpMeta?.modelDescription || upnpMeta?.modelName
-    const subtitle = getDeviceSubtitle(device, isNetwork, cleanName, upnpMeta)
+    const subtitle = getDeviceSubtitle(ep, upnpMeta)
 
     return (
       <button
-        key={device}
-        onClick={() => selectDevice(device)}
+        key={ep.id}
+        onClick={() => selectEndpoint(typedEndpoint)}
         className={`w-full p-3 rounded-xl border text-left flex items-center justify-between transition-all cursor-pointer ${
           isSelected
             ? 'bg-white/[0.08] border-[#D4AF37]/50 text-white shadow-sm'
@@ -135,6 +168,11 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
                   UPnP
                 </span>
               )}
+              {isSelected && !isBackendActive && (
+                <span className="px-1.5 py-0.5 rounded text-[9px] bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                  Unavailable
+                </span>
+              )}
             </div>
             <span className="text-[11px] text-[#71717A] truncate mt-0.5">
               {subtitle}
@@ -148,6 +186,34 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
           </div>
         )}
       </button>
+    )
+  }
+
+  const renderUnavailableSelectedCard = (ep: AudioEndpoint) => {
+    const label = decodeHtmlEntities(getEndpointDisplayName(ep))
+    const isNetwork = ep.transport === 'upnp'
+    return (
+      <div
+        key={`unavailable-${ep.transport}-${label}`}
+        className="w-full p-3 rounded-xl border bg-rose-500/[0.06] border-rose-500/35 text-left flex items-center justify-between"
+      >
+        <div className="flex items-center gap-3 min-w-0 pr-3">
+          <div className="p-2 rounded-lg shrink-0 bg-rose-500/15 text-rose-300">
+            <AlertTriangle className="w-4 h-4" />
+          </div>
+          <div className="flex flex-col min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-medium truncate text-white">{label}</span>
+              <span className="px-1.5 py-0.5 rounded text-[9px] bg-rose-500/20 text-rose-200 border border-rose-500/30">
+                Selected · Unavailable
+              </span>
+            </div>
+            <span className="text-[11px] text-rose-200/80 truncate mt-0.5">
+              {isNetwork ? 'UPnP renderer offline or unreachable' : 'WASAPI endpoint disconnected'} · Not auto-switching
+            </span>
+          </div>
+        </div>
+      </div>
     )
   }
 
@@ -177,7 +243,7 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
           </button>
         </div>
 
-        {/* Master Switch: Bit-Perfect Mode */}
+        {/* Master Switch: Purity Mode (Unity Gain, never equated with proven bit-perfect) */}
         <div className="p-4 px-6 bg-white/[0.02] border-b border-white/[0.08] flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <div
@@ -192,16 +258,16 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
             <div className="flex flex-col text-left">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-semibold text-white tracking-wide">
-                  Bit-Perfect Mode
+                  Purity Mode (0 dB Unity Gain)
                 </span>
                 {isPurityMode && (
                   <span className="px-1.5 py-0.5 rounded text-[9px] font-medium tracking-wide uppercase bg-[#D4AF37]/15 text-[#D4AF37] border border-[#D4AF37]/30">
-                    ENABLED · UNITY GAIN
+                    UNITY GAIN · RATE MATCH
                   </span>
                 )}
               </div>
               <span className="text-xs text-[#8E8E93] max-w-sm mt-0.5 leading-relaxed">
-                Locks digital volume at 0 dB and enables native sample-rate output.
+                Locks app volume at 0 dB and requests matching sample rate. Local WASAPI runs in Windows Shared Mode.
               </span>
             </div>
           </div>
@@ -224,39 +290,59 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
         </div>
 
         {/* Active Stream & Clock Telemetry */}
-        {streamTelemetry && (
-          <div className="p-3 px-6 bg-black/20 border-b border-white/[0.06] flex items-center justify-between text-xs">
-            <div className="flex flex-col">
-              <span className="text-[10px] uppercase font-medium tracking-wider text-[#71717A]">
-                Source & Clock
-              </span>
-              <div className="flex items-center gap-2 text-[#E4E4E7] font-medium mt-0.5">
-                <span>{streamTelemetry.format}</span>
-                <span className="text-[#52525B]">·</span>
-                <span>
-                  {streamTelemetry.sampleRate ? `${streamTelemetry.sampleRate / 1000} kHz` : '44.1 kHz'}
-                </span>
-                <span className="text-[#52525B]">/</span>
-                <span>{streamTelemetry.bitDepth || 16}-bit</span>
-                {outputSampleRate && (
-                  <span className="text-[11px] text-[#A1A1AA]">
-                    (DAC: {outputSampleRate / 1000} kHz)
+        {(streamTelemetry || endpointError) && (
+          <div className="p-3 px-6 bg-black/20 border-b border-white/[0.06] flex flex-col gap-2 text-xs">
+            {streamTelemetry && (
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-col">
+                  <span className="text-[10px] uppercase font-medium tracking-wider text-[#71717A]">
+                    Source & Backend Route
                   </span>
-                )}
+                  <div className="flex items-center gap-2 text-[#E4E4E7] font-medium mt-0.5 flex-wrap">
+                    <span>{streamTelemetry.format}</span>
+                    <span className="text-[#52525B]">·</span>
+                    <span>
+                      {streamTelemetry.sampleRate ? `${streamTelemetry.sampleRate / 1000} kHz` : '44.1 kHz'}
+                    </span>
+                    <span className="text-[#52525B]">/</span>
+                    <span>{streamTelemetry.bitDepth || 16}-bit</span>
+                    {signalDesc.canShowDacRate && outputSampleRate && (
+                      <span className="text-[11px] text-[#A1A1AA]">
+                        (Mixer: {outputSampleRate / 1000} kHz)
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span
+                    className={`px-2 py-0.5 rounded border text-[10px] font-medium ${
+                      activeBackendEndpoint === null
+                        ? 'bg-rose-500/15 text-rose-200 border-rose-500/30'
+                        : 'bg-white/[0.06] text-[#E4E4E7] border-white/[0.10]'
+                    }`}
+                  >
+                    {signalDesc.transportLabel}
+                  </span>
+                  {signalDesc.isProvenBitPerfect && (
+                    <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-medium">
+                      Raw Stream
+                    </span>
+                  )}
+                  {streamTelemetry.isHighRes && (
+                    <span className="px-2 py-0.5 rounded bg-[#D4AF37]/15 text-[#D4AF37] border border-[#D4AF37]/30 text-[10px] font-medium">
+                      Hi-Res
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {isBitPerfect && (
-                <span className="px-2 py-0.5 rounded bg-white/[0.06] text-[#E4E4E7] border border-white/[0.10] text-[10px] font-medium">
-                  Bit-Perfect
-                </span>
-              )}
-              {streamTelemetry.isHighRes && (
-                <span className="px-2 py-0.5 rounded bg-[#D4AF37]/15 text-[#D4AF37] border border-[#D4AF37]/30 text-[10px] font-medium">
-                  Hi-Res
-                </span>
-              )}
-            </div>
+            )}
+
+            {endpointError && (
+              <div className="flex items-start gap-2 rounded-lg bg-rose-500/10 border border-rose-500/30 px-2.5 py-1.5 text-[11px] text-rose-200">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-rose-300" />
+                <span>{endpointError}</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -279,34 +365,36 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
             </button>
           </div>
 
-          {availableDevices.length === 0 ? (
+          {availableEndpoints.length === 0 && !selectedUnavailable ? (
             <div className="p-5 rounded-xl border border-white/[0.08] bg-black/30 text-center text-xs text-[#71717A]">
-              No audio devices detected. Defaulting to system audio.
+              No audio devices detected.
             </div>
           ) : (
             <>
               {/* Direct Audio Section */}
-              {hardwareDevices.length > 0 && (
+              {(hardwareEndpoints.length > 0 || (selectedUnavailable && selectedUnavailable.transport !== 'upnp')) && (
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2 text-[11px] font-medium text-[#71717A]">
                     <Radio className="w-3.5 h-3.5 text-[#A1A1AA]" />
-                    <span>Direct Audio ({hardwareDevices.length})</span>
+                    <span>Direct Audio ({hardwareEndpoints.length})</span>
                   </div>
                   <div className="flex flex-col gap-1.5">
-                    {hardwareDevices.map(renderDeviceCard)}
+                    {selectedUnavailable && selectedUnavailable.transport !== 'upnp' && renderUnavailableSelectedCard(selectedUnavailable)}
+                    {hardwareEndpoints.map(renderEndpointCard)}
                   </div>
                 </div>
               )}
 
               {/* Network Streamers Section */}
-              {networkDevices.length > 0 && (
+              {(networkEndpoints.length > 0 || selectedUnavailable?.transport === 'upnp') && (
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center gap-2 text-[11px] font-medium text-[#71717A]">
                     <Wifi className="w-3.5 h-3.5 text-[#A1A1AA]" />
-                    <span>Network Streamers ({networkDevices.length})</span>
+                    <span>Network Streamers ({networkEndpoints.length})</span>
                   </div>
                   <div className="flex flex-col gap-1.5">
-                    {networkDevices.map(renderDeviceCard)}
+                    {selectedUnavailable?.transport === 'upnp' && renderUnavailableSelectedCard(selectedUnavailable)}
+                    {networkEndpoints.map(renderEndpointCard)}
                   </div>
                 </div>
               )}

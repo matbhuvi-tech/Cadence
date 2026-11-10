@@ -13,7 +13,316 @@ use lofty::tag::Accessor;
 use rodio::{Decoder, OutputStream, Sink};
 use serde::{Deserialize, Serialize};
 
-use super::upnp::UpnpManager;
+use super::upnp::{UpnpDevice, UpnpManager};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointTransport {
+    SystemDefault,
+    Wasapi,
+    Upnp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "camelCase")]
+pub enum AudioEndpoint {
+    #[serde(rename = "system_default")]
+    SystemDefault,
+    #[serde(rename = "wasapi")]
+    Wasapi { name: String },
+    #[serde(rename = "upnp")]
+    Upnp {
+        udn: String,
+        #[serde(rename = "friendlyName")]
+        friendly_name: String,
+    },
+}
+
+impl AudioEndpoint {
+    pub fn id(&self) -> String {
+        match self {
+            AudioEndpoint::SystemDefault => "system_default".to_string(),
+            AudioEndpoint::Wasapi { name } => format!("wasapi:{}", name),
+            AudioEndpoint::Upnp { udn, .. } => format!("upnp:{}", udn),
+        }
+    }
+
+    pub fn display_label(&self) -> String {
+        match self {
+            AudioEndpoint::SystemDefault => "Default Audio Device".to_string(),
+            AudioEndpoint::Wasapi { name } => name.clone(),
+            AudioEndpoint::Upnp { friendly_name, .. } => format!("[UPnP] {}", friendly_name),
+        }
+    }
+
+    pub fn transport(&self) -> EndpointTransport {
+        match self {
+            AudioEndpoint::SystemDefault => EndpointTransport::SystemDefault,
+            AudioEndpoint::Wasapi { .. } => EndpointTransport::Wasapi,
+            AudioEndpoint::Upnp { .. } => EndpointTransport::Upnp,
+        }
+    }
+
+    /// Parse legacy string endpoint identifiers without substring or friendly-name guesswork.
+    pub fn from_legacy_string(raw: &str, upnp_devices: &[UpnpDevice]) -> AudioEndpoint {
+        if raw == "system_default" || raw.eq_ignore_ascii_case("Default Audio Device") {
+            return AudioEndpoint::SystemDefault;
+        }
+        if let Some(name) = raw.strip_prefix("wasapi:") {
+            return AudioEndpoint::Wasapi {
+                name: name.to_string(),
+            };
+        }
+        if let Some(udn) = raw.strip_prefix("upnp:") {
+            let friendly_name = upnp_devices
+                .iter()
+                .find(|d| d.id == udn)
+                .map(|d| d.friendly_name.clone())
+                .unwrap_or_else(|| udn.to_string());
+            return AudioEndpoint::Upnp {
+                udn: udn.to_string(),
+                friendly_name,
+            };
+        }
+        if raw.starts_with("uuid:") {
+            let friendly_name = upnp_devices
+                .iter()
+                .find(|d| d.id == raw)
+                .map(|d| d.friendly_name.clone())
+                .unwrap_or_else(|| raw.to_string());
+            return AudioEndpoint::Upnp {
+                udn: raw.to_string(),
+                friendly_name,
+            };
+        }
+        if let Some(friendly) = raw.strip_prefix("[UPnP]") {
+            let clean = friendly.trim();
+            if let Some(dev) = upnp_devices.iter().find(|d| d.friendly_name == clean) {
+                return AudioEndpoint::Upnp {
+                    udn: dev.id.clone(),
+                    friendly_name: dev.friendly_name.clone(),
+                };
+            }
+            return AudioEndpoint::Upnp {
+                udn: clean.to_string(),
+                friendly_name: clean.to_string(),
+            };
+        }
+        AudioEndpoint::Wasapi {
+            name: raw.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioEndpointInfo {
+    pub id: String,
+    pub transport: EndpointTransport,
+    pub display_name: String,
+    pub wasapi_name: Option<String>,
+    pub udn: Option<String>,
+    pub is_available: bool,
+    pub supports_dsd: bool,
+    pub is_bit_perfect_capable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EndpointInventory {
+    has_default_wasapi: bool,
+    default_wasapi_name: Option<String>,
+    wasapi_names: Vec<String>,
+    upnp_devices: Vec<UpnpDevice>,
+}
+
+impl EndpointInventory {
+    fn from_host(upnp_manager: &UpnpManager) -> Self {
+        let host = cpal::default_host();
+        let default_wasapi_name = host.default_output_device().and_then(|d| d.name().ok());
+        let has_default_wasapi = host.default_output_device().is_some();
+        let mut wasapi_names: Vec<String> = host
+            .output_devices()
+            .ok()
+            .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default();
+        // Preserve insertion order while removing duplicate device names reported by driver wrappers.
+        let mut deduped = Vec::with_capacity(wasapi_names.len());
+        for name in wasapi_names.drain(..) {
+            if !deduped.contains(&name) {
+                deduped.push(name);
+            }
+        }
+        Self {
+            has_default_wasapi,
+            default_wasapi_name,
+            wasapi_names: deduped,
+            upnp_devices: upnp_manager.get_devices(),
+        }
+    }
+
+    fn contains_exact_wasapi(&self, name: &str) -> bool {
+        self.wasapi_names.iter().any(|n| n == name)
+    }
+
+    fn find_exact_upnp(&self, udn: &str) -> Option<&UpnpDevice> {
+        self.upnp_devices.iter().find(|d| d.id == udn)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RouteTarget {
+    LocalWasapi {
+        selected: AudioEndpoint,
+        exact_wasapi_name: Option<String>,
+    },
+    Upnp {
+        selected: AudioEndpoint,
+        udn: String,
+    },
+}
+
+fn resolve_endpoint_selection(
+    endpoint: &AudioEndpoint,
+    inventory: &EndpointInventory,
+) -> Result<AudioEndpoint, String> {
+    match endpoint {
+        AudioEndpoint::SystemDefault => {
+            if inventory.has_default_wasapi {
+                Ok(AudioEndpoint::SystemDefault)
+            } else {
+                Err("Default WASAPI audio output device is unavailable.".to_string())
+            }
+        }
+        AudioEndpoint::Wasapi { name } => {
+            if inventory.contains_exact_wasapi(name) {
+                Ok(AudioEndpoint::Wasapi { name: name.clone() })
+            } else {
+                Err(format!("Audio device '{}' is unavailable.", name))
+            }
+        }
+        AudioEndpoint::Upnp { udn, friendly_name } => {
+            if let Some(dev) = inventory.find_exact_upnp(udn) {
+                Ok(AudioEndpoint::Upnp {
+                    udn: dev.id.clone(),
+                    friendly_name: dev.friendly_name.clone(),
+                })
+            } else {
+                Err(format!(
+                    "UPnP streamer '{}' ({}) is unavailable.",
+                    friendly_name, udn
+                ))
+            }
+        }
+    }
+}
+
+fn plan_play_route(
+    selected: &AudioEndpoint,
+    is_dsd: bool,
+    inventory: &EndpointInventory,
+) -> Result<RouteTarget, String> {
+    match selected {
+        AudioEndpoint::SystemDefault => {
+            if !inventory.has_default_wasapi {
+                return Err("Selected default WASAPI audio device is unavailable.".to_string());
+            }
+            if is_dsd {
+                return Err(
+                    "Selected output 'Default Audio Device' (WASAPI Shared) does not support native DSD (.dsf/.dff) playback. Select a UPnP/DLNA network streamer endpoint in Audio Outputs to play DSD.".to_string(),
+                );
+            }
+            Ok(RouteTarget::LocalWasapi {
+                selected: AudioEndpoint::SystemDefault,
+                exact_wasapi_name: None,
+            })
+        }
+        AudioEndpoint::Wasapi { name } => {
+            if !inventory.contains_exact_wasapi(name) {
+                return Err(format!("Selected audio device '{}' is unavailable.", name));
+            }
+            if is_dsd {
+                return Err(format!(
+                    "Selected output '{}' (WASAPI Shared) does not support native DSD (.dsf/.dff) playback. Select a UPnP/DLNA network streamer endpoint in Audio Outputs to play DSD.",
+                    name
+                ));
+            }
+            Ok(RouteTarget::LocalWasapi {
+                selected: AudioEndpoint::Wasapi { name: name.clone() },
+                exact_wasapi_name: Some(name.clone()),
+            })
+        }
+        AudioEndpoint::Upnp { udn, friendly_name } => {
+            let dev = inventory.find_exact_upnp(udn).ok_or_else(|| {
+                format!(
+                    "Selected UPnP renderer '{}' ({}) is unavailable.",
+                    friendly_name, udn
+                )
+            })?;
+            Ok(RouteTarget::Upnp {
+                selected: AudioEndpoint::Upnp {
+                    udn: dev.id.clone(),
+                    friendly_name: dev.friendly_name.clone(),
+                },
+                udn: dev.id.clone(),
+            })
+        }
+    }
+}
+
+fn compute_signal_telemetry(
+    active_backend_endpoint: Option<&AudioEndpoint>,
+    purity_mode: bool,
+    current_stream_rate: Option<u32>,
+    current_stream_channels: Option<u16>,
+    os_default_name: Option<&str>,
+) -> (Option<String>, bool, String, String, Option<u32>, Option<u16>) {
+    match active_backend_endpoint {
+        None => (
+            None,
+            false,
+            "unavailable".to_string(),
+            "unavailable".to_string(),
+            None,
+            None,
+        ),
+        Some(AudioEndpoint::Upnp { friendly_name, .. }) => (
+            Some(format!("[UPnP] {}", friendly_name)),
+            true,
+            "upnp_streamer".to_string(),
+            "upnp_raw_stream".to_string(),
+            None,
+            None,
+        ),
+        Some(AudioEndpoint::Wasapi { name }) => (
+            Some(name.clone()),
+            false, // cpal 0.15.3 WASAPI uses AUDCLNT_SHAREMODE_SHARED + rodio DynamicMixer; Purity Mode is never proven bit-perfect
+            "wasapi_shared".to_string(),
+            if purity_mode {
+                "wasapi_shared_purity".to_string()
+            } else {
+                "wasapi_shared".to_string()
+            },
+            current_stream_rate,
+            current_stream_channels,
+        ),
+        Some(AudioEndpoint::SystemDefault) => (
+            Some(
+                os_default_name
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Default Audio Device".to_string()),
+            ),
+            false,
+            "wasapi_shared".to_string(),
+            if purity_mode {
+                "wasapi_shared_purity".to_string()
+            } else {
+                "wasapi_shared".to_string()
+            },
+            current_stream_rate,
+            current_stream_channels,
+        ),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +355,9 @@ pub struct PlaybackStatus {
     pub output_sample_rate: Option<u32>,
     pub output_channels: Option<u16>,
     pub device_type: String,
+    pub selected_endpoint: AudioEndpoint,
+    pub active_backend_endpoint: Option<AudioEndpoint>,
+    pub signal_path_mode: String,
 }
 
 enum AudioWorkerMsg {
@@ -62,8 +374,8 @@ enum AudioWorkerMsg {
     SetVolume {
         volume: f32,
     },
-    SetDevice {
-        device_name: String,
+    SetEndpoint {
+        endpoint: AudioEndpoint,
         responder: Sender<Result<(), String>>,
     },
     SetPurityMode {
@@ -108,7 +420,8 @@ impl AudioEngine {
         let playback_stopped_at = Arc::new(parking_lot::Mutex::new(None));
         let stopped_at_worker = Arc::clone(&playback_stopped_at);
 
-        // Run initial background SSDP scan on engine startup so devices like HiFi Rose are ready immediately
+        // Run initial background SSDP scan on engine startup so UPnP inventory is ready
+        // Inventory discovery must never mutate the selected or active playback endpoint.
         let bg_upnp = Arc::clone(&upnp_manager);
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
@@ -116,15 +429,17 @@ impl AudioEngine {
                 runtime.block_on(async {
                     let devs = bg_upnp.discover_devices().await;
                     eprintln!("[Cadence AudioEngine] Initial SSDP scan discovered {} UPnP devices", devs.len());
-                    if let Some(top_streamer) = devs.iter().find(|d| !d.is_display_device()) {
-                        let _ = bg_upnp.set_active_device(&top_streamer.id);
-                        eprintln!("[Cadence AudioEngine] Auto-locked active UPnP streamer to '{}' [{:?}]", top_streamer.friendly_name, top_streamer.model_name);
-                    }
                 });
             }
         });
 
         std::thread::spawn(move || {
+            let host = cpal::default_host();
+            let initial_os_default = host.default_output_device();
+            let mut active_os_default_name = initial_os_default.as_ref().and_then(|d| d.name().ok());
+            let initial_config = initial_os_default
+                .as_ref()
+                .and_then(|d| d.default_output_config().ok());
             let (mut _stream, mut stream_handle) = match OutputStream::try_default() {
                 Ok((s, h)) => (Some(s), Some(h)),
                 Err(e) => {
@@ -133,10 +448,11 @@ impl AudioEngine {
                 }
             };
 
-            let default_device = cpal::default_host()
-                .default_output_device()
-                .map(|d| d.name().unwrap_or_else(|_| "Default Audio Device".into()));
-
+            let selected_endpoint_init = AudioEndpoint::SystemDefault;
+            let mut selected_endpoint = selected_endpoint_init;
+            let mut active_backend_endpoint: Option<AudioEndpoint> = stream_handle
+                .as_ref()
+                .map(|_| AudioEndpoint::SystemDefault);
             let mut sink: Option<Sink> = None;
             let mut current_file: Option<String> = None;
             let mut duration = Duration::ZERO;
@@ -146,10 +462,15 @@ impl AudioEngine {
             let mut volume: f32 = 1.0;
             let mut saved_user_volume: f32 = 1.0;
             let mut purity_mode: bool = false;
-            let mut active_device_name = default_device;
             let mut current_info: Option<AudioStreamInfo> = None;
-            let mut current_stream_rate: Option<u32> = Some(48000);
-            let mut current_stream_channels: Option<u16> = Some(2);
+            let mut current_stream_rate: Option<u32> = initial_config
+                .as_ref()
+                .map(|c| c.sample_rate().0)
+                .or_else(|| stream_handle.as_ref().map(|_| 48000));
+            let mut current_stream_channels: Option<u16> = initial_config
+                .as_ref()
+                .map(|c| c.channels())
+                .or_else(|| stream_handle.as_ref().map(|_| 2));
             let mut is_upnp_active = false;
             let mut staged_next_file: Option<String> = None;
             let mut staged_next_buffer: Option<Vec<u8>> = None;
@@ -228,115 +549,98 @@ impl AudioEngine {
                             || stream_info.format.eq_ignore_ascii_case("DSF")
                             || stream_info.format.eq_ignore_ascii_case("DFF");
 
-                        // Check if active device is a UPnP network streamer
-                        let mut is_upnp_target = active_device_name
-                            .as_ref()
-                            .map(|n| n.starts_with("[UPnP]") || n.starts_with("uuid:"))
-                            .unwrap_or(false);
-
-                        // If active device is currently pointing to a display/monitor, override it with dedicated audiophile streamer:
-                        if let Some(ref name) = active_device_name {
-                            if name.to_lowercase().contains("odyssey") || name.to_lowercase().contains("oled") || name.to_lowercase().contains("tv") {
-                                eprintln!("[Cadence AudioEngine] Active device was set to display monitor ('{}'). Overriding with audiophile streamer...", name);
-                                let devices = upnp_worker_ref.get_devices();
-                                if let Some(streamer) = devices.iter().find(|d| !d.is_display_device()) {
-                                    let _ = upnp_worker_ref.set_active_device(&streamer.id);
-                                    active_device_name = Some(format!("[UPnP] {}", streamer.friendly_name));
-                                    is_upnp_target = true;
-                                }
+                        let inventory = EndpointInventory::from_host(&upnp_worker_ref);
+                        let route = match plan_play_route(&selected_endpoint, is_dsd, &inventory) {
+                            Ok(route) => route,
+                            Err(err) => {
+                                is_upnp_active = false;
+                                active_backend_endpoint = None;
+                                current_file = None;
+                                current_info = None;
+                                is_playing_worker.store(false, Ordering::Release);
+                                is_paused_worker.store(false, Ordering::Release);
+                                let _ = responder.send(Err(err));
+                                continue;
                             }
-                        }
+                        };
 
-                        // If not explicitly set to UPnP, check if UpnpManager has an active device,
-                        // or if active_device_name matches a UPnP streamer:
-                        if !is_upnp_target {
-                            if let Some(active_dev) = upnp_worker_ref.get_active_device() {
-                                active_device_name = Some(format!("[UPnP] {}", active_dev.friendly_name));
-                                is_upnp_target = true;
-                            } else if let Some(ref name) = active_device_name {
-                                if upnp_worker_ref.set_active_device(name).is_ok() {
-                                    if let Some(active_dev) = upnp_worker_ref.get_active_device() {
-                                        active_device_name = Some(format!("[UPnP] {}", active_dev.friendly_name));
-                                        is_upnp_target = true;
+                        let (local_selected, exact_wasapi_name) = match route {
+                            RouteTarget::Upnp { selected, udn } => {
+                                let upnp_clone = Arc::clone(&upnp_worker_ref);
+                                let target_path = path.to_path_buf();
+                                let track_duration = stream_info.duration_secs;
+                                let title = stream_info.title.clone().unwrap_or_else(|| "Cadence Track".into());
+                                let artist = stream_info.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
+                                let album = stream_info.album.clone().unwrap_or_else(|| "Album".into());
+
+                                let rt = tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build();
+
+                                let upnp_res = match rt {
+                                    Ok(runtime) => runtime.block_on(async {
+                                        upnp_clone
+                                            .play_file_on_device(&udn, &target_path, track_duration, &title, &artist, &album)
+                                            .await
+                                    }),
+                                    Err(e) => Err(format!("Tokio runtime error: {}", e)),
+                                };
+
+                                match upnp_res {
+                                    Ok(_) => {
+                                        _stream = None;
+                                        stream_handle = None;
+                                        current_stream_rate = None;
+                                        current_stream_channels = None;
+                                        is_upnp_active = true;
+                                        active_backend_endpoint = Some(selected);
+                                        current_file = Some(file_path.clone());
+                                        duration = Duration::from_secs_f64(stream_info.duration_secs);
+                                        playback_start = Some(Instant::now());
+                                        accumulated_position = Duration::ZERO;
+                                        is_paused = false;
+                                        current_info = Some(stream_info.clone());
+                                        is_playing_worker.store(true, Ordering::Release);
+                                        is_paused_worker.store(false, Ordering::Release);
+                                        let _ = responder.send(Ok(stream_info));
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[Cadence AudioEngine] UPnP playback failed on '{}': {}",
+                                            selected.display_label(),
+                                            e
+                                        );
+                                        is_upnp_active = false;
+                                        active_backend_endpoint = None;
+                                        current_file = None;
+                                        current_info = None;
+                                        is_playing_worker.store(false, Ordering::Release);
+                                        is_paused_worker.store(false, Ordering::Release);
+                                        let _ = responder.send(Err(format!("UPnP streamer error: {}", e)));
+                                        continue;
                                     }
                                 }
                             }
-                        }
-
-                        // For native DSD playback:
-                        if is_dsd && !is_upnp_target {
-                            let devices = upnp_worker_ref.get_devices();
-                            // Pick dedicated audiophile streamer, strictly excluding display monitors/TVs
-                            if let Some(streamer) = devices.iter().find(|d| !d.is_display_device()).or_else(|| devices.first()) {
-                                eprintln!(
-                                    "[Cadence AudioEngine] Bit-Perfect DSD stream requested. Selecting audiophile network streamer '{}' ({})",
-                                    streamer.friendly_name, streamer.id
-                                );
-                                let _ = upnp_worker_ref.set_active_device(&streamer.id);
-                                active_device_name = Some(format!("[UPnP] {}", streamer.friendly_name));
-                                is_upnp_target = true;
+                            RouteTarget::LocalWasapi {
+                                selected,
+                                exact_wasapi_name,
+                            } => {
+                                upnp_worker_ref.clear_active_device();
+                                is_upnp_active = false;
+                                (selected, exact_wasapi_name)
                             }
-                        }
+                        };
 
-                        if is_dsd && !is_upnp_target {
-                            // Bit-perfect DSD without decoding requires an active UPnP network streamer endpoint
-                            let _ = responder.send(Err(
-                                "Bit-Perfect DSD Passthrough requires an active UPnP/DLNA endpoint (e.g. HiFi Rose). No network streamer is currently active. Please select your network streamer in Audio Outputs.".to_string()
-                            ));
-                            continue;
-                        }
-
-                        if is_upnp_target {
-                            let upnp_clone = Arc::clone(&upnp_worker_ref);
-                            let target_path = path.to_path_buf();
-                            let track_duration = stream_info.duration_secs;
-                            let title = stream_info.title.clone().unwrap_or_else(|| "Cadence Track".into());
-                            let artist = stream_info.artist.clone().unwrap_or_else(|| "Unknown Artist".into());
-                            let album = stream_info.album.clone().unwrap_or_else(|| "Album".into());
-
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build();
-
-                            let upnp_res = match rt {
-                                Ok(runtime) => runtime.block_on(async {
-                                    upnp_clone.play_file(&target_path, track_duration, &title, &artist, &album).await
-                                }),
-                                Err(e) => Err(format!("Tokio runtime error: {}", e)),
-                            };
-
-                            match upnp_res {
-                                Ok(_) => {
-                                    is_upnp_active = true;
-                                    current_file = Some(file_path.clone());
-                                    duration = Duration::from_secs_f64(stream_info.duration_secs);
-                                    playback_start = Some(Instant::now());
-                                    accumulated_position = Duration::ZERO;
-                                    is_paused = false;
-                                    current_info = Some(stream_info.clone());
-                                    is_playing_worker.store(true, Ordering::Release);
-                                    is_paused_worker.store(false, Ordering::Release);
-                                    let _ = responder.send(Ok(stream_info));
-                                    continue;
-                                }
-                                Err(e) => {
-                                    eprintln!("[Cadence AudioEngine] UPnP playback failed on '{}': {}", active_device_name.as_deref().unwrap_or(""), e);
-                                    is_upnp_active = false;
-                                    let _ = responder.send(Err(format!("UPnP streamer error: {}", e)));
-                                    continue;
-                                }
-                            }
-                        } else {
-                            is_upnp_active = false;
-                        }
-
-                        // Local Playback Path: Dynamic Clock/Sample-Rate Matching & Bit-Perfect Stream Negotiation
+                        // Local Playback Path: Dynamic Clock/Sample-Rate Matching on strictly selected WASAPI endpoint
                         let target_rate = stream_info.sample_rate.unwrap_or(48000);
                         let target_channels = stream_info.channels.unwrap_or(2);
 
-                        let rate_mismatch = current_stream_rate != Some(target_rate)
-                            || current_stream_channels != Some(target_channels)
+                        let endpoint_needs_open = active_backend_endpoint.as_ref() != Some(&local_selected)
                             || stream_handle.is_none();
+                        let rate_mismatch = endpoint_needs_open
+                            || current_stream_rate != Some(target_rate)
+                            || current_stream_channels != Some(target_channels);
 
                         if rate_mismatch {
                             let is_same_family = match (current_stream_rate, Some(target_rate)) {
@@ -360,74 +664,90 @@ impl AudioEngine {
                                 std::thread::sleep(Duration::from_millis(effective_settle_ms));
                             }
 
-                            // Find target cpal Device
+                            // Find strictly matching cpal Device (never fall back to default for a pinned WASAPI selection)
                             let host = cpal::default_host();
-                            let target_device = match active_device_name.as_ref() {
-                                Some(name) if !name.to_lowercase().contains("default") => {
-                                    host.output_devices()
-                                        .ok()
-                                        .and_then(|mut devs| devs.find(|d| d.name().map(|n| &n == name).unwrap_or(false)))
-                                        .or_else(|| host.default_output_device())
-                                }
-                                _ => host.default_output_device(),
+                            let target_device = match exact_wasapi_name.as_ref() {
+                                Some(name) => host
+                                    .output_devices()
+                                    .ok()
+                                    .and_then(|mut devs| devs.find(|d| d.name().map(|n| &n == name).unwrap_or(false))),
+                                None => host.default_output_device(),
                             };
 
-                            if let Some(device) = target_device {
-                                let stream_config = cpal::SupportedStreamConfig::new(
-                                    target_channels,
-                                    cpal::SampleRate(target_rate),
-                                    cpal::SupportedBufferSize::Unknown,
-                                    cpal::SampleFormat::F32,
-                                );
+                            let Some(device) = target_device else {
+                                _stream = None;
+                                stream_handle = None;
+                                current_stream_rate = None;
+                                current_stream_channels = None;
+                                active_backend_endpoint = None;
+                                let _ = responder.send(Err(format!(
+                                    "Selected audio device '{}' is unavailable.",
+                                    selected_endpoint.display_label()
+                                )));
+                                continue;
+                            };
 
-                                eprintln!(
-                                    "[Cadence AudioEngine] Negotiating native clock: {} Hz, {} channels on '{}'...",
-                                    target_rate,
-                                    target_channels,
-                                    device.name().unwrap_or_default()
-                                );
+                            let stream_config = cpal::SupportedStreamConfig::new(
+                                target_channels,
+                                cpal::SampleRate(target_rate),
+                                cpal::SupportedBufferSize::Unknown,
+                                cpal::SampleFormat::F32,
+                            );
 
-                                match OutputStream::try_from_device_config(&device, stream_config) {
-                                    Ok((s, h)) => {
-                                        _stream = Some(s);
-                                        stream_handle = Some(h);
-                                        current_stream_rate = Some(target_rate);
-                                        current_stream_channels = Some(target_channels);
-                                        eprintln!("[Cadence AudioEngine] Native clock locked at {} Hz (Exclusive Clock Matching)", target_rate);
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "[Cadence AudioEngine] Target rate {} Hz not natively accepted ({:?}). Falling back to device default...",
-                                            target_rate, e
-                                        );
-                                        if let Ok((s, h)) = OutputStream::try_from_device(&device) {
-                                             _stream = Some(s);
+                            eprintln!(
+                                "[Cadence AudioEngine] Negotiating clock: {} Hz, {} channels on '{}'...",
+                                target_rate,
+                                target_channels,
+                                device.name().unwrap_or_default()
+                            );
+
+                            match OutputStream::try_from_device_config(&device, stream_config) {
+                                Ok((s, h)) => {
+                                    _stream = Some(s);
+                                    stream_handle = Some(h);
+                                    current_stream_rate = Some(target_rate);
+                                    current_stream_channels = Some(target_channels);
+                                    eprintln!("[Cadence AudioEngine] WASAPI clock configured at {} Hz", target_rate);
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[Cadence AudioEngine] Target rate {} Hz not accepted ({:?}). Falling back to same-device default config...",
+                                        target_rate, e
+                                    );
+                                    match OutputStream::try_from_device(&device) {
+                                        Ok((s, h)) => {
+                                            _stream = Some(s);
                                             stream_handle = Some(h);
                                             if let Ok(cfg) = device.default_output_config() {
                                                 current_stream_rate = Some(cfg.sample_rate().0);
                                                 current_stream_channels = Some(cfg.channels());
                                             }
                                         }
+                                        Err(dev_err) => {
+                                            _stream = None;
+                                            stream_handle = None;
+                                            current_stream_rate = None;
+                                            current_stream_channels = None;
+                                            active_backend_endpoint = None;
+                                            let _ = responder.send(Err(format!(
+                                                "Audio device '{}' failed to open output stream: {}",
+                                                selected_endpoint.display_label(),
+                                                dev_err
+                                            )));
+                                            continue;
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        // Re-initialize default output stream if still missing
                         if stream_handle.is_none() {
-                            match OutputStream::try_default() {
-                                Ok((s, h)) => {
-                                    active_device_name = cpal::default_host()
-                                        .default_output_device()
-                                        .map(|d| d.name().unwrap_or_else(|_| "Default Audio Device".into()));
-                                    _stream = Some(s);
-                                    stream_handle = Some(h);
-                                }
-                                Err(e) => {
-                                    let _ = responder.send(Err(format!("Audio output device is not available: {}", e)));
-                                    continue;
-                                }
-                            }
+                            active_backend_endpoint = None;
+                            let _ = responder.send(Err(format!(
+                                "Audio device '{}' is unavailable.",
+                                selected_endpoint.display_label()
+                            )));
+                            continue;
                         }
 
                         let mem_data = if staged_next_file.as_deref() == Some(&file_path) {
@@ -441,25 +761,47 @@ impl AudioEngine {
                         let new_sink = match Sink::try_new(handle) {
                             Ok(s) => s,
                             Err(sink_err) => {
-                                eprintln!("[Cadence AudioEngine] Sink creation failed ({}), attempting to refresh...", sink_err);
-                                match OutputStream::try_default() {
-                                    Ok((s, h)) => {
-                                        active_device_name = cpal::default_host()
-                                            .default_output_device()
-                                            .map(|d| d.name().unwrap_or_else(|_| "Default Audio Device".into()));
+                                eprintln!("[Cadence AudioEngine] Sink creation failed ({}), reopening selected device...", sink_err);
+                                let host = cpal::default_host();
+                                let reopen_device = match exact_wasapi_name.as_ref() {
+                                    Some(name) => host
+                                        .output_devices()
+                                        .ok()
+                                        .and_then(|mut devs| devs.find(|d| d.name().map(|n| &n == name).unwrap_or(false))),
+                                    None => host.default_output_device(),
+                                };
+                                match reopen_device.and_then(|d| {
+                                    let cfg = d.default_output_config().ok();
+                                    OutputStream::try_from_device(&d).ok().map(|pair| (pair, cfg))
+                                }) {
+                                    Some(((s, h), cfg)) => {
+                                        if let Some(c) = cfg {
+                                            current_stream_rate = Some(c.sample_rate().0);
+                                            current_stream_channels = Some(c.channels());
+                                        }
                                         let sink_result = Sink::try_new(&h);
                                         _stream = Some(s);
                                         stream_handle = Some(h);
                                         match sink_result {
                                             Ok(s) => s,
                                             Err(e) => {
+                                                active_backend_endpoint = None;
                                                 let _ = responder.send(Err(format!("Failed to create audio sink after refresh: {}", e)));
                                                 continue;
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        let _ = responder.send(Err(format!("Failed to create audio sink: {}", e)));
+                                    None => {
+                                        _stream = None;
+                                        stream_handle = None;
+                                        current_stream_rate = None;
+                                        current_stream_channels = None;
+                                        active_backend_endpoint = None;
+                                        let _ = responder.send(Err(format!(
+                                            "Audio device '{}' is unavailable for playback ({}).",
+                                            selected_endpoint.display_label(),
+                                            sink_err
+                                        )));
                                         continue;
                                     }
                                 }
@@ -498,6 +840,12 @@ impl AudioEngine {
 
                         new_sink.play();
 
+                        if matches!(local_selected, AudioEndpoint::SystemDefault) {
+                            active_os_default_name = cpal::default_host()
+                                .default_output_device()
+                                .and_then(|d| d.name().ok());
+                        }
+                        active_backend_endpoint = Some(local_selected);
                         sink = Some(new_sink);
                         current_file = Some(file_path.clone());
                         duration = Duration::from_secs_f64(stream_info.duration_secs);
@@ -587,34 +935,27 @@ impl AudioEngine {
 
                     AudioWorkerMsg::Seek { position_secs } => {
                         let target_pos = Duration::from_secs_f64(position_secs.max(0.0));
-                        if stream_handle.is_none() {
-                            if let Ok((s, h)) = OutputStream::try_default() {
-                                active_device_name = cpal::default_host()
-                                    .default_output_device()
-                                    .map(|d| d.name().unwrap_or_else(|_| "Default Audio Device".into()));
-                                _stream = Some(s);
-                                stream_handle = Some(h);
-                            }
-                        }
-                        if let (Some(fp), Some(handle)) = (current_file.as_ref(), stream_handle.as_ref()) {
-                            let path = Path::new(fp);
-                            if let Ok(file) = File::open(path) {
-                                let reader = BufReader::new(file);
-                                if let Ok(new_sink) = Sink::try_new(handle) {
-                                    if let Ok(source) = Decoder::new(reader) {
-                                        let effective_vol = if purity_mode { 1.0 } else { volume };
-                                        new_sink.set_volume(effective_vol);
-                                        new_sink.append(source);
-                                        let _ = new_sink.try_seek(target_pos);
-                                        if !is_paused {
-                                            new_sink.play();
-                                            playback_start = Some(Instant::now());
-                                        } else {
-                                            new_sink.pause();
-                                            playback_start = None;
+                        if !is_upnp_active && active_backend_endpoint.as_ref() == Some(&selected_endpoint) {
+                            if let (Some(fp), Some(handle)) = (current_file.as_ref(), stream_handle.as_ref()) {
+                                let path = Path::new(fp);
+                                if let Ok(file) = File::open(path) {
+                                    let reader = BufReader::new(file);
+                                    if let Ok(new_sink) = Sink::try_new(handle) {
+                                        if let Ok(source) = Decoder::new(reader) {
+                                            let effective_vol = if purity_mode { 1.0 } else { volume };
+                                            new_sink.set_volume(effective_vol);
+                                            new_sink.append(source);
+                                            let _ = new_sink.try_seek(target_pos);
+                                            if !is_paused {
+                                                new_sink.play();
+                                                playback_start = Some(Instant::now());
+                                            } else {
+                                                new_sink.pause();
+                                                playback_start = None;
+                                            }
+                                            sink = Some(new_sink);
+                                            accumulated_position = target_pos;
                                         }
-                                        sink = Some(new_sink);
-                                        accumulated_position = target_pos;
                                     }
                                 }
                             }
@@ -638,140 +979,182 @@ impl AudioEngine {
                         }
                     }
 
-                    AudioWorkerMsg::SetDevice { device_name, responder } => {
-                        let clean = device_name.trim_start_matches("[UPnP]").trim();
-                        // Check if device is explicitly UPnP or matches any discovered UPnP streamer
-                        let is_upnp = device_name.starts_with("[UPnP]")
-                            || device_name.starts_with("uuid:")
-                            || upnp_worker_ref.set_active_device(&device_name).is_ok();
-
-                        if is_upnp {
-                            let _ = upnp_worker_ref.set_active_device(&device_name);
-                            let resolved_label = upnp_worker_ref
-                                .get_active_device()
-                                .map(|d| format!("[UPnP] {}", d.friendly_name))
-                                .unwrap_or_else(|| format!("[UPnP] {}", clean));
-
-                            eprintln!(
-                                "[Cadence AudioEngine] Output route set to network streamer '{}'",
-                                resolved_label
-                            );
-
-                            active_device_name = Some(resolved_label);
-                            is_upnp_active = true;
-
-                            // Stop local sink immediately so sound stops coming from the computer/monitor
-                            let was_playing = sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false);
-                            if let Some(s) = sink.take() {
-                                s.stop();
-                            }
-
-                            // If a track was actively playing, seamlessly transfer streaming to the UPnP renderer
-                            if was_playing && !is_paused {
-                                if let Some(fp) = current_file.as_ref() {
+                    AudioWorkerMsg::SetEndpoint { endpoint, responder } => {
+                        let inventory = EndpointInventory::from_host(&upnp_worker_ref);
+                        selected_endpoint = endpoint.clone();
+                        let resolved = resolve_endpoint_selection(&endpoint, &inventory);
+                        let res = match resolved {
+                            Err(err_msg) => {
+                                if is_upnp_active {
                                     let upnp_clone = Arc::clone(&upnp_worker_ref);
-                                    let target_path = Path::new(fp).to_path_buf();
-                                    let track_duration = duration.as_secs_f64();
-                                    let title = current_info.as_ref().and_then(|i| i.title.clone()).unwrap_or_else(|| "Cadence Track".into());
-                                    let artist = current_info.as_ref().and_then(|i| i.artist.clone()).unwrap_or_else(|| "Unknown Artist".into());
-                                    let album = current_info.as_ref().and_then(|i| i.album.clone()).unwrap_or_else(|| "Album".into());
-
                                     std::thread::spawn(move || {
-                                        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-                                        if let Ok(runtime) = rt {
-                                            let _ = runtime.block_on(async {
-                                                let res = upnp_clone.play_file(&target_path, track_duration, &title, &artist, &album).await;
-                                                if let Err(err) = res {
-                                                    eprintln!("[Cadence AudioEngine] Transfer to UPnP failed: {}", err);
-                                                }
-                                            });
+                                        if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                                            let _ = runtime.block_on(async { upnp_clone.stop().await });
                                         }
                                     });
                                 }
-                            }
-
-                            let _ = responder.send(Ok(()));
-                            continue;
-                        }
-
-                        // Local CPAL Device
-                        upnp_worker_ref.clear_active_device();
-                        is_upnp_active = false;
-
-                        let host = cpal::default_host();
-                        let target_device = if device_name.to_lowercase().contains("default") {
-                            host.default_output_device()
-                        } else {
-                            match host.output_devices() {
-                                Ok(mut devs) => devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false)),
-                                Err(e) => {
-                                    let _ = responder.send(Err(format!("Error querying devices: {}", e)));
-                                    continue;
+                                upnp_worker_ref.clear_active_device();
+                                is_upnp_active = false;
+                                if let Some(s) = sink.take() {
+                                    s.stop();
                                 }
+                                _stream = None;
+                                stream_handle = None;
+                                current_stream_rate = None;
+                                current_stream_channels = None;
+                                active_backend_endpoint = None;
+                                playback_start = None;
+                                is_paused = false;
+                                is_playing_worker.store(false, Ordering::Release);
+                                is_paused_worker.store(false, Ordering::Release);
+                                Err(err_msg)
                             }
-                        };
+                            Ok(AudioEndpoint::Upnp { udn, friendly_name }) => {
+                                if let Some(dev) = inventory.find_exact_upnp(&udn).cloned() {
+                                    upnp_worker_ref.set_active_device_exact(dev);
+                                }
+                                let was_playing = sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
+                                    || (is_upnp_active && !is_paused && current_file.is_some());
+                                if let Some(s) = sink.take() {
+                                    s.stop();
+                                }
+                                _stream = None;
+                                stream_handle = None;
+                                current_stream_rate = None;
+                                current_stream_channels = None;
+                                is_upnp_active = true;
+                                active_backend_endpoint = Some(AudioEndpoint::Upnp {
+                                    udn: udn.clone(),
+                                    friendly_name: friendly_name.clone(),
+                                });
 
-                        let device = match target_device {
-                            Some(d) => d,
-                            None => {
-                                let _ = responder.send(Err(format!("Audio device '{}' not found", device_name)));
-                                continue;
+                                if was_playing && !is_paused {
+                                    if let Some(fp) = current_file.as_ref() {
+                                        let upnp_clone = Arc::clone(&upnp_worker_ref);
+                                        let target_udn = udn.clone();
+                                        let target_path = Path::new(fp).to_path_buf();
+                                        let track_duration = duration.as_secs_f64();
+                                        let title = current_info.as_ref().and_then(|i| i.title.clone()).unwrap_or_else(|| "Cadence Track".into());
+                                        let artist = current_info.as_ref().and_then(|i| i.artist.clone()).unwrap_or_else(|| "Unknown Artist".into());
+                                        let album = current_info.as_ref().and_then(|i| i.album.clone()).unwrap_or_else(|| "Album".into());
+
+                                        std::thread::spawn(move || {
+                                            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                                                let _ = runtime.block_on(async {
+                                                    if let Err(err) = upnp_clone.play_file_on_device(&target_udn, &target_path, track_duration, &title, &artist, &album).await {
+                                                        eprintln!("[Cadence AudioEngine] Transfer to UPnP failed: {}", err);
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    }
+                                }
+                                Ok(())
                             }
-                        };
-
-                        let (new_s, new_h) = match OutputStream::try_from_device(&device) {
-                            Ok(pair) => pair,
-                            Err(e) => {
-                                let _ = responder.send(Err(format!("Failed to open output stream: {}", e)));
-                                continue;
-                            }
-                        };
-
-                        if let Ok(cfg) = device.default_output_config() {
-                            current_stream_rate = Some(cfg.sample_rate().0);
-                            current_stream_channels = Some(cfg.channels());
-                        }
-
-                        let mut current_pos = accumulated_position.as_secs_f64();
-                        if let Some(start) = playback_start {
-                            if !is_paused {
-                                current_pos += start.elapsed().as_secs_f64();
-                            }
-                        }
-                        let was_playing = sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false);
-
-                        if let Some(s) = sink.take() {
-                            s.stop();
-                        }
-                        _stream = Some(new_s);
-                        stream_handle = Some(new_h.clone());
-                        active_device_name = Some(device_name.clone());
-
-                        if let Some(fp) = current_file.as_ref() {
-                            let path = Path::new(fp);
-                            if let Ok(file) = File::open(path) {
-                                let reader = BufReader::new(file);
-                                if let Ok(new_sink) = Sink::try_new(&new_h) {
-                                    if let Ok(source) = Decoder::new(reader) {
-                                        let effective_vol = if purity_mode { 1.0 } else { volume };
-                                        new_sink.set_volume(effective_vol);
-                                        new_sink.append(source);
-                                        let _ = new_sink.try_seek(Duration::from_secs_f64(current_pos));
-                                        if was_playing && !is_paused {
-                                            new_sink.play();
-                                            playback_start = Some(Instant::now());
-                                        } else {
-                                            new_sink.pause();
-                                            playback_start = None;
+                            Ok(local_ep @ (AudioEndpoint::SystemDefault | AudioEndpoint::Wasapi { .. })) => {
+                                if is_upnp_active {
+                                    let upnp_clone = Arc::clone(&upnp_worker_ref);
+                                    std::thread::spawn(move || {
+                                        if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                                            let _ = runtime.block_on(async { upnp_clone.stop().await });
                                         }
-                                        sink = Some(new_sink);
-                                        accumulated_position = Duration::from_secs_f64(current_pos);
+                                    });
+                                }
+                                upnp_worker_ref.clear_active_device();
+                                is_upnp_active = false;
+
+                                let host = cpal::default_host();
+                                let target_device = match &local_ep {
+                                    AudioEndpoint::SystemDefault => host.default_output_device(),
+                                    AudioEndpoint::Wasapi { name } => host
+                                        .output_devices()
+                                        .ok()
+                                        .and_then(|mut devs| devs.find(|d| d.name().map(|n| &n == name).unwrap_or(false))),
+                                    AudioEndpoint::Upnp { .. } => None,
+                                };
+
+                                match target_device {
+                                    None => {
+                                        if let Some(s) = sink.take() {
+                                            s.stop();
+                                        }
+                                        _stream = None;
+                                        stream_handle = None;
+                                        current_stream_rate = None;
+                                        current_stream_channels = None;
+                                        active_backend_endpoint = None;
+                                        Err(format!("Audio device '{}' not found", local_ep.display_label()))
+                                    }
+                                    Some(device) => {
+                                        if matches!(local_ep, AudioEndpoint::SystemDefault) {
+                                            active_os_default_name = device.name().ok();
+                                        }
+                                        match OutputStream::try_from_device(&device) {
+                                            Err(e) => {
+                                                if let Some(s) = sink.take() {
+                                                    s.stop();
+                                                }
+                                                _stream = None;
+                                                stream_handle = None;
+                                                current_stream_rate = None;
+                                                current_stream_channels = None;
+                                                active_backend_endpoint = None;
+                                                Err(format!("Failed to open output stream: {}", e))
+                                            }
+                                            Ok((new_s, new_h)) => {
+                                                if let Ok(cfg) = device.default_output_config() {
+                                                    current_stream_rate = Some(cfg.sample_rate().0);
+                                                    current_stream_channels = Some(cfg.channels());
+                                                } else {
+                                                    current_stream_rate = None;
+                                                    current_stream_channels = None;
+                                                }
+
+                                                let mut current_pos = accumulated_position.as_secs_f64();
+                                                if let Some(start) = playback_start {
+                                                    if !is_paused {
+                                                        current_pos += start.elapsed().as_secs_f64();
+                                                    }
+                                                }
+                                                let was_playing = sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false);
+                                                if let Some(s) = sink.take() {
+                                                    s.stop();
+                                                }
+                                                _stream = Some(new_s);
+                                                stream_handle = Some(new_h.clone());
+                                                active_backend_endpoint = Some(local_ep);
+
+                                                if let Some(fp) = current_file.as_ref() {
+                                                    let path = Path::new(fp);
+                                                    if let Ok(file) = File::open(path) {
+                                                        let reader = BufReader::new(file);
+                                                        if let Ok(new_sink) = Sink::try_new(&new_h) {
+                                                            if let Ok(source) = Decoder::new(reader) {
+                                                                let effective_vol = if purity_mode { 1.0 } else { volume };
+                                                                new_sink.set_volume(effective_vol);
+                                                                new_sink.append(source);
+                                                                let _ = new_sink.try_seek(Duration::from_secs_f64(current_pos));
+                                                                if was_playing && !is_paused {
+                                                                    new_sink.play();
+                                                                    playback_start = Some(Instant::now());
+                                                                } else {
+                                                                    new_sink.pause();
+                                                                    playback_start = None;
+                                                                }
+                                                                sink = Some(new_sink);
+                                                                accumulated_position = Duration::from_secs_f64(current_pos);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Ok(())
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-
-                        let _ = responder.send(Ok(()));
+                        };
+                        let _ = responder.send(res);
                     }
 
                     AudioWorkerMsg::GetStatus { responder } => {
@@ -793,24 +1176,20 @@ impl AudioEngine {
                         is_playing_worker.store(is_playing, Ordering::Release);
                         is_paused_worker.store(is_paused, Ordering::Release);
 
-                        let is_bit_perfect = if is_upnp_active {
-                            true // UPnP transmits identical untouched raw audio stream
-                        } else if purity_mode {
-                            // Local bit-perfect if rates match and volume is unity
-                            current_info.as_ref().map(|i| {
-                                i.sample_rate == current_stream_rate && (volume - 1.0).abs() < f32::EPSILON
-                            }).unwrap_or(true)
-                        } else {
-                            false
-                        };
-
-                        let device_type = if is_upnp_active {
-                            "upnp_streamer".to_string()
-                        } else if purity_mode {
-                            "wasapi_exclusive_clock".to_string()
-                        } else {
-                            "wasapi_shared".to_string()
-                        };
+                        let (
+                            active_device,
+                            is_bit_perfect,
+                            device_type,
+                            signal_path_mode,
+                            output_sample_rate,
+                            output_channels,
+                        ) = compute_signal_telemetry(
+                            active_backend_endpoint.as_ref(),
+                            purity_mode,
+                            current_stream_rate,
+                            current_stream_channels,
+                            active_os_default_name.as_deref(),
+                        );
 
                         let status = PlaybackStatus {
                             is_playing,
@@ -819,13 +1198,16 @@ impl AudioEngine {
                             position_secs: current_pos.min(duration.as_secs_f64()),
                             duration_secs: duration.as_secs_f64(),
                             volume,
-                            active_device: active_device_name.clone(),
+                            active_device,
                             stream_info: current_info.clone(),
                             purity_mode,
                             is_bit_perfect,
-                            output_sample_rate: current_stream_rate,
-                            output_channels: current_stream_channels,
+                            output_sample_rate,
+                            output_channels,
                             device_type,
+                            selected_endpoint: selected_endpoint.clone(),
+                            active_backend_endpoint: active_backend_endpoint.clone(),
+                            signal_path_mode,
                         };
 
                         let _ = responder.send(status);
@@ -963,11 +1345,11 @@ impl AudioEngine {
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
-    pub fn set_audio_device(&self, device_name: &str) -> Result<(), String> {
+    pub fn set_audio_endpoint(&self, endpoint: AudioEndpoint) -> Result<(), String> {
         let (resp_tx, resp_rx) = channel();
         self.tx
-            .send(AudioWorkerMsg::SetDevice {
-                device_name: device_name.to_string(),
+            .send(AudioWorkerMsg::SetEndpoint {
+                endpoint,
                 responder: resp_tx,
             })
             .map_err(|e| format!("Audio worker error: {}", e))?;
@@ -975,6 +1357,12 @@ impl AudioEngine {
         resp_rx
             .recv()
             .map_err(|e| format!("Audio response timeout: {}", e))?
+    }
+
+    pub fn set_audio_device(&self, device_name: &str) -> Result<(), String> {
+        let upnp_devices = self.upnp_manager.get_devices();
+        let endpoint = AudioEndpoint::from_legacy_string(device_name, &upnp_devices);
+        self.set_audio_endpoint(endpoint)
     }
 
     pub fn set_purity_mode(&self, enabled: bool) -> Result<bool, String> {
@@ -1022,7 +1410,10 @@ impl AudioEngine {
             is_bit_perfect: false,
             output_sample_rate: None,
             output_channels: None,
-            device_type: "wasapi_shared".to_string(),
+            device_type: "unavailable".to_string(),
+            selected_endpoint: AudioEndpoint::SystemDefault,
+            active_backend_endpoint: None,
+            signal_path_mode: "unavailable".to_string(),
         }
     }
 
@@ -1049,16 +1440,67 @@ impl AudioEngine {
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
-    pub fn list_output_devices(&self) -> Vec<String> {
-        let host = cpal::default_host();
-        let mut devices: Vec<String> = match host.output_devices() {
-            Ok(devs) => devs.filter_map(|d| d.name().ok()).collect(),
-            Err(_) => vec!["Default Audio Device".into()],
-        };
+    pub fn list_audio_endpoints(&self) -> Vec<AudioEndpointInfo> {
+        let inventory = EndpointInventory::from_host(&self.upnp_manager);
+        let mut endpoints = Vec::new();
 
-        // Append all discovered UPnP devices
-        let upnp_devices = self.upnp_manager.get_devices();
-        for upnp in upnp_devices {
+        endpoints.push(AudioEndpointInfo {
+            id: AudioEndpoint::SystemDefault.id(),
+            transport: EndpointTransport::SystemDefault,
+            display_name: "Default Audio Device".to_string(),
+            wasapi_name: inventory.default_wasapi_name.clone(),
+            udn: None,
+            is_available: inventory.has_default_wasapi,
+            supports_dsd: false,
+            is_bit_perfect_capable: false,
+        });
+
+        for name in inventory.wasapi_names {
+            endpoints.push(AudioEndpointInfo {
+                id: AudioEndpoint::Wasapi { name: name.clone() }.id(),
+                transport: EndpointTransport::Wasapi,
+                display_name: name.clone(),
+                wasapi_name: Some(name),
+                udn: None,
+                is_available: true,
+                supports_dsd: false,
+                is_bit_perfect_capable: false,
+            });
+        }
+
+        let mut seen_udns = Vec::new();
+        for upnp in inventory.upnp_devices {
+            if seen_udns.contains(&upnp.id) {
+                continue;
+            }
+            seen_udns.push(upnp.id.clone());
+            endpoints.push(AudioEndpointInfo {
+                id: AudioEndpoint::Upnp {
+                    udn: upnp.id.clone(),
+                    friendly_name: upnp.friendly_name.clone(),
+                }
+                .id(),
+                transport: EndpointTransport::Upnp,
+                display_name: upnp.friendly_name,
+                wasapi_name: None,
+                udn: Some(upnp.id),
+                is_available: true,
+                supports_dsd: true,
+                is_bit_perfect_capable: true,
+            });
+        }
+
+        endpoints
+    }
+
+    pub fn list_output_devices(&self) -> Vec<String> {
+        let inventory = EndpointInventory::from_host(&self.upnp_manager);
+        let mut devices = inventory.wasapi_names;
+        if devices.is_empty() {
+            devices.push("Default Audio Device".into());
+        }
+
+        for upnp in inventory.upnp_devices {
             let label = format!("[UPnP] {}", upnp.friendly_name);
             if !devices.contains(&label) {
                 devices.push(label);
@@ -1170,12 +1612,221 @@ fn try_scan_io(
 }
 
 #[cfg(test)]
-#[test]
-fn scan_io_rejects_loading_playing_and_paused_and_resumes_immediately_when_idle() {
-    let gate = parking_lot::Mutex::new(());
-    let loading = gate.lock();
-    assert!(try_scan_io(&gate, || false).is_none());
-    drop(loading);
-    assert!(try_scan_io(&gate, || true).is_none());
-    assert!(try_scan_io(&gate, || false).is_some());
+mod tests {
+    use super::*;
+
+    fn sample_upnp_devices() -> Vec<UpnpDevice> {
+        vec![
+            UpnpDevice {
+                id: "uuid:rose-130-udn".into(),
+                friendly_name: "ROSE-67".into(),
+                model_name: Some("RS130".into()),
+                model_description: Some("HiFi ROSE".into()),
+                manufacturer: Some("CITECH".into()),
+                location: "http://192.0.2.10:34042/desc".into(),
+                control_url: "http://192.0.2.10:34042/action".into(),
+            },
+            UpnpDevice {
+                id: "uuid:samsung-oled-udn".into(),
+                friendly_name: "34\" Odyssey OLED G8".into(),
+                model_name: Some("Odyssey OLED G8".into()),
+                model_description: Some("Samsung OLED Monitor".into()),
+                manufacturer: Some("Samsung".into()),
+                location: "http://192.0.2.30:9197/dmr".into(),
+                control_url: "http://192.0.2.30:9197/action".into(),
+            },
+        ]
+    }
+
+    fn sample_inventory(upnp_devices: Vec<UpnpDevice>) -> EndpointInventory {
+        EndpointInventory {
+            has_default_wasapi: true,
+            default_wasapi_name: Some("Speakers (Game-Audeze Maxwell)".into()),
+            wasapi_names: vec![
+                "Speakers (Chat-Audeze Maxwell)".into(),
+                "Speakers (Game-Audeze Maxwell)".into(),
+                "Odyssey G85SB (NVIDIA High Definition Audio)".into(),
+            ],
+            upnp_devices,
+        }
+    }
+
+    #[test]
+    fn scan_io_rejects_loading_playing_and_paused_and_resumes_immediately_when_idle() {
+        let gate = parking_lot::Mutex::new(());
+        let loading = gate.lock();
+        assert!(try_scan_io(&gate, || false).is_none());
+        drop(loading);
+        assert!(try_scan_io(&gate, || true).is_none());
+        assert!(try_scan_io(&gate, || false).is_some());
+    }
+
+    #[test]
+    fn startup_discovery_race_does_not_override_wasapi_selection_or_play_route() {
+        // Before SSDP completes, user explicitly selects Audeze Maxwell via WASAPI
+        let empty_upnp_inventory = sample_inventory(vec![]);
+        let maxwell = AudioEndpoint::Wasapi {
+            name: "Speakers (Game-Audeze Maxwell)".into(),
+        };
+        let resolved = resolve_endpoint_selection(&maxwell, &empty_upnp_inventory).unwrap();
+        assert_eq!(resolved, maxwell);
+
+        // Simulated SSDP discovery completes later and finds ROSE-67
+        let upnp_manager = UpnpManager::new();
+        assert!(upnp_manager.get_active_device().is_none());
+        let discovered_inventory = sample_inventory(sample_upnp_devices());
+
+        // Even with UPnP inventory present, Play must route strictly to Maxwell WASAPI
+        let route = plan_play_route(&maxwell, false, &discovered_inventory).unwrap();
+        assert_eq!(
+            route,
+            RouteTarget::LocalWasapi {
+                selected: maxwell.clone(),
+                exact_wasapi_name: Some("Speakers (Game-Audeze Maxwell)".into()),
+            }
+        );
+
+        // Auto-advance (subsequent track play) also preserves the exact WASAPI endpoint
+        let next_track_route = plan_play_route(&maxwell, false, &discovered_inventory).unwrap();
+        assert_eq!(next_track_route, route);
+    }
+
+    #[test]
+    fn exact_endpoint_identity_prevents_fuzzy_upnp_or_display_override() {
+        let upnp = sample_upnp_devices();
+        let inventory = sample_inventory(upnp.clone());
+
+        // Local WASAPI names (including display monitor name "Odyssey G85SB") never parse as UPnP
+        let nvidia = AudioEndpoint::from_legacy_string(
+            "Odyssey G85SB (NVIDIA High Definition Audio)",
+            &upnp,
+        );
+        assert_eq!(
+            nvidia,
+            AudioEndpoint::Wasapi {
+                name: "Odyssey G85SB (NVIDIA High Definition Audio)".into()
+            }
+        );
+        assert_eq!(
+            plan_play_route(&nvidia, false, &inventory).unwrap(),
+            RouteTarget::LocalWasapi {
+                selected: nvidia.clone(),
+                exact_wasapi_name: Some("Odyssey G85SB (NVIDIA High Definition Audio)".into()),
+            }
+        );
+
+        // Substring of UPnP friendly_name must not match UPnP
+        let bare_rose = AudioEndpoint::from_legacy_string("HiFi Rose", &upnp);
+        assert!(matches!(bare_rose, AudioEndpoint::Wasapi { .. }));
+        assert!(resolve_endpoint_selection(&bare_rose, &inventory).is_err());
+
+        // Explicit Samsung UPnP UDN must NOT be overridden with ROSE-67
+        let oled_upnp = AudioEndpoint::Upnp {
+            udn: "uuid:samsung-oled-udn".into(),
+            friendly_name: "34\" Odyssey OLED G8".into(),
+        };
+        assert_eq!(
+            plan_play_route(&oled_upnp, false, &inventory).unwrap(),
+            RouteTarget::Upnp {
+                selected: oled_upnp,
+                udn: "uuid:samsung-oled-udn".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn unavailable_endpoints_fail_clearly_without_switching_transports_or_falling_back() {
+        let mut inventory = sample_inventory(sample_upnp_devices());
+        // Simulate unplugged headphones during playback / auto-advance
+        inventory
+            .wasapi_names
+            .retain(|n| n != "Speakers (Game-Audeze Maxwell)");
+
+        let maxwell = AudioEndpoint::Wasapi {
+            name: "Speakers (Game-Audeze Maxwell)".into(),
+        };
+        let sel_err = resolve_endpoint_selection(&maxwell, &inventory).unwrap_err();
+        assert!(sel_err.contains("unavailable"));
+
+        let play_err = plan_play_route(&maxwell, false, &inventory).unwrap_err();
+        assert!(play_err.contains("unavailable"));
+
+        // Missing UPnP renderer fails without substituting ROSE-67
+        let missing_upnp = AudioEndpoint::Upnp {
+            udn: "uuid:missing-streamer".into(),
+            friendly_name: "Offline Streamer".into(),
+        };
+        let upnp_err = plan_play_route(&missing_upnp, false, &inventory).unwrap_err();
+        assert!(upnp_err.contains("unavailable"));
+
+        // Telemetry when selected endpoint is unavailable preserves none for active backend and rate
+        let (active_device, is_bit_perfect, device_type, signal_path_mode, rate, channels) =
+            compute_signal_telemetry(None, true, Some(48000), Some(2), None);
+        assert_eq!(active_device, None);
+        assert!(!is_bit_perfect);
+        assert_eq!(device_type, "unavailable");
+        assert_eq!(signal_path_mode, "unavailable");
+        assert_eq!(rate, None);
+        assert_eq!(channels, None);
+    }
+
+    #[test]
+    fn dsd_playback_never_silently_switches_from_wasapi_to_upnp() {
+        let inventory = sample_inventory(sample_upnp_devices());
+        let maxwell = AudioEndpoint::Wasapi {
+            name: "Speakers (Game-Audeze Maxwell)".into(),
+        };
+
+        // Playing .dsf/.dff when WASAPI is selected must fail clearly, never hijack UPnP ROSE-67
+        let err = plan_play_route(&maxwell, true, &inventory).unwrap_err();
+        assert!(err.contains("WASAPI Shared"));
+        assert!(err.contains("DSD"));
+
+        // Same for SystemDefault
+        let def_err = plan_play_route(&AudioEndpoint::SystemDefault, true, &inventory).unwrap_err();
+        assert!(def_err.contains("DSD"));
+
+        // Playing .dsf/.dff when UPnP UDN is explicitly selected succeeds on that UDN
+        let rose = AudioEndpoint::Upnp {
+            udn: "uuid:rose-130-udn".into(),
+            friendly_name: "ROSE-67".into(),
+        };
+        assert_eq!(
+            plan_play_route(&rose, true, &inventory).unwrap(),
+            RouteTarget::Upnp {
+                selected: rose,
+                udn: "uuid:rose-130-udn".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn signal_telemetry_does_not_equate_purity_mode_with_proven_bit_perfect_output() {
+        let maxwell = AudioEndpoint::Wasapi {
+            name: "Speakers (Game-Audeze Maxwell)".into(),
+        };
+        // Purity mode ON on local WASAPI still uses AUDCLNT_SHAREMODE_SHARED
+        let (dev, bp, dtype, mode, rate, ch) =
+            compute_signal_telemetry(Some(&maxwell), true, Some(44100), Some(2), None);
+        assert_eq!(dev.as_deref(), Some("Speakers (Game-Audeze Maxwell)"));
+        assert!(!bp);
+        assert_eq!(dtype, "wasapi_shared");
+        assert_eq!(mode, "wasapi_shared_purity");
+        assert_eq!(rate, Some(44100));
+        assert_eq!(ch, Some(2));
+
+        // UPnP telemetry clears local DAC clock rate/channels instead of reporting stale 48 kHz
+        let rose = AudioEndpoint::Upnp {
+            udn: "uuid:rose-130-udn".into(),
+            friendly_name: "ROSE-67".into(),
+        };
+        let (dev_u, bp_u, dtype_u, mode_u, rate_u, ch_u) =
+            compute_signal_telemetry(Some(&rose), false, Some(48000), Some(2), None);
+        assert_eq!(dev_u.as_deref(), Some("[UPnP] ROSE-67"));
+        assert!(bp_u);
+        assert_eq!(dtype_u, "upnp_streamer");
+        assert_eq!(mode_u, "upnp_raw_stream");
+        assert_eq!(rate_u, None);
+        assert_eq!(ch_u, None);
+    }
 }

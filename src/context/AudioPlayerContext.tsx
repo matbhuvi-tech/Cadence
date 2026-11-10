@@ -3,6 +3,15 @@ import { Track, Release, Playlist, SampleRateTransition } from '../core/types'
 import { tauriBridge, AudioStreamTelemetry } from '../services/tauriBridge'
 import { sqliteLibraryService } from '../services/sqliteLibraryService'
 import { graphEngine } from '../core/graphEngine'
+import {
+  AudioEndpoint,
+  AudioEndpointInfo,
+  EndpointRoutingState,
+  createEndpointRoutingController,
+  endpointFromLegacyString,
+  getEndpointDisplayName,
+  getEndpointLegacyLabel,
+} from '../core/endpointRouting'
 
 export function computeSampleRateTransition(
   current: Track | null,
@@ -77,6 +86,11 @@ interface AudioPlayerContextType {
   streamTelemetry: AudioStreamTelemetry | null
   activeDevice: string
   availableDevices: string[]
+  selectedEndpoint: AudioEndpoint
+  activeBackendEndpoint: AudioEndpoint | null
+  availableEndpoints: AudioEndpointInfo[]
+  signalPathMode: string
+  endpointError: string | null
   isNativeTauri: boolean
   isPurityMode: boolean
   isBitPerfect: boolean
@@ -94,6 +108,7 @@ interface AudioPlayerContextType {
   toggleRepeat: () => void
   toggleShuffle: () => void
   selectDevice: (device: string) => Promise<void>
+  selectEndpoint: (endpoint: AudioEndpoint) => Promise<void>
   refreshDevices: () => Promise<void>
   togglePurityMode: (enabled?: boolean) => Promise<void>
   discoverUpnpDevices: () => Promise<any[]>
@@ -141,23 +156,74 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [repeatMode, setRepeatMode] = useState<'off' | 'all' | 'one'>('off')
   const [isShuffle, setIsShuffle] = useState<boolean>(false)
   const [streamTelemetry, setStreamTelemetry] = useState<AudioStreamTelemetry | null>(null)
-  const [activeDevice, setActiveDevice] = useState<string>(() => {
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        return localStorage.getItem('cadence:active_device') || 'Default System Audio'
-      }
-    } catch {
-      // In restricted WebView2 or private browsing, localStorage may throw SecurityError
-    }
-    return 'Default System Audio'
-  })
-  const [availableDevices, setAvailableDevices] = useState<string[]>([])
   const [isNativeTauri, setIsNativeTauri] = useState<boolean>(() => tauriBridge.isTauri())
   const [isPurityMode, setIsPurityMode] = useState<boolean>(false)
-  const [isBitPerfect, setIsBitPerfect] = useState<boolean>(false)
-  const [outputSampleRate, setOutputSampleRate] = useState<number | undefined>(undefined)
-  const [deviceType, setDeviceType] = useState<string | undefined>('wasapi_shared')
-  const [upnpDevices, setUpnpDevices] = useState<any[]>([])
+
+  const routingControllerRef = useRef<ReturnType<typeof createEndpointRoutingController> | null>(null)
+  if (!routingControllerRef.current) {
+    const safeStorage =
+      typeof window !== 'undefined' && window.localStorage
+        ? {
+            getItem: (k: string) => {
+              try {
+                return window.localStorage.getItem(k)
+              } catch {
+                return null
+              }
+            },
+            setItem: (k: string, v: string) => {
+              try {
+                window.localStorage.setItem(k, v)
+              } catch {}
+            },
+          }
+        : null
+    routingControllerRef.current = createEndpointRoutingController(
+      {
+        listAudioEndpoints: () => tauriBridge.listAudioEndpoints(),
+        discoverUpnpDevices: () => tauriBridge.discoverUpnpDevices(),
+        setAudioEndpoint: (ep) => tauriBridge.setAudioEndpoint(ep),
+        getPlaybackStatus: () => tauriBridge.getPlaybackStatus(),
+      },
+      safeStorage,
+      (next) => setRoutingState(next)
+    )
+  }
+
+  const [routingState, setRoutingState] = useState<EndpointRoutingState>(() =>
+    routingControllerRef.current!.getState()
+  )
+
+  const {
+    selectedEndpoint,
+    activeBackendEndpoint,
+    availableEndpoints,
+    upnpDevices,
+    deviceType,
+    signalPathMode,
+    isBitPerfect,
+    outputSampleRate,
+    endpointError,
+  } = routingState
+
+  const activeDevice = useMemo(
+    () => (activeBackendEndpoint ? getEndpointDisplayName(activeBackendEndpoint) : ''),
+    [activeBackendEndpoint]
+  )
+
+  const availableDevices = useMemo(
+    () =>
+      availableEndpoints
+        .filter((e) => e.transport !== 'system_default')
+        .map((e) =>
+          getEndpointLegacyLabel(
+            e.transport === 'upnp'
+              ? { transport: 'upnp', udn: e.udn || e.id, friendlyName: e.displayName }
+              : { transport: 'wasapi', name: e.wasapiName || e.displayName }
+          )
+        ),
+    [availableEndpoints]
+  )
 
   // Unified Right Sidebar & Gapless Playback State
   const [isRightSidebarOpen, setIsRightSidebarOpen] = useState<boolean>(false)
@@ -279,7 +345,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const tauri = tauriBridge.isTauri()
     setIsNativeTauri(tauri)
     tauriBridge.getPurityMode().then((p) => setIsPurityMode(p))
-    refreshDevices()
+    const controller = routingControllerRef.current!
+    controller.initializeStartup().catch(() => {})
+    controller.refreshInventory().catch(() => {})
 
     if (tauri) {
       import('@tauri-apps/api/event').then(({ listen }) => {
@@ -291,8 +359,6 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
             const positionSecsVal = data.positionSecs ?? data.position_secs
             const durationSecsVal = data.durationSecs ?? data.duration_secs
             const isPurityModeVal = data.isPurityMode ?? data.is_purity_mode
-            const isBitPerfectVal = data.isBitPerfect ?? data.is_bit_perfect
-            const activeDeviceVal = data.activeDevice ?? data.active_device
             const streamInfoVal = data.streamInfo ?? data.stream_info
             const currentFileVal = data.currentFile ?? data.current_file
 
@@ -302,10 +368,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
             if (durationSecsVal !== undefined) setDuration(durationSecsVal)
             if (data.volume !== undefined) setVolumeState(data.volume)
             if (isPurityModeVal !== undefined) setIsPurityMode(isPurityModeVal)
-            if (isBitPerfectVal !== undefined) setIsBitPerfect(isBitPerfectVal)
-            if (activeDeviceVal) setActiveDevice(activeDeviceVal)
             if (streamInfoVal) setStreamTelemetry(streamInfoVal)
             if (currentFileVal) reconcileActiveTrack(currentFileVal)
+            controller.syncFromBackendPoll().catch(() => {})
           }
         }).catch(() => {})
 
@@ -416,6 +481,8 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     if ((isPlaying || isPaused) && isTauri) {
       pollIntervalRef.current = setInterval(async () => {
         try {
+          const controller = routingControllerRef.current!
+          const epochBeforePoll = controller.getState().selectionEpoch
           const status = await tauriBridge.getPlaybackStatus()
           if (!status) return
 
@@ -437,15 +504,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           if (status.purityMode !== undefined) {
             setIsPurityMode(status.purityMode)
           }
-          if (status.isBitPerfect !== undefined) {
-            setIsBitPerfect(status.isBitPerfect)
-          }
-          if (status.outputSampleRate !== undefined) {
-            setOutputSampleRate(status.outputSampleRate)
-          }
-          if (status.deviceType !== undefined) {
-            setDeviceType(status.deviceType)
-          }
+          controller.reconcilePolledStatus(status, epochBeforePoll)
 
           // Reconcile current track if native audio engine is playing a different file
           if (status.currentFile) {
@@ -615,17 +674,22 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
         setIsPlaying(true)
         setIsPaused(false)
+        routingControllerRef.current?.setEndpointError(null)
+        routingControllerRef.current?.syncFromBackendPoll().catch(() => {})
       } catch (err) {
         console.error('[AudioPlayer] Play track failed:', err)
+        const errMsg = err instanceof Error ? err.message : String(err)
         setIsPlaying(false)
         setIsPaused(false)
+        routingControllerRef.current?.setEndpointError(errMsg)
+        routingControllerRef.current?.syncFromBackendPoll().catch(() => {})
         try {
           await tauriBridge.stop()
         } catch {}
         if (typeof window !== 'undefined') {
           window.dispatchEvent(
             new CustomEvent('cadence:toast', {
-              detail: `Cannot play "${track.title}": ${err instanceof Error ? err.message : String(err)}`,
+              detail: `Cannot play "${track.title}": ${errMsg}`,
             })
           )
         }
@@ -768,16 +832,26 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setIsShuffle((prev) => !prev)
   }, [])
 
-  // Select Audio Output Device
-  const selectDevice = useCallback(async (device: string) => {
-    setActiveDevice(device)
-    if (typeof window !== 'undefined') {
-      try {
-        localStorage.setItem('cadence:active_device', device)
-      } catch {}
+  // Select Audio Output Endpoint (typed identity, preserves user selection even on failure)
+  const selectEndpoint = useCallback(async (endpoint: AudioEndpoint) => {
+    const res = await routingControllerRef.current!.selectEndpoint(endpoint)
+    if (!res.ok && res.error && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('cadence:toast', {
+          detail: `Output unavailable: ${res.error}`,
+        })
+      )
     }
-    await tauriBridge.setAudioDevice(device)
   }, [])
+
+  // Legacy string selection wrapper (parses without fuzzy matching)
+  const selectDevice = useCallback(
+    async (device: string) => {
+      const endpoint = endpointFromLegacyString(device, routingControllerRef.current!.getState().upnpDevices)
+      await selectEndpoint(endpoint)
+    },
+    [selectEndpoint]
+  )
 
   // Toggle Bit-Perfect Purity Mode
   const togglePurityMode = useCallback(async (forced?: boolean) => {
@@ -789,75 +863,31 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         setVolumeState(1)
         setIsMuted(false)
       }
+      await routingControllerRef.current?.syncFromBackendPoll().catch(() => {})
     } catch (e) {
       console.error('[AudioPlayerContext] Failed to toggle purity mode:', e)
     }
   }, [isPurityMode])
 
-  // Discover UPnP / DLNA Network Renderers
+  // Discover UPnP / DLNA Network Renderers (Inventory update only; never switches endpoint)
   const discoverUpnpDevices = useCallback(async () => {
     try {
-      const discovered = await tauriBridge.discoverUpnpDevices()
-      setUpnpDevices(discovered)
-      return discovered
+      await routingControllerRef.current!.refreshInventory()
+      return routingControllerRef.current!.getState().upnpDevices
     } catch (e) {
       console.error('[AudioPlayerContext] discoverUpnpDevices error:', e)
       return []
     }
   }, [])
 
-  // Refresh Audio Output Devices (Local + UPnP)
+  // Refresh Audio Output Devices (Local + UPnP inventory only; never modifies active or selected endpoint)
   const refreshDevices = useCallback(async () => {
     try {
-      const [localDevices, netDevices] = await Promise.all([
-        tauriBridge.listAudioDevices(),
-        tauriBridge.discoverUpnpDevices(),
-      ])
-      setUpnpDevices(netDevices)
-      const merged = [...localDevices]
-      for (const d of netDevices) {
-        const upnpLabel = `[UPnP] ${d.friendlyName}`
-        if (!merged.includes(upnpLabel)) {
-          merged.push(upnpLabel)
-        }
-      }
-      setAvailableDevices(merged)
-
-      let savedDevice: string | null = null
-      try {
-        savedDevice = typeof window !== 'undefined' && window.localStorage ? localStorage.getItem('cadence:active_device') : null
-      } catch {}
-      // Check if savedDevice is an unintended display monitor/TV
-      const isSavedMonitor = savedDevice && /odyssey|oled|tv|monitor|screen|display/i.test(savedDevice)
-
-      // Find top audiophile network streamer (e.g. HiFi Rose, Anthem AVM)
-      const audiophileStreamer = netDevices.find(
-        (d) => !/odyssey|oled|tv|monitor|screen|display/i.test(d.friendlyName + (d.modelName || '') + (d.modelDescription || ''))
-      )
-
-      if (savedDevice && merged.includes(savedDevice) && !isSavedMonitor) {
-        setActiveDevice(savedDevice)
-        await tauriBridge.setAudioDevice(savedDevice)
-      } else if (audiophileStreamer) {
-        // Auto-activate top audiophile network streamer (e.g. dedicated UPnP endpoint) for bit-perfect delivery
-        const streamerLabel = `[UPnP] ${audiophileStreamer.friendlyName}`
-        setActiveDevice(streamerLabel)
-        if (typeof window !== 'undefined') {
-          try {
-            localStorage.setItem('cadence:active_device', streamerLabel)
-          } catch {}
-        }
-        await tauriBridge.setAudioDevice(streamerLabel)
-      } else if (savedDevice && merged.includes(savedDevice)) {
-        setActiveDevice(savedDevice)
-        await tauriBridge.setAudioDevice(savedDevice)
-      } else if (merged.length > 0 && !activeDevice) {
-        setActiveDevice(merged[0])
-      }
+      await routingControllerRef.current!.refreshInventory()
     } catch (e) {
       console.error('[AudioPlayerContext] refreshDevices error:', e)
     }
-  }, [activeDevice])
+  }, [])
 
   // Upcoming tracks derived from current queue & queueIndex
   const upcomingTracks = useMemo(() => {
@@ -1096,6 +1126,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         streamTelemetry,
         activeDevice,
         availableDevices,
+        selectedEndpoint,
+        activeBackendEndpoint,
+        availableEndpoints,
+        signalPathMode,
+        endpointError,
         isNativeTauri,
         isPurityMode,
         isBitPerfect,
@@ -1113,6 +1148,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
         toggleRepeat,
         toggleShuffle,
         selectDevice,
+        selectEndpoint,
         refreshDevices,
         togglePurityMode,
         discoverUpnpDevices,

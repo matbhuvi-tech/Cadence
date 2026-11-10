@@ -268,7 +268,7 @@ export const QueuePlaylistDrawer: React.FC<QueuePlaylistDrawerProps> = ({
                   {isBitPerfect && (
                     <span className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
                       <ShieldCheck className="h-3 w-3" />
-                      Bit-Perfect Lock
+                      UPnP Raw Stream
                     </span>
                   )}
                 </div>

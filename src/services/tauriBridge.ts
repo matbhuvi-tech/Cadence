@@ -5,6 +5,16 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import {
+  AudioEndpoint,
+  AudioEndpointInfo,
+  SignalPathMode,
+  getEndpointDisplayName,
+  mergeEndpointsFromLegacyAndUpnp,
+  normalizeBackendEndpoint,
+} from '../core/endpointRouting'
+
+export type { AudioEndpoint, AudioEndpointInfo, SignalPathMode }
 import type { CurationDecisionTrace, UpdateArtistEditorialPayload } from '../core/types'
 import type { CurateDraft } from '../core/curateDraft'
 import type { CurateEvidenceRun, CurateEvidenceSummary } from './curateEvidenceService'
@@ -53,13 +63,16 @@ export interface PlaybackStatePayload {
   durationSecs: number
   volume: number
   playbackState?: 'Playing' | 'Paused' | 'Stopped' | 'Loading' | string
-  activeDevice?: string
+  activeDevice?: string | null
   streamInfo?: AudioStreamTelemetry
   purityMode?: boolean
   isBitPerfect?: boolean
   outputSampleRate?: number
   outputChannels?: number
   deviceType?: string
+  selectedEndpoint?: AudioEndpoint
+  activeBackendEndpoint?: AudioEndpoint | null
+  signalPathMode?: SignalPathMode | string
 }
 
 export interface StorageAccessibilityReport {
@@ -290,12 +303,19 @@ class TauriBridgeService {
         durationSecs: Number(raw.durationSecs ?? raw.duration_secs ?? 0),
         volume: Number(raw.volume ?? 1),
         playbackState: raw.playbackState ?? raw.playback_state,
-        activeDevice: raw.activeDevice ?? raw.active_device,
+        activeDevice: raw.activeDevice ?? raw.active_device ?? null,
         purityMode: Boolean(raw.purityMode ?? raw.purity_mode),
         isBitPerfect: Boolean(raw.isBitPerfect ?? raw.is_bit_perfect),
-        outputSampleRate: raw.outputSampleRate ?? raw.output_sample_rate,
-        outputChannels: raw.outputChannels ?? raw.output_channels,
+        outputSampleRate: raw.outputSampleRate ?? raw.output_sample_rate ?? undefined,
+        outputChannels: raw.outputChannels ?? raw.output_channels ?? undefined,
         deviceType: raw.deviceType ?? raw.device_type ?? 'wasapi_shared',
+        selectedEndpoint: normalizeBackendEndpoint(raw.selectedEndpoint ?? raw.selected_endpoint) ?? {
+          transport: 'system_default',
+        },
+        activeBackendEndpoint: normalizeBackendEndpoint(
+          raw.activeBackendEndpoint ?? raw.active_backend_endpoint
+        ),
+        signalPathMode: raw.signalPathMode ?? raw.signal_path_mode ?? 'wasapi_shared',
         streamInfo: sInfo
           ? {
               filePath: sInfo.filePath ?? sInfo.file_path,
@@ -325,6 +345,9 @@ class TauriBridgeService {
         purityMode: false,
         isBitPerfect: false,
         deviceType: 'web_audio',
+        selectedEndpoint: { transport: 'system_default' },
+        activeBackendEndpoint: { transport: 'system_default' },
+        signalPathMode: 'wasapi_shared',
       }
     }
   }
@@ -435,25 +458,45 @@ class TauriBridgeService {
   }
 
   /**
+   * List typed audio endpoints (SystemDefault, WASAPI, and UPnP)
+   */
+  public async listAudioEndpoints(): Promise<AudioEndpointInfo[]> {
+    if (this.isTauri()) {
+      try {
+        return await invoke<AudioEndpointInfo[]>('list_audio_endpoints')
+      } catch (err) {
+        console.error('[TauriBridge] Native list_audio_endpoints error:', err)
+        const legacy = await this.listAudioDevices()
+        return mergeEndpointsFromLegacyAndUpnp(legacy, [])
+      }
+    }
+    const webDevices = await this.listAudioDevices()
+    return mergeEndpointsFromLegacyAndUpnp(webDevices, [])
+  }
+
+  /**
+   * Set active audio output endpoint using typed identity
+   */
+  public async setAudioEndpoint(endpoint: AudioEndpoint): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('set_audio_endpoint', { endpoint })
+    } else {
+      await this.setAudioDevice(getEndpointDisplayName(endpoint))
+    }
+  }
+
+  /**
    * Set active audio output device
    */
   public async setAudioDevice(deviceName: string): Promise<void> {
     if (this.isTauri()) {
-      try {
-        await invoke('set_audio_device', { deviceName })
-      } catch (err) {
-        console.error('[TauriBridge] set_audio_device native error:', err)
-      }
+      await invoke('set_audio_device', { deviceName })
     } else {
       // Find matching device ID
       const deviceId = this.browserDeviceMap.get(deviceName) || 'default'
       this.activeDeviceId = deviceId
       if (this.browserAudio && typeof (this.browserAudio as any).setSinkId === 'function') {
-        try {
-          await (this.browserAudio as any).setSinkId(deviceId)
-        } catch (err) {
-          console.warn('[TauriBridge] setSinkId error:', err)
-        }
+        await (this.browserAudio as any).setSinkId(deviceId)
       }
     }
   }

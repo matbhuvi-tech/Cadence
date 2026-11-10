@@ -18,7 +18,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   // Format label for audiophile signal badge
   const formatBadge = () => {
     if (!stream) {
-      if (status.isBitPerfect) return 'BIT-PERFECT';
+      if (status.isBitPerfect) return 'RAW STREAM';
+      if (status.purityMode) return 'UNITY GAIN';
       return 'READY';
     }
 

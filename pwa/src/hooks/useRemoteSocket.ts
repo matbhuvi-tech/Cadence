@@ -9,8 +9,8 @@ const INITIAL_STATUS: PlaybackStatus = {
   positionSecs: 0,
   durationSecs: 0,
   volume: 1.0,
-  purityMode: true,
-  isBitPerfect: true,
+  purityMode: false,
+  isBitPerfect: false,
   activeDevice: null,
   streamInfo: null,
 };

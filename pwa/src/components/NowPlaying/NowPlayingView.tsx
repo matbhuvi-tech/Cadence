@@ -129,8 +129,12 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
     onSeek(sliderPos);
   };
 
-  const dspModeNode = status.purityMode ? 'BIT-PERFECT DIRECT' : 'OS MIXER';
-  const outputNode = status.activeDevice ? status.activeDevice.replace(/^\[.*?\]\s*/, '') : 'WASAPI Exclusive';
+  const dspModeNode = status.purityMode
+    ? 'PURITY (0dB)'
+    : status.isBitPerfect
+    ? 'RAW STREAM'
+    : 'OS MIXER';
+  const outputNode = status.activeDevice ? status.activeDevice.replace(/^\[.*?\]\s*/, '') : 'WASAPI Shared';
 
   return (
     <div className="flex-1 flex flex-col justify-between items-center px-6 py-3 overflow-y-auto no-scrollbar max-w-md mx-auto w-full select-none">
@@ -318,13 +322,13 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
             ) : (
               <ShieldAlert className="w-3.5 h-3.5 text-zinc-500" />
             )}
-            <span>Bit-Perfect Purity Mode: {status.purityMode ? 'ON' : 'OFF'}</span>
+            <span>Purity Mode (0 dB): {status.purityMode ? 'ON' : 'OFF'}</span>
           </button>
         </div>
 
         <VolumeGuard
           volume={status.volume}
-          isBitPerfect={status.isBitPerfect}
+          isBitPerfect={status.purityMode || status.isBitPerfect}
           onVolumeChange={onVolumeChange}
         />
       </div>

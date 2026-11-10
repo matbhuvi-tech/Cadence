@@ -43,11 +43,10 @@ pub async fn monitor_queue_completion(state: Arc<RemoteState>) {
 
         let near_end = status.duration_secs > 1.0
             && status.position_secs >= status.duration_secs - 0.25;
-        let renderer_reports_progress = status
-            .active_device
-            .as_deref()
-            .map(|name| name.starts_with("[UPnP]"))
-            .unwrap_or(false);
+        let renderer_reports_progress = matches!(
+            status.active_backend_endpoint,
+            Some(crate::audio::AudioEndpoint::Upnp { .. })
+        );
         let track_finished = near_end
             && !status.is_paused
             && (renderer_reports_progress || (!status.is_playing && !status.is_paused));

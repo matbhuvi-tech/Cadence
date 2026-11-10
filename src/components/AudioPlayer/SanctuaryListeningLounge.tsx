@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { graphEngine } from '../../core/graphEngine'
+import { describeSignalPath } from '../../core/endpointRouting'
 
 interface SanctuaryListeningLoungeProps {
   isOpen: boolean
@@ -33,7 +34,9 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     volume,
     isMuted,
     streamTelemetry,
-    activeDevice,
+    selectedEndpoint,
+    activeBackendEndpoint,
+    signalPathMode,
     isPurityMode,
     isBitPerfect,
     outputSampleRate,
@@ -198,25 +201,38 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
           </div>
 
           {/* Minimalist Signal Path Capsule */}
-          <div className="p-4 rounded-xl bg-white/[0.03] border border-white/[0.07] font-mono text-xs space-y-2">
-            <div className="flex items-center justify-between text-[#8E8E93] text-[10px] uppercase font-bold tracking-wider">
-              <span>Bit-Perfect Signal Path</span>
-              <span className="text-[#10B981] flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3" />
-                <span>Locked</span>
-              </span>
-            </div>
-            <div className="text-[11px] text-[#F5F5F7] flex items-center justify-between pt-1 border-t border-white/[0.05]">
-              <span className="text-[#8E8E93]">Transport:</span>
-              <span>VirtualLock Pinned RAM · MMCSS Pro Audio</span>
-            </div>
-            <div className="text-[11px] text-[#F5F5F7] flex items-center justify-between">
-              <span className="text-[#8E8E93]">Output DAC:</span>
-              <span className="truncate max-w-[220px]">
-                {isPurityMode ? 'WASAPI Exclusive 0dB' : activeDevice}
-              </span>
-            </div>
-          </div>
+          {(() => {
+            const signalDesc = describeSignalPath({
+              selectedEndpoint,
+              activeBackendEndpoint,
+              deviceType,
+              signalPathMode,
+              isPurityMode,
+              isBitPerfect,
+              volume,
+              isMuted,
+              outputSampleRate,
+            })
+            return (
+              <div className="p-4 rounded-xl bg-white/[0.03] border border-white/[0.07] font-mono text-xs space-y-2">
+                <div className="flex items-center justify-between text-[#8E8E93] text-[10px] uppercase font-bold tracking-wider">
+                  <span>{signalDesc.isProvenBitPerfect ? 'UPnP Raw Signal Path' : 'Audio Signal Path'}</span>
+                  <span className={`${activeBackendEndpoint === null ? 'text-rose-400' : 'text-[#10B981]'} flex items-center gap-1`}>
+                    <CheckCircle2 className="w-3 h-3" />
+                    <span>{signalDesc.transportLabel}</span>
+                  </span>
+                </div>
+                <div className="text-[11px] text-[#F5F5F7] flex items-center justify-between pt-1 border-t border-white/[0.05] gap-2">
+                  <span className="text-[#8E8E93] shrink-0">Transport:</span>
+                  <span className="truncate text-right">{signalDesc.clockStepDetail}</span>
+                </div>
+                <div className="text-[11px] text-[#F5F5F7] flex items-center justify-between gap-2">
+                  <span className="text-[#8E8E93] shrink-0">Output Endpoint:</span>
+                  <span className="truncate max-w-[240px] text-right">{signalDesc.transportDetail}</span>
+                </div>
+              </div>
+            )
+          })()}
         </div>
       </main>
 

@@ -1,3 +1,12 @@
+import type {
+  AudioEndpoint,
+  AudioEndpointInfo,
+  EndpointTransport,
+  SignalPathMode,
+} from './endpointRouting'
+
+export type { AudioEndpoint, AudioEndpointInfo, EndpointTransport, SignalPathMode }
+
 export type CreditRole =
   | 'composer'
   | 'arranger'
@@ -446,13 +455,16 @@ export interface PlaybackStatePayload {
   positionSecs: number
   durationSecs: number
   volume: number
-  activeDevice?: string
+  activeDevice?: string | null
   streamInfo?: any
   purityMode?: boolean
   isBitPerfect?: boolean
   outputSampleRate?: number
   outputChannels?: number
   deviceType?: string
+  selectedEndpoint?: AudioEndpoint
+  activeBackendEndpoint?: AudioEndpoint | null
+  signalPathMode?: SignalPathMode | string
 }
 
 export interface Playlist {

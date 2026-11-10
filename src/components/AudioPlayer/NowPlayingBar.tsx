@@ -23,10 +23,12 @@ import {
   Lock,
   ListMusic,
   Zap,
+  AlertTriangle,
 } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
+import { describeSignalPath, getEndpointDisplayName } from '../../core/endpointRouting'
 
 interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
@@ -50,9 +52,13 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     repeatMode,
     isShuffle,
     streamTelemetry,
-    activeDevice,
+    selectedEndpoint,
+    activeBackendEndpoint,
+    signalPathMode,
+    endpointError,
     isPurityMode,
     isBitPerfect,
+    outputSampleRate,
     deviceType,
     togglePurityMode,
     togglePlayPause,
@@ -94,7 +100,19 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
   const isHiRes = streamTelemetry?.isHighRes || currentTrack?.isHighRes
 
-  const ledColor = isDsd ? '#818CF8' : isHiRes ? '#F59E0B' : '#10B981'
+  const signalDesc = describeSignalPath({
+    selectedEndpoint,
+    activeBackendEndpoint,
+    deviceType,
+    signalPathMode,
+    isPurityMode,
+    isBitPerfect,
+    volume,
+    isMuted,
+    outputSampleRate,
+  })
+  const isEndpointUnavailable = activeBackendEndpoint === null || deviceType === 'unavailable'
+  const ledColor = isEndpointUnavailable ? '#F43F5E' : isDsd ? '#818CF8' : isHiRes ? '#F59E0B' : '#10B981'
 
   if (!currentTrack && (topMode === 'curate' || topMode === 'maintain') && !isDeviceModalOpen && !isSignalPopoverOpen) {
     return null
@@ -240,10 +258,12 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             {/* Audio Output Device Modal Trigger */}
             <button
               onClick={() => setIsDeviceModalOpen(true)}
-              title={`Output Endpoint: ${activeDevice}`}
+              title={`Selected Output: ${getEndpointDisplayName(selectedEndpoint)}${
+                isEndpointUnavailable ? ' (Unavailable)' : ''
+              }`}
               className="p-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white transition-all cursor-pointer"
             >
-              <Speaker className="w-3.5 h-3.5 text-[#D4AF37]" />
+              <Speaker className={`w-3.5 h-3.5 ${isEndpointUnavailable ? 'text-rose-400' : 'text-[#D4AF37]'}`} />
             </button>
 
             {/* Volume Control */}
@@ -308,8 +328,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                   {streamTelemetry?.format || currentTrack?.format || 'PCM'}
                 </span>
                 <span className="transport-signal-label text-[#8E8E93]">→</span>
-                <span className="transport-signal-label text-[#8E8E93] truncate max-w-[70px]">
-                  {deviceType === 'upnp_streamer' ? 'UPnP' : isPurityMode ? 'WASAPI Ex.' : 'WASAPI'}
+                <span className="transport-signal-label text-[#8E8E93] truncate max-w-[110px]">
+                  {signalDesc.pillLabel}
                 </span>
               </button>
             )}
@@ -387,8 +407,18 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
           >
             <div className="flex items-center justify-between pb-2 border-b border-white/[0.08] mb-3">
               <span className="font-bold text-white text-xs flex items-center gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981]" />
-                <span>Deterministic Signal Path & DAC Clock</span>
+                {isEndpointUnavailable ? (
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981]" />
+                )}
+                <span>
+                  {isEndpointUnavailable
+                    ? 'Audio Signal Path · Unavailable'
+                    : signalDesc.isProvenBitPerfect
+                    ? 'UPnP Raw Signal Path'
+                    : 'Audio Signal Path Telemetry'}
+                </span>
               </span>
               <button
                 onClick={() => setIsSignalPopoverOpen(false)}
@@ -414,54 +444,61 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 </div>
               </div>
 
-              {/* Step 2: Memory */}
+              {/* Step 2: Buffer / Path */}
               <div className="flex items-start gap-2.5">
                 <div className="w-5 h-5 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] text-[#10B981] shrink-0 mt-0.5">
                   2
                 </div>
                 <div>
-                  <div className="text-[#8E8E93] text-[10px]">RAM Pinning (Zero Disk I/O)</div>
-                  <div className="text-white font-semibold flex items-center gap-1.5">
-                    <span>VirtualLock Active</span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300">
-                      100% Pinned
-                    </span>
+                  <div className="text-[#8E8E93] text-[10px]">{signalDesc.clockStepTitle}</div>
+                  <div className="text-white font-semibold flex items-center gap-1.5 flex-wrap">
+                    <span>{signalDesc.transportLabel}</span>
+                    {signalDesc.isProvenBitPerfect && (
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300">
+                        Raw Untouched File
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* Step 3: Thread */}
+              {/* Step 3: Processing / Engine */}
               <div className="flex items-start gap-2.5">
                 <div className="w-5 h-5 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] text-[#818CF8] shrink-0 mt-0.5">
                   3
                 </div>
                 <div>
-                  <div className="text-[#8E8E93] text-[10px]">Isolated Thread & Priority</div>
+                  <div className="text-[#8E8E93] text-[10px]">Transport & Mixing Stage</div>
                   <div className="text-white font-semibold">
-                    MMCSS Pro Audio · Core Pinned
+                    {signalDesc.clockStepDetail}
                   </div>
                 </div>
               </div>
 
-              {/* Step 4: DAC Output */}
+              {/* Step 4: Active Backend Endpoint */}
               <div className="flex items-start gap-2.5">
                 <div className="w-5 h-5 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] text-[#F59E0B] shrink-0 mt-0.5">
                   4
                 </div>
-                <div>
-                  <div className="text-[#8E8E93] text-[10px]">Endpoint Hardware Lock</div>
-                  <div className="text-white font-semibold truncate max-w-[200px]">
-                    {isPurityMode ? 'WASAPI Exclusive (Bit-Perfect)' : activeDevice}
+                <div className="min-w-0">
+                  <div className="text-[#8E8E93] text-[10px]">Active Backend Output</div>
+                  <div className="text-white font-semibold truncate max-w-[220px]">
+                    {signalDesc.transportDetail}
                   </div>
+                  {endpointError && (
+                    <div className="text-[10px] text-rose-300 mt-0.5 break-words">
+                      {endpointError}
+                    </div>
+                  )}
                 </div>
               </div>
 
               {/* Step 5: Gain Integrity */}
               <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[10px]">
-                <span className="text-[#8E8E93]">Gain Attenuation:</span>
-                <span className="text-amber-400 font-semibold flex items-center gap-1">
-                  <Lock className="w-2.5 h-2.5" />
-                  <span>0 dB Unity Gain Locked</span>
+                <span className="text-[#8E8E93]">Gain Stage:</span>
+                <span className={`${signalDesc.gainIsLocked ? 'text-amber-400' : 'text-[#E5E5EA]'} font-semibold flex items-center gap-1`}>
+                  {signalDesc.gainIsLocked && <Lock className="w-2.5 h-2.5" />}
+                  <span>{signalDesc.gainLabel}</span>
                 </span>
               </div>
 

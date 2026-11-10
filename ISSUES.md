@@ -6,3 +6,5 @@
 - [#22](https://github.com/matbhuvi-tech/Cadence/issues/22): Desktop Now Playing card flickers and bottom player controls stall when playing track from mobile.
 - [#23](https://github.com/matbhuvi-tech/Cadence/issues/23): Desktop playback queue is not synchronized to mobile remote queue.
 - [#24](https://github.com/matbhuvi-tech/Cadence/issues/24): Remove past played tracks from playback queue on both desktop and mobile.
+- [#26](https://github.com/matbhuvi-tech/Cadence/issues/26): Crash / AppHangB1 during playback and when selecting WASAPI output device.
+- [#27](https://github.com/matbhuvi-tech/Cadence/issues/27): WASAPI-to-UPnP endpoint routing override and signal-path telemetry mismatch.
