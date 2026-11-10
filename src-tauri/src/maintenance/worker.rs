@@ -253,14 +253,23 @@ impl MaintenanceWorker {
         let in_cooldown = !is_active_session && !cooldown_remaining.is_zero();
         s.is_idle = !is_active_session && !in_cooldown;
 
-        // Query current SQLite counts
-        let conn = self.db.conn.lock();
-        if let Ok((cached, not_found, failed, total_target, pending)) = DbOperations::get_artwork_cache_stats(&conn) {
-            s.cached_count = cached;
-            s.not_found_count = not_found;
-            s.failed_count = failed;
-            s.total_items = total_target;
-            s.pending_items = pending;
+        // During active playback or cooldown, serve cached artwork counts instead of hitting SQLite.
+        let has_cached_counts = s.total_items > 0 || s.cached_count > 0 || s.not_found_count > 0 || s.failed_count > 0;
+        if s.is_idle || !has_cached_counts {
+            let conn = self.db.conn.lock();
+            if let Ok((cached, not_found, failed, total_target, pending)) = DbOperations::get_artwork_cache_stats(&conn) {
+                s.cached_count = cached;
+                s.not_found_count = not_found;
+                s.failed_count = failed;
+                s.total_items = total_target;
+                s.pending_items = pending;
+                let mut stats_guard = self.stats.lock();
+                stats_guard.cached_count = cached;
+                stats_guard.not_found_count = not_found;
+                stats_guard.failed_count = failed;
+                stats_guard.total_items = total_target;
+                stats_guard.pending_items = pending;
+            }
         }
 
         if status.is_playing && !status.is_paused {
@@ -299,41 +308,58 @@ impl MaintenanceWorker {
 
     fn run_loop(&self) {
         let mut last_reported_state = String::new();
+        let mut last_status_tag = String::new();
 
         while self.is_running.load(Ordering::Relaxed) {
             // 0. Check User Pause
             if self.user_paused.load(Ordering::Relaxed) {
                 if last_reported_state != "user_paused" {
                     last_reported_state = "user_paused".to_string();
+                    last_status_tag = "user_paused".to_string();
                     self.set_status("Suspended: Background maintenance paused by user".to_string());
                     self.emit_current_state();
                 }
-                thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(1500));
                 continue;
             }
 
             // 1. Check if the audio engine is idle (not playing, not paused, and past 30s cooldown)
-            if !self.is_audio_idle() {
-                let status = self.engine.get_status();
-                let (current_state, msg) = if status.is_playing || status.is_paused {
-                    *self.last_playback_activity.lock() = std::time::Instant::now();
-                    (
-                        "paused_playback".to_string(),
-                        if !status.is_paused {
-                            "Suspended: Bit-perfect audio playback active (zero bus contention)".to_string()
-                        } else {
-                            "Suspended: Playback session paused (listening room silence preserved)".to_string()
-                        },
-                    )
+            let status = self.engine.get_status();
+            let is_active_session = status.is_playing || status.is_paused;
+            if is_active_session {
+                *self.last_playback_activity.lock() = std::time::Instant::now();
+            }
+            let elapsed = self.last_playback_activity.lock().elapsed();
+            let in_cooldown = !is_active_session && elapsed < Duration::from_secs(30);
+
+            if is_active_session || in_cooldown {
+                let (current_state, status_tag, msg) = if is_active_session {
+                    if !status.is_paused {
+                        (
+                            "paused_playback".to_string(),
+                            "playing".to_string(),
+                            "Suspended: Bit-perfect audio playback active (zero bus contention)".to_string(),
+                        )
+                    } else {
+                        (
+                            "paused_playback".to_string(),
+                            "paused".to_string(),
+                            "Suspended: Playback session paused (listening room silence preserved)".to_string(),
+                        )
+                    }
                 } else {
-                    let rem = Duration::from_secs(30).saturating_sub(self.last_playback_activity.lock().elapsed());
+                    let rem = Duration::from_secs(30).saturating_sub(elapsed);
                     (
                         "cooldown".to_string(),
+                        format!("cooldown:{}", rem.as_secs()),
                         format!("Cooling down: {}s cooldown remaining before background tasks resume", rem.as_secs()),
                     )
                 };
 
-                self.set_status(msg);
+                if last_status_tag != status_tag {
+                    last_status_tag = status_tag;
+                    self.set_status(msg);
+                }
 
                 // Zero-polling contract: Emit only on state transition to preserve quiet bus
                 if last_reported_state != current_state {
@@ -351,9 +377,10 @@ impl MaintenanceWorker {
                     self.emit_current_state();
                 }
 
-                thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(if is_active_session { 2000 } else { 1000 }));
                 continue;
             }
+            last_status_tag.clear();
 
             // 2. Audio is idle (>30s cooldown elapsed):
             // Priority 1: Check for pending artist portraits

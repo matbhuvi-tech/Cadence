@@ -210,9 +210,9 @@ export const CadenceSettingsModal: React.FC<CadenceSettingsModalProps> = ({
                   Assign urgency tiers for Curate metadata issue detection and album ranking.
                 </p>
                 <CuratePrioritySettingsForm
+                  key={isOpen && activeTab === 'priorities' ? 'priorities-open' : 'priorities-closed'}
                   settings={prioritySettings}
                   summary={prioritySummary}
-                  resetDraftSignal={isOpen && activeTab === 'priorities'}
                   onSave={onSavePrioritySettings}
                 />
               </div>

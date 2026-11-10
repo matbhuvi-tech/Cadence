@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 import { Release, PressingVariant, AlbumDisplayMode, Track } from '../../core/types'
 import { IntegrityScanner } from '../../services/integrityScanner'
-import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { graphEngine } from '../../core/graphEngine'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
@@ -44,6 +44,63 @@ interface VariantStackCardProps {
   onCustomizeRelease?: (release: Release) => void
 }
 
+const formatClockTime = (seconds: number) => {
+  if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.floor(seconds % 60)
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
+
+const VariantStackScrubber: React.FC<{
+  isCurrentlyPlayingAlbum: boolean
+  fallbackDuration: number
+  onSeek: (seconds: number) => void
+}> = React.memo(({ isCurrentlyPlayingAlbum, fallbackDuration, onSeek }) => {
+  const { currentTime, duration } = useAudioProgress()
+  const effectiveDuration = isCurrentlyPlayingAlbum
+    ? (duration > 0 ? duration : fallbackDuration)
+    : fallbackDuration
+  const currentElapsed = isCurrentlyPlayingAlbum ? currentTime : 121
+  const progressFraction =
+    effectiveDuration > 0 ? Math.max(0, Math.min(1, currentElapsed / effectiveDuration)) : 0
+  const progressPercent = progressFraction * 100
+
+  return (
+    <div className="flex items-center gap-3 text-[10px] font-mono text-[#94A3B8]">
+      <span className="w-10 text-right font-semibold text-white/90">
+        {formatClockTime(currentElapsed)}
+      </span>
+
+      <div
+        onClick={(e) => {
+          if (!isCurrentlyPlayingAlbum || !onSeek || effectiveDuration <= 0) return
+          const rect = e.currentTarget.getBoundingClientRect()
+          const clickX = e.clientX - rect.left
+          const pct = Math.max(0, Math.min(1, clickX / rect.width))
+          onSeek(pct * effectiveDuration)
+        }}
+        className="relative flex-1 flex items-center group cursor-pointer h-2 py-1"
+      >
+        <div className="w-full h-1 bg-white/[0.12] rounded-full overflow-hidden pointer-events-none">
+          <div
+            className="w-full h-full origin-left bg-gradient-to-r from-[#00F5FF] via-[#8B5CF6] to-[#ADFF2F] transition-transform duration-150 ease-linear rounded-full"
+            style={{ transform: `scaleX(${progressFraction})` }}
+          />
+        </div>
+        {/* Drag thumb on hover */}
+        <div
+          className="absolute w-3 h-3 rounded-full bg-white shadow-md shadow-black/80 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+          style={{ left: `${progressPercent}%` }}
+        />
+      </div>
+
+      <span className="w-10 text-left font-semibold text-white/70">
+        {formatClockTime(effectiveDuration)}
+      </span>
+    </div>
+  )
+})
+
 export const VariantStackCard: React.FC<VariantStackCardProps> = ({
   release,
   displayMode = 'album_first',
@@ -54,7 +111,7 @@ export const VariantStackCard: React.FC<VariantStackCardProps> = ({
   onInspectRelease,
   onCustomizeRelease,
 }) => {
-  const { currentTrack, isPlaying, playTrack, togglePlayPause, currentTime, duration, seek } = useAudioPlayer()
+  const { currentTrack, isPlaying, playTrack, togglePlayPause, seek } = useAudioPlayer()
   const [isLiked, setIsLiked] = useState(false)
   const [localExpanded, setLocalExpanded] = useState(isSelected)
 
@@ -182,19 +239,9 @@ export const VariantStackCard: React.FC<VariantStackCardProps> = ({
 
   const telemetry = getTelemetry()
 
-  // Format seconds to mm:ss
-  const formatTime = (seconds: number) => {
-    if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-  }
-
-  const effectiveDuration = isCurrentlyPlayingAlbum
-    ? (duration > 0 ? duration : currentTrack?.durationSeconds || 233)
+  const fallbackTrackDuration = isCurrentlyPlayingAlbum
+    ? currentTrack?.durationSeconds || 233
     : relTracks[0]?.durationSeconds || 233
-  const currentElapsed = isCurrentlyPlayingAlbum ? currentTime : 121
-  const progressPercent = Math.min(100, (currentElapsed / (effectiveDuration || 1)) * 100)
 
   const handlePlayAlbum = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -602,38 +649,11 @@ export const VariantStackCard: React.FC<VariantStackCardProps> = ({
               {/* HiFi Rose RS130 Transport & Interactive Scrubber Bar */}
               <div className="bg-black/40 backdrop-blur-xl border border-white/[0.08] rounded-xl p-3 flex flex-col gap-2 max-w-2xl">
                 {/* Scrubber Line with Times */}
-                <div className="flex items-center gap-3 text-[10px] font-mono text-[#94A3B8]">
-                  <span className="w-10 text-right font-semibold text-white/90">
-                    {formatTime(currentElapsed)}
-                  </span>
-
-                  <div
-                    onClick={(e) => {
-                      if (!isCurrentlyPlayingAlbum || !seek || effectiveDuration <= 0) return
-                      const rect = e.currentTarget.getBoundingClientRect()
-                      const clickX = e.clientX - rect.left
-                      const pct = Math.max(0, Math.min(1, clickX / rect.width))
-                      seek(pct * effectiveDuration)
-                    }}
-                    className="relative flex-1 flex items-center group cursor-pointer h-2 py-1"
-                  >
-                    <div className="w-full h-1 bg-white/[0.12] rounded-full overflow-hidden pointer-events-none">
-                      <div
-                        className="h-full bg-gradient-to-r from-[#00F5FF] via-[#8B5CF6] to-[#ADFF2F] transition-all duration-150 rounded-full"
-                        style={{ width: `${progressPercent}%` }}
-                      />
-                    </div>
-                    {/* Drag thumb on hover */}
-                    <div
-                      className="absolute w-3 h-3 rounded-full bg-white shadow-md shadow-black/80 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
-                      style={{ left: `${progressPercent}%` }}
-                    />
-                  </div>
-
-                  <span className="w-10 text-left font-semibold text-white/70">
-                    {formatTime(effectiveDuration)}
-                  </span>
-                </div>
+                <VariantStackScrubber
+                  isCurrentlyPlayingAlbum={Boolean(isCurrentlyPlayingAlbum)}
+                  fallbackDuration={fallbackTrackDuration}
+                  onSeek={seek}
+                />
 
                 {/* Transport Action Buttons */}
                 <div className="flex items-center justify-between pt-1">

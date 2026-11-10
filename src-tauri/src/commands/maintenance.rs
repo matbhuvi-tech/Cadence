@@ -245,11 +245,16 @@ pub fn commit_enqueue_batch(
 }
 
 #[tauri::command]
-pub fn commit_get_curate_projection(
-    db: State<crate::db::AppDb>,
+pub async fn commit_get_curate_projection(
+    db: State<'_, crate::db::AppDb>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let conn = db.conn.lock();
-    load_curate_projection(&conn).map_err(|err| err.to_string())
+    let db = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.conn.lock();
+        load_curate_projection(&conn).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 fn load_curate_projection(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<serde_json::Value>> {
@@ -379,12 +384,16 @@ pub fn commit_retry_curate_items(
 }
 
 #[tauri::command]
-pub fn commit_get_queue_summary(
-    db: State<crate::db::AppDb>,
+pub async fn commit_get_queue_summary(
+    db: State<'_, crate::db::AppDb>,
 ) -> Result<crate::db::CommitQueueSummary, String> {
-    let conn = db.conn.lock();
-    crate::db::DbOperations::get_commit_queue_summary(&conn)
-        .map_err(|e| e.to_string())
+    let db = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.conn.lock();
+        crate::db::DbOperations::get_commit_queue_summary(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -490,10 +499,14 @@ pub fn commit_undo_batch(
 }
 
 #[tauri::command]
-pub fn commit_get_queued_track_ids(
-    db: State<crate::db::AppDb>,
+pub async fn commit_get_queued_track_ids(
+    db: State<'_, crate::db::AppDb>,
 ) -> Result<Vec<String>, String> {
-    let conn = db.conn.lock();
-    crate::db::DbOperations::get_queued_track_ids(&conn)
-        .map_err(|e| e.to_string())
+    let db = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.conn.lock();
+        crate::db::DbOperations::get_queued_track_ids(&conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

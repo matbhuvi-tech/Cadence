@@ -71,6 +71,31 @@ export function computeSampleRateTransition(
   return null
 }
 
+function isSameStreamTelemetry(
+  a: AudioStreamTelemetry | null,
+  b: AudioStreamTelemetry | null
+): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.filePath === b.filePath &&
+    a.title === b.title &&
+    a.artist === b.artist &&
+    a.album === b.album &&
+    a.durationSecs === b.durationSecs &&
+    a.sampleRate === b.sampleRate &&
+    a.bitDepth === b.bitDepth &&
+    a.channels === b.channels &&
+    a.format === b.format &&
+    a.isHighRes === b.isHighRes
+  )
+}
+
+export interface AudioProgressContextType {
+  currentTime: number
+  duration: number
+}
+
 interface AudioPlayerContextType {
   currentTrack: Track | null
   currentRelease: Release | null
@@ -78,8 +103,6 @@ interface AudioPlayerContextType {
   queueIndex: number
   isPlaying: boolean
   isPaused: boolean
-  currentTime: number
-  duration: number
   volume: number
   isMuted: boolean
   repeatMode: 'off' | 'all' | 'one'
@@ -142,6 +165,7 @@ interface AudioPlayerContextType {
 export type RightSidebarTab = 'queue' | 'playlists'
 
 const AudioPlayerContext = createContext<AudioPlayerContextType | null>(null)
+const AudioProgressContext = createContext<AudioProgressContextType>({ currentTime: 0, duration: 0 })
 
 export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null)
@@ -152,6 +176,8 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [isPaused, setIsPaused] = useState<boolean>(false)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [duration, setDuration] = useState<number>(0)
+  const currentTimeRef = useRef<number>(0)
+  currentTimeRef.current = currentTime
   const [volume, setVolumeState] = useState<number>(1)
   const [isMuted, setIsMuted] = useState<boolean>(false)
   const [repeatMode, setRepeatMode] = useState<'off' | 'all' | 'one'>('off')
@@ -254,6 +280,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const appliedServerRevisionRef = useRef<number>(0)
   const latestHydrationRevisionRef = useRef<number>(0)
   const isInternalQueueUpdateRef = useRef<boolean>(false)
+  const handleAutoAdvanceRef = useRef<() => void>(() => {})
 
   const reconcileActiveTrack = useCallback((file: string | null | undefined) => {
     if (!file) return
@@ -364,13 +391,27 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
             const streamInfoVal = data.streamInfo ?? data.stream_info
             const currentFileVal = data.currentFile ?? data.current_file
 
-            if (isPlayingVal !== undefined) setIsPlaying(Boolean(isPlayingVal))
-            if (isPausedVal !== undefined) setIsPaused(Boolean(isPausedVal))
-            if (positionSecsVal !== undefined) setCurrentTime(positionSecsVal)
-            if (durationSecsVal !== undefined) setDuration(durationSecsVal)
+            if (isPlayingVal !== undefined) {
+              const nextPlaying = Boolean(isPlayingVal)
+              setIsPlaying((prev) => (prev === nextPlaying ? prev : nextPlaying))
+            }
+            if (isPausedVal !== undefined) {
+              const nextPaused = Boolean(isPausedVal)
+              setIsPaused((prev) => (prev === nextPaused ? prev : nextPaused))
+            }
+            if (positionSecsVal !== undefined) {
+              setCurrentTime((prev) => (prev === positionSecsVal ? prev : positionSecsVal))
+            }
+            if (durationSecsVal !== undefined) {
+              setDuration((prev) => (prev === durationSecsVal ? prev : durationSecsVal))
+            }
             if (data.volume !== undefined) setVolumeState(data.volume)
-            if (isPurityModeVal !== undefined) setIsPurityMode(isPurityModeVal)
-            if (streamInfoVal) setStreamTelemetry(streamInfoVal)
+            if (isPurityModeVal !== undefined) {
+              setIsPurityMode((prev) => (prev === isPurityModeVal ? prev : isPurityModeVal))
+            }
+            if (streamInfoVal) {
+              setStreamTelemetry((prev) => (isSameStreamTelemetry(prev, streamInfoVal) ? prev : streamInfoVal))
+            }
             if (currentFileVal) reconcileActiveTrack(currentFileVal)
             controller.syncFromBackendPoll().catch(() => {})
           }
@@ -495,10 +536,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [currentTrack?.releaseId])
 
-  // Poll position and status for native Tauri playback
+  // Poll position and status strictly during active playback (zero background polling while paused or stopped)
   useEffect(() => {
     const isTauri = isNativeTauri || tauriBridge.isTauri()
-    if ((isPlaying || isPaused) && isTauri) {
+    if (isPlaying && !isPaused && isTauri) {
       pollIntervalRef.current = setInterval(async () => {
         try {
           const controller = routingControllerRef.current!
@@ -507,22 +548,28 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           if (!status) return
 
           if (typeof status.positionSecs === 'number' && !isNaN(status.positionSecs)) {
-            setCurrentTime(status.positionSecs)
+            const nextPos = status.positionSecs
+            setCurrentTime((prev) => (prev === nextPos ? prev : nextPos))
           }
           if (status.durationSecs && status.durationSecs > 0) {
-            setDuration(status.durationSecs)
+            const nextDur = status.durationSecs
+            setDuration((prev) => (prev === nextDur ? prev : nextDur))
           }
           if (status.isPlaying !== undefined) {
-            setIsPlaying(status.isPlaying)
+            const nextPlaying = status.isPlaying
+            setIsPlaying((prev) => (prev === nextPlaying ? prev : nextPlaying))
           }
           if (status.isPaused !== undefined) {
-            setIsPaused(status.isPaused)
+            const nextPaused = status.isPaused
+            setIsPaused((prev) => (prev === nextPaused ? prev : nextPaused))
           }
           if (status.streamInfo) {
-            setStreamTelemetry(status.streamInfo)
+            const nextTelemetry = status.streamInfo
+            setStreamTelemetry((prev) => (isSameStreamTelemetry(prev, nextTelemetry) ? prev : nextTelemetry))
           }
           if (status.purityMode !== undefined) {
-            setIsPurityMode(status.purityMode)
+            const nextPurity = status.purityMode
+            setIsPurityMode((prev) => (prev === nextPurity ? prev : nextPurity))
           }
           controller.reconcilePolledStatus(status, epochBeforePoll)
 
@@ -533,12 +580,13 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
           // Audiophile Invariant #1 & #3 Gapless Pre-loading Check:
           // Once 2 seconds have elapsed and the playback buffer is stable, pre-stage the immediate next track
+          const { queue: activeQueue, queueIndex: activeQueueIndex } = stateRef.current
           if (
             isGapless &&
             status.positionSecs > 2 &&
-            queueIndex + 1 < queue.length
+            activeQueueIndex + 1 < activeQueue.length
           ) {
-            const nextTrackCandidate = queue[queueIndex + 1]
+            const nextTrackCandidate = activeQueue[activeQueueIndex + 1]
             if (
               nextTrackCandidate?.filePath &&
               hasPreloadedNextRef.current !== nextTrackCandidate.id
@@ -554,7 +602,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
             status.positionSecs >= status.durationSecs - 0.5 &&
             !status.isPaused
           ) {
-            handleAutoAdvance()
+            handleAutoAdvanceRef.current()
           }
 
           // Self-heal: If the backend engine is idle and not playing, reconcile UI state
@@ -576,9 +624,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     return () => {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current)
+        pollIntervalRef.current = null
       }
     }
-  }, [isPlaying, isPaused, isNativeTauri])
+  }, [isPlaying, isPaused, isNativeTauri, isGapless, reconcileActiveTrack])
 
   // Auto advance helper
   const handleAutoAdvance = useCallback(() => {
@@ -619,6 +668,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       setIsPaused(false)
     }
   }, [])
+  handleAutoAdvanceRef.current = handleAutoAdvance
 
   // Play track function
   const playTrack = useCallback(
@@ -808,7 +858,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     if (stateRef.current.queue.length === 0) return
 
     // If more than 3 seconds in, restart current track
-    if (currentTime > 3) {
+    if (currentTimeRef.current > 3) {
       await tauriBridge.seek(0)
       setCurrentTime(0)
       return
@@ -817,7 +867,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     // Since past tracks are pruned from queue, previous restarts the current track
     await tauriBridge.seek(0)
     setCurrentTime(0)
-  }, [currentTime])
+  }, [])
 
   // Seek
   const seek = useCallback(async (seconds: number) => {
@@ -1141,75 +1191,141 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [queue, currentTrack])
 
+  const progressContextValue = useMemo<AudioProgressContextType>(
+    () => ({ currentTime, duration }),
+    [currentTime, duration]
+  )
+
+  const playerContextValue = useMemo<AudioPlayerContextType>(
+    () => ({
+      currentTrack,
+      currentRelease,
+      queue,
+      queueIndex,
+      isPlaying,
+      isPaused,
+      volume,
+      isMuted,
+      repeatMode,
+      isShuffle,
+      streamTelemetry,
+      activeDevice,
+      availableDevices,
+      selectedEndpoint,
+      activeBackendEndpoint,
+      availableEndpoints,
+      signalPathMode,
+      endpointError,
+      isNativeTauri,
+      isPurityMode,
+      isBitPerfect,
+      outputSampleRate,
+      deviceType,
+      upnpDevices,
+      playTrack,
+      togglePlayPause,
+      stop,
+      nextTrack,
+      prevTrack,
+      seek,
+      setVolume,
+      toggleMute,
+      toggleRepeat,
+      toggleShuffle,
+      selectDevice,
+      selectEndpoint,
+      refreshDevices,
+      togglePurityMode,
+      discoverUpnpDevices,
+      upcomingTracks,
+      nextTrackTransition,
+      addToQueue,
+      playNext,
+      removeFromQueue,
+      reorderQueue,
+      clearQueue,
+      setFullQueue,
+      saveQueueAsPlaylist,
+      isQueueDrawerOpen: isRightSidebarOpen && (rightSidebarTab === 'queue' || rightSidebarTab === 'playlists'),
+      toggleQueueDrawer,
+      queueDrawerTab: rightSidebarTab === 'playlists' ? 'playlists' : 'queue',
+      setQueueDrawerTab,
+      rightSidebarTab,
+      setRightSidebarTab,
+      isRightSidebarOpen,
+      setIsRightSidebarOpen,
+      toggleRightSidebar,
+      isGapless,
+      toggleGapless,
+      settlingDelayMs,
+      setSettlingDelay,
+    }),
+    [
+      currentTrack,
+      currentRelease,
+      queue,
+      queueIndex,
+      isPlaying,
+      isPaused,
+      volume,
+      isMuted,
+      repeatMode,
+      isShuffle,
+      streamTelemetry,
+      activeDevice,
+      availableDevices,
+      selectedEndpoint,
+      activeBackendEndpoint,
+      availableEndpoints,
+      signalPathMode,
+      endpointError,
+      isNativeTauri,
+      isPurityMode,
+      isBitPerfect,
+      outputSampleRate,
+      deviceType,
+      upnpDevices,
+      playTrack,
+      togglePlayPause,
+      stop,
+      nextTrack,
+      prevTrack,
+      seek,
+      setVolume,
+      toggleMute,
+      toggleRepeat,
+      toggleShuffle,
+      selectDevice,
+      selectEndpoint,
+      refreshDevices,
+      togglePurityMode,
+      discoverUpnpDevices,
+      upcomingTracks,
+      nextTrackTransition,
+      addToQueue,
+      playNext,
+      removeFromQueue,
+      reorderQueue,
+      clearQueue,
+      setFullQueue,
+      saveQueueAsPlaylist,
+      isRightSidebarOpen,
+      rightSidebarTab,
+      toggleQueueDrawer,
+      setQueueDrawerTab,
+      toggleRightSidebar,
+      isGapless,
+      toggleGapless,
+      settlingDelayMs,
+      setSettlingDelay,
+    ]
+  )
+
   return (
-    <AudioPlayerContext.Provider
-      value={{
-        currentTrack,
-        currentRelease,
-        queue,
-        queueIndex,
-        isPlaying,
-        isPaused,
-        currentTime,
-        duration,
-        volume,
-        isMuted,
-        repeatMode,
-        isShuffle,
-        streamTelemetry,
-        activeDevice,
-        availableDevices,
-        selectedEndpoint,
-        activeBackendEndpoint,
-        availableEndpoints,
-        signalPathMode,
-        endpointError,
-        isNativeTauri,
-        isPurityMode,
-        isBitPerfect,
-        outputSampleRate,
-        deviceType,
-        upnpDevices,
-        playTrack,
-        togglePlayPause,
-        stop,
-        nextTrack,
-        prevTrack,
-        seek,
-        setVolume,
-        toggleMute,
-        toggleRepeat,
-        toggleShuffle,
-        selectDevice,
-        selectEndpoint,
-        refreshDevices,
-        togglePurityMode,
-        discoverUpnpDevices,
-        upcomingTracks,
-        nextTrackTransition,
-        addToQueue,
-        playNext,
-        removeFromQueue,
-        reorderQueue,
-        clearQueue,
-        setFullQueue,
-        saveQueueAsPlaylist,
-        isQueueDrawerOpen: isRightSidebarOpen && (rightSidebarTab === 'queue' || rightSidebarTab === 'playlists'),
-        toggleQueueDrawer,
-        queueDrawerTab: rightSidebarTab === 'playlists' ? 'playlists' : 'queue',
-        setQueueDrawerTab,
-        rightSidebarTab,
-        setRightSidebarTab,
-        isRightSidebarOpen,
-        setIsRightSidebarOpen,
-        toggleRightSidebar,
-        isGapless,
-        toggleGapless,
-        settlingDelayMs,
-        setSettlingDelay,
-      }}
-    >
-      {children}
+    <AudioPlayerContext.Provider value={playerContextValue}>
+      <AudioProgressContext.Provider value={progressContextValue}>
+        {children}
+      </AudioProgressContext.Provider>
     </AudioPlayerContext.Provider>
   )
 }
@@ -1220,4 +1336,8 @@ export const useAudioPlayer = (): AudioPlayerContextType => {
     throw new Error('useAudioPlayer must be used within an AudioPlayerProvider')
   }
   return context
+}
+
+export const useAudioProgress = (): AudioProgressContextType => {
+  return useContext(AudioProgressContext)
 }

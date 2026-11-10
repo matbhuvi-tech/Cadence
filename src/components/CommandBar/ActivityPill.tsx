@@ -2,6 +2,8 @@ import React from 'react'
 import { RotateCw, Pause, AlertTriangle, CheckCircle2, Cpu } from 'lucide-react'
 import { ScanProgressPayload } from '../../core/types'
 import { MaintenanceStats } from '../../services/tauriBridge'
+import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
 
 interface ActivityPillProps {
   telemetry: ScanProgressPayload
@@ -12,10 +14,16 @@ interface ActivityPillProps {
 
 export const ActivityPill: React.FC<ActivityPillProps> = ({
   telemetry,
-  maintenanceStats,
+  maintenanceStats: propMaintenanceStats,
   onClick,
   isOpen,
 }) => {
+  const { isPlaying, isPaused } = useAudioPlayer()
+  const { maintenanceStats: ownMaintenanceStats } = useMaintenanceWorker(
+    propMaintenanceStats === undefined && !isPlaying && !isPaused
+  )
+  const maintenanceStats = propMaintenanceStats ?? ownMaintenanceStats
+
   const isMaintenanceActive = Boolean(
     maintenanceStats?.isRunning &&
       (maintenanceStats?.pendingItems ?? 0) > 0 &&
@@ -66,7 +74,7 @@ export const ActivityPill: React.FC<ActivityPillProps> = ({
           <RotateCw className="w-3.5 h-3.5 text-[#00F5FF] animate-spin" />
         )
       ) : isMaintenanceActive ? (
-        <Cpu className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+        <Cpu className="w-3.5 h-3.5 text-cyan-400" />
       ) : telemetry.skippedCount > 0 ? (
         <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
       ) : (

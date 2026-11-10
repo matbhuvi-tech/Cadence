@@ -439,35 +439,51 @@ export function createEndpointRoutingController(
     }
   }
 
-  const applyStatusSnapshot = (status: EndpointPlaybackStatusLike, allowSelectedSync: boolean) => {
+  const applyStatusSnapshot = (status: EndpointPlaybackStatusLike, allowSelectedSync: boolean): boolean => {
+    let changed = false
     const backendActive = normalizeBackendEndpoint(status.activeBackendEndpoint)
     const backendSelected = normalizeBackendEndpoint(status.selectedEndpoint)
 
-    if (allowSelectedSync && backendSelected) {
+    if (allowSelectedSync && backendSelected && !isSameEndpoint(state.selectedEndpoint, backendSelected)) {
       state.selectedEndpoint = backendSelected
       persistSelected(backendSelected)
+      changed = true
     }
 
-    if (status.activeBackendEndpoint !== undefined) {
+    if (status.activeBackendEndpoint !== undefined && !isSameEndpoint(state.activeBackendEndpoint, backendActive)) {
       state.activeBackendEndpoint = backendActive
+      changed = true
     }
-    if (status.deviceType) {
+    if (status.deviceType && state.deviceType !== status.deviceType) {
       state.deviceType = status.deviceType
+      changed = true
     }
-    if (status.signalPathMode) {
+    if (status.signalPathMode && state.signalPathMode !== status.signalPathMode) {
       state.signalPathMode = status.signalPathMode
+      changed = true
     }
     if (status.isBitPerfect !== undefined) {
-      state.isBitPerfect = Boolean(status.isBitPerfect)
+      const nextBitPerfect = Boolean(status.isBitPerfect)
+      if (state.isBitPerfect !== nextBitPerfect) {
+        state.isBitPerfect = nextBitPerfect
+        changed = true
+      }
     }
-    state.outputSampleRate =
+    const nextOutputSampleRate =
       typeof status.outputSampleRate === 'number' && status.outputSampleRate > 0
         ? status.outputSampleRate
         : undefined
-
-    if (backendActive && isSameEndpoint(backendActive, state.selectedEndpoint)) {
-      state.endpointError = null
+    if (state.outputSampleRate !== nextOutputSampleRate) {
+      state.outputSampleRate = nextOutputSampleRate
+      changed = true
     }
+
+    if (backendActive && isSameEndpoint(backendActive, state.selectedEndpoint) && state.endpointError !== null) {
+      state.endpointError = null
+      changed = true
+    }
+
+    return changed
   }
 
   return {
@@ -644,8 +660,9 @@ export function createEndpointRoutingController(
 
     reconcilePolledStatus(status: EndpointPlaybackStatusLike, capturedEpoch: number) {
       if (capturedEpoch === state.selectionEpoch && state.inFlightSelections === 0) {
-        applyStatusSnapshot(status, true)
-        emit()
+        if (applyStatusSnapshot(status, true)) {
+          emit()
+        }
       } else {
         emitDiag(
           'device_selection',

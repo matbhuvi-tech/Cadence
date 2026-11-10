@@ -55,7 +55,7 @@ export const CatalogPulseCard: React.FC<CatalogPulseCardProps> = ({
           </div>
         </div>
         <div className="shrink-0 whitespace-nowrap flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 text-[10px] font-mono">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
+          <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
           <span>Live Graph</span>
         </div>
       </div>

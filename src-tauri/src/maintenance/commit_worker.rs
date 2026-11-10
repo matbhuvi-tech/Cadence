@@ -11,7 +11,7 @@ use lofty::file::TaggedFileExt;
 use lofty::picture::{Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagExt, TagItem};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -67,7 +67,7 @@ impl CommitWriteError {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitTelemetryPayload {
     pub state: String, // "idle" | "writing" | "paused_playback" | "cooldown" | "paused_mount_offline" | "user_paused"
@@ -153,6 +153,10 @@ pub struct CommitQueueWorker {
     telemetry_sink: Arc<Mutex<Option<TelemetrySink>>>,
     last_telemetry_emit: Arc<Mutex<std::time::Instant>>,
     last_emitted_state: Arc<Mutex<String>>,
+    last_emitted_payload: Arc<Mutex<Option<CommitTelemetryPayload>>>,
+    queue_dirty: Arc<AtomicBool>,
+    pending_hint: Arc<AtomicBool>,
+    wake_signal: Arc<(Mutex<()>, Condvar)>,
     offline_mounts: Arc<Mutex<HashSet<String>>>,
     mount_failure_counts: Arc<Mutex<HashMap<String, u32>>>,
     active_item_info: Arc<Mutex<Option<(String, String, String)>>>, // (track_id, title, file_path)
@@ -176,6 +180,10 @@ impl CommitQueueWorker {
             telemetry_sink: Arc::new(Mutex::new(None)),
             last_telemetry_emit: Arc::new(Mutex::new(std::time::Instant::now() - Duration::from_secs(1))),
             last_emitted_state: Arc::new(Mutex::new(String::new())),
+            last_emitted_payload: Arc::new(Mutex::new(None)),
+            queue_dirty: Arc::new(AtomicBool::new(true)),
+            pending_hint: Arc::new(AtomicBool::new(false)),
+            wake_signal: Arc::new((Mutex::new(()), Condvar::new())),
             offline_mounts: Arc::new(Mutex::new(HashSet::new())),
             mount_failure_counts: Arc::new(Mutex::new(HashMap::new())),
             active_item_info: Arc::new(Mutex::new(None)),
@@ -184,6 +192,20 @@ impl CommitQueueWorker {
             prepared_cover: Arc::new(Mutex::new(None)),
             current_active_batch_id: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn wake(&self) {
+        self.queue_dirty.store(true, Ordering::Release);
+        let _guard = self.wake_signal.0.lock();
+        self.wake_signal.1.notify_all();
+    }
+
+    fn sleep_or_wake(&self, duration: Duration) {
+        let mut guard = self.wake_signal.0.lock();
+        if self.queue_dirty.load(Ordering::Acquire) || !self.is_running.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.wake_signal.1.wait_for(&mut guard, duration);
     }
 
     /// Creates a CommitQueueWorker with its own dedicated SQLite connection,
@@ -321,40 +343,89 @@ impl CommitQueueWorker {
 
     pub fn stop(&self) {
         self.is_running.store(false, Ordering::SeqCst);
+        let _guard = self.wake_signal.0.lock();
+        self.wake_signal.1.notify_all();
     }
 
     fn run_loop(&self) {
+        let mut checked_summary = false;
+
         while self.is_running.load(Ordering::Relaxed) {
             // 1. Check user pause
             if self.user_paused.load(Ordering::Relaxed) {
-                self.emit_state_telemetry("user_paused", None, None);
-                thread::sleep(Duration::from_millis(300));
+                let state_changed = *self.last_emitted_state.lock() != "user_paused";
+                if state_changed || self.queue_dirty.swap(false, Ordering::AcqRel) || !checked_summary {
+                    self.emit_state_telemetry("user_paused", None, None);
+                    checked_summary = true;
+                }
+                self.sleep_or_wake(Duration::from_millis(2000));
                 continue;
             }
 
-            // 2. Audio Engine Transport Preemption Guard
-            // Fetch summary to check if there is work to do
-            let summary = {
-                let conn = self.lock_db();
-                DbOperations::get_commit_queue_summary(&conn).ok()
-            };
-
-            let pending_count = summary.as_ref().map(|s| s.pending_items).unwrap_or(0);
-            if pending_count == 0 {
-                *self.active_item_info.lock() = None;
-                self.emit_state_telemetry("idle", None, None);
-                thread::sleep(Duration::from_millis(500));
-                continue;
-            }
-
+            // 2. Audio Engine Transport Preemption Guard: zero SQLite polling while playback is active
             if (self.playback_active)() {
-                *self.active_item_info.lock() = None;
-                self.emit_state_telemetry("paused_playback", None, None);
-                thread::sleep(Duration::from_millis(250));
+                let prev_state_needs_sync = {
+                    let s = self.last_emitted_state.lock();
+                    *s != "idle" && *s != "paused_playback"
+                };
+                if self.queue_dirty.swap(false, Ordering::AcqRel) || !checked_summary || prev_state_needs_sync {
+                    let summary = {
+                        let conn = self.lock_db();
+                        DbOperations::get_commit_queue_summary(&conn).ok()
+                    };
+                    checked_summary = true;
+                    if let Some(summary) = summary {
+                        let has_pending = summary.pending_items > 0;
+                        self.pending_hint.store(has_pending, Ordering::Release);
+                        *self.active_item_info.lock() = None;
+                        if has_pending {
+                            self.emit_state_telemetry_with_summary(&summary, "paused_playback", None, None);
+                        } else {
+                            self.emit_state_telemetry_with_summary(&summary, "idle", None, None);
+                        }
+                    }
+                }
+                let wait_ms = if self.pending_hint.load(Ordering::Acquire) { 500 } else { 1500 };
+                self.sleep_or_wake(Duration::from_millis(wait_ms));
                 continue;
             }
 
-            // 3. Excluded mounts check
+            // 3. Check queue work when idle or awoken
+            let dirty = self.queue_dirty.swap(false, Ordering::AcqRel);
+            if !checked_summary || dirty || self.pending_hint.load(Ordering::Acquire) {
+                let summary = {
+                    let conn = self.lock_db();
+                    DbOperations::get_commit_queue_summary(&conn).ok()
+                };
+                checked_summary = true;
+                if let Some(ref summary) = summary {
+                    let has_pending = summary.pending_items > 0;
+                    self.pending_hint.store(has_pending, Ordering::Release);
+                    if !has_pending {
+                        *self.active_item_info.lock() = None;
+                        self.emit_state_telemetry_with_summary(summary, "idle", None, None);
+                        self.sleep_or_wake(Duration::from_millis(2000));
+                        continue;
+                    }
+                }
+            } else {
+                let has_pending = {
+                    let conn = self.lock_db();
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM commit_queue_items WHERE status = 'pending')",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+                };
+                if !has_pending {
+                    self.sleep_or_wake(Duration::from_millis(2000));
+                    continue;
+                }
+                self.pending_hint.store(true, Ordering::Release);
+            }
+
+            // 4. Excluded mounts check
             let excluded: Vec<String> = self.offline_mounts.lock().iter().cloned().collect();
 
             // Fetch and claim under one transaction so edits cannot replace a claimed payload.
@@ -367,17 +438,19 @@ impl CommitQueueWorker {
                 Ok(Some(claimed)) => claimed,
                 Err(err) => {
                     eprintln!("[CommitQueueWorker] Could not claim next item: {}", err);
-                    thread::sleep(Duration::from_millis(500));
+                    self.sleep_or_wake(Duration::from_millis(500));
                     continue;
                 }
                 Ok(None) => {
                     // All pending items may be on offline mounts
+                    *self.active_item_info.lock() = None;
                     if !excluded.is_empty() {
                         self.emit_state_telemetry("paused_mount_offline", None, None);
                     } else {
+                        self.pending_hint.store(false, Ordering::Release);
                         self.emit_state_telemetry("idle", None, None);
                     }
-                    thread::sleep(Duration::from_millis(500));
+                    self.sleep_or_wake(Duration::from_millis(1000));
                     continue;
                 }
             };
@@ -434,7 +507,10 @@ impl CommitQueueWorker {
 
                     match summary_res {
                         Ok(summary) => {
-                            self.emit_telemetry_with_summary(&summary, "writing", None, None, false);
+                            let has_pending = summary.pending_items > 0;
+                            self.pending_hint.store(has_pending, Ordering::Release);
+                            let batch_done = !has_pending && summary.inflight_items == 0;
+                            self.emit_telemetry_with_summary(&summary, "writing", None, None, batch_done);
                         }
                         Err(e) => {
                             eprintln!("[CommitQueueWorker] Critical: Failed to mark item {} completed: {}", item.id, e);
@@ -468,6 +544,7 @@ impl CommitQueueWorker {
 
                     match summary_res {
                         Ok(summary) => {
+                            self.pending_hint.store(summary.pending_items > 0, Ordering::Release);
                             self.emit_telemetry_with_summary(&summary, "writing", None, Some(err_msg), true);
                         }
                         Err(e) => {
@@ -478,7 +555,7 @@ impl CommitQueueWorker {
             }
 
             // Yield briefly between tracks to ensure storage bus quietness and UI smoothness
-            thread::sleep(Duration::from_millis(20));
+            self.sleep_or_wake(Duration::from_millis(20));
         }
     }
 
@@ -905,7 +982,37 @@ impl CommitQueueWorker {
         self.emit_telemetry_with_state(state, cooldown_remaining, error_message, force);
     }
 
+    fn emit_state_telemetry_with_summary(
+        &self,
+        summary: &crate::db::CommitQueueSummary,
+        state: &str,
+        cooldown_remaining: Option<u64>,
+        error_message: Option<String>,
+    ) {
+        let mut last_state = self.last_emitted_state.lock();
+        let force = *last_state != state;
+        if force && (state == "paused_playback" || state == "user_paused") {
+            diag_log!(
+                DiagCategory::AudioHygiene,
+                0,
+                0,
+                0,
+                "hygiene_commit_suppressed",
+                "prev={} state={}",
+                *last_state,
+                state
+            );
+        }
+        *last_state = state.to_string();
+        drop(last_state);
+
+        self.emit_telemetry_with_summary(summary, state, cooldown_remaining, error_message, force);
+    }
+
     pub fn emit_telemetry(&self, force: bool) {
+        if force {
+            self.wake();
+        }
         let state = {
             let is_playback_active = (self.playback_active)();
             if self.user_paused.load(Ordering::Relaxed) {
@@ -928,22 +1035,29 @@ impl CommitQueueWorker {
         error_message: Option<String>,
         force: bool,
     ) {
-        let mut last_emit = self.last_telemetry_emit.lock();
-        if !force && last_emit.elapsed() < Duration::from_millis(250) {
+        if !force && self.last_telemetry_emit.lock().elapsed() < Duration::from_millis(250) {
             return;
         }
-        *last_emit = std::time::Instant::now();
-        drop(last_emit);
-
-        let telemetry_sink = self.telemetry_sink.lock().clone();
-        let emit = match telemetry_sink {
-            Some(emit) => emit,
-            None => return,
-        };
 
         let (pending_items, inflight_items, completed_items, failed_items) =
-            self.batch_progress(Some(summary));
+            if summary.total_batches == 0
+                && summary.active_batch_id.is_none()
+                && summary.pending_items == 0
+                && summary.inflight_items == 0
+                && summary.completed_items == 0
+                && summary.failed_items == 0
+            {
+                (0, 0, 0, 0)
+            } else {
+                self.batch_progress(Some(summary))
+            };
         let total_items = pending_items + inflight_items + completed_items + failed_items;
+
+        let resolved_state = if total_items == 0 || (pending_items == 0 && inflight_items == 0) {
+            "idle".to_string()
+        } else {
+            state.to_string()
+        };
 
         let percent = if total_items > 0 {
             (completed_items as f64 / total_items as f64) * 100.0
@@ -951,23 +1065,27 @@ impl CommitQueueWorker {
             100.0
         };
 
-        let history = self.processed_in_window.lock();
-        let throughput = (history.len() as f64) / 5.0;
-        drop(history);
+        let throughput = if resolved_state == "writing" {
+            let history = self.processed_in_window.lock();
+            (history.len() as f64) / 5.0
+        } else {
+            0.0
+        };
 
-        let active_info = self.active_item_info.lock().clone();
+        let active_info = if resolved_state == "writing" {
+            self.active_item_info.lock().clone()
+        } else {
+            None
+        };
         let (current_track_id, current_track_title, current_track_file_path) = match active_info {
             Some((tid, title, path)) => (Some(tid), Some(title), Some(path)),
             None => (None, None, None),
         };
 
-        let offline = self.offline_mounts.lock().iter().cloned().collect();
+        let mut offline: Vec<String> = self.offline_mounts.lock().iter().cloned().collect();
+        offline.sort();
 
-        let resolved_state = if total_items == 0 || (pending_items == 0 && inflight_items == 0) {
-            "idle".to_string()
-        } else {
-            state.to_string()
-        };
+        *self.last_emitted_state.lock() = resolved_state.clone();
 
         let payload = CommitTelemetryPayload {
             state: resolved_state,
@@ -988,7 +1106,19 @@ impl CommitQueueWorker {
             error_message,
         };
 
-        emit(&payload);
+        {
+            let mut prev = self.last_emitted_payload.lock();
+            if !force && prev.as_ref() == Some(&payload) {
+                return;
+            }
+            *prev = Some(payload.clone());
+        }
+        *self.last_telemetry_emit.lock() = std::time::Instant::now();
+
+        let telemetry_sink = self.telemetry_sink.lock().clone();
+        if let Some(emit) = telemetry_sink {
+            emit(&payload);
+        }
     }
 
     fn emit_telemetry_with_state(
@@ -1300,5 +1430,75 @@ mod tests {
         fs::remove_file(&song).unwrap();
         fs::remove_file(&database).unwrap();
         fs::remove_dir(&folder).unwrap();
+    }
+
+    #[test]
+    fn idle_and_paused_workers_suppress_duplicate_telemetry_emissions() {
+        use std::sync::atomic::AtomicUsize;
+
+        let folder = std::env::temp_dir().join(format!("cadence-telemetry-dedup-{}", Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        let database = folder.join("cadence.db");
+        let db = AppDb::new(database.clone()).unwrap();
+
+        let emissions = Arc::new(AtomicUsize::new(0));
+        let playing = Arc::new(AtomicBool::new(false));
+        let worker = CommitQueueWorker::with_playback_gate(db.clone(), {
+            let playing = Arc::clone(&playing);
+            move || playing.load(Ordering::SeqCst)
+        });
+        *worker.telemetry_sink.lock() = Some(Arc::new({
+            let emissions = Arc::clone(&emissions);
+            move |_| {
+                emissions.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+
+        let handle = worker.start().unwrap();
+        assert!(wait_until(|| emissions.load(Ordering::SeqCst) == 1), "initial idle state should emit once");
+        thread::sleep(Duration::from_millis(900));
+        assert_eq!(emissions.load(Ordering::SeqCst), 1, "idle worker must not re-emit identical telemetry");
+
+        // Enqueue an item while playback is active and verify paused_playback also emits only once.
+        playing.store(true, Ordering::SeqCst);
+        {
+            let mut conn = db.conn.lock();
+            let batch = DbCommitQueueBatch {
+                id: "batch-paused".into(),
+                description: Some("Paused gate".into()),
+                total_tracks: 1,
+                destination: "embedded".into(),
+                force_override: false,
+                status: "pending".into(),
+                created_at: "2026-11-10".into(),
+                completed_at: None,
+            };
+            let item = NewCommitItem {
+                id: "item-paused".into(),
+                track_id: "track-paused".into(),
+                file_path: folder.join("missing.wav").to_string_lossy().into(),
+                mount_id: "disk".into(),
+                payload_json: "{}".into(),
+                backup_json: "{}".into(),
+                expected_crc: None,
+            };
+            DbOperations::insert_commit_batch_and_items(&mut conn, &batch, &[item]).unwrap();
+        }
+        worker.emit_telemetry(true);
+        assert!(wait_until(|| *worker.last_emitted_state.lock() == "paused_playback"));
+        let count_after_pause = emissions.load(Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(900));
+        assert_eq!(
+            emissions.load(Ordering::SeqCst),
+            count_after_pause,
+            "paused playback worker must not re-emit identical paused telemetry"
+        );
+
+        worker.stop();
+        handle.join().unwrap();
+        drop(worker);
+        drop(db);
+        let _ = fs::remove_file(&database);
+        let _ = fs::remove_dir(&folder);
     }
 }

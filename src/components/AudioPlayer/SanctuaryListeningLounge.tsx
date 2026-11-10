@@ -12,7 +12,7 @@ import {
   CheckCircle2,
   Sparkles,
 } from 'lucide-react'
-import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath } from '../../core/endpointRouting'
 
@@ -20,6 +20,45 @@ interface SanctuaryListeningLoungeProps {
   isOpen: boolean
   onClose: () => void
 }
+
+const formatClockTime = (seconds: number) => {
+  if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.floor(seconds % 60)
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
+
+const SanctuaryScrubber: React.FC<{
+  fallbackDuration: number
+  onSeek: (seconds: number) => void
+}> = React.memo(({ fallbackDuration, onSeek }) => {
+  const { currentTime, duration } = useAudioProgress()
+  const effectiveDuration = duration > 0 ? duration : fallbackDuration
+  const progressFraction =
+    effectiveDuration > 0 ? Math.max(0, Math.min(1, currentTime / effectiveDuration)) : 0
+
+  return (
+    <div className="space-y-1">
+      <div
+        className="h-1.5 bg-white/10 rounded-full overflow-hidden cursor-pointer relative group"
+        onClick={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect()
+          const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+          onSeek(pct * effectiveDuration)
+        }}
+      >
+        <div
+          className="w-full h-full origin-left bg-gradient-to-r from-[#D4AF37] to-white rounded-full relative transition-transform duration-150 ease-linear"
+          style={{ transform: `scaleX(${progressFraction})` }}
+        />
+      </div>
+      <div className="flex items-center justify-between text-[11px] font-mono text-[#8E8E93] tabular-nums">
+        <span>{formatClockTime(currentTime)}</span>
+        <span>{formatClockTime(effectiveDuration)}</span>
+      </div>
+    </div>
+  )
+})
 
 export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> = ({
   isOpen,
@@ -29,8 +68,6 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     currentTrack,
     currentRelease,
     isPlaying,
-    currentTime,
-    duration,
     volume,
     isMuted,
     streamTelemetry,
@@ -63,18 +100,10 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
 
   if (!isOpen) return null
 
-  const effectiveDuration = duration > 0 ? duration : currentTrack?.durationSeconds || currentTrack?.duration || 0
-  const progressPercent = effectiveDuration > 0 ? (currentTime / effectiveDuration) * 100 : 0
+  const fallbackDuration = currentTrack?.durationSeconds || currentTrack?.duration || 0
   const resolvedRelease =
     currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
   const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
-
-  const formatTime = (seconds: number) => {
-    if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-  }
 
   const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
   const isHiRes = streamTelemetry?.isHighRes || currentTrack?.isHighRes
@@ -97,7 +126,7 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
       {/* Top Header: Clean Apple-Style Bar */}
       <header className="flex items-center justify-between z-10 shrink-0">
         <div className="flex items-center gap-3">
-          <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+          <span className="w-2 h-2 rounded-full bg-[#10B981]" />
           <span className="text-[11px] font-mono tracking-widest text-[#8E8E93] uppercase">
             Sanctuary Listening Lounge
           </span>
@@ -239,25 +268,7 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
       {/* Bottom Minimalist Transport Controls & Scrubber */}
       <footer className="w-full max-w-2xl mx-auto space-y-4 z-10 shrink-0">
         {/* Scrubber */}
-        <div className="space-y-1">
-          <div
-            className="h-1.5 bg-white/10 rounded-full overflow-hidden cursor-pointer relative group"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect()
-              const pct = (e.clientX - rect.left) / rect.width
-              seek(pct * effectiveDuration)
-            }}
-          >
-            <div
-              className="h-full bg-gradient-to-r from-[#D4AF37] to-white rounded-full relative"
-              style={{ width: `${progressPercent}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between text-[11px] font-mono text-[#8E8E93] tabular-nums">
-            <span>{formatTime(currentTime)}</span>
-            <span>{formatTime(effectiveDuration)}</span>
-          </div>
-        </div>
+        <SanctuaryScrubber fallbackDuration={fallbackDuration} onSeek={seek} />
 
         {/* Transport Controls */}
         <div className="flex items-center justify-between gap-4">

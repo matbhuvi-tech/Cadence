@@ -102,9 +102,11 @@ class BackgroundArtworkService {
       })
       .catch(() => {})
 
-    // 3. Fallback slow poll (every 3s) for audio engine transport status
+    // 3. Fallback slow poll (every 3s) only while an enrichment queue or job is active
     this.pollInterval = setInterval(() => {
-      this.checkPlaybackStatus()
+      if (this.queue.length > 0 || this.currentJob !== null) {
+        this.checkPlaybackStatus()
+      }
     }, 3000)
   }
 

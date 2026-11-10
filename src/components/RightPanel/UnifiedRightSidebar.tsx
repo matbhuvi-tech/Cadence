@@ -17,7 +17,7 @@ import {
   Music2,
 } from 'lucide-react'
 import { Track, Playlist, Release } from '../../core/types'
-import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 
 interface UnifiedRightSidebarProps {
@@ -29,6 +29,76 @@ interface UnifiedRightSidebarProps {
   onClose?: () => void
   showToast?: (msg: string) => void
 }
+
+const formatClockTime = (seconds: number) => {
+  if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.floor(seconds % 60)
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
+
+const formatTotalDuration = (seconds: number) => {
+  if (!seconds || isNaN(seconds)) return '0 min'
+  const hours = Math.floor(seconds / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  if (hours > 0) return `${hours}h ${mins}m`
+  return `${mins}m`
+}
+
+const SidebarTrackDuration: React.FC<{ fallbackDuration: number }> = React.memo(({ fallbackDuration }) => {
+  const { duration } = useAudioProgress()
+  return <span>{formatClockTime(duration || fallbackDuration)}</span>
+})
+
+const SidebarScrubber: React.FC<{
+  fallbackDuration: number
+  onSeek: (seconds: number) => void
+}> = React.memo(({ fallbackDuration, onSeek }) => {
+  const { currentTime, duration } = useAudioProgress()
+  const effectiveDuration = duration > 0 ? duration : fallbackDuration
+  const progressFraction =
+    effectiveDuration > 0 ? Math.max(0, Math.min(1, currentTime / effectiveDuration)) : 0
+
+  return (
+    <div className="flex items-center gap-2 mt-3 pt-2 border-t border-white/5">
+      <span className="text-[10px] text-neutral-400 font-mono w-7 text-left select-none">
+        {formatClockTime(currentTime)}
+      </span>
+      <div
+        onClick={(e) => {
+          if (!effectiveDuration || effectiveDuration <= 0) return
+          const rect = e.currentTarget.getBoundingClientRect()
+          const clickX = e.clientX - rect.left
+          const ratio = Math.max(0, Math.min(1, clickX / rect.width))
+          onSeek(ratio * effectiveDuration)
+        }}
+        className="relative flex-1 h-1.5 bg-white/10 hover:bg-white/20 rounded-full cursor-pointer overflow-hidden transition-colors group/bar"
+        title="Click to seek"
+      >
+        <div
+          className="absolute inset-0 origin-left bg-[#D4AF37] rounded-full group-hover/bar:bg-[#F5D061] transition-transform duration-150 ease-linear"
+          style={{ transform: `scaleX(${progressFraction})` }}
+        />
+      </div>
+      <span className="text-[10px] text-neutral-400 font-mono w-7 text-right select-none">
+        {formatClockTime(effectiveDuration)}
+      </span>
+    </div>
+  )
+})
+
+const SidebarRemainingTime: React.FC<{
+  fallbackDuration: number
+  totalUpcomingSecs: number
+}> = React.memo(({ fallbackDuration, totalUpcomingSecs }) => {
+  const { currentTime, duration } = useAudioProgress()
+  const currentRemaining = Math.max(0, (duration || fallbackDuration) - currentTime)
+  return (
+    <span className="text-[10px] text-neutral-400 font-mono">
+      {formatTotalDuration(currentRemaining + totalUpcomingSecs)} remaining
+    </span>
+  )
+})
 
 export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
   allReleases = [],
@@ -45,8 +115,6 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
     queue,
     isPlaying,
     isPaused,
-    currentTime,
-    duration,
     seek,
     isShuffle,
     toggleShuffle,
@@ -132,31 +200,13 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
   }
 
   // Format seconds to mm:ss
-  const formatTime = (seconds: number) => {
-    if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-  }
-
-  // Format total seconds to hours & minutes
-  const formatTotalTime = (seconds: number) => {
-    if (!seconds || isNaN(seconds)) return '0 min'
-    const hours = Math.floor(seconds / 3600)
-    const mins = Math.floor((seconds % 3600) / 60)
-    if (hours > 0) return `${hours}h ${mins}m`
-    return `${mins}m`
-  }
+  const formatTime = formatClockTime
+  const formatTotalTime = formatTotalDuration
 
   // Durations
   const totalUpcomingSecs = useMemo(() => {
     return upcomingTracks.reduce((acc, t) => acc + (t.durationSeconds || t.duration || 0), 0)
   }, [upcomingTracks])
-
-  const totalRemainingSecs = useMemo(() => {
-    const currentRemaining = Math.max(0, (duration || currentTrack?.durationSeconds || 0) - currentTime)
-    return currentRemaining + totalUpcomingSecs
-  }, [duration, currentTrack, currentTime, totalUpcomingSecs])
 
   // Drag and drop for Queue reordering
   const handleDragStart = (e: React.DragEvent<HTMLDivElement>, index: number) => {
@@ -357,11 +407,7 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                           {currentTrack.title}
                         </h4>
                         <span className="flex items-center gap-1 rounded-full bg-[#D4AF37]/20 px-2 py-0.5 text-[9px] font-mono text-[#D4AF37] border border-[#D4AF37]/30 shrink-0">
-                          <span
-                            className={`w-1.5 h-1.5 rounded-full bg-[#D4AF37] ${
-                              isPlaying && !isPaused ? 'animate-pulse' : ''
-                            }`}
-                          />
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />
                           {isPlaying && !isPaused ? 'Playing' : 'Paused'}
                         </span>
                       </div>
@@ -382,7 +428,7 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                       <span className="rounded bg-[#D4AF37]/10 px-1.5 py-0.2 text-[9px] font-mono text-[#D4AF37] border border-[#D4AF37]/20">
                         {currentTrack.sampleRateStr?.split(' ')[0] || currentTrack.format || 'PCM'}
                       </span>
-                      <span>{formatTime(duration || currentTrack.durationSeconds || 0)}</span>
+                      <SidebarTrackDuration fallbackDuration={currentTrack.durationSeconds || 0} />
                     </div>
                   </div>
 
@@ -433,34 +479,10 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                 </div>
 
                 {/* Scrubber / Progress Bar */}
-                <div className="flex items-center gap-2 mt-3 pt-2 border-t border-white/5">
-                  <span className="text-[10px] text-neutral-400 font-mono w-7 text-left select-none">
-                    {formatTime(currentTime)}
-                  </span>
-                  <div
-                    onClick={(e) => {
-                      if (!duration || duration <= 0) return
-                      const rect = e.currentTarget.getBoundingClientRect()
-                      const clickX = e.clientX - rect.left
-                      const ratio = Math.max(0, Math.min(1, clickX / rect.width))
-                      seek(ratio * duration)
-                    }}
-                    className="relative flex-1 h-1.5 bg-white/10 hover:bg-white/20 rounded-full cursor-pointer overflow-hidden transition-all group/bar"
-                    title="Click to seek"
-                  >
-                    <div
-                      className="absolute left-0 top-0 bottom-0 bg-[#D4AF37] rounded-full group-hover/bar:bg-[#F5D061] transition-all"
-                      style={{
-                        width: `${
-                          duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0
-                        }%`,
-                      }}
-                    />
-                  </div>
-                  <span className="text-[10px] text-neutral-400 font-mono w-7 text-right select-none">
-                    {formatTime(duration || currentTrack.durationSeconds || 0)}
-                  </span>
-                </div>
+                <SidebarScrubber
+                  fallbackDuration={currentTrack.durationSeconds || 0}
+                  onSeek={seek}
+                />
               </div>
             ) : (
               <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.01] p-5 text-center text-xs text-neutral-500">
@@ -483,9 +505,10 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
 
               <div className="flex items-center gap-2">
                 {upcomingTracks.length > 0 && (
-                  <span className="text-[10px] text-neutral-400 font-mono">
-                    {formatTotalTime(totalRemainingSecs)} remaining
-                  </span>
+                  <SidebarRemainingTime
+                    fallbackDuration={currentTrack?.durationSeconds || 0}
+                    totalUpcomingSecs={totalUpcomingSecs}
+                  />
                 )}
 
                 {/* Save Queue as Playlist */}

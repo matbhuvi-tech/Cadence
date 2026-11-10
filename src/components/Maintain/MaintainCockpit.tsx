@@ -38,6 +38,7 @@ import { graphEngine } from '../../core/graphEngine'
 import { normalizationService, NormalizationRule } from '../../services/normalizationService'
 import { auditService } from '../../services/auditService'
 import { useMaintenanceWorker } from '../../hooks/useMaintenanceWorker'
+import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { useCatalogHealth } from '../../hooks/useCatalogHealth'
 import { tauriBridge, MaintenanceStats } from '../../services/tauriBridge'
 import { isIssueInEntityScope, getIssueCanonicalTarget } from '../../core/scopeUtils'
@@ -305,7 +306,8 @@ export const MaintainCockpit: React.FC<MaintainCockpitProps> = ({
   const [newRuleTarget, setNewRuleTarget] = useState('')
   const [remediatingIssueId, setRemediatingIssueId] = useState<string | null>(null)
   const [remediationProgress, setRemediationProgress] = useState<{ current: number; total: number; title: string } | null>(null)
-  const { maintenanceStats: mStats } = useMaintenanceWorker(true)
+  const { isPlaying: audioPlaying, isPaused: audioPaused } = useAudioPlayer()
+  const { maintenanceStats: mStats } = useMaintenanceWorker(!audioPlaying && !audioPaused)
 
   // Background Artwork Enrichment State & Reactive Subscription
   const [bgArtState, setBgArtState] = useState<BackgroundArtworkState>(() => backgroundArtworkService.getState())

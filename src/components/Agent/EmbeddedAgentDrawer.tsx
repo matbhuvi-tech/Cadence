@@ -459,7 +459,7 @@ export const EmbeddedAgentDrawer: React.FC<EmbeddedAgentDrawerProps> = ({
         <div className="flex items-center gap-2.5">
           <div className="relative p-2 rounded-xl bg-[#0C0D10] border border-[#D4AF37]/40 text-[#D4AF37] shadow-[0_2px_10px_rgba(212,175,55,0.15)]">
             <CadenceLogo variant="gold" className="w-5 h-5" />
-            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#10B981] animate-pulse" />
+            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#10B981]" />
           </div>
           <div className="flex flex-col">
             <div className="flex items-center gap-2">

@@ -25,7 +25,7 @@ import {
   Zap,
   AlertTriangle,
 } from 'lucide-react'
-import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath, getEndpointDisplayName } from '../../core/endpointRouting'
@@ -36,6 +36,63 @@ interface NowPlayingBarProps {
   topMode?: 'library' | 'curate' | 'maintain'
 }
 
+const formatClockTime = (seconds: number) => {
+  if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.floor(seconds % 60)
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+}
+
+const NowPlayingScrubber: React.FC<{
+  fallbackDuration: number
+  hasTrack: boolean
+  onSeek: (seconds: number) => void
+}> = React.memo(({ fallbackDuration, hasTrack, onSeek }) => {
+  const { currentTime, duration } = useAudioProgress()
+  const effectiveDuration = duration > 0 ? duration : fallbackDuration
+  const progressFraction =
+    effectiveDuration > 0 ? Math.max(0, Math.min(1, currentTime / effectiveDuration)) : 0
+
+  return (
+    <div
+      className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 group/scrub ${
+        !hasTrack ? 'opacity-30 pointer-events-none' : ''
+      }`}
+      onClick={(e) => {
+        if (!hasTrack) return
+        const rect = e.currentTarget.getBoundingClientRect()
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+        onSeek(pct * effectiveDuration)
+      }}
+      title={`Seek: ${formatClockTime(currentTime)} / ${effectiveDuration > 0 ? formatClockTime(effectiveDuration) : '00:00'}`}
+    >
+      <div
+        className="w-full h-full origin-left bg-gradient-to-r from-[#D4AF37] via-[#F59E0B] to-[#10B981] transition-transform duration-150 ease-linear"
+        style={{ transform: `scaleX(${progressFraction})` }}
+      />
+    </div>
+  )
+})
+
+const NowPlayingElapsedTime: React.FC = React.memo(() => {
+  const { currentTime } = useAudioProgress()
+  return (
+    <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
+      {formatClockTime(currentTime)}
+    </span>
+  )
+})
+
+const NowPlayingTotalTime: React.FC<{ fallbackDuration: number }> = React.memo(({ fallbackDuration }) => {
+  const { duration } = useAudioProgress()
+  const effectiveDuration = duration > 0 ? duration : fallbackDuration
+  return (
+    <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-left select-none">
+      {effectiveDuration > 0 ? formatClockTime(effectiveDuration) : '--:--'}
+    </span>
+  )
+})
+
 export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   onOpenSanctuary,
   onOpenRemoteModal,
@@ -45,8 +102,6 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     currentTrack,
     currentRelease,
     isPlaying,
-    currentTime,
-    duration,
     volume,
     isMuted,
     repeatMode,
@@ -83,16 +138,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   const [isDeviceModalOpen, setIsDeviceModalOpen] = useState(false)
   const [isSignalPopoverOpen, setIsSignalPopoverOpen] = useState(false)
 
-  // Format seconds to mm:ss with tabular-nums
-  const formatTime = (seconds: number) => {
-    if (!seconds || isNaN(seconds) || seconds < 0) return '00:00'
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-  }
-
-  const effectiveDuration = duration > 0 ? duration : currentTrack?.durationSeconds || currentTrack?.duration || 0
-  const progressPercent = effectiveDuration > 0 ? (currentTime / effectiveDuration) * 100 : 0
+  const fallbackDuration = currentTrack?.durationSeconds || currentTrack?.duration || 0
   const resolvedRelease =
     currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
   const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
@@ -124,23 +170,11 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
       <footer className="transport-bar-container fixed bottom-3 left-1/2 z-50 w-[calc(100%-1.5rem)] max-w-[2560px] -translate-x-1/2">
         <div className="glass-dropdown border border-white/[0.08] rounded-2xl h-[56px] px-4 grid grid-cols-[minmax(180px,0.85fr)_minmax(300px,auto)_minmax(0,1.4fr)] items-center gap-x-4 shadow-2xl relative select-none">
           {/* Subtle Top Specular Scrubber Highlight */}
-          <div
-            className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-all duration-150 group/scrub ${
-              !currentTrack ? 'opacity-30 pointer-events-none' : ''
-            }`}
-            onClick={(e) => {
-              if (!currentTrack) return
-              const rect = e.currentTarget.getBoundingClientRect()
-              const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-              seek(pct * effectiveDuration)
-            }}
-            title={`Seek: ${formatTime(currentTime)} / ${effectiveDuration > 0 ? formatTime(effectiveDuration) : '00:00'}`}
-          >
-            <div
-              className="h-full bg-gradient-to-r from-[#D4AF37] via-[#F59E0B] to-[#10B981] transition-all duration-100"
-              style={{ width: `${progressPercent}%` }}
-            />
-          </div>
+          <NowPlayingScrubber
+            fallbackDuration={fallbackDuration}
+            hasTrack={Boolean(currentTrack)}
+            onSeek={seek}
+          />
 
           {/* LEFT SECTION: TRACK CREDITS & SANCTUARY TRIGGER */}
           <div className="transport-track flex items-center gap-2.5 min-w-0 max-w-[300px]">
@@ -186,9 +220,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
           {/* CENTER SECTION: TACTILE TRANSPORT CONTROLS (SINGLE-AXIS 56PX) */}
           <div className={`transport-controls flex items-center justify-center gap-2 sm:gap-3 min-w-0 transition-opacity ${!currentTrack ? 'opacity-40 pointer-events-none' : ''}`}>
             {/* Elapsed Time */}
-            <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
-              {formatTime(currentTime)}
-            </span>
+            <NowPlayingElapsedTime />
 
             {/* Shuffle Button */}
             <button
@@ -248,9 +280,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             </button>
 
             {/* Remaining / Total Time */}
-            <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-left select-none">
-              {effectiveDuration > 0 ? formatTime(effectiveDuration) : '--:--'}
-            </span>
+            <NowPlayingTotalTime fallbackDuration={fallbackDuration} />
           </div>
 
           {/* RIGHT SECTION: AUDIOPHILE SIGNAL PATH, QUEUE & PLAYLIST TOGGLES, VOLUME */}
@@ -321,7 +351,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 className="transport-signal-button flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[11px] font-mono transition-all cursor-pointer shadow-sm group shrink-0"
               >
                 <span
-                  className="w-2 h-2 rounded-full animate-pulse shadow-sm"
+                  className="w-2 h-2 rounded-full shadow-sm"
                   style={{ backgroundColor: ledColor }}
                 />
                 <span className="transport-signal-label text-[#F5F5F7] font-semibold">

@@ -381,11 +381,80 @@ function testIdentityParsingAndSignalPathTelemetry() {
   assert.equal(unavailableDesc.canShowDacRate, false)
 }
 
+async function testNoopPollSkipsEmitAndStorageWrite() {
+  const rose: AudioEndpoint = {
+    transport: 'upnp',
+    udn: 'uuid:rose-130-udn',
+    friendlyName: 'ROSE-67',
+  }
+  const bridge: EndpointRoutingBridge = {
+    async listAudioEndpoints() {
+      return SAMPLE_LOCAL_ENDPOINTS
+    },
+    async discoverUpnpDevices() {
+      return SAMPLE_UPNP
+    },
+    async setAudioEndpoint() {},
+    async getPlaybackStatus() {
+      return {
+        selectedEndpoint: rose,
+        activeBackendEndpoint: rose,
+        deviceType: 'upnp_streamer',
+        signalPathMode: 'upnp_raw_stream',
+        isBitPerfect: true,
+        outputSampleRate: 11289600,
+      }
+    },
+  }
+
+  let storageWrites = 0
+  const data = new Map<string, string>()
+  const storage = {
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      storageWrites += 1
+      data.set(key, value)
+    },
+  }
+
+  let emissions = 0
+  const controller = createEndpointRoutingController(bridge, storage, () => {
+    emissions += 1
+  })
+  await controller.selectEndpoint(rose)
+  const snapshot: EndpointPlaybackStatusLike = {
+    selectedEndpoint: rose,
+    activeBackendEndpoint: rose,
+    deviceType: 'upnp_streamer',
+    signalPathMode: 'upnp_raw_stream',
+    isBitPerfect: true,
+    outputSampleRate: 11289600,
+  }
+  controller.reconcilePolledStatus(snapshot, controller.getState().selectionEpoch)
+
+  const baselineEmissions = emissions
+  const baselineWrites = storageWrites
+  for (let i = 0; i < 10; i++) {
+    controller.reconcilePolledStatus(snapshot, controller.getState().selectionEpoch)
+  }
+  assert.equal(emissions, baselineEmissions, 'unchanged poll must not trigger onChange')
+  assert.equal(storageWrites, baselineWrites, 'unchanged poll must not rewrite localStorage')
+
+  // Changed sample rate emits once and does not rewrite storage
+  controller.reconcilePolledStatus(
+    { ...snapshot, outputSampleRate: 44100 },
+    controller.getState().selectionEpoch
+  )
+  assert.equal(emissions, baselineEmissions + 1)
+  assert.equal(storageWrites, baselineWrites)
+}
+
 async function main() {
   await testStartupDiscoveryRaceDoesNotOverrideWasapiSelection()
   await testStaleAsyncDiscoveryAndBootDoNotOverwriteNewerSelection()
   await testUnavailableEndpointPreservesSelectionAndAutoAdvanceError()
   testIdentityParsingAndSignalPathTelemetry()
+  await testNoopPollSkipsEmitAndStorageWrite()
   console.log('ALL ENDPOINT ROUTING REGRESSION TESTS PASSED')
 }
 

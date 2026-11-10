@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react'
+import React, { useState, useMemo, useEffect, useCallback } from 'react'
 import {
   Play,
   Shuffle,
@@ -96,7 +96,183 @@ interface AlbumCardData {
   isMasterpiece: boolean
 }
 
-export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
+interface AlbumCardItemProps {
+  album: AlbumCardData
+  onSelectCard: (album: AlbumCardData) => void
+  onSelectArtist: (artist: string, e: React.MouseEvent) => void
+  onToggleFavorite: (album: AlbumCardData, e?: React.MouseEvent) => void
+  onPlayAlbum: (album: AlbumCardData) => void
+  onEditAlbum: (album: AlbumCardData, e?: React.MouseEvent) => void
+}
+
+const AlbumCardItem: React.FC<AlbumCardItemProps> = React.memo(({
+  album,
+  onSelectCard,
+  onSelectArtist,
+  onToggleFavorite,
+  onPlayAlbum,
+  onEditAlbum,
+}) => {
+  const displayArtist = useMemo(
+    () => creditInferenceService.resolveDisplayArtist(album.release, album.tracks),
+    [album.release, album.tracks]
+  )
+
+  return (
+    <div
+      onClick={() => onSelectCard(album)}
+      className="group/card flex flex-col cursor-pointer select-none transition-transform duration-200 hover:-translate-y-1 relative"
+    >
+      {/* Borderless 1:1 Artwork Container with 8px radius and Inner Specular Ring */}
+      <div
+        className={`relative aspect-square w-full rounded-lg overflow-hidden bg-[#131418] apple-album-shadow mb-2.5 transition-shadow duration-300 ${
+          album.variantsCount > 1 ? 'pressing-stack-layer' : ''
+        }`}
+      >
+        {/* Fallback Artwork Background */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-[#1C1D24] via-[#14151B] to-[#0C0D10] text-[#636366] p-3 text-center">
+          <Disc3 className="w-10 h-10 text-white/20 group-hover/card:rotate-45 transition-transform duration-700" />
+        </div>
+
+        {album.coverArtUrl ? (
+          <img
+            src={album.coverArtUrl}
+            alt={album.title}
+            className="absolute inset-0 w-full h-full object-cover rounded-lg group-hover/card:scale-[1.03] transition-transform duration-500 z-[1]"
+            loading="lazy"
+            onError={(e) => {
+              ;(e.target as HTMLElement).style.display = 'none'
+            }}
+          />
+        ) : null}
+
+        {/* Ultra-thin inner specular ring for sleeve boundary against dark backgrounds */}
+        <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10 pointer-events-none z-10" />
+
+        {/* Top-Right Badges: Staged Status & Editions */}
+        <div className="absolute top-2 right-2 flex items-center gap-1 z-10">
+          {album.stagedCount > 0 && (
+            <span
+              className="px-2 py-0.5 rounded-full bg-[#F59E0B] text-black font-mono font-bold text-[9px] shadow-md flex items-center gap-1"
+              title={`${album.stagedCount} uncommitted sidecar edits`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-black" />
+              <span>Staged</span>
+            </span>
+          )}
+
+          {album.variantsCount > 1 && (
+            <span
+              className="px-2 py-0.5 rounded-full bg-black/75 text-[#E5E5EA] border border-white/15 font-mono text-[9px] shadow-sm flex items-center gap-1"
+              title={`${album.variantsCount} Master Editions Stacked`}
+            >
+              <Layers className="w-2.5 h-2.5 text-[#D4AF37]" />
+              <span>{album.variantsCount} Editions</span>
+            </span>
+          )}
+
+          {Boolean(album.discCount && album.discCount > 1) && (
+            <span
+              className="px-2 py-0.5 rounded-full bg-black/75 text-[#E5E5EA] border border-white/15 font-mono text-[9px] shadow-sm flex items-center gap-1"
+              title={`${album.discCount} Discs in Box Set`}
+            >
+              <Disc3 className="w-2.5 h-2.5 text-[#38BDF8]" />
+              <span>{album.discCount} Discs</span>
+            </span>
+          )}
+        </div>
+
+        {/* Top-Left: Favorite Quick Toggle (Visible on hover or when favorited) */}
+        <div
+          className={`absolute top-2 left-2 z-10 transition-opacity duration-200 ${
+            album.isFavorite ? 'opacity-100' : 'opacity-0 group-hover/card:opacity-100'
+          }`}
+        >
+          <button
+            onClick={(e) => onToggleFavorite(album, e)}
+            className="w-7 h-7 rounded-full bg-black/75 border border-white/15 text-white/80 hover:text-[#F43F5E] flex items-center justify-center transition-colors cursor-pointer shadow-sm"
+            title={album.isFavorite ? 'Remove Favorite' : 'Mark Favorite'}
+          >
+            <Heart
+              className={`w-3.5 h-3.5 ${
+                album.isFavorite ? 'text-[#F43F5E] fill-[#F43F5E]' : ''
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Hover Overlay: Play Button & Edit Trigger */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover/card:opacity-100 transition-opacity duration-200 flex items-end justify-between p-3 z-10 pointer-events-none">
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onPlayAlbum(album)
+            }}
+            className="w-10 h-10 rounded-full bg-white/95 hover:bg-white text-black flex items-center justify-center shadow-2xl hover:scale-105 active:scale-95 transition-transform cursor-pointer pointer-events-auto"
+            title="Play Album"
+          >
+            <Play className="w-4 h-4 fill-current ml-0.5" />
+          </button>
+
+          <button
+            onClick={(e) => onEditAlbum(album, e)}
+            className="w-8 h-8 rounded-full bg-black/75 hover:bg-black/90 text-white/90 border border-white/20 flex items-center justify-center shadow-lg hover:scale-105 active:scale-95 transition-transform cursor-pointer pointer-events-auto"
+            title="Curate Album Metadata & Artwork"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Clean Editorial 3-Line Typography Lockup */}
+      <div className="flex flex-col min-w-0">
+        {/* Line 1: Album Title */}
+        <span
+          className="font-semibold text-[13px] text-[#F5F5F7] truncate leading-tight group-hover/card:text-white transition-colors"
+          title={album.title}
+        >
+          {album.title}
+        </span>
+
+        {/* Line 2: Primary Artist / Composer */}
+        <span
+          onClick={(e) => onSelectArtist(displayArtist, e)}
+          className="text-[12px] text-[#8E8E93] hover:text-white truncate mt-1 leading-tight transition-colors cursor-pointer"
+          title={`Filter by artist: ${displayArtist}`}
+        >
+          {displayArtist}
+        </span>
+
+        {/* Line 3: Monospace Micro-Telemetry (Year · Format · DR) */}
+        <div className="text-[11px] font-mono text-[#636366] tabular-nums mt-1 flex items-center gap-1.5 truncate">
+          {album.releaseYear && <span>{album.releaseYear}</span>}
+          {album.releaseYear && album.formats.length > 0 && <span className="text-white/20">·</span>}
+          {album.formats.length > 0 && (
+            <span className={album.formats[0].includes('DSD') || album.formats[0] === 'DSF' || album.formats[0] === 'DFF' ? 'text-[#818CF8]' : ''}>
+              {album.formats[0]}
+            </span>
+          )}
+          {album.sampleRates.length > 0 && album.sampleRates[0] !== '0.0kHz' && (
+            <>
+              <span className="text-white/20">·</span>
+              <span>{album.sampleRates[0]}</span>
+            </>
+          )}
+          {FEATURES.DYNAMIC_RANGE && album.avgDr > 0 && (
+            <>
+              <span className="text-white/20">·</span>
+              <span className={album.avgDr >= 12 ? 'text-[#D4AF37] font-semibold' : ''}>
+                DR{album.avgDr}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+})
+
+export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
   releases = [],
   tracks = [],
   selectedTrackId,
@@ -118,7 +294,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
   onSelectArtist: propOnSelectArtist,
   selectedComposer: propSelectedComposer,
   onSelectComposer: propOnSelectComposer,
-  splitReleaseIds = new Set(),
+  splitReleaseIds = new Set<string>(),
   onToggleReleaseSplit,
 }) => {
   const { playTrack, currentTrack, isPlaying, playNext, addToQueue } = useAudioPlayer()
@@ -471,7 +647,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
       )
   }, [albumCards])
 
-  const handleEditAlbum = (album: AlbumCardData, e?: React.MouseEvent, targetReleaseId?: string) => {
+  const handleEditAlbum = useCallback((album: AlbumCardData, e?: React.MouseEvent, targetReleaseId?: string) => {
     e?.stopPropagation()
     let relToEdit: Release | undefined = album.release
     if (targetReleaseId && releases) {
@@ -514,14 +690,14 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     if (onCustomizeRelease) {
       onCustomizeRelease(relToEdit)
     }
-  }
+  }, [releases, onCustomizeRelease])
 
-  const handleToggleFavorite = (album: AlbumCardData, e?: React.MouseEvent) => {
+  const handleToggleFavorite = useCallback((album: AlbumCardData, e?: React.MouseEvent) => {
     e?.stopPropagation()
     if (album.release && onUpdateReleaseDetails) {
       onUpdateReleaseDetails(album.release.id, { isFavorite: !album.isFavorite })
     }
-  }
+  }, [onUpdateReleaseDetails])
 
   const handleSetRating = (album: AlbumCardData, star: number, e?: React.MouseEvent) => {
     e?.stopPropagation()
@@ -531,12 +707,29 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
     }
   }
 
-  const handlePlayAlbum = (album: AlbumCardData, trackList?: Track[]) => {
+  const handlePlayAlbum = useCallback((album: AlbumCardData, trackList?: Track[]) => {
     const list = trackList || album.tracks
     if (list.length > 0) {
       playTrack(list[0], list)
     }
-  }
+  }, [playTrack])
+
+  const handleSelectAlbumCard = useCallback((album: AlbumCardData) => {
+    setSelectedAlbumId(album.id)
+    if (album.tracks.length > 0) {
+      onSelectTrack(album.tracks[0].id)
+    }
+    if (album.release) {
+      onInspectRelease(album.release.id)
+    }
+  }, [setSelectedAlbumId, onSelectTrack, onInspectRelease])
+
+  const handleSelectArtistFromCard = useCallback((artist: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setSelectedArtist(artist)
+    setSelectedAlbumId(null)
+    setSelectedComposer(null)
+  }, [setSelectedArtist, setSelectedAlbumId, setSelectedComposer])
 
   const handleShuffleAlbum = (album: AlbumCardData, trackList?: Track[]) => {
     const list = trackList || album.tracks
@@ -577,179 +770,17 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
   }, [cardSize])
 
   // Render a Single Album Card (Apple HIG Borderless Lockup)
-  const renderAlbumCard = (album: AlbumCardData) => {
-    return (
-      <div
-        key={album.id}
-        onClick={() => {
-          setSelectedAlbumId(album.id)
-          if (album.tracks.length > 0) {
-            onSelectTrack(album.tracks[0].id)
-          }
-          if (album.release) {
-            onInspectRelease(album.release.id)
-          }
-        }}
-        className="group/card flex flex-col cursor-pointer select-none transition-all duration-200 hover:-translate-y-1 relative"
-      >
-        {/* Borderless 1:1 Artwork Container with 8px radius and Inner Specular Ring */}
-        <div
-          className={`relative aspect-square w-full rounded-lg overflow-hidden bg-[#131418] apple-album-shadow mb-2.5 transition-shadow duration-300 ${
-            album.variantsCount > 1 ? 'pressing-stack-layer' : ''
-          }`}
-        >
-          {/* Fallback Artwork Background */}
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-[#1C1D24] via-[#14151B] to-[#0C0D10] text-[#636366] p-3 text-center">
-            <Disc3 className="w-10 h-10 text-white/20 group-hover/card:rotate-45 transition-transform duration-700" />
-          </div>
-
-          {album.coverArtUrl ? (
-            <img
-              src={album.coverArtUrl}
-              alt={album.title}
-              className="absolute inset-0 w-full h-full object-cover rounded-lg group-hover/card:scale-[1.03] transition-transform duration-500 z-[1]"
-              loading="lazy"
-              onError={(e) => {
-                ;(e.target as HTMLElement).style.display = 'none'
-              }}
-            />
-          ) : null}
-
-          {/* Ultra-thin inner specular ring for sleeve boundary against dark backgrounds */}
-          <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10 pointer-events-none z-10" />
-
-          {/* Top-Right Badges: Staged Status & Editions */}
-          <div className="absolute top-2 right-2 flex items-center gap-1 z-10">
-            {album.stagedCount > 0 && (
-              <span
-                className="px-2 py-0.5 rounded-full bg-[#F59E0B] text-black font-mono font-bold text-[9px] shadow-md flex items-center gap-1"
-                title={`${album.stagedCount} uncommitted sidecar edits`}
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-black animate-pulse" />
-                <span>Staged</span>
-              </span>
-            )}
-
-            {album.variantsCount > 1 && (
-              <span
-                className="px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[#E5E5EA] border border-white/15 font-mono text-[9px] shadow-sm flex items-center gap-1"
-                title={`${album.variantsCount} Master Editions Stacked`}
-              >
-                <Layers className="w-2.5 h-2.5 text-[#D4AF37]" />
-                <span>{album.variantsCount} Editions</span>
-              </span>
-            )}
-
-            {Boolean(album.discCount && album.discCount > 1) && (
-              <span
-                className="px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-[#E5E5EA] border border-white/15 font-mono text-[9px] shadow-sm flex items-center gap-1"
-                title={`${album.discCount} Discs in Box Set`}
-              >
-                <Disc3 className="w-2.5 h-2.5 text-[#38BDF8]" />
-                <span>{album.discCount} Discs</span>
-              </span>
-            )}
-          </div>
-
-          {/* Top-Left: Favorite Quick Toggle (Visible on hover or when favorited) */}
-          <div
-            className={`absolute top-2 left-2 z-10 transition-opacity duration-200 ${
-              album.isFavorite ? 'opacity-100' : 'opacity-0 group-hover/card:opacity-100'
-            }`}
-          >
-            <button
-              onClick={(e) => handleToggleFavorite(album, e)}
-              className="w-7 h-7 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white/80 hover:text-[#F43F5E] flex items-center justify-center transition-colors cursor-pointer shadow-sm"
-              title={album.isFavorite ? 'Remove Favorite' : 'Mark Favorite'}
-            >
-              <Heart
-                className={`w-3.5 h-3.5 ${
-                  album.isFavorite ? 'text-[#F43F5E] fill-[#F43F5E]' : ''
-                }`}
-              />
-            </button>
-          </div>
-
-          {/* Hover Overlay: Frosted Glass Play Button & Edit Trigger */}
-          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover/card:opacity-100 transition-opacity duration-200 flex items-end justify-between p-3 z-10 pointer-events-none">
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                handlePlayAlbum(album)
-              }}
-              className="w-10 h-10 rounded-full bg-white/95 hover:bg-white text-black flex items-center justify-center shadow-2xl hover:scale-105 active:scale-95 transition-all cursor-pointer pointer-events-auto"
-              title="Play Album"
-            >
-              <Play className="w-4 h-4 fill-current ml-0.5" />
-            </button>
-
-            <button
-              onClick={(e) => handleEditAlbum(album, e)}
-              className="w-8 h-8 rounded-full bg-black/60 hover:bg-black/80 text-white/90 backdrop-blur-md border border-white/20 flex items-center justify-center shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer pointer-events-auto"
-              title="Curate Album Metadata & Artwork"
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {/* Clean Editorial 3-Line Typography Lockup */}
-        <div className="flex flex-col min-w-0">
-          {/* Line 1: Album Title */}
-          <span
-            className="font-semibold text-[13px] text-[#F5F5F7] truncate leading-tight group-hover/card:text-white transition-colors"
-            title={album.title}
-          >
-            {album.title}
-          </span>
-
-          {/* Line 2: Primary Artist / Composer */}
-          {(() => {
-            const displayArtist = creditInferenceService.resolveDisplayArtist(album.release, album.tracks)
-            return (
-              <span
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setSelectedArtist(displayArtist)
-                  setSelectedAlbumId(null)
-                  setSelectedComposer(null)
-                }}
-                className="text-[12px] text-[#8E8E93] hover:text-white truncate mt-1 leading-tight transition-colors cursor-pointer"
-                title={`Filter by artist: ${displayArtist}`}
-              >
-                {displayArtist}
-              </span>
-            )
-          })()}
-
-          {/* Line 3: Monospace Micro-Telemetry (Year · Format · DR) */}
-          <div className="text-[11px] font-mono text-[#636366] tabular-nums mt-1 flex items-center gap-1.5 truncate">
-            {album.releaseYear && <span>{album.releaseYear}</span>}
-            {album.releaseYear && album.formats.length > 0 && <span className="text-white/20">·</span>}
-            {album.formats.length > 0 && (
-              <span className={album.formats[0].includes('DSD') || album.formats[0] === 'DSF' || album.formats[0] === 'DFF' ? 'text-[#818CF8]' : ''}>
-                {album.formats[0]}
-              </span>
-            )}
-            {album.sampleRates.length > 0 && album.sampleRates[0] !== '0.0kHz' && (
-              <>
-                <span className="text-white/20">·</span>
-                <span>{album.sampleRates[0]}</span>
-              </>
-            )}
-            {FEATURES.DYNAMIC_RANGE && album.avgDr > 0 && (
-              <>
-                <span className="text-white/20">·</span>
-                <span className={album.avgDr >= 12 ? 'text-[#D4AF37] font-semibold' : ''}>
-                  DR{album.avgDr}
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-    )
-  }
+  const renderAlbumCard = (album: AlbumCardData) => (
+    <AlbumCardItem
+      key={album.id}
+      album={album}
+      onSelectCard={handleSelectAlbumCard}
+      onSelectArtist={handleSelectArtistFromCard}
+      onToggleFavorite={handleToggleFavorite}
+      onPlayAlbum={handlePlayAlbum}
+      onEditAlbum={handleEditAlbum}
+    />
+  )
 
   // Render the Album Detail Drill-down View
   const renderAlbumDetail = (album: AlbumCardData) => {
@@ -940,7 +971,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
 
                 {album.stagedCount > 0 && (
                   <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 font-mono text-[11px] border border-amber-500/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
                     <span>{album.stagedCount} Staged</span>
                   </span>
                 )}
@@ -1168,7 +1199,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
                           title="Play Track"
                         >
                           {isCurrentPlaying && isPlaying ? (
-                            <Volume2 className="w-3.5 h-3.5 text-[#00F5FF] animate-pulse" />
+                            <Volume2 className="w-3.5 h-3.5 text-[#00F5FF]" />
                           ) : (
                             <>
                               <span className="group-hover/tr:hidden text-xs font-mono text-[#64748B]">
@@ -1829,7 +1860,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
               <>
                 {albumCards.length === 0 ? (
                   <div className="h-64 flex flex-col items-center justify-center text-[#64748B] gap-2">
-                    <Disc3 className="w-10 h-10 text-white/20 animate-pulse" />
+                    <Disc3 className="w-10 h-10 text-white/20" />
                     <p className="text-sm">No albums match your current filter.</p>
                   </div>
                 ) : (
@@ -1928,4 +1959,4 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = ({
       </div>
     </div>
   )
-}
+})

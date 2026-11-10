@@ -75,8 +75,42 @@ import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
 import { backgroundArtworkService } from './services/backgroundArtworkService'
 import { CadenceLogo } from './components/common/CadenceLogo'
 import { useStagedChanges } from './hooks/useStagedChanges'
-import { useMaintenanceWorker } from './hooks/useMaintenanceWorker'
 import { GeminiSetupScreen } from './components/GeminiSetupScreen'
+
+function areCurateCommitRowsEqual(a: readonly CurateCommitRow[], b: readonly CurateCommitRow[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (
+      x.id !== y.id ||
+      x.trackId !== y.trackId ||
+      x.status !== y.status ||
+      x.payloadJson !== y.payloadJson ||
+      x.applies !== y.applies ||
+      x.hasNewerDraft !== y.hasNewerDraft ||
+      x.hasHeldEdits !== y.hasHeldEdits ||
+      x.lineageChanged !== y.lineageChanged ||
+      x.artworkUrl !== y.artworkUrl ||
+      x.errorMessage !== y.errorMessage
+    ) {
+      return false
+    }
+    const cx = x.catalog
+    const cy = y.catalog
+    if (cx !== cy) {
+      if (!cx || !cy) return false
+      const keysA = Object.keys(cx) as (keyof typeof cx)[]
+      const keysB = Object.keys(cy) as (keyof typeof cy)[]
+      if (keysA.length !== keysB.length) return false
+      for (const k of keysA) {
+        if (cx[k] !== cy[k]) return false
+      }
+    }
+  }
+  return true
+}
 
 export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   // Primary Graph State
@@ -101,7 +135,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
               ? { ...row, hasNewerDraft: true, hasHeldEdits: saved.hasHeldEdits }
               : row
           }) : rows
-          return JSON.stringify(current) === JSON.stringify(next) ? current : next
+          return areCurateCommitRowsEqual(current, next) ? current : next
         })
       }
     } catch (err) {
@@ -122,15 +156,24 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
     if (!tauriBridge.isTauri()) return
     let disposed = false
     let unsubscribe: (() => void) | undefined
+    let lastTelemetrySig: string | null = null
     void refreshCurateCommits()
-    void tauriBridge.listenCommitTelemetry(() => {
-      if (!disposed) void refreshCurateCommits()
-    }).then(unlisten => {
-      if (disposed) unlisten()
-      else {
-        unsubscribe = unlisten
+    void tauriBridge.listenCommitTelemetry((payload) => {
+      if (disposed) return
+      const sig = `${payload.state}|${payload.activeBatchId ?? ''}|${payload.pendingItems}|${payload.inflightItems}|${payload.completedItems}|${payload.failedItems}|${payload.currentTrackId ?? ''}`
+      if (sig === lastTelemetrySig) return
+      const isInitialEmptyIdle =
+        lastTelemetrySig === null &&
+        payload.state === 'idle' &&
+        payload.totalItems === 0 &&
+        !payload.activeBatchId
+      lastTelemetrySig = sig
+      if (!isInitialEmptyIdle) {
         void refreshCurateCommits()
       }
+    }).then(unlisten => {
+      if (disposed) unlisten()
+      else unsubscribe = unlisten
     })
     return () => {
       disposed = true
@@ -195,7 +238,6 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
 
   // Canonical staged mutations hook
   const { stagedAlbumsCount } = useStagedChanges(tracks, releases)
-  const { maintenanceStats } = useMaintenanceWorker(true)
 
   // View & Filter State
   const [viewMode, setViewMode] = useState<CanvasViewMode>('cover_grid')
@@ -1728,7 +1770,6 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
           {/* Activity telemetry */}
           <ActivityPill
             telemetry={scanTelemetry}
-            maintenanceStats={maintenanceStats}
             onClick={() => setIsActivityPopoverOpen((prev) => !prev)}
             isOpen={isActivityPopoverOpen}
           />
@@ -1772,7 +1813,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
               <span
                 aria-hidden="true"
                 className={`w-1.5 h-1.5 rounded-full ${
-                  debugMode === 'diagnostic_capture' ? 'bg-rose-400 animate-pulse' : 'bg-[#D4AF37]'
+                  debugMode === 'diagnostic_capture' ? 'bg-rose-400' : 'bg-[#D4AF37]'
                 }`}
               />
             )}
@@ -2020,7 +2061,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
 
                 <div className="flex items-center gap-2 mb-2">
                   <span className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-[11px] font-mono font-semibold border border-amber-500/30 flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
                     Network Folder Offline
                   </span>
                 </div>
@@ -2462,8 +2503,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
       <CadenceSettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        activeTab={settingsTab}
-        onTabChange={setSettingsTab}
+        initialTab={settingsTab}
         prioritySettings={prioritySettings}
         prioritySummary={curateCatalog.summary}
         onSavePrioritySettings={handleSavePrioritySettings}

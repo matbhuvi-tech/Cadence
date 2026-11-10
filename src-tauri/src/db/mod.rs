@@ -26,6 +26,14 @@ impl AppDb {
         schema::initialize_schema(&conn)
             .map_err(|e| format!("Failed to initialize SQLite schema: {}", e))?;
 
+        conn.execute_batch(
+            "
+            PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -16384;
+            ",
+        )
+        .map_err(|e| format!("Failed to configure SQLite performance PRAGMAs: {}", e))?;
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -47,6 +55,8 @@ impl AppDb {
             PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
             PRAGMA busy_timeout = 5000;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -16384;
             ",
         )
         .map_err(|e| format!("Failed to configure dedicated SQLite connection: {}", e))?;
