@@ -1,11 +1,19 @@
-//! Simplified 3-state audiophile UPnP pacing controller (`Phase 2.2` bounded recovery).
+//! Receiver-backpressure-driven adaptive UPnP pacing controller (Experimental).
 //!
-//! Objective: maintain a small, stable audio headroom (~1.2 s) at the UPnP renderer while
-//! cruising at ~1.000x real-time bitrate and recovering with lead-gated bounded tiers
-//! (`1.020x` shallow / `1.050x` moderate / `1.080x` deep deficit) only when estimated
-//! delivery lead drops below target—without accumulating excess receiver backlog,
-//! restoring Phase 1's rate-inversion/2s-reset defects, or executing blocking calls
-//! in the critical streaming loop.
+//! Objective: maintain generous audio cushion inside the UPnP renderer so Wi-Fi packet-loss
+//! or RTT hiccups are absorbed downstream without audible stutters, by gently overfeeding
+//! (`1.080x` start, bounded `1.120x` max) until TCP telemetry (`SIO_TCP_INFO`) shows the
+//! renderer's HTTP client stops reading (`ReceiverFlowControl` via RWIN collapse / `SndLimTimeRwin`).
+//!
+//! Upon receiver flow-control pressure:
+//! - Drain briefly (`0.995x` for 1.5 s) so TCP RWIN reopens cleanly, and halve excess rate
+//!   above `1.000x` while tightening an adaptive soft ceiling (`>= 1.010x`).
+//! - Repeated pressure backs off further down toward `1.000x` (or brief `0.995x` drain while
+//!   RWIN remains closed).
+//! - While delivery remains free of receiver pressure (even across Wi-Fi `LinkCongestion` where
+//!   receiver RWIN stays wide open), step pace up slowly (`+0.010x` / `+0.005x` per `6 s`) toward
+//!   the ceiling—preserving non-bursty `16 KB` chunk pacing, `32 KB` steady `SO_SNDBUF`,
+//!   `next_chunk_due = now` stall phase re-anchoring, and zero blocking calls in the loop.
 
 use std::net::TcpStream as StdTcpStream;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -18,38 +26,40 @@ use super::stream_tuning;
 use crate::diag_log;
 use crate::diagnostics::DiagCategory;
 
-/// Tuning parameters for the 3-state bounded-recovery UPnP pacing controller.
+/// Tuning parameters for the receiver-backpressure-driven UPnP pacing controller.
 #[derive(Debug, Clone, Copy)]
 pub struct PacerConfig {
-    /// Target delivery lead to exit `InitialFill` (default: 1200 ms).
+    /// Reference initial lead target retained for contiguous-reconnect lead seeding & config compatibility.
     pub initial_lead_target_ms: u64,
-    /// Half-width around `effective_target_lead_ms` forming `[L_low, L_high]` hysteresis.
-    pub band_half_width_ms: i64,
-    /// Additional lead above `L_high` defining `L_max` trim ceiling.
-    pub trim_margin_ms: i64,
+    /// Starting steady overfeed multiplier after initial <=512 KB pre-roll (`1.080x`).
+    pub initial_overfeed_multiplier: f64,
+    /// Steady cruising floor when backed off cleanly (`1.000x`).
+    pub min_steady_multiplier: f64,
+    /// Gentle relief-drain multiplier applied during flow-control holdoff (`0.995x`).
+    pub drain_multiplier: f64,
+    /// Hard upper cap on overfeed multiplier (`1.120x`), preventing LAN bursts on Wi-Fi.
+    pub max_overfeed_multiplier: f64,
+    /// Clean interval without `ReceiverFlowControl` before stepping pace up (`6000 ms`).
+    pub ramp_interval_ms: u64,
+    /// Initial upward pace step before any flow-control strike (`+0.010x`).
+    pub initial_ramp_step: f64,
+    /// Fine upward pace step after hitting receiver pressure (`+0.005x`).
+    pub fine_ramp_step: f64,
+    /// Excess-above-1.000x retention factor per debounced flow-control strike (`0.50` = halve excess).
+    pub backoff_excess_factor: f64,
+    /// Minimum adaptive soft ceiling so hiccup recovery always remains possible (`1.010x`).
+    pub soft_ceiling_floor: f64,
+    /// Margin below a hitting multiplier / slow relaxation step (`0.005x`).
+    pub soft_ceiling_step: f64,
+    /// Clean interval before relaxing soft ceiling & decaying strike count (`30000 ms`).
+    pub soft_ceiling_relax_ms: u64,
     /// Hard cap on deficit accrued behind the 1.000x playback horizon (`D_max`).
     pub max_debt_ms: i64,
-    /// Lower safety floor for `effective_target_lead_ms` under flow-control clamping.
-    pub min_safe_target_ms: u64,
-    /// Conservative recovery multiplier used when headroom is mildly below `L_low`.
-    pub recovery_multiplier: f64,
-    /// Lead threshold below which moderate recovery (`moderate_recovery_multiplier`) engages.
-    pub moderate_recovery_lead_ms: i64,
-    /// Moderate bounded recovery multiplier for thinning cushion (`400..800 ms` at 1200 ms target).
-    pub moderate_recovery_multiplier: f64,
-    /// Lead threshold below which deep deficit recovery (`deficit_recovery_multiplier`) engages.
-    pub deficit_recovery_lead_ms: i64,
-    /// Bounded deficit recovery multiplier when lead is critically low (`< 400 ms`).
-    pub deficit_recovery_multiplier: f64,
-    /// Gentle sub-real-time trim multiplier applied only when lead exceeds `L_max`.
-    pub trim_multiplier: f64,
     /// Write/lag duration threshold separating normal operation from slow events.
     pub stall_threshold_ms: u64,
     /// Fast socket write threshold indicating healthy non-blocked kernel drain.
     pub fast_write_ms: u64,
-    /// Short holdoff pausing `> 1.000x` boost briefly right on a congestion/uncertain stall.
-    pub congestion_holdoff_ms: u64,
-    /// Cooldown before relaxing `flow_suppressed` after flow-control signal clears.
+    /// Drain holdoff & episode debounce duration after `ReceiverFlowControl` (`1500 ms`).
     pub flow_clear_ms: u64,
     /// Periodic non-blocking `SIO_TCP_INFO` probe cadence during normal playback (~5 Hz).
     pub tcp_info_poll_ms: u64,
@@ -59,33 +69,31 @@ pub struct PacerConfig {
     pub tcp_info_stale_ms: u64,
     /// Upper bound on uncertainty margin under fallback mode (`Uncertain`).
     pub uncertain_max_margin_ms: u64,
-    /// Minimum interval between repeated flow-control ceiling reductions.
-    pub target_clamp_cooldown_ms: u64,
 }
 
 impl Default for PacerConfig {
     fn default() -> Self {
         Self {
             initial_lead_target_ms: 1200,
-            band_half_width_ms: 100,
-            trim_margin_ms: 100,
+            initial_overfeed_multiplier: 1.080,
+            min_steady_multiplier: 1.000,
+            drain_multiplier: 0.995,
+            max_overfeed_multiplier: 1.120,
+            ramp_interval_ms: 6_000,
+            initial_ramp_step: 0.010,
+            fine_ramp_step: 0.005,
+            backoff_excess_factor: 0.50,
+            soft_ceiling_floor: 1.010,
+            soft_ceiling_step: 0.005,
+            soft_ceiling_relax_ms: 30_000,
             max_debt_ms: 3000,
-            min_safe_target_ms: 150,
-            recovery_multiplier: stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER, // 1.020x
-            moderate_recovery_lead_ms: 800,
-            moderate_recovery_multiplier: 1.050,
-            deficit_recovery_lead_ms: 400,
-            deficit_recovery_multiplier: 1.080,
-            trim_multiplier: 0.995,
             stall_threshold_ms: stream_tuning::BACKPRESSURE_STALL_MS, // 25 ms
             fast_write_ms: 10,
-            congestion_holdoff_ms: 100,
-            flow_clear_ms: 1500,
+            flow_clear_ms: 1_500,
             tcp_info_poll_ms: 200,
             tcp_info_min_event_ms: 50,
             tcp_info_stale_ms: 750,
             uncertain_max_margin_ms: 250,
-            target_clamp_cooldown_ms: 500,
         }
     }
 }
@@ -106,7 +114,7 @@ pub struct TcpSocketSample {
     pub snd_lim_time_cwnd: Option<u32>,
 }
 
-/// Confidence level of the delivery estimate passed to the rate controller.
+/// Confidence level of the delivery estimate passed to the controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryCertainty {
     Measured,
@@ -161,9 +169,8 @@ enum RateRegime {
     Unpaced,
     InitialFill,
     Cruise,
-    Recovering,
+    Overfeed,
     Trim,
-    CongestionHoldoff,
     FlowSuppressed,
 }
 
@@ -173,9 +180,8 @@ impl RateRegime {
             Self::Unpaced => 0,
             Self::InitialFill => 1,
             Self::Cruise => 2,
-            Self::Recovering => 3,
+            Self::Overfeed => 3,
             Self::Trim => 4,
-            Self::CongestionHoldoff => 5,
             Self::FlowSuppressed => 6,
         }
     }
@@ -184,9 +190,8 @@ impl RateRegime {
         match code {
             1 => "initial_fill",
             2 => "cruise",
-            3 => "recovering",
+            3 => "overfeed",
             4 => "trim",
-            5 => "congestion_holdoff",
             6 => "flow_suppressed",
             _ => "unpaced",
         }
@@ -428,12 +433,13 @@ pub(crate) struct SynchronousPacer {
     uncertain_slow_cluster: u32,
     clean_fast_streak: u32,
 
-    // Controller hysteresis, holdoff, and suppression state
-    effective_target_lead_ms: u64,
-    last_target_clamp_at: Option<Instant>,
-    is_recovering: bool,
-    congestion_holdoff_until: Option<Instant>,
+    // Receiver-backpressure-driven adaptive overfeed controller state
+    active_pace_mult: f64,
+    soft_ceiling_mult: f64,
+    flow_strikes: u32,
     flow_suppressed_until: Option<Instant>,
+    clean_window_anchor: Option<Instant>,
+    ceiling_relax_anchor: Option<Instant>,
 }
 
 impl SynchronousPacer {
@@ -469,11 +475,12 @@ impl SynchronousPacer {
             uncertain_slow_at: None,
             uncertain_slow_cluster: 0,
             clean_fast_streak: 0,
-            effective_target_lead_ms: 0,
-            last_target_clamp_at: None,
-            is_recovering: false,
-            congestion_holdoff_until: None,
+            active_pace_mult: 0.0,
+            soft_ceiling_mult: 0.0,
+            flow_strikes: 0,
             flow_suppressed_until: None,
+            clean_window_anchor: None,
+            ceiling_relax_anchor: None,
         }
     }
 
@@ -511,16 +518,16 @@ impl SynchronousPacer {
             .effective_target_lead_ms
             .store(initial_target, Ordering::Relaxed);
 
-        // Preserve existing socket-buffer clamping contract for >=1 MB Range requests,
-        // while keeping state transitions clean: contiguous reconnects enter SteadyMaintain;
-        // fresh starts and discontinuous seeks begin in InitialFill.
+        // Preserve clamped 32 KB SO_SNDBUF on Range continuations.
+        // Contiguous reconnects enter SteadyMaintain at 1.000x until clean interval steps up;
+        // fresh starts and discontinuous seeks enter InitialFill at `initial_overfeed_multiplier` (1.080x).
         let (initial_state, initial_regime, initial_mult, seed_horizon_bytes, horizon_ready) =
             if is_contiguous_reconnect {
                 let seed_lead = (initial_target as f64 / 1000.0) * realtime;
                 (
                     PacingState::SteadyMaintain,
                     RateRegime::Cruise,
-                    1.0,
+                    config.min_steady_multiplier,
                     -seed_lead,
                     true,
                 )
@@ -528,7 +535,7 @@ impl SynchronousPacer {
                 (
                     PacingState::InitialFill,
                     RateRegime::InitialFill,
-                    stream_tuning::RAMP_UP_MULTIPLIER,
+                    config.initial_overfeed_multiplier,
                     0.0,
                     is_range_continuation,
                 )
@@ -558,11 +565,12 @@ impl SynchronousPacer {
             uncertain_slow_at: None,
             uncertain_slow_cluster: 0,
             clean_fast_streak: 0,
-            effective_target_lead_ms: initial_target,
-            last_target_clamp_at: None,
-            is_recovering: false,
-            congestion_holdoff_until: None,
+            active_pace_mult: initial_mult,
+            soft_ceiling_mult: config.max_overfeed_multiplier,
+            flow_strikes: 0,
             flow_suppressed_until: None,
+            clean_window_anchor: if horizon_ready { Some(now) } else { None },
+            ceiling_relax_anchor: if horizon_ready { Some(now) } else { None },
         };
         pacer
             .metrics
@@ -611,6 +619,8 @@ impl SynchronousPacer {
             self.horizon_bytes = 0.0;
             self.last_horizon_tick = Some(now);
             self.next_chunk_due = Some(now);
+            self.clean_window_anchor = Some(now);
+            self.ceiling_relax_anchor = Some(now);
             self.horizon_initialized = true;
             return;
         }
@@ -637,6 +647,8 @@ impl SynchronousPacer {
             let resumed_at = Instant::now();
             self.last_horizon_tick = Some(resumed_at);
             self.next_chunk_due = Some(resumed_at);
+            self.clean_window_anchor = Some(resumed_at);
+            self.ceiling_relax_anchor = Some(resumed_at);
             return;
         }
         if let Some(dur) = sleep_dur {
@@ -682,6 +694,8 @@ impl SynchronousPacer {
         if !self.horizon_initialized {
             self.last_horizon_tick = Some(now);
             self.next_chunk_due = Some(now);
+            self.clean_window_anchor.get_or_insert(now);
+            self.ceiling_relax_anchor.get_or_insert(now);
             self.horizon_initialized = true;
         }
 
@@ -716,6 +730,8 @@ impl SynchronousPacer {
             self.horizon_bytes += dt.as_secs_f64() * realtime;
         } else {
             self.next_chunk_due = Some(now);
+            self.clean_window_anchor = Some(now);
+            self.ceiling_relax_anchor = Some(now);
         }
 
         // 3. Determine stall thresholds & update fallback uncertainty width.
@@ -767,7 +783,7 @@ impl SynchronousPacer {
         };
         let margin_ms = ((margin_bytes as f64 / realtime) * 1000.0).round().max(0.0) as u64;
 
-        // 5. Classify event & apply flow-control / congestion guards cleanly.
+        // 5. Classify event & react: back off on receiver pressure, ignore Wi-Fi link congestion for pace.
         let cause = self.classify_event(
             now,
             write_block_dur,
@@ -778,16 +794,13 @@ impl SynchronousPacer {
             just_measured,
             deltas,
         );
-        self.apply_cause_reaction(now, certainty, cause, display_lead_ms);
+        if !paused {
+            self.apply_cause_reaction(now, certainty, cause, display_lead_ms);
+        }
 
-        // 6. State transition + target multiplier selection.
-        let (multiplier, regime) = self.select_rate_and_transition(
-            now,
-            certainty,
-            lead_lower_ms,
-            lead_upper_ms,
-            paused,
-        );
+        // 6. State transition + adaptive receiver-pressure multiplier selection.
+        let (multiplier, regime) =
+            self.select_rate_and_transition(now, certainty, display_lead_ms, paused);
 
         if !self.is_metadata {
             self.metrics.lead_certainty.store(
@@ -802,14 +815,13 @@ impl SynchronousPacer {
                 .store(margin_ms, Ordering::Relaxed);
             self.metrics
                 .effective_target_lead_ms
-                .store(self.effective_target_lead_ms, Ordering::Relaxed);
+                .store((self.soft_ceiling_mult * 1000.0).round() as u64, Ordering::Relaxed);
             self.metrics.record_state(self.state, regime, multiplier, false);
         }
 
         // 7. Compute non-bursty virtual sleep deadline.
         // Only the stalled/lagged chunk itself skips sleep (re-anchoring `next_chunk_due`
-        // to `now` so a missed wakeup never triggers an unpaced catch-up burst); subsequent
-        // clean chunks during `flow_suppressed` / `congestion_holdoff` stay paced at 1.000x.
+        // to `now` so a missed wakeup never triggers a wire-speed catch-up burst).
         if paused {
             return None;
         }
@@ -852,8 +864,6 @@ impl SynchronousPacer {
         fast_thresh: Duration,
     ) {
         if certainty == DeliveryCertainty::Measured {
-            // Fresh TCP_INFO telemetry proves whether RWIN is open or congested;
-            // never let Measured congestion/stalls trip the Uncertain slow-cluster fallback.
             self.uncertain_slow_cluster = 0;
             self.uncertain_slow_at = None;
             return;
@@ -910,14 +920,11 @@ impl SynchronousPacer {
                     .last_tcp_sample
                     .map(|s| s.bytes_in_flight as u64)
                     .unwrap_or(0);
-                // Bounds unACKed airlink exposure + kernel SO_SNDBUF ceiling cleanly.
                 let unacked_bound = inflight.saturating_add(self.steady_sndbuf as u64);
                 let lb = self.sent.saturating_sub(unacked_bound);
                 (lb, lb, unacked_bound.min(self.sent))
             }
             DeliveryCertainty::Uncertain => {
-                // Explicitly avoid claiming `accepted - SO_SNDBUF` equals ACKed delivery:
-                // track explicit `[pessimistic, optimistic]` interval widening on slow writes.
                 let max_margin = ((self.config.uncertain_max_margin_ms as f64 / 1000.0) * realtime)
                     .round()
                     .max((stream_tuning::CHUNK_BYTES as u64 * 2) as f64)
@@ -932,7 +939,7 @@ impl SynchronousPacer {
     #[allow(clippy::too_many_arguments)]
     fn classify_event(
         &self,
-        now: Instant,
+        _now: Instant,
         write_block_dur: Duration,
         is_write_stall: bool,
         is_schedule_lag: bool,
@@ -950,10 +957,7 @@ impl SynchronousPacer {
         if is_write_stall {
             if certainty == DeliveryCertainty::Measured {
                 if let Some(sample) = self.last_tcp_sample {
-                    if self.is_link_congestion(sample, deltas)
-                        || (!just_measured
-                            && self.congestion_holdoff_until.is_some_and(|t| now < t))
-                    {
+                    if self.is_link_congestion(sample, deltas) {
                         return StallCause::LinkCongestion;
                     }
                 }
@@ -1002,36 +1006,21 @@ impl SynchronousPacer {
     ) {
         match cause {
             StallCause::ReceiverFlowControl => {
-                self.is_recovering = false;
-                self.flow_suppressed_until =
-                    Some(now + Duration::from_millis(self.config.flow_clear_ms));
-                self.clamp_target_downward(now, lead_ms);
                 if !self.is_metadata {
                     self.metrics
                         .flow_control_events
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                diag_log!(
-                    DiagCategory::UpnpLifecycle,
-                    0,
-                    0,
-                    0,
-                    "upnp_pacer_flow_control",
-                    "lead_ms={} target_ms={} snd_wnd={}",
-                    lead_ms,
-                    self.effective_target_lead_ms,
-                    self.last_tcp_sample.map(|s| s.snd_wnd).unwrap_or(0)
-                );
+                self.trigger_flow_backoff(now, lead_ms, "tcp_flow_control");
             }
             StallCause::LinkCongestion => {
-                self.is_recovering = false;
-                self.congestion_holdoff_until =
-                    Some(now + Duration::from_millis(self.config.congestion_holdoff_ms));
                 if !self.is_metadata {
                     self.metrics
                         .congestion_events
                         .fetch_add(1, Ordering::Relaxed);
                 }
+                // Deliberately keep `active_pace_mult` and clean ramp-up anchors untouched on Wi-Fi
+                // congestion while receiver TCP RWIN stays wide open, so overfeed refills quickly.
                 diag_log!(
                     DiagCategory::UpnpLifecycle,
                     0,
@@ -1045,66 +1034,86 @@ impl SynchronousPacer {
                 );
             }
             StallCause::AmbiguousWriteStall => {
-                self.is_recovering = false;
-                self.congestion_holdoff_until =
-                    Some(now + Duration::from_millis(self.config.congestion_holdoff_ms));
                 if !self.is_metadata {
                     self.metrics
                         .ambiguous_stall_events
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                // Engage flow-suppressed target clamping strictly when delivery bounds are Uncertain;
-                // when TCP_INFO is Measured and SndWnd remains open, keep holdoff at 1.000x without
-                // corrupting `effective_target_lead_ms`.
                 if certainty == DeliveryCertainty::Uncertain && self.uncertain_slow_cluster >= 3 {
-                    self.flow_suppressed_until =
-                        Some(now + Duration::from_millis(self.config.flow_clear_ms));
-                    self.clamp_target_downward(now, lead_ms);
+                    self.trigger_flow_backoff(now, lead_ms, "uncertain_cluster");
+                } else {
+                    diag_log!(
+                        DiagCategory::UpnpLifecycle,
+                        0,
+                        0,
+                        0,
+                        "upnp_pacer_ambiguous_stall",
+                        "lead_ms={} cluster={} pace_mult={:.3}",
+                        lead_ms,
+                        self.uncertain_slow_cluster,
+                        self.active_pace_mult
+                    );
                 }
-                diag_log!(
-                    DiagCategory::UpnpLifecycle,
-                    0,
-                    0,
-                    0,
-                    "upnp_pacer_ambiguous_stall",
-                    "lead_ms={} cluster={} target_ms={}",
-                    lead_ms,
-                    self.uncertain_slow_cluster,
-                    self.effective_target_lead_ms
-                );
             }
             StallCause::LocalScheduleLag | StallCause::None => {}
         }
     }
 
-    fn clamp_target_downward(&mut self, now: Instant, observed_lead_ms: i64) {
-        let allow_clamp = self.last_target_clamp_at.is_none_or(|t| {
-            now.saturating_duration_since(t)
-                >= Duration::from_millis(self.config.target_clamp_cooldown_ms)
-        });
-        if !allow_clamp {
+    /// Halves excess overfeed over `1.000x`, tightens the adaptive soft ceiling, and initiates a
+    /// `flow_clear_ms` (`1500 ms`) relief drain at `0.995x`. Debounced per holdoff window so
+    /// repeated 50–200 ms probes during a single buffer-full episode do not cascade strikes.
+    fn trigger_flow_backoff(&mut self, now: Instant, lead_ms: i64, reason: &'static str) {
+        if self.flow_suppressed_until.is_some_and(|t| now < t) {
             return;
         }
-        self.last_target_clamp_at = Some(now);
-        let scaled = if observed_lead_ms > 0 {
-            ((observed_lead_ms as f64) * 0.85).round() as u64
+
+        let until = now + Duration::from_millis(self.config.flow_clear_ms);
+        self.flow_suppressed_until = Some(until);
+        self.clean_window_anchor = Some(until);
+        self.ceiling_relax_anchor = Some(until);
+        self.flow_strikes = self.flow_strikes.saturating_add(1);
+
+        let prev_mult = self.active_pace_mult;
+        let floor = self.config.min_steady_multiplier;
+        let excess = (prev_mult - floor).max(0.0);
+        let halved = floor + excess * self.config.backoff_excess_factor;
+        let rounded = (halved * 1000.0).round() / 1000.0;
+        let next_mult = if rounded < floor + 0.005 {
+            floor
         } else {
-            self.config.min_safe_target_ms
+            rounded.max(floor)
         };
-        let next_target = scaled
-            .min(self.effective_target_lead_ms)
-            .max(self.config.min_safe_target_ms);
-        if next_target < self.effective_target_lead_ms {
-            self.effective_target_lead_ms = next_target;
-        }
+        self.active_pace_mult = next_mult;
+
+        let cand_ceil =
+            ((prev_mult - self.config.soft_ceiling_step) * 1000.0).round() / 1000.0;
+        self.soft_ceiling_mult = self
+            .soft_ceiling_mult
+            .min(cand_ceil)
+            .max(self.config.soft_ceiling_floor);
+
+        diag_log!(
+            DiagCategory::UpnpLifecycle,
+            0,
+            0,
+            0,
+            "upnp_pacer_backoff",
+            "reason={} strikes={} prev_mult={:.3} next_mult={:.3} soft_ceil={:.3} snd_wnd={} lead_ms={}",
+            reason,
+            self.flow_strikes,
+            prev_mult,
+            self.active_pace_mult,
+            self.soft_ceiling_mult,
+            self.last_tcp_sample.map(|s| s.snd_wnd).unwrap_or(0),
+            lead_ms
+        );
     }
 
     fn select_rate_and_transition(
         &mut self,
         now: Instant,
         certainty: DeliveryCertainty,
-        lead_lower_ms: i64,
-        lead_upper_ms: i64,
+        display_lead_ms: i64,
         paused: bool,
     ) -> (f64, RateRegime) {
         if paused {
@@ -1112,120 +1121,95 @@ impl SynchronousPacer {
         }
 
         let flow_active = self.flow_suppressed_until.is_some_and(|t| now < t);
-        let holdoff_active = self.congestion_holdoff_until.is_some_and(|t| now < t);
-        let target_ms = self.effective_target_lead_ms as i64;
-        let low_ms = (target_ms - self.config.band_half_width_ms)
-            .max(self.config.min_safe_target_ms as i64 / 2);
-        let high_ms = target_ms + self.config.band_half_width_ms;
-        let max_ms = high_ms + self.config.trim_margin_ms;
 
-        match self.state {
-            PacingState::Unpaced => (0.0, RateRegime::Unpaced),
-            PacingState::InitialFill => {
-                // In Uncertain mode, require optimistic lead to reach target AND fast drain before exit.
-                let reached_target = match certainty {
-                    DeliveryCertainty::Measured => lead_lower_ms >= target_ms,
-                    DeliveryCertainty::Uncertain => {
-                        lead_upper_ms >= target_ms && self.clean_fast_streak >= 2
-                    }
-                };
-                if flow_active || reached_target {
-                    self.state = PacingState::SteadyMaintain;
-                    self.next_chunk_due = Some(now);
-                    if !self.is_metadata {
-                        self.metrics.state_transitions.fetch_add(1, Ordering::Relaxed);
-                    }
-                    diag_log!(
-                        DiagCategory::UpnpLifecycle,
-                        0,
-                        0,
-                        0,
-                        "upnp_pacer_state_change",
-                        "from=initial_fill to=steady_maintain lead_ms={} certainty={} flow={}",
-                        lead_upper_ms,
-                        certainty.as_str(),
-                        flow_active
-                    );
-                    if flow_active {
-                        return (1.0, RateRegime::FlowSuppressed);
-                    }
-                    return (1.0, RateRegime::Cruise);
+        if self.state == PacingState::InitialFill {
+            let clean_elapsed = self
+                .clean_window_anchor
+                .is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(self.config.ramp_interval_ms));
+            if flow_active || self.flow_strikes > 0 || clean_elapsed {
+                self.state = PacingState::SteadyMaintain;
+                if !self.is_metadata {
+                    self.metrics.state_transitions.fetch_add(1, Ordering::Relaxed);
                 }
-
-                if holdoff_active {
-                    (1.0, RateRegime::CongestionHoldoff)
-                } else {
-                    (stream_tuning::RAMP_UP_MULTIPLIER, RateRegime::InitialFill)
-                }
-            }
-            PacingState::SteadyMaintain => {
-                if flow_active {
-                    self.is_recovering = false;
-                    return (1.0, RateRegime::FlowSuppressed);
-                }
-                if holdoff_active {
-                    self.is_recovering = false;
-                    return (1.0, RateRegime::CongestionHoldoff);
-                }
-
-                // Upper trim guard: prevent persistent overfeeding past `L_max`.
-                if lead_upper_ms > max_ms && (certainty == DeliveryCertainty::Uncertain || lead_lower_ms > max_ms) {
-                    self.is_recovering = false;
-                    return (self.config.trim_multiplier, RateRegime::Trim);
-                }
-
-                // Hysteresis gate around target lead with lead-gated bounded recovery:
-                // Under `Uncertain`, engage recovery only when even optimistic `lead_upper_ms < low_ms`
-                // and fast drains confirm clear socket acceptance, stopping at `target_ms`.
-                let active_lead_ms = match certainty {
-                    DeliveryCertainty::Measured => lead_lower_ms,
-                    DeliveryCertainty::Uncertain => lead_upper_ms,
-                };
-                let (trigger_recovery, exit_recovery) = match certainty {
-                    DeliveryCertainty::Measured => (
-                        lead_lower_ms < low_ms,
-                        lead_lower_ms >= high_ms,
-                    ),
-                    DeliveryCertainty::Uncertain => (
-                        lead_upper_ms < low_ms && self.clean_fast_streak >= 2,
-                        lead_upper_ms >= target_ms,
-                    ),
-                };
-
-                if self.is_recovering && exit_recovery {
-                    self.is_recovering = false;
-                } else if !self.is_recovering && trigger_recovery {
-                    self.is_recovering = true;
-                }
-
-                if self.is_recovering {
-                    let mult = self.recovery_rate_for_lead(target_ms, active_lead_ms);
-                    (mult, RateRegime::Recovering)
-                } else {
-                    (1.0, RateRegime::Cruise)
-                }
+                diag_log!(
+                    DiagCategory::UpnpLifecycle,
+                    0,
+                    0,
+                    0,
+                    "upnp_pacer_state_change",
+                    "from=initial_fill to=steady_maintain lead_ms={} certainty={} flow={} mult={:.3}",
+                    display_lead_ms,
+                    certainty.as_str(),
+                    flow_active,
+                    self.active_pace_mult
+                );
             }
         }
+
+        if flow_active {
+            return (self.config.drain_multiplier, RateRegime::FlowSuppressed);
+        }
+
+        if self.state == PacingState::SteadyMaintain {
+            self.maybe_step_up_while_clean(now, display_lead_ms);
+        }
+
+        let regime = if self.state == PacingState::InitialFill {
+            RateRegime::InitialFill
+        } else if self.active_pace_mult > self.config.min_steady_multiplier + 1e-6 {
+            RateRegime::Overfeed
+        } else if self.active_pace_mult < self.config.min_steady_multiplier - 1e-6 {
+            RateRegime::Trim
+        } else {
+            RateRegime::Cruise
+        };
+        (self.active_pace_mult, regime)
     }
 
-    /// Selects bounded recovery pace scaled by remaining headroom (`1.020x` shallow,
-    /// `1.050x` moderate, `1.080x` deep deficit) while scaling thresholds cleanly if
-    /// flow control clamped `effective_target_lead_ms`.
-    fn recovery_rate_for_lead(&self, target_ms: i64, active_lead_ms: i64) -> f64 {
-        let moderate_thresh = (target_ms - 400)
-            .max(0)
-            .min(self.config.moderate_recovery_lead_ms);
-        let deficit_thresh = (target_ms - 800)
-            .max(0)
-            .min(self.config.deficit_recovery_lead_ms)
-            .min(moderate_thresh);
+    fn maybe_step_up_while_clean(&mut self, now: Instant, display_lead_ms: i64) {
+        let relax_dur = Duration::from_millis(self.config.soft_ceiling_relax_ms);
+        let relax_anchor = *self.ceiling_relax_anchor.get_or_insert(now);
+        if now.saturating_duration_since(relax_anchor) >= relax_dur {
+            self.ceiling_relax_anchor = Some(now);
+            if self.flow_strikes > 0 {
+                self.flow_strikes -= 1;
+            }
+            if self.soft_ceiling_mult < self.config.max_overfeed_multiplier - 1e-6 {
+                self.soft_ceiling_mult =
+                    (((self.soft_ceiling_mult + self.config.soft_ceiling_step) * 1000.0).round()
+                        / 1000.0)
+                        .min(self.config.max_overfeed_multiplier);
+            }
+        }
 
-        if active_lead_ms < deficit_thresh {
-            self.config.deficit_recovery_multiplier
-        } else if active_lead_ms < moderate_thresh {
-            self.config.moderate_recovery_multiplier
-        } else {
-            self.config.recovery_multiplier
+        let ramp_dur = Duration::from_millis(self.config.ramp_interval_ms);
+        let ramp_anchor = *self.clean_window_anchor.get_or_insert(now);
+        if now.saturating_duration_since(ramp_anchor) >= ramp_dur {
+            self.clean_window_anchor = Some(now);
+            let step = if self.flow_strikes == 0 {
+                self.config.initial_ramp_step
+            } else {
+                self.config.fine_ramp_step
+            };
+            let next = (((self.active_pace_mult + step) * 1000.0).round() / 1000.0)
+                .min(self.soft_ceiling_mult);
+            if next > self.active_pace_mult + 1e-6 {
+                let prev = self.active_pace_mult;
+                self.active_pace_mult = next;
+                diag_log!(
+                    DiagCategory::UpnpLifecycle,
+                    0,
+                    0,
+                    0,
+                    "upnp_pacer_ramp_up",
+                    "prev_mult={:.3} next_mult={:.3} soft_ceil={:.3} strikes={} lead_ms={}",
+                    prev,
+                    next,
+                    self.soft_ceiling_mult,
+                    self.flow_strikes,
+                    display_lead_ms
+                );
+            }
         }
     }
 }
@@ -1351,51 +1335,59 @@ mod tests {
         p.horizon_initialized = true;
         p.last_horizon_tick = Some(now);
         p.next_chunk_due = Some(now);
+        p.clean_window_anchor = Some(now);
+        p.ceiling_relax_anchor = Some(now);
         p
     }
 
     #[test]
-    fn test_steady_state_matches_1x_without_excess_accumulation() {
+    fn test_clean_stream_ramps_from_1080_up_to_1120_ceiling() {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
-        // Simulate completing InitialFill to ~1210ms lead with open RWIN
-        p.state = PacingState::SteadyMaintain;
-        p.sent = (1.210 * DSD256_BPS) as u64 + 32_768 + 8_192;
 
-        let sleep = p.advance_pacing_with_sample(
+        let _ = p.advance_pacing_with_sample(
             t0,
             Duration::from_micros(200),
             false,
             Some(sample(549_632, 3_000, 0, 8_192)),
         );
-        assert!(sleep.is_some());
-        let snap = p.metrics.snapshot();
-        assert_eq!(snap.current_state, "steady_maintain");
-        assert_eq!(snap.current_regime, "cruise");
-        assert_eq!(snap.lead_certainty, "measured");
-        assert!((snap.current_multiplier - 1.000).abs() < 1e-6);
+        let s0 = p.metrics.snapshot();
+        assert_eq!(s0.current_state, "initial_fill");
+        assert_eq!(s0.current_regime, "initial_fill");
+        assert!((s0.current_multiplier - 1.080).abs() < 1e-6);
 
-        // If excess lead grows above L_max (1400ms), controller trims gently below 1.000x
-        p.sent += (0.300 * DSD256_BPS) as u64;
+        // After 6s clean without flow control -> transitions to steady_maintain and steps +0.010x
+        let t1 = t0 + Duration::from_secs(6);
         let _ = p.advance_pacing_with_sample(
-            t0 + Duration::from_millis(1),
+            t1,
             Duration::from_micros(200),
             false,
             Some(sample(549_632, 3_000, 0, 8_192)),
         );
-        let snap2 = p.metrics.snapshot();
-        assert_eq!(snap2.current_regime, "trim");
-        assert!((snap2.current_multiplier - 0.995).abs() < 1e-6);
+        let s1 = p.metrics.snapshot();
+        assert_eq!(s1.current_state, "steady_maintain");
+        assert_eq!(s1.current_regime, "overfeed");
+        assert!((s1.current_multiplier - 1.090).abs() < 1e-6);
+
+        // Repeated 6s clean windows step up +0.010x -> 1.100 -> 1.110 -> 1.120 cap
+        for expected in [1.100, 1.110, 1.120, 1.120] {
+            let step_t = p.clean_window_anchor.unwrap() + Duration::from_secs(6);
+            let _ = p.advance_pacing_with_sample(
+                step_t,
+                Duration::from_micros(200),
+                false,
+                Some(sample(549_632, 3_000, 0, 8_192)),
+            );
+            assert!((p.metrics.snapshot().current_multiplier - expected).abs() < 1e-6);
+        }
     }
 
     #[test]
-    fn test_wifi_congestion_does_not_lock_below_recovery_or_invert() {
+    fn test_wifi_congestion_with_open_rwin_does_not_back_off_pace_or_reset_ramp() {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
         p.state = PacingState::SteadyMaintain;
-        p.sent = (1.200 * DSD256_BPS) as u64 + 32_768;
 
-        // Baseline TCP_INFO sample
         let _ = p.advance_pacing_with_sample(
             t0,
             Duration::from_micros(200),
@@ -1403,41 +1395,155 @@ mod tests {
             Some(sample(549_632, 3_000, 0, 0)),
         );
 
-        // 220ms Wi-Fi stall with SndWnd still wide open (549 KB) and retransmissions rising
-        let t1 = t0 + Duration::from_millis(220);
-        p.sent += stream_tuning::CHUNK_BYTES as u64;
+        // Heavy Wi-Fi stall (45ms block, retransmissions rising, 85ms RTT) while RWIN wide open (549 KB)
+        let t1 = t0 + Duration::from_secs(3);
         let s1 = p.advance_pacing_with_sample(
             t1,
             Duration::from_millis(45),
             false,
             Some(sample(549_632, 85_000, 4_380, 32_768)),
         );
-        assert!(s1.is_none());
+        assert!(s1.is_none(), "stalled chunk re-anchors virtual due to prevent catch-up bursts");
         let snap1 = p.metrics.snapshot();
-        assert_eq!(snap1.current_regime, "congestion_holdoff");
         assert_eq!(snap1.congestion_events, 1);
         assert_eq!(snap1.flow_control_events, 0);
-        assert!(snap1.estimated_lead_ms < 1100, "lost headroom recorded cleanly");
+        assert_eq!(snap1.current_regime, "overfeed");
+        assert!((snap1.current_multiplier - 1.080).abs() < 1e-6);
 
-        // After brief holdoff expires (100ms) and writes are fast/clean, shallow 1.020x recovery engages
-        let t2 = t1 + Duration::from_millis(150);
+        // At t0 + 6s, clean ramp-up still engages (+0.010x -> 1.090x) despite Wi-Fi congestion at 3s
+        let t2 = t0 + Duration::from_secs(6);
         let _ = p.advance_pacing_with_sample(
             t2,
             Duration::from_micros(200),
             false,
-            Some(sample(549_632, 3_200, 4_380, 4_096)),
+            Some(sample(549_632, 3_000, 4_380, 4_096)),
         );
-        let snap2 = p.metrics.snapshot();
-        assert_eq!(snap2.current_regime, "recovering");
-        assert!((snap2.current_multiplier - 1.020).abs() < 1e-6);
+        assert!((p.metrics.snapshot().current_multiplier - 1.090).abs() < 1e-6);
     }
 
     #[test]
-    fn test_receiver_flow_control_suppresses_boost_and_keeps_clock_running_on_zerowindow() {
+    fn test_graduated_backoff_on_receiver_flow_control_and_episode_debouncing() {
+        let mut t = Instant::now();
+        let mut p = make_pacer(t);
+        p.state = PacingState::SteadyMaintain;
+        p.active_pace_mult = 1.120;
+
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_micros(200),
+            false,
+            Some(sample(549_632, 3_000, 0, 0)),
+        );
+
+        // Hit #1: RS130 HTTP client stops reading (snd_wnd=24000) -> halve 1.120->1.060 + 1.5s drain at 0.995x
+        t += Duration::from_millis(500);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_millis(30),
+            false,
+            Some(sample(24_000, 3_000, 0, 16_384)),
+        );
+        let snap_hit1 = p.metrics.snapshot();
+        assert_eq!(snap_hit1.current_regime, "flow_suppressed");
+        assert!((snap_hit1.current_multiplier - 0.995).abs() < 1e-6);
+        assert!((p.active_pace_mult - 1.060).abs() < 1e-6);
+        assert!((p.soft_ceiling_mult - 1.115).abs() < 1e-6);
+        assert_eq!(p.flow_strikes, 1);
+
+        // Repeated collapsed probes inside the 1.5s drain episode must NOT cascade strikes
+        t += Duration::from_millis(200);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_micros(200),
+            false,
+            Some(sample(24_000, 3_000, 0, 16_384)),
+        );
+        assert_eq!(p.flow_strikes, 1);
+        assert!((p.active_pace_mult - 1.060).abs() < 1e-6);
+
+        // After 1.5s drain ends -> resumes at 1.060x
+        t += Duration::from_millis(1_400);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_micros(200),
+            false,
+            Some(sample(549_632, 3_000, 0, 8_192)),
+        );
+        let snap_resumed = p.metrics.snapshot();
+        assert_eq!(snap_resumed.current_regime, "overfeed");
+        assert!((snap_resumed.current_multiplier - 1.060).abs() < 1e-6);
+
+        // Hit #2 happens again -> halve 1.060->1.030x, tighten soft ceiling to 1.055x
+        t += Duration::from_secs(2);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_millis(30),
+            false,
+            Some(sample(0, 3_000, 0, 16_384)),
+        );
+        assert_eq!(p.flow_strikes, 2);
+        assert!((p.active_pace_mult - 1.030).abs() < 1e-6);
+        assert!((p.soft_ceiling_mult - 1.055).abs() < 1e-6);
+
+        // Clean 6s AFTER second holdoff -> fine step +0.005x (1.030 -> 1.035x)
+        t += Duration::from_millis(1_600) + Duration::from_secs(6);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_micros(200),
+            false,
+            Some(sample(549_632, 3_000, 0, 8_192)),
+        );
+        assert!((p.metrics.snapshot().current_multiplier - 1.035).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_soft_ceiling_relaxes_slowly_after_long_clean_period_and_snaps_near_1x() {
+        let mut t = Instant::now();
+        let mut p = make_pacer(t);
+        p.state = PacingState::SteadyMaintain;
+        p.active_pace_mult = 1.008;
+
+        // Pressure near 1.000x snaps cleanly to 1.000x cruise floor
+        t += Duration::from_millis(100);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_micros(200),
+            false,
+            Some(sample(16_384, 3_000, 0, 8_192)),
+        );
+        assert!((p.active_pace_mult - 1.000).abs() < 1e-6);
+        assert!((p.soft_ceiling_mult - 1.010).abs() < 1e-6);
+
+        // Exit holdoff
+        t += Duration::from_millis(1_600);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_micros(200),
+            false,
+            Some(sample(549_632, 3_000, 0, 8_192)),
+        );
+        assert_eq!(p.metrics.snapshot().current_regime, "cruise");
+        assert!((p.metrics.snapshot().current_multiplier - 1.000).abs() < 1e-6);
+
+        // 30s clean relaxes soft_ceiling (+0.005 -> 1.015x), decrements strikes, and steps up pace
+        t += Duration::from_secs(30);
+        let _ = p.advance_pacing_with_sample(
+            t,
+            Duration::from_micros(200),
+            false,
+            Some(sample(549_632, 3_000, 0, 8_192)),
+        );
+        assert!((p.soft_ceiling_mult - 1.015).abs() < 1e-6);
+        assert_eq!(p.flow_strikes, 0);
+        assert!(p.active_pace_mult > 1.000);
+    }
+
+    #[test]
+    fn test_explicit_pause_freezes_clock_and_suppresses_pause_rwin_backoff() {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
         p.state = PacingState::SteadyMaintain;
-        p.sent = (1.200 * DSD256_BPS) as u64 + 32_768;
+        p.sent = (1.500 * DSD256_BPS) as u64;
 
         let _ = p.advance_pacing_with_sample(
             t0,
@@ -1446,38 +1552,20 @@ mod tests {
             Some(sample(549_632, 3_000, 0, 0)),
         );
 
-        // Receiver shrinks SndWnd to 0 (TCP ZeroWindow) while NOT paused!
-        let t1 = t0 + Duration::from_millis(300);
-        let h_before = p.horizon_bytes;
-        let s1 = p.advance_pacing_with_sample(
-            t1,
-            Duration::from_millis(35),
-            false,
-            Some(sample(0, 3_000, 0, 16_384)),
-        );
-        assert!(s1.is_none());
-        let snap = p.metrics.snapshot();
-        assert_eq!(snap.current_regime, "flow_suppressed");
-        assert_eq!(snap.flow_control_events, 1);
-        assert!(snap.effective_target_lead_ms < 1200);
-        // CRITICAL: consumption clock must keep advancing during ZeroWindow when not explicitly paused
-        assert!(p.horizon_bytes > h_before);
-    }
-
-    #[test]
-    fn test_explicit_pause_freezes_horizon_while_debt_remains_bounded() {
-        let t0 = Instant::now();
-        let mut p = make_pacer(t0);
-        p.state = PacingState::SteadyMaintain;
-        p.sent = (1.200 * DSD256_BPS) as u64;
-
         let h0 = p.horizon_bytes;
-        // 10 seconds while paused must NOT advance consumption horizon
+        // 10s paused + collapsed RWIN due to Pause must NOT advance horizon, ramp up pace, or inflict strike
         let t1 = t0 + Duration::from_secs(10);
-        let _ = p.advance_pacing_with_sample(t1, Duration::from_micros(100), true, None);
+        let _ = p.advance_pacing_with_sample(
+            t1,
+            Duration::from_micros(100),
+            true,
+            Some(sample(24_000, 3_000, 0, 0)),
+        );
         assert!((p.horizon_bytes - h0).abs() < 1e-6);
+        assert_eq!(p.flow_strikes, 0);
+        assert!((p.active_pace_mult - 1.080).abs() < 1e-6);
 
-        // While actively playing across a 10s outage, debt is hard-capped at D_max (3000ms)
+        // ZeroWindow while NOT paused keeps consumption clock advancing and caps debt at D_max
         let t2 = t1 + Duration::from_secs(10);
         let _ = p.advance_pacing_with_sample(t2, Duration::from_millis(500), false, None);
         let snap = p.metrics.snapshot();
@@ -1489,63 +1577,22 @@ mod tests {
     }
 
     #[test]
-    fn test_uncertain_fallback_does_not_claim_measured_and_caps_slow_clusters() {
+    fn test_uncertain_fallback_clusters_engage_backoff_safely() {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
         p.state = PacingState::SteadyMaintain;
-        p.sent = (1.150 * DSD256_BPS) as u64;
 
-        // With TCP_INFO unavailable (`None`), certainty is explicitly Uncertain
         let _ = p.advance_pacing_with_sample(t0, Duration::from_millis(30), false, None);
-        let snap1 = p.metrics.snapshot();
-        assert_eq!(snap1.lead_certainty, "uncertain");
-        assert_eq!(snap1.ambiguous_stall_events, 1);
-        assert_eq!(snap1.current_regime, "congestion_holdoff");
+        assert_eq!(p.metrics.snapshot().lead_certainty, "uncertain");
+        assert_eq!(p.flow_strikes, 0);
 
-        // 3 clustered slow writes within 2s engage conservative flow-suppressed fallback
         let _ = p.advance_pacing_with_sample(t0 + Duration::from_millis(200), Duration::from_millis(30), false, None);
         let _ = p.advance_pacing_with_sample(t0 + Duration::from_millis(400), Duration::from_millis(30), false, None);
         let snap3 = p.metrics.snapshot();
         assert_eq!(snap3.current_regime, "flow_suppressed");
+        assert_eq!(p.flow_strikes, 1);
+        assert!((p.active_pace_mult - 1.040).abs() < 1e-6);
         assert!(snap3.uncertain_margin_ms <= p.config.uncertain_max_margin_ms);
-    }
-
-    #[test]
-    fn test_initial_fill_resilient_to_isolated_congestion_and_stops_at_target() {
-        let t0 = Instant::now();
-        let mut p = make_pacer(t0);
-        p.sent = 200_000;
-        let _ = p.advance_pacing_with_sample(
-            t0,
-            Duration::from_micros(200),
-            false,
-            Some(sample(549_632, 3_000, 0, 0)),
-        );
-        assert_eq!(p.state, PacingState::InitialFill);
-
-        // Isolated Wi-Fi retry stall in InitialFill pauses briefly cleanly without aborting fill!
-        let t1 = t0 + Duration::from_millis(50);
-        p.sent += 16_384;
-        let _ = p.advance_pacing_with_sample(
-            t1,
-            Duration::from_millis(32),
-            false,
-            Some(sample(549_632, 55_000, 2_920, 16_384)),
-        );
-        assert_eq!(p.state, PacingState::InitialFill);
-        assert_eq!(p.metrics.snapshot().current_regime, "congestion_holdoff");
-
-        // After holdoff clears, InitialFill completes smoothly once lead >= 1200ms -> SteadyMaintain
-        let t2 = t1 + Duration::from_millis(600);
-        p.sent = ((0.650 + 1.210) * DSD256_BPS) as u64 + 32_768 + 8_192;
-        let _ = p.advance_pacing_with_sample(
-            t2,
-            Duration::from_micros(200),
-            false,
-            Some(sample(549_632, 3_000, 2_920, 8_192)),
-        );
-        assert_eq!(p.state, PacingState::SteadyMaintain);
-        assert_eq!(p.metrics.snapshot().current_regime, "cruise");
     }
 
     #[test]
@@ -1554,7 +1601,6 @@ mod tests {
         let metrics = Arc::new(UpnpPacingMetrics::default());
         let paused = Arc::new(AtomicBool::new(false));
 
-        // Contiguous reconnect enters SteadyMaintain directly with cruise rate
         let p_cont = SynchronousPacer::with_config(
             PacerConfig::default(),
             Some(DSD256_BPS),
@@ -1567,8 +1613,8 @@ mod tests {
             paused.clone(),
         );
         assert_eq!(p_cont.state, PacingState::SteadyMaintain);
+        assert!((p_cont.active_pace_mult - 1.000).abs() < 1e-6);
 
-        // Discontinuous seek (>= 1MB jump) resets into InitialFill (clamped 32KB SO_SNDBUF kept)
         let mut p_seek = SynchronousPacer::with_config(
             PacerConfig::default(),
             Some(DSD256_BPS),
@@ -1581,10 +1627,8 @@ mod tests {
             paused,
         );
         assert_eq!(p_seek.state, PacingState::InitialFill);
+        assert!((p_seek.active_pace_mult - 1.080).abs() < 1e-6);
 
-        // Measured snapshot ages out past 750ms -> degrades explicitly to Uncertain
-        p_seek.state = PacingState::SteadyMaintain;
-        p_seek.sent = (1.200 * DSD256_BPS) as u64;
         let _ = p_seek.advance_pacing_with_sample(
             t0,
             Duration::from_micros(200),
@@ -1596,149 +1640,6 @@ mod tests {
         let t_stale = t0 + Duration::from_millis(850);
         let _ = p_seek.advance_pacing_with_sample(t_stale, Duration::from_micros(200), false, None);
         assert_eq!(p_seek.metrics.snapshot().lead_certainty, "uncertain");
-    }
-
-    #[test]
-    fn test_schedule_lag_does_not_suppress_or_trigger_flow_control() {
-        let t0 = Instant::now();
-        let mut p = make_pacer(t0);
-        p.state = PacingState::SteadyMaintain;
-        p.sent = (1.200 * DSD256_BPS) as u64 + 32_768;
-
-        // Seed fresh TCP_INFO
-        let _ = p.advance_pacing_with_sample(
-            t0,
-            Duration::from_micros(200),
-            false,
-            Some(sample(549_632, 3_000, 0, 0)),
-        );
-
-        // 45ms OS thread scheduling delay where Winsock write itself finished in 200us
-        let t_lag = t0 + Duration::from_millis(45);
-        p.sent += 16_384;
-        let s = p.advance_pacing_with_sample(t_lag, Duration::from_micros(200), false, None);
-        assert!(s.is_none(), "no catch-up sleep skip or burst needed; resets virtual due to now");
-        let snap = p.metrics.snapshot();
-        assert_eq!(snap.schedule_lag_stalls, 1);
-        assert_eq!(snap.write_block_stalls, 0);
-        assert_eq!(snap.flow_control_events, 0);
-        assert_eq!(snap.congestion_events, 0);
-    }
-
-    #[test]
-    fn test_measured_clustered_congestion_does_not_clamp_target_lead() {
-        let t0 = Instant::now();
-        let mut p = make_pacer(t0);
-        p.state = PacingState::SteadyMaintain;
-        p.sent = (1.350 * DSD256_BPS) as u64 + 32_768;
-
-        // Baseline Measured sample with SndWnd wide open (~810 KB)
-        let _ = p.advance_pacing_with_sample(
-            t0,
-            Duration::from_micros(200),
-            false,
-            Some(sample(810_880, 3_000, 0, 0)),
-        );
-
-        // 3 clustered stalls across 300ms while Measured & RWIN wide open:
-        // (a) proven congestion (retrans delta > 0)
-        // (b) follow-up slow write inside <50ms poll throttle (`None`, just_measured = false)
-        // (c) another congestion / unexplained stall with RWIN still wide open
-        let t1 = t0 + Duration::from_millis(100);
-        let _ = p.advance_pacing_with_sample(
-            t1,
-            Duration::from_millis(40),
-            false,
-            Some(sample(810_880, 54_000, 2_920, 16_384)),
-        );
-        let t2 = t1 + Duration::from_millis(38);
-        let _ = p.advance_pacing_with_sample(t2, Duration::from_millis(38), false, None);
-        assert_eq!(p.metrics.snapshot().ambiguous_stall_events, 0);
-
-        // Fresh low-RTT stalls with open SndWnd still must not trigger Uncertain flow suppression
-        let t3 = t2 + Duration::from_millis(120);
-        let _ = p.advance_pacing_with_sample(
-            t3,
-            Duration::from_millis(36),
-            false,
-            Some(sample(810_880, 18_000, 2_920, 8_192)),
-        );
-        let t4 = t3 + Duration::from_millis(120);
-        let _ = p.advance_pacing_with_sample(
-            t4,
-            Duration::from_millis(36),
-            false,
-            Some(sample(810_880, 18_000, 2_920, 8_192)),
-        );
-        let t5 = t4 + Duration::from_millis(120);
-        let _ = p.advance_pacing_with_sample(
-            t5,
-            Duration::from_millis(36),
-            false,
-            Some(sample(810_880, 18_000, 2_920, 8_192)),
-        );
-
-        let snap = p.metrics.snapshot();
-        assert_eq!(snap.lead_certainty, "measured");
-        assert_eq!(snap.effective_target_lead_ms, 1200);
-        assert_eq!(snap.flow_control_events, 0);
-        assert_eq!(snap.current_regime, "congestion_holdoff");
-    }
-
-    #[test]
-    fn test_lead_gated_recovery_tiers_and_exit_to_cruise() {
-        let mut t = Instant::now();
-        let mut p = make_pacer(t);
-        p.state = PacingState::SteadyMaintain;
-
-        let step = |p: &mut SynchronousPacer, t_now: Instant, lead_ms: f64| {
-            p.horizon_bytes = 0.0;
-            p.last_horizon_tick = Some(t_now);
-            p.sent = ((lead_ms / 1000.0) * DSD256_BPS) as u64 + 32_768 + 8_192;
-            let _ = p.advance_pacing_with_sample(
-                t_now,
-                Duration::from_micros(200),
-                false,
-                Some(sample(549_632, 3_000, 0, 8_192)),
-            );
-            p.metrics.snapshot()
-        };
-
-        // Deep deficit (< 400ms) -> bounded 1.080x recovery
-        t += Duration::from_millis(10);
-        let s_deep = step(&mut p, t, 250.0);
-        assert_eq!(s_deep.current_regime, "recovering");
-        assert!((s_deep.current_multiplier - 1.080).abs() < 1e-6);
-
-        // Moderate depletion (400..800ms) -> bounded 1.050x recovery
-        t += Duration::from_millis(10);
-        let s_mod = step(&mut p, t, 600.0);
-        assert_eq!(s_mod.current_regime, "recovering");
-        assert!((s_mod.current_multiplier - 1.050).abs() < 1e-6);
-
-        // Shallow depletion (800..1300ms while recovering) -> gentle 1.020x top-off
-        t += Duration::from_millis(10);
-        let s_shallow = step(&mut p, t, 950.0);
-        assert_eq!(s_shallow.current_regime, "recovering");
-        assert!((s_shallow.current_multiplier - 1.020).abs() < 1e-6);
-
-        // Hysteresis holds gentle 1.020x through 1200ms target up to L_high (1300ms)
-        t += Duration::from_millis(10);
-        let s_hyst = step(&mut p, t, 1200.0);
-        assert_eq!(s_hyst.current_regime, "recovering");
-        assert!((s_hyst.current_multiplier - 1.020).abs() < 1e-6);
-
-        // Reaches L_high (1310ms) -> exits recovery cleanly to 1.000x cruise
-        t += Duration::from_millis(10);
-        let s_exit = step(&mut p, t, 1310.0);
-        assert_eq!(s_exit.current_regime, "cruise");
-        assert!((s_exit.current_multiplier - 1.000).abs() < 1e-6);
-
-        // Stays in 1.000x cruise back across 1200ms target down to L_low (1100ms)
-        t += Duration::from_millis(10);
-        let s_cruise = step(&mut p, t, 1150.0);
-        assert_eq!(s_cruise.current_regime, "cruise");
-        assert!((s_cruise.current_multiplier - 1.000).abs() < 1e-6);
     }
 
     #[cfg(windows)]
