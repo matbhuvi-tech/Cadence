@@ -31,7 +31,11 @@ use crate::diagnostics::DiagCategory;
 pub struct PacerConfig {
     /// Reference initial lead target retained for contiguous-reconnect lead seeding & config compatibility.
     pub initial_lead_target_ms: u64,
-    /// Starting steady overfeed multiplier after initial <=512 KB pre-roll (`1.080x`).
+    /// Paced startup boost multiplier applied in `InitialFill` before settling to `1.080x` (`1.180x`).
+    pub initial_fill_multiplier: f64,
+    /// Downstream cushion target in ms before transitioning out of `InitialFill` (`1000 ms`).
+    pub initial_fill_lead_ms: i64,
+    /// Starting steady overfeed multiplier after `InitialFill` completes (`1.080x`).
     pub initial_overfeed_multiplier: f64,
     /// Steady cruising floor when backed off cleanly (`1.000x`).
     pub min_steady_multiplier: f64,
@@ -75,6 +79,8 @@ impl Default for PacerConfig {
     fn default() -> Self {
         Self {
             initial_lead_target_ms: 1200,
+            initial_fill_multiplier: 1.180,
+            initial_fill_lead_ms: 1_000,
             initial_overfeed_multiplier: 1.080,
             min_steady_multiplier: 1.000,
             drain_multiplier: 0.995,
@@ -440,6 +446,7 @@ pub(crate) struct SynchronousPacer {
     flow_suppressed_until: Option<Instant>,
     clean_window_anchor: Option<Instant>,
     ceiling_relax_anchor: Option<Instant>,
+    sleep_timer: stream_tuning::HighResPacingTimer,
 }
 
 impl SynchronousPacer {
@@ -481,6 +488,7 @@ impl SynchronousPacer {
             flow_suppressed_until: None,
             clean_window_anchor: None,
             ceiling_relax_anchor: None,
+            sleep_timer: stream_tuning::HighResPacingTimer::noop(),
         }
     }
 
@@ -520,7 +528,8 @@ impl SynchronousPacer {
 
         // Preserve clamped 32 KB SO_SNDBUF on Range continuations.
         // Contiguous reconnects enter SteadyMaintain at 1.000x until clean interval steps up;
-        // fresh starts and discontinuous seeks enter InitialFill at `initial_overfeed_multiplier` (1.080x).
+        // fresh starts and discontinuous seeks enter InitialFill at `initial_fill_multiplier` (1.180x)
+        // until 1000 ms cushion is reached (then hand off to 1.080x SteadyMaintain).
         let (initial_state, initial_regime, initial_mult, seed_horizon_bytes, horizon_ready) =
             if is_contiguous_reconnect {
                 let seed_lead = (initial_target as f64 / 1000.0) * realtime;
@@ -535,7 +544,7 @@ impl SynchronousPacer {
                 (
                     PacingState::InitialFill,
                     RateRegime::InitialFill,
-                    config.initial_overfeed_multiplier,
+                    config.initial_fill_multiplier,
                     0.0,
                     is_range_continuation,
                 )
@@ -547,7 +556,7 @@ impl SynchronousPacer {
             state: initial_state,
             preroll: if is_range_continuation { 0 } else { preroll_bytes },
             sent: 0,
-            last_chunk_bytes: stream_tuning::CHUNK_BYTES,
+            last_chunk_bytes: stream_tuning::calculate_pacing_chunk_bytes(realtime),
             steady_sndbuf: sndbuf_bytes,
             clamped_to_steady: is_range_continuation,
             is_metadata: false,
@@ -571,6 +580,7 @@ impl SynchronousPacer {
             flow_suppressed_until: None,
             clean_window_anchor: if horizon_ready { Some(now) } else { None },
             ceiling_relax_anchor: if horizon_ready { Some(now) } else { None },
+            sleep_timer: stream_tuning::HighResPacingTimer::acquire(),
         };
         pacer
             .metrics
@@ -652,7 +662,7 @@ impl SynchronousPacer {
             return;
         }
         if let Some(dur) = sleep_dur {
-            std::thread::sleep(dur);
+            self.sleep_timer.sleep(dur);
         }
     }
 
@@ -833,7 +843,7 @@ impl SynchronousPacer {
         let effective_rate = (realtime * multiplier).max(stream_tuning::MIN_PACE_BYTES_PER_SEC);
         let chunk_dur = Duration::from_secs_f64(self.last_chunk_bytes as f64 / effective_rate);
         let max_phase_slip = Duration::from_secs_f64(
-            (stream_tuning::CHUNK_BYTES.saturating_mul(2)) as f64 / realtime,
+            (self.last_chunk_bytes.saturating_mul(2)) as f64 / realtime,
         )
         .min(Duration::from_millis(12));
         let floor_due = now.checked_sub(max_phase_slip).unwrap_or(now);
@@ -1078,12 +1088,15 @@ impl SynchronousPacer {
         let excess = (prev_mult - floor).max(0.0);
         let halved = floor + excess * self.config.backoff_excess_factor;
         let rounded = (halved * 1000.0).round() / 1000.0;
-        let next_mult = if rounded < floor + 0.005 {
+        let next_mult = if self.state == PacingState::InitialFill {
+            let capped = if rounded < floor + 0.005 { floor } else { rounded.max(floor) };
+            capped.min(self.config.initial_overfeed_multiplier)
+        } else if rounded < floor + 0.005 {
             floor
         } else {
             rounded.max(floor)
         };
-        self.active_pace_mult = next_mult;
+        self.active_pace_mult = next_mult.min(self.soft_ceiling_mult).max(floor);
 
         let cand_ceil =
             ((prev_mult - self.config.soft_ceiling_step) * 1000.0).round() / 1000.0;
@@ -1126,8 +1139,16 @@ impl SynchronousPacer {
             let clean_elapsed = self
                 .clean_window_anchor
                 .is_some_and(|t| now.saturating_duration_since(t) >= Duration::from_millis(self.config.ramp_interval_ms));
-            if flow_active || self.flow_strikes > 0 || clean_elapsed {
+            let cushion_ready = display_lead_ms >= self.config.initial_fill_lead_ms;
+            if flow_active || self.flow_strikes > 0 || cushion_ready || clean_elapsed {
                 self.state = PacingState::SteadyMaintain;
+                if !(flow_active || self.flow_strikes > 0) {
+                    self.active_pace_mult = self
+                        .config
+                        .initial_overfeed_multiplier
+                        .min(self.soft_ceiling_mult);
+                }
+                self.clean_window_anchor = Some(now);
                 if !self.is_metadata {
                     self.metrics.state_transitions.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1341,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clean_stream_ramps_from_1080_up_to_1120_ceiling() {
+    fn test_clean_stream_ramps_from_initial_fill_to_1120_ceiling() {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
 
@@ -1354,23 +1375,24 @@ mod tests {
         let s0 = p.metrics.snapshot();
         assert_eq!(s0.current_state, "initial_fill");
         assert_eq!(s0.current_regime, "initial_fill");
-        assert!((s0.current_multiplier - 1.080).abs() < 1e-6);
+        assert!((s0.current_multiplier - 1.180).abs() < 1e-6);
 
-        // After 6s clean without flow control -> transitions to steady_maintain and steps +0.010x
-        let t1 = t0 + Duration::from_secs(6);
+        // Once 1000 ms downstream cushion is reached (e.g. at t0 + 3.5s), hands off to 1.080x steady_maintain
+        let t_fill = t0 + Duration::from_millis(3_500);
+        p.sent = (4.6 * DSD256_BPS) as u64;
         let _ = p.advance_pacing_with_sample(
-            t1,
+            t_fill,
             Duration::from_micros(200),
             false,
             Some(sample(549_632, 3_000, 0, 8_192)),
         );
-        let s1 = p.metrics.snapshot();
-        assert_eq!(s1.current_state, "steady_maintain");
-        assert_eq!(s1.current_regime, "overfeed");
-        assert!((s1.current_multiplier - 1.090).abs() < 1e-6);
+        let s_handoff = p.metrics.snapshot();
+        assert_eq!(s_handoff.current_state, "steady_maintain");
+        assert_eq!(s_handoff.current_regime, "overfeed");
+        assert!((s_handoff.current_multiplier - 1.080).abs() < 1e-6);
 
-        // Repeated 6s clean windows step up +0.010x -> 1.100 -> 1.110 -> 1.120 cap
-        for expected in [1.100, 1.110, 1.120, 1.120] {
+        // Repeated 6s clean windows step up +0.010x -> 1.090 -> 1.100 -> 1.110 -> 1.120 cap
+        for expected in [1.090, 1.100, 1.110, 1.120, 1.120] {
             let step_t = p.clean_window_anchor.unwrap() + Duration::from_secs(6);
             let _ = p.advance_pacing_with_sample(
                 step_t,
@@ -1387,6 +1409,7 @@ mod tests {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
         p.state = PacingState::SteadyMaintain;
+        p.active_pace_mult = 1.080;
 
         let _ = p.advance_pacing_with_sample(
             t0,
@@ -1543,6 +1566,7 @@ mod tests {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
         p.state = PacingState::SteadyMaintain;
+        p.active_pace_mult = 1.080;
         p.sent = (1.500 * DSD256_BPS) as u64;
 
         let _ = p.advance_pacing_with_sample(
@@ -1581,6 +1605,7 @@ mod tests {
         let t0 = Instant::now();
         let mut p = make_pacer(t0);
         p.state = PacingState::SteadyMaintain;
+        p.active_pace_mult = 1.080;
 
         let _ = p.advance_pacing_with_sample(t0, Duration::from_millis(30), false, None);
         assert_eq!(p.metrics.snapshot().lead_certainty, "uncertain");
@@ -1627,7 +1652,7 @@ mod tests {
             paused,
         );
         assert_eq!(p_seek.state, PacingState::InitialFill);
-        assert!((p_seek.active_pace_mult - 1.080).abs() < 1e-6);
+        assert!((p_seek.active_pace_mult - 1.180).abs() < 1e-6);
 
         let _ = p_seek.advance_pacing_with_sample(
             t0,
@@ -1665,5 +1690,54 @@ mod tests {
         assert!(elapsed < Duration::from_millis(10), "SIO_TCP_INFO took {:?}", elapsed);
         drop(cli);
         let _ = srv.join();
+    }
+
+    #[test]
+    fn test_4kb_chunk_phase_slip_clamped_under_3ms() {
+        let t0 = Instant::now();
+        let mut p = make_pacer(t0);
+        p.last_chunk_bytes = 4 * 1024;
+
+        // Seed steady phase at t0
+        let first_sleep = p
+            .advance_pacing_with_sample(
+                t0,
+                Duration::from_micros(200),
+                false,
+                Some(sample(549_632, 3_000, 0, 8_192)),
+            )
+            .expect("expected 4 KB DSD256 sleep");
+        assert!(
+            first_sleep > Duration::from_micros(1200) && first_sleep < Duration::from_micros(1500),
+            "expected ~1.34 ms for 4 KB @ 1.080x DSD256, got {:?}",
+            first_sleep
+        );
+
+        // Simulate a 10 ms OS preemption lag: phase-slip floor clamps backlog to <= 2 chunks (~2.90 ms)
+        let t_delayed = t0 + Duration::from_millis(10);
+        let after_lag = p.advance_pacing_with_sample(t_delayed, Duration::from_micros(200), false, None);
+        assert!(after_lag.is_none(), "immediate catch-up of bounded <= 2 chunks");
+        let lag = t_delayed.saturating_duration_since(p.next_chunk_due.unwrap());
+        assert!(
+            lag <= Duration::from_millis(3),
+            "phase slip exceeded 2-chunk bound (~2.90 ms): {:?}",
+            lag
+        );
+        // Only <= 3 chunks needed before positive pacing sleep resumes (unlike 8+ chunks at 16 KB)
+        let mut sleeps = 0;
+        for step in 1..=4 {
+            if p.advance_pacing_with_sample(
+                t_delayed + Duration::from_micros(step * 100),
+                Duration::from_micros(200),
+                false,
+                None,
+            )
+            .is_some()
+            {
+                sleeps += 1;
+                break;
+            }
+        }
+        assert_eq!(sleeps, 1, "expected positive sleep to resume within <= 3 catch-up chunks");
     }
 }

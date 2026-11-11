@@ -47,6 +47,8 @@ struct StreamSource {
     sndbuf_bytes: usize,
     /// Dynamic fast-start kernel TCP send buffer for unpaced pre-roll.
     fast_start_sndbuf_bytes: usize,
+    /// Dynamic pacing write chunk size (`4 KB`..`16 KB`), bitrate-scaled cleanly.
+    chunk_bytes: usize,
     /// Byte offset where ID3v2 / album artwork metadata begins (if known).
     metadata_offset: Option<u64>,
     /// Bounded initial headroom target in ms for `InitialFill` (default: 1200 ms).
@@ -144,17 +146,18 @@ impl StreamSource {
             None
         };
 
-        let (pace_bytes_per_sec, steady_pace_bytes_per_sec, realtime_bytes_per_sec, preroll_bytes, sndbuf_bytes, fast_start_sndbuf_bytes) = if let Some(realtime) = calculated_realtime {
+        let (pace_bytes_per_sec, steady_pace_bytes_per_sec, realtime_bytes_per_sec, preroll_bytes, sndbuf_bytes, fast_start_sndbuf_bytes, chunk_bytes) = if let Some(realtime) = calculated_realtime {
             let initial_pace = (realtime * stream_tuning::INITIAL_PACE_MULTIPLIER).max(stream_tuning::MIN_PACE_BYTES_PER_SEC);
             let steady_pace = (realtime * stream_tuning::STEADY_PACE_MULTIPLIER).max(stream_tuning::MIN_PACE_BYTES_PER_SEC);
             let sndbuf = stream_tuning::calculate_sndbuf_bytes(realtime);
             let fast_start = stream_tuning::calculate_fast_start_sndbuf_bytes(realtime);
+            let chunk_sz = stream_tuning::calculate_pacing_chunk_bytes(realtime);
             // Cap pre-roll burst to MAX_PREROLL_BYTES (2 MB) to prevent FIFO bufferbloat
             let raw_preroll = (realtime * stream_tuning::PREROLL_SECS) as u64;
             let preroll = raw_preroll.min(stream_tuning::MAX_PREROLL_BYTES);
 
             eprintln!(
-                "[Cadence UPnP Streamer] Format: {} | Audio Bitrate: {:.1} KB/s ({:.2} Mbps) | State 1 Ramp-Up: {:.1} KB/s ({:.2}x) | State 2 Step-Down: {:.1} KB/s ({:.2}x) | Fast-Start: {} KB | SO_SNDBUF: {} KB",
+                "[Cadence UPnP Streamer] Format: {} | Audio Bitrate: {:.1} KB/s ({:.2} Mbps) | State 1 Ramp-Up: {:.1} KB/s ({:.2}x) | State 2 Step-Down: {:.1} KB/s ({:.2}x) | Fast-Start: {} KB | SO_SNDBUF: {} KB | Chunk: {} KB",
                 if is_dsd { "DSD" } else { "PCM" },
                 realtime / 1024.0,
                 (realtime * 8.0) / 1_000_000.0,
@@ -163,11 +166,12 @@ impl StreamSource {
                 steady_pace / 1024.0,
                 stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER,
                 preroll / 1024,
-                sndbuf / 1024
+                sndbuf / 1024,
+                chunk_sz / 1024
             );
-            (Some(initial_pace), Some(steady_pace), Some(realtime), preroll, sndbuf, fast_start)
+            (Some(initial_pace), Some(steady_pace), Some(realtime), preroll, sndbuf, fast_start, chunk_sz)
         } else {
-            (None, None, None, 0, stream_tuning::MIN_SOCKET_SNDBUF_BYTES, stream_tuning::SOCKET_FAST_START_SNDBUF)
+            (None, None, None, 0, stream_tuning::MIN_SOCKET_SNDBUF_BYTES, stream_tuning::SOCKET_FAST_START_SNDBUF, stream_tuning::CHUNK_BYTES)
         };
 
         let metadata_offset = if let Some(ref info) = dsf_info {
@@ -196,6 +200,7 @@ impl StreamSource {
             preroll_bytes,
             sndbuf_bytes,
             fast_start_sndbuf_bytes,
+            chunk_bytes,
             metadata_offset,
             initial_lead_target_ms,
             has_streamed_audio: AtomicBool::new(false),
@@ -733,7 +738,7 @@ impl UpnpManager {
         pacer: &mut SynchronousPacer,
     ) -> bool {
         let mut offset = base_offset;
-        for chunk in slice.chunks(stream_tuning::CHUNK_BYTES) {
+        for chunk in slice.chunks(source.chunk_bytes.max(1)) {
             let t0 = Instant::now();
             if stream.write_all(chunk).is_err() {
                 return false;

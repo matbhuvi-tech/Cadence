@@ -16,8 +16,31 @@ use std::path::Path;
 
 const MB: u64 = 1024 * 1024;
 
-/// Fixed chunk size written per paced tick.
+/// Maximum / baseline chunk size written per paced tick (16 KB).
 pub const CHUNK_BYTES: usize = 16 * 1024;
+
+/// Minimum paced TCP write slice (4 KB = 1 Windows page, ~3 TCP MSS frames) so Wi-Fi
+/// `TCP_NODELAY` avoids single-packet TXOP fragmentation overhead while flattening 10 ms bins.
+pub const MIN_PACING_CHUNK_BYTES: usize = 4 * 1024;
+
+/// Target minimum chunk pacing interval (1.25 ms), keeping wakeups comfortably above
+/// high-resolution OS waitable timer precision (`~0.5 ms`) across DSD512/DSD1024 as well as DSD256.
+pub const TARGET_PACING_TICK_SECS: f64 = 0.00125;
+
+/// Computes the bitrate-aware paced chunk size rounded up to a 4 KB page boundary and
+/// clamped to `[MIN_PACING_CHUNK_BYTES, CHUNK_BYTES]`:
+/// - CD .. DSD256 (`<= 2.82 MB/s`): `4 KB` (`~1.30–1.45 ms` ticks at DSD256 `1.00–1.12x`)
+/// - DSD512 (`5.64 MB/s`): `8 KB` (`~1.29–1.45 ms` ticks)
+/// - DSD1024 (`11.29 MB/s`): `16 KB` (`~1.29–1.45 ms` ticks)
+pub fn calculate_pacing_chunk_bytes(bitrate_bytes_per_sec: f64) -> usize {
+    const PAGE_ALIGN: usize = 4 * 1024;
+    if bitrate_bytes_per_sec <= 0.0 {
+        return CHUNK_BYTES;
+    }
+    let raw = (bitrate_bytes_per_sec * TARGET_PACING_TICK_SECS).ceil() as usize;
+    let aligned = raw.saturating_add(PAGE_ALIGN - 1) & !(PAGE_ALIGN - 1);
+    aligned.clamp(MIN_PACING_CHUNK_BYTES, CHUNK_BYTES)
+}
 
 /// Rounds a buffer size up to the nearest 16 KB (16,384 byte) chunk boundary.
 /// Matches Windows Winsock 4 KB physical memory page allocation granularity (4 x 4 KB pages)
@@ -100,9 +123,9 @@ pub const PACE_MULTIPLIER: f64 = INITIAL_PACE_MULTIPLIER;
 /// Maximum duration of audio sent unpaced at the start of a request (0.5s).
 pub const PREROLL_SECS: f64 = 0.5;
 
-/// Ceiling for the initial fast-start pre-roll burst (512 KB) to ensure the streamer's
-/// internal FIFO ring buffer remains ~90% empty, preventing high-watermark ZeroWindow stalls.
-pub const MAX_PREROLL_BYTES: u64 = 512 * 1024;
+/// Ceiling for the initial fast-start pre-roll burst (1 MB) so high-rate streams like
+/// DSD256 (~363 ms) retain safe startup immunity without crowding RS130's ~10-11.5 MB buffer.
+pub const MAX_PREROLL_BYTES: u64 = 1024 * 1024;
 
 /// Hysteresis threshold in milliseconds for TCP backpressure detection.
 /// Minor OS sleep wakeup variance (< 25 ms) is absorbed by the cumulative deadline clock.
@@ -313,9 +336,35 @@ impl StreamingThreadGuard {
 }
 
 /// Sets lower priority for the background prefetch thread so monster-track
-/// disk reads never preempt the 16 KB network packet pacing loop.
+/// disk reads never preempt the paced network packet loop.
 pub fn set_prefetch_thread_priority() {
     platform::set_prefetch_thread_priority();
+}
+
+/// Reusable high-resolution pacing sleep timer backed by Windows
+/// `CreateWaitableTimerExW(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)` (~0.5 ms precision),
+/// falling back cleanly to `std::thread::sleep` on unsupported systems or `noop()` instances.
+pub struct HighResPacingTimer {
+    inner: platform::HighResTimer,
+}
+
+impl HighResPacingTimer {
+    pub fn acquire() -> Self {
+        Self {
+            inner: platform::HighResTimer::acquire(),
+        }
+    }
+
+    pub fn noop() -> Self {
+        Self {
+            inner: platform::HighResTimer::noop(),
+        }
+    }
+
+    #[inline]
+    pub fn sleep(&self, dur: std::time::Duration) {
+        self.inner.sleep(dur);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,14 +376,16 @@ mod platform {
     use super::MemoryInfo;
     use std::ffi::c_void;
     use std::sync::Mutex;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
     use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
     use windows_sys::Win32::System::Memory::{VirtualLock, VirtualUnlock};
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     use windows_sys::Win32::System::Threading::{
-        AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, GetCurrentProcess,
-        GetCurrentThread, GetProcessWorkingSetSize, SetProcessWorkingSetSize,
-        SetThreadAffinityMask, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateWaitableTimerExW,
+        GetCurrentProcess, GetCurrentThread, GetProcessWorkingSetSize, SetProcessWorkingSetSize,
+        SetThreadAffinityMask, SetThreadPriority, SetWaitableTimer, WaitForSingleObject,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, THREAD_PRIORITY_BELOW_NORMAL,
+        TIMER_ALL_ACCESS,
     };
 
 
@@ -552,6 +603,68 @@ mod platform {
             }
         }
     }
+
+    pub struct HighResTimer {
+        handle: HANDLE,
+    }
+
+    impl HighResTimer {
+        pub fn acquire() -> Self {
+            let handle = unsafe {
+                CreateWaitableTimerExW(
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    TIMER_ALL_ACCESS,
+                )
+            };
+            Self { handle }
+        }
+
+        pub fn noop() -> Self {
+            Self {
+                handle: std::ptr::null_mut(),
+            }
+        }
+
+        #[inline]
+        pub fn sleep(&self, dur: std::time::Duration) {
+            if dur.is_zero() {
+                return;
+            }
+            if self.handle.is_null() {
+                std::thread::sleep(dur);
+                return;
+            }
+            // Relative waitable timer due time is in negative 100-ns units.
+            let ticks_100ns = dur
+                .as_nanos()
+                .div_ceil(100)
+                .max(1)
+                .min(i64::MAX as u128) as i64;
+            let due_time: i64 = -ticks_100ns;
+            let set_ok = unsafe {
+                SetWaitableTimer(self.handle, &due_time, 0, None, std::ptr::null(), 0)
+            };
+            if set_ok != 0 {
+                let wait_res = unsafe { WaitForSingleObject(self.handle, INFINITE) };
+                if wait_res == WAIT_OBJECT_0 {
+                    return;
+                }
+            }
+            std::thread::sleep(dur);
+        }
+    }
+
+    impl Drop for HighResTimer {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                unsafe {
+                    CloseHandle(self.handle);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -566,6 +679,23 @@ mod platform {
     }
     pub fn unlock_memory(_data: &[u8]) {}
     pub fn set_prefetch_thread_priority() {}
+
+    pub struct HighResTimer;
+
+    impl HighResTimer {
+        pub fn acquire() -> Self {
+            Self
+        }
+        pub fn noop() -> Self {
+            Self
+        }
+        #[inline]
+        pub fn sleep(&self, dur: std::time::Duration) {
+            if !dur.is_zero() {
+                std::thread::sleep(dur);
+            }
+        }
+    }
 
     pub struct PlatformThreadGuard;
 
@@ -657,6 +787,36 @@ mod tests {
         let dsd256_fast = calculate_fast_start_sndbuf_bytes(2_822_400.0);
         assert_eq!(dsd256_fast, 256 * 1024);
         assert_eq!(dsd256_fast % CHUNK_BYTES, 0);
+    }
+
+    #[test]
+    fn test_calculate_pacing_chunk_bytes_scales_cleanly() {
+        assert_eq!(calculate_pacing_chunk_bytes(0.0), CHUNK_BYTES);
+        assert_eq!(calculate_pacing_chunk_bytes(176_400.0), 4 * 1024);
+        assert_eq!(calculate_pacing_chunk_bytes(705_600.0), 4 * 1024);
+        assert_eq!(calculate_pacing_chunk_bytes(1_411_200.0), 4 * 1024);
+        assert_eq!(calculate_pacing_chunk_bytes(2_822_400.0), 4 * 1024);
+        assert_eq!(calculate_pacing_chunk_bytes(5_644_800.0), 8 * 1024);
+        assert_eq!(calculate_pacing_chunk_bytes(11_289_600.0), 16 * 1024);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_high_res_pacing_timer_sub_2ms_sleep() {
+        let timer = HighResPacingTimer::acquire();
+        let t0 = std::time::Instant::now();
+        timer.sleep(std::time::Duration::from_micros(1300));
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_micros(900),
+            "timer woke way too early: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(5),
+            "timer lagged unexpectedly: {:?}",
+            elapsed
+        );
     }
 }
 
