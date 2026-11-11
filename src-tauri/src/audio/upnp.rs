@@ -12,6 +12,8 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
 
 use super::stream_tuning::{self, LockedBuffer, StreamingThreadGuard};
+use super::upnp_pacer::{PacerConfig, SynchronousPacer, UpnpPacingMetrics};
+pub use super::upnp_pacer::UpnpPacingSnapshot;
 use crate::diag_log;
 use crate::diagnostics::{self, DiagCategory};
 
@@ -47,6 +49,11 @@ struct StreamSource {
     fast_start_sndbuf_bytes: usize,
     /// Byte offset where ID3v2 / album artwork metadata begins (if known).
     metadata_offset: Option<u64>,
+    /// Bounded initial headroom target in ms for `InitialFill` (default: 1200 ms).
+    initial_lead_target_ms: u64,
+    /// Monotonic audio payload progress across sequential HTTP Range connections.
+    has_streamed_audio: AtomicBool,
+    last_audio_end_offset: AtomicU64,
     mode: BufferMode,
 }
 
@@ -173,6 +180,12 @@ impl StreamSource {
             None
         };
 
+        let initial_lead_target_ms = std::env::var("CADENCE_INITIAL_LEAD_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|ms| ms.clamp(150, 2500))
+            .unwrap_or_else(|| PacerConfig::default().initial_lead_target_ms);
+
         Ok(Self {
             path: path.to_path_buf(),
             content_type: content_type_for(path),
@@ -184,6 +197,9 @@ impl StreamSource {
             sndbuf_bytes,
             fast_start_sndbuf_bytes,
             metadata_offset,
+            initial_lead_target_ms,
+            has_streamed_audio: AtomicBool::new(false),
+            last_audio_end_offset: AtomicU64::new(0),
             mode,
         })
     }
@@ -222,250 +238,6 @@ fn content_type_for(path: &Path) -> &'static str {
         _ => "application/octet-stream",
     }
 }
-
-/// 3-State Adaptive Pacing Engine for DSD and High-Bitrate PCM streaming:
-/// - State 1 (Ramp-Up): Delivers at 1.25x real-time bitrate to smoothly prime the streamer's
-///   hardware FIFO buffer (typically 4–8 MB) without wire-speed gigabit burst currents.
-/// - State 2 (Backpressure Detected): When kernel write blocks or schedule lag exceed 25 ms
-///   (TCP ZeroWindow), drops delivery rate to 1.02x, clamps SO_SNDBUF to 32 KB, and re-anchors
-///   the timeline baseline to prevent any catch-up bursts.
-/// - State 3 (Stable Operation): Cruising delivery matching DAC consumption (+0.2% to +2%).
-///   Monitors for an 8-second continuous clean window before probing upward in +0.005x increments.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PacingState {
-    Unpaced,
-    RampUp,
-    BackpressureDetected {
-        entered_at: Instant,
-        last_stall_at: Instant,
-        consecutive_stalls: u32,
-    },
-    StableOperation {
-        stable_since: Instant,
-        current_multiplier: f64,
-        last_adjustment: Instant,
-    },
-}
-
-struct SynchronousPacer {
-    realtime_rate: Option<f64>,
-    state: PacingState,
-    preroll: u64,
-    sent: u64,
-    paced_start: Option<Instant>,
-    steady_sndbuf: usize,
-    clamped_to_steady: bool,
-    transition_sent: u64,
-}
-
-impl SynchronousPacer {
-    fn unpaced() -> Self {
-        Self {
-            realtime_rate: None,
-            state: PacingState::Unpaced,
-            preroll: 0,
-            sent: 0,
-            paced_start: None,
-            steady_sndbuf: stream_tuning::MIN_SOCKET_SNDBUF_BYTES,
-            clamped_to_steady: true,
-            transition_sent: 0,
-        }
-    }
-
-    fn new(source: &StreamSource, range_start: u64, is_metadata: bool) -> Self {
-        if is_metadata {
-            return Self::unpaced();
-        }
-
-        // Only requests mid-track (start >= 1 MB) are sequential range continuations.
-        // Initial requests (start < 1 MB, such as byte 0, or byte 80/92 after header sniff)
-        // receive the 512 KB fast-start pre-roll burst to prime the streamer's DAC instantly.
-        let is_range_continuation = range_start >= 1024 * 1024;
-        let initial_state = if is_range_continuation {
-            PacingState::StableOperation {
-                stable_since: Instant::now(),
-                current_multiplier: stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER,
-                last_adjustment: Instant::now(),
-            }
-        } else {
-            PacingState::RampUp
-        };
-
-        Self {
-            realtime_rate: source.realtime_bytes_per_sec,
-            state: initial_state,
-            preroll: if is_range_continuation { 0 } else { source.preroll_bytes },
-            sent: 0,
-            paced_start: None,
-            steady_sndbuf: source.sndbuf_bytes,
-            clamped_to_steady: is_range_continuation,
-            transition_sent: 0,
-        }
-    }
-
-    fn on_chunk_sent(&mut self, stream: &mut StdTcpStream, n: usize, write_block_dur: Duration) {
-        self.sent += n as u64;
-        let realtime = match self.realtime_rate {
-            Some(r) => r,
-            None => return,
-        };
-
-        // Phase 1: Fast-Start Pre-roll Burst (unpaced up to MAX_PREROLL_BYTES)
-        if self.sent <= self.preroll {
-            return;
-        }
-
-        // Phase 2: Transition Boundary (Clean Drain):
-        // When pre-roll finishes, down-clamp SO_SNDBUF to steady_sndbuf (32 KB ceiling).
-        if !self.clamped_to_steady {
-            let sock = socket2::SockRef::from(&*stream);
-            let _ = sock.set_send_buffer_size(self.steady_sndbuf);
-            self.clamped_to_steady = true;
-            self.transition_sent = self.sent;
-            self.paced_start = Some(Instant::now());
-            return;
-        }
-
-        // Phase 3: Rate determination based on 3-State Machine
-        let current_rate = match self.state {
-            PacingState::Unpaced => return,
-            PacingState::RampUp => realtime * stream_tuning::RAMP_UP_MULTIPLIER,
-            PacingState::BackpressureDetected { consecutive_stalls, .. } => {
-                if consecutive_stalls > 1 {
-                    realtime * stream_tuning::STABLE_MIN_MULTIPLIER
-                } else {
-                    realtime * stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER
-                }
-            }
-            PacingState::StableOperation { current_multiplier, .. } => {
-                realtime * current_multiplier
-            }
-        };
-
-        let start = *self.paced_start.get_or_insert_with(Instant::now);
-        let paced_bytes = (self.sent - self.transition_sent) as f64;
-        let target_time = start + Duration::from_secs_f64(paced_bytes / current_rate);
-
-        let now = Instant::now();
-        let stall_threshold = Duration::from_millis(stream_tuning::BACKPRESSURE_STALL_MS);
-        let schedule_lag = now.saturating_duration_since(target_time);
-        let is_stall = write_block_dur > stall_threshold || schedule_lag > stall_threshold;
-
-        if target_time > now && !is_stall {
-            std::thread::sleep(target_time - now);
-        }
-
-        if is_stall {
-            // True TCP backpressure / ZeroWindow stall detected.
-            // Re-anchor baseline to prevent wire-speed catch-up burst!
-            self.paced_start = Some(Instant::now());
-            self.transition_sent = self.sent;
-
-            match self.state {
-                PacingState::RampUp => {
-                    eprintln!(
-                        "[Cadence UPnP Pacer] State 1 (Ramp-Up {:.2}x) -> State 2 (Backpressure Detected, stall {:?}). Stepping down to {:.2}x.",
-                        stream_tuning::RAMP_UP_MULTIPLIER,
-                        write_block_dur.max(schedule_lag),
-                        stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER
-                    );
-                    self.state = PacingState::BackpressureDetected {
-                        entered_at: Instant::now(),
-                        last_stall_at: Instant::now(),
-                        consecutive_stalls: 1,
-                    };
-                }
-                PacingState::BackpressureDetected { entered_at, last_stall_at, consecutive_stalls } => {
-                    let now_t = Instant::now();
-                    let recent = now_t.duration_since(last_stall_at) < Duration::from_secs(2);
-                    let stalls = if recent { consecutive_stalls + 1 } else { 1 };
-                    let effective_mult = if stalls > 1 {
-                        stream_tuning::STABLE_MIN_MULTIPLIER
-                    } else {
-                        stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER
-                    };
-                    eprintln!(
-                        "[Cadence UPnP Pacer] State 2 (Repeated Backpressure #{}). Holding rate at {:.3}x.",
-                        stalls, effective_mult
-                    );
-                    self.state = PacingState::BackpressureDetected {
-                        entered_at,
-                        last_stall_at: now_t,
-                        consecutive_stalls: stalls,
-                    };
-                }
-                PacingState::StableOperation { current_multiplier, .. } => {
-                    eprintln!(
-                        "[Cadence UPnP Pacer] State 3 -> State 2 (Renewed Backpressure). Stepping down from {:.3}x to {:.2}x.",
-                        current_multiplier,
-                        stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER
-                    );
-                    self.state = PacingState::BackpressureDetected {
-                        entered_at: Instant::now(),
-                        last_stall_at: Instant::now(),
-                        consecutive_stalls: 1,
-                    };
-                }
-                PacingState::Unpaced => {}
-            }
-        } else {
-            // Clean progress without stall on this chunk
-            match self.state {
-                PacingState::BackpressureDetected { last_stall_at, consecutive_stalls, .. } => {
-                    // If stall-free for 5 seconds, promote to State 3 (Stable Operation)
-                    if last_stall_at.elapsed() >= Duration::from_secs(5) {
-                        let initial_mult = if consecutive_stalls > 1 {
-                            stream_tuning::STABLE_MIN_MULTIPLIER
-                        } else {
-                            stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER
-                        };
-                        eprintln!(
-                            "[Cadence UPnP Pacer] State 2 -> State 3 (Stable Operation). Progress recovered, cruising at {:.3}x.",
-                            initial_mult
-                        );
-                        self.state = PacingState::StableOperation {
-                            stable_since: Instant::now(),
-                            current_multiplier: initial_mult,
-                            last_adjustment: Instant::now(),
-                        };
-                    }
-                }
-                PacingState::StableOperation { stable_since, current_multiplier, last_adjustment } => {
-                    // If stable for STABILITY_WINDOW_SECS (8s) and last adjustment was >= 8s ago, probe headroom
-                    if stable_since.elapsed() >= Duration::from_secs_f64(stream_tuning::STABILITY_WINDOW_SECS)
-                        && last_adjustment.elapsed() >= Duration::from_secs_f64(stream_tuning::STABILITY_WINDOW_SECS)
-                        && current_multiplier < stream_tuning::STABLE_PROBE_CEILING
-                    {
-                        let new_mult = (current_multiplier + stream_tuning::STABLE_PROBE_INCREMENT).min(stream_tuning::STABLE_PROBE_CEILING);
-                        if new_mult > current_multiplier {
-                            eprintln!(
-                                "[Cadence UPnP Pacer] State 3: Sustained stability for {:.1}s. Probing headroom: {:.3}x -> {:.3}x.",
-                                stable_since.elapsed().as_secs_f64(),
-                                current_multiplier,
-                                new_mult
-                            );
-                            self.state = PacingState::StableOperation {
-                                stable_since,
-                                current_multiplier: new_mult,
-                                last_adjustment: Instant::now(),
-                            };
-                            self.paced_start = Some(Instant::now());
-                            self.transition_sent = self.sent;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    fn on_sent(&mut self, stream: &mut StdTcpStream, n: usize) {
-        self.on_chunk_sent(stream, n, Duration::ZERO);
-    }
-}
-
 
 fn configure_initial_socket(stream: &StdTcpStream, fast_start_sndbuf: usize) {
     // Disable Nagle's algorithm for immediate packet dispatch
@@ -580,6 +352,8 @@ pub struct UpnpManager {
     /// Whole-track RAM limit in MB (0 = Auto, derived from available RAM).
     buffer_limit_mb: Arc<AtomicU64>,
     discovery_gen: Arc<AtomicU64>,
+    pacing_metrics: Arc<UpnpPacingMetrics>,
+    playback_paused: Arc<AtomicBool>,
 }
 
 impl UpnpManager {
@@ -593,10 +367,16 @@ impl UpnpManager {
             current_stream: Arc::new(Mutex::new(None)),
             buffer_limit_mb: Arc::new(AtomicU64::new(0)),
             discovery_gen: Arc::new(AtomicU64::new(0)),
+            pacing_metrics: Arc::new(UpnpPacingMetrics::default()),
+            playback_paused: Arc::new(AtomicBool::new(false)),
         };
 
         manager.ensure_http_server();
         manager
+    }
+
+    pub fn get_pacing_stats(&self) -> UpnpPacingSnapshot {
+        self.pacing_metrics.snapshot()
     }
 
     /// Resolve the local LAN IPv4 address of this machine
@@ -656,6 +436,8 @@ impl UpnpManager {
 
         let port = self.http_port;
         let current = Arc::clone(&self.current_stream);
+        let pacing_metrics = Arc::clone(&self.pacing_metrics);
+        let paused_flag = Arc::clone(&self.playback_paused);
 
         std::thread::Builder::new()
             .name("cadence-upnp-listener".into())
@@ -698,10 +480,17 @@ impl UpnpManager {
                                 let _ = std_stream.set_write_timeout(Some(Duration::from_secs(10)));
 
                                 let source_ref = Arc::clone(&current);
+                                let metrics_ref = Arc::clone(&pacing_metrics);
+                                let paused_ref = Arc::clone(&paused_flag);
                                 std::thread::Builder::new()
                                     .name("cadence-paced-stream".into())
                                     .spawn(move || {
-                                        Self::handle_connection_sync(std_stream, source_ref);
+                                        Self::handle_connection_sync(
+                                            std_stream,
+                                            source_ref,
+                                            metrics_ref,
+                                            paused_ref,
+                                        );
                                     })
                                     .expect("failed to spawn dedicated paced streaming thread");
                             }
@@ -715,7 +504,12 @@ impl UpnpManager {
             .expect("failed to spawn UPnP listener thread");
     }
 
-    fn handle_connection_sync(mut stream: StdTcpStream, source_ref: Arc<Mutex<Option<Arc<StreamSource>>>>) {
+    fn handle_connection_sync(
+        mut stream: StdTcpStream,
+        source_ref: Arc<Mutex<Option<Arc<StreamSource>>>>,
+        pacing_metrics: Arc<UpnpPacingMetrics>,
+        playback_paused: Arc<AtomicBool>,
+    ) {
         // Register this dedicated OS thread with Windows MMCSS Pro Audio, pin off Core 0/1,
         // and lock 1 ms timer resolution. Reverts cleanly on drop (even upon early socket broken-pipe).
         let _thread_guard = StreamingThreadGuard::acquire();
@@ -812,6 +606,23 @@ impl UpnpManager {
         };
 
         let is_range_continuation = !is_metadata_request && start >= 1024 * 1024;
+        let is_contiguous_reconnect = if is_range_continuation
+            && source.has_streamed_audio.load(Ordering::Acquire)
+        {
+            let prev_end = source.last_audio_end_offset.load(Ordering::Acquire);
+            start >= prev_end.saturating_sub(256 * 1024)
+                && start <= prev_end.saturating_add(512 * 1024)
+        } else {
+            false
+        };
+        let track_audio_progress =
+            !is_metadata_request && !(start >= len / 2 && (end - start + 1) <= 256 * 1024);
+
+        if !is_metadata_request {
+            pacing_metrics
+                .fast_start_sndbuf_bytes
+                .store(source.fast_start_sndbuf_bytes as u64, Ordering::Relaxed);
+        }
 
         // Socket send buffer:
         // - Range continuation (start >= 1 MB): steady-state clamped to 32 KB ceiling to physically prevent micro-bursts.
@@ -819,6 +630,11 @@ impl UpnpManager {
         let sock = socket2::SockRef::from(&stream);
         if is_range_continuation {
             let _ = sock.set_send_buffer_size(source.sndbuf_bytes);
+            if let Ok(actual) = sock.send_buffer_size() {
+                pacing_metrics
+                    .actual_sndbuf_bytes
+                    .store(actual as u64, Ordering::Relaxed);
+            }
         } else if source.fast_start_sndbuf_bytes != initial_fast_start {
             let _ = sock.set_send_buffer_size(source.fast_start_sndbuf_bytes);
         }
@@ -846,50 +662,90 @@ impl UpnpManager {
             0,
             0,
             "upnp_http_connect",
-            "method={} range={}-{} len={} meta={} range_cont={}",
+            "method={} range={}-{} len={} meta={} range_cont={} contiguous={}",
             method,
             start,
             end,
             len,
             is_metadata_request,
-            is_range_continuation
+            is_range_continuation,
+            is_contiguous_reconnect
         );
-
-        if is_metadata_request {
-            eprintln!(
-                "[Cadence UPnP Streamer] Serving metadata / cover art bytes {}-{} of {} (unpaced wire-speed)",
-                start, end, len
-            );
-        } else {
-            eprintln!(
-                "[Cadence UPnP Streamer] Serving audio bytes {}-{} of {} (Range continuation: {})",
-                start, end, len, is_range_continuation
-            );
-        }
 
         // Disable read timeout during the active streaming phase
         let _ = stream.set_read_timeout(None);
 
-        let mut pacer = SynchronousPacer::new(&source, start, is_metadata_request);
+        if track_audio_progress {
+            source.has_streamed_audio.store(true, Ordering::Release);
+            source.last_audio_end_offset.store(start, Ordering::Release);
+        }
+
+        let mut config = PacerConfig::default();
+        config.initial_lead_target_ms = source.initial_lead_target_ms;
+        let mut pacer = SynchronousPacer::with_config(
+            config,
+            source.realtime_bytes_per_sec,
+            source.preroll_bytes,
+            source.sndbuf_bytes,
+            is_contiguous_reconnect,
+            is_range_continuation,
+            is_metadata_request,
+            pacing_metrics,
+            playback_paused,
+        );
 
         match &source.mode {
             BufferMode::WholeTrack(ram) => {
                 // Zero-copy, zero-allocation: write fixed-size slices of the locked buffer.
                 let body = &ram.as_slice()[start as usize..=end as usize];
-                for chunk in body.chunks(stream_tuning::CHUNK_BYTES) {
-                    let t0 = Instant::now();
-                    if stream.write_all(chunk).is_err() {
-                        return;
-                    }
-                    let write_block_dur = t0.elapsed();
-                    pacer.on_chunk_sent(&mut stream, chunk.len(), write_block_dur);
+                if !Self::write_paced_chunks(
+                    &mut stream,
+                    body,
+                    start,
+                    &source,
+                    track_audio_progress,
+                    &mut pacer,
+                ) {
+                    return;
                 }
             }
             BufferMode::Windowed { window_bytes } => {
-                Self::stream_windowed_sync(&mut stream, &source.path, start, end, *window_bytes, &mut pacer);
+                Self::stream_windowed_sync(
+                    &mut stream,
+                    &source,
+                    start,
+                    end,
+                    *window_bytes,
+                    track_audio_progress,
+                    &mut pacer,
+                );
             }
         }
         let _ = stream.flush();
+    }
+
+    fn write_paced_chunks(
+        stream: &mut StdTcpStream,
+        slice: &[u8],
+        base_offset: u64,
+        source: &StreamSource,
+        track_progress: bool,
+        pacer: &mut SynchronousPacer,
+    ) -> bool {
+        let mut offset = base_offset;
+        for chunk in slice.chunks(stream_tuning::CHUNK_BYTES) {
+            let t0 = Instant::now();
+            if stream.write_all(chunk).is_err() {
+                return false;
+            }
+            let write_block_dur = t0.elapsed();
+            offset = offset.saturating_add(chunk.len() as u64);
+            if track_progress {
+                source.last_audio_end_offset.store(offset, Ordering::Release);
+            }
+            pacer.on_chunk_sent(stream, chunk.len(), write_block_dur);
+        }
+        true
     }
 
     /// Serve `start..=end` from page-locked read-ahead windows on the dedicated OS thread.
@@ -898,12 +754,14 @@ impl UpnpManager {
     /// per window. The prefetch thread runs with normal priority outside MMCSS.
     fn stream_windowed_sync(
         stream: &mut StdTcpStream,
-        path: &Path,
+        source: &StreamSource,
         start: u64,
         end: u64,
         window_bytes: u64,
+        track_progress: bool,
         pacer: &mut SynchronousPacer,
     ) {
+        let path = &source.path;
         let spawn_load = |offset: u64, len: u64| {
             let p = path.to_path_buf();
             std::thread::Builder::new()
@@ -951,24 +809,36 @@ impl UpnpManager {
             let window = match handle.join() {
                 Ok(Ok(buf)) if !buf.as_slice().is_empty() => buf,
                 Ok(Err(e)) => {
-                    eprintln!("[Cadence UPnP Streamer] Window read failed at {}: {}", pos, e);
+                    diag_log!(
+                        DiagCategory::UpnpLifecycle,
+                        0,
+                        0,
+                        0,
+                        "upnp_window_read_failed",
+                        "pos={} err={}",
+                        pos,
+                        e
+                    );
                     return;
                 }
                 _ => return,
             };
+            pacer.metrics.window_reads.fetch_add(1, Ordering::Relaxed);
 
             let next_pos = pos + window.as_slice().len() as u64;
             if next_pos <= end {
                 pending = Some(spawn_load(next_pos, (end - next_pos + 1).min(window_bytes)));
             }
 
-            for chunk in window.as_slice().chunks(stream_tuning::CHUNK_BYTES) {
-                let t0 = Instant::now();
-                if stream.write_all(chunk).is_err() {
-                    return;
-                }
-                let write_block_dur = t0.elapsed();
-                pacer.on_chunk_sent(stream, chunk.len(), write_block_dur);
+            if !Self::write_paced_chunks(
+                stream,
+                window.as_slice(),
+                pos,
+                source,
+                track_progress,
+                pacer,
+            ) {
+                return;
             }
             pos = next_pos;
         }
@@ -1352,15 +1222,26 @@ impl UpnpManager {
             file_path.display()
         );
 
+        self.playback_paused.store(false, Ordering::Release);
+        self.pacing_metrics.reset_for_stream();
+
         // Pre-load the untouched file into page-locked RAM before the renderer
         // starts pulling, so storage is idle for the duration of playback.
-        let already_loaded = self
-            .current_stream
-            .lock()
-            .as_ref()
-            .map(|s| s.path == file_path && matches!(s.mode, BufferMode::WholeTrack(_)))
-            .unwrap_or(false);
-        if !already_loaded {
+        let reset_existing = {
+            let guard = self.current_stream.lock();
+            if let Some(s) = guard.as_ref() {
+                if s.path == file_path && matches!(s.mode, BufferMode::WholeTrack(_)) {
+                    s.has_streamed_audio.store(false, Ordering::Release);
+                    s.last_audio_end_offset.store(0, Ordering::Release);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if !reset_existing {
             // Release the previous track's buffer first so peak RAM isn't old + new.
             *self.current_stream.lock() = None;
             let limit_mb = self.buffer_limit_mb.load(Ordering::SeqCst);
@@ -1500,6 +1381,7 @@ impl UpnpManager {
             device.id
         );
 
+        self.playback_paused.store(true, Ordering::Release);
         let mut state = self.playback_state.lock();
         state.is_paused = true;
         state.is_playing = false;
@@ -1540,6 +1422,7 @@ impl UpnpManager {
             device.id
         );
 
+        self.playback_paused.store(false, Ordering::Release);
         let mut state = self.playback_state.lock();
         state.is_paused = false;
         state.is_playing = true;
@@ -1547,6 +1430,7 @@ impl UpnpManager {
     }
 
     pub async fn stop(&self) -> Result<(), String> {
+        self.playback_paused.store(false, Ordering::Release);
         let device = match self.active_device.lock().clone() {
             Some(d) => d,
             None => return Ok(()),

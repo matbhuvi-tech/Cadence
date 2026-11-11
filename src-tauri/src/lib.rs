@@ -227,6 +227,7 @@ pub fn run() {
             get_purity_mode,
             discover_upnp_devices,
             get_stream_buffer_info,
+            get_upnp_pacing_stats,
             set_stream_buffer_limit,
             prepare_next_track,
             invalidate_next_track,

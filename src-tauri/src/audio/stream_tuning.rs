@@ -448,10 +448,24 @@ mod platform {
             let mmcss_handle = unsafe {
                 let h = AvSetMmThreadCharacteristicsW(task.as_ptr(), &mut task_index);
                 if h.is_null() {
-                    eprintln!("[Cadence UPnP Streamer] MMCSS 'Pro Audio' registration failed.");
+                    crate::diag_log!(
+                        crate::diagnostics::DiagCategory::UpnpLifecycle,
+                        0,
+                        0,
+                        0,
+                        "upnp_mmcss_failed",
+                        "task=ProAudio"
+                    );
                     None
                 } else {
-                    eprintln!("[Cadence UPnP Streamer] Streaming thread registered with MMCSS 'Pro Audio'.");
+                    crate::diag_log!(
+                        crate::diagnostics::DiagCategory::UpnpLifecycle,
+                        0,
+                        0,
+                        0,
+                        "upnp_mmcss_acquired",
+                        "task=ProAudio"
+                    );
                     Some(h)
                 }
             };
@@ -476,7 +490,14 @@ mod platform {
                 unsafe {
                     AvRevertMmThreadCharacteristics(handle);
                 }
-                eprintln!("[Cadence UPnP Streamer] MMCSS 'Pro Audio' reverted cleanly.");
+                crate::diag_log!(
+                    crate::diagnostics::DiagCategory::UpnpLifecycle,
+                    0,
+                    0,
+                    0,
+                    "upnp_mmcss_reverted",
+                    "task=ProAudio"
+                );
             }
         }
     }
@@ -494,10 +515,23 @@ mod platform {
         let mask = all & !0b11;
         let prev = unsafe { SetThreadAffinityMask(GetCurrentThread(), mask) };
         if prev == 0 {
-            eprintln!("[Cadence UPnP Streamer] SetThreadAffinityMask failed.");
+            crate::diag_log!(
+                crate::diagnostics::DiagCategory::UpnpLifecycle,
+                0,
+                0,
+                0,
+                "upnp_affinity_failed",
+                "mask={:#x}",
+                mask
+            );
         } else {
-            eprintln!(
-                "[Cadence UPnP Streamer] Streaming thread pinned away from Core 0/1 (mask {:#x}).",
+            crate::diag_log!(
+                crate::diagnostics::DiagCategory::UpnpLifecycle,
+                0,
+                0,
+                0,
+                "upnp_affinity_pinned",
+                "mask={:#x}",
                 mask
             );
         }
@@ -507,7 +541,14 @@ mod platform {
         unsafe {
             let res = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
             if res == 0 {
-                eprintln!("[Cadence UPnP Streamer] SetThreadPriority for disk prefetch failed.");
+                crate::diag_log!(
+                    crate::diagnostics::DiagCategory::BackgroundWorkers,
+                    0,
+                    0,
+                    0,
+                    "upnp_prefetch_priority_failed",
+                    "prio=BELOW_NORMAL"
+                );
             }
         }
     }

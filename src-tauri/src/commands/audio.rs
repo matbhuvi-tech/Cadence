@@ -1,7 +1,7 @@
 use tauri::State;
 use crate::audio::{
     AudioEndpoint, AudioEndpointInfo, AudioEngine, AudioStreamInfo, PlaybackStatus,
-    StreamBufferInfo, UpnpDevice,
+    StreamBufferInfo, UpnpDevice, UpnpPacingSnapshot,
 };
 
 #[tauri::command]
@@ -96,6 +96,11 @@ pub async fn discover_upnp_devices(engine: State<'_, AudioEngine>) -> Result<Vec
 #[tauri::command]
 pub fn get_stream_buffer_info(engine: State<'_, AudioEngine>) -> StreamBufferInfo {
     engine.get_upnp_manager().get_buffer_info()
+}
+
+#[tauri::command]
+pub fn get_upnp_pacing_stats(engine: State<'_, AudioEngine>) -> UpnpPacingSnapshot {
+    engine.get_upnp_manager().get_pacing_stats()
 }
 
 #[tauri::command]
