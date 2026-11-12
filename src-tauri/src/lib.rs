@@ -281,6 +281,7 @@ pub fn run() {
             db_remove_watched_folder,
             db_get_tracks,
             db_get_releases,
+            db_set_release_favorite,
             db_save_tracks_batch,
             db_get_skipped_files,
             db_ignore_skipped_file,

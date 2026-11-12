@@ -301,6 +301,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
 
   const [internalActiveTab, setInternalActiveTab] = useState<EntityTab>('albums')
   const [searchFilter, setSearchFilter] = useState('')
+  const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [internalSortBy, setInternalSortBy] = useState<SortBy>('year_desc')
   const [internalCardSize, setInternalCardSize] = useState<CardSize>('standard')
 
@@ -500,8 +501,9 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
       })
     })
 
-    // Filter by quick search
+    // Filter by favorites & quick search
     const filtered = cards.filter((album) => {
+      if (favoritesOnly && !album.isFavorite) return false
       if (!searchFilter.trim()) return true
       const q = searchFilter.toLowerCase()
       return (
@@ -530,7 +532,12 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
     })
 
     return { unfilteredCards: cards, albumCards: filtered }
-  }, [tracks, releases, searchFilter, sortBy, releaseToMasterMap])
+  }, [tracks, releases, searchFilter, favoritesOnly, sortBy, releaseToMasterMap])
+
+  const favoritesCount = useMemo(
+    () => unfilteredCards.filter((a) => a.isFavorite).length,
+    [unfilteredCards]
+  )
 
   // Drilldown Selected Album
   const selectedAlbum = useMemo(() => {
@@ -1805,9 +1812,29 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
             </div>
           )}
 
-          {/* Right: Sort and Card Size Selector */}
+          {/* Right: Favorites Filter, Sort, and Card Size Selector */}
           {!selectedAlbum && (
             <div className="flex items-center gap-3">
+              {/* Favorites Filter Pill */}
+              <button
+                type="button"
+                onClick={() => setFavoritesOnly((prev) => !prev)}
+                aria-pressed={favoritesOnly}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                  favoritesOnly
+                    ? 'bg-[#F43F5E]/15 border-[#F43F5E]/40 text-[#FDA4AF] shadow-sm'
+                    : 'bg-white/[0.04] border-white/[0.06] text-[#8E8E93] hover:text-white hover:border-white/15'
+                }`}
+                title={favoritesOnly ? 'Show all albums' : 'Filter to favorite albums only'}
+              >
+                <Heart
+                  className={`w-3.5 h-3.5 ${
+                    favoritesOnly ? 'text-[#F43F5E] fill-[#F43F5E]' : ''
+                  }`}
+                />
+                <span>Favorites ({favoritesCount})</span>
+              </button>
+
               {/* Sort By Dropdown */}
               <div className="flex items-center gap-1.5 text-xs text-[#8E8E93]">
                 <span className="text-[11px] font-mono">Sort:</span>
@@ -1859,9 +1886,26 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
             {activeTab === 'albums' && (
               <>
                 {albumCards.length === 0 ? (
-                  <div className="h-64 flex flex-col items-center justify-center text-[#64748B] gap-2">
-                    <Disc3 className="w-10 h-10 text-white/20" />
-                    <p className="text-sm">No albums match your current filter.</p>
+                  <div className="h-64 flex flex-col items-center justify-center text-[#64748B] gap-3">
+                    {favoritesOnly ? (
+                      <Heart className="w-10 h-10 text-[#F43F5E]/40" />
+                    ) : (
+                      <Disc3 className="w-10 h-10 text-white/20" />
+                    )}
+                    <p className="text-sm">
+                      {favoritesOnly
+                        ? 'No favorite albums match your current filter.'
+                        : 'No albums match your current filter.'}
+                    </p>
+                    {favoritesOnly && (
+                      <button
+                        type="button"
+                        onClick={() => setFavoritesOnly(false)}
+                        className="px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-xs text-white/90 transition-colors cursor-pointer"
+                      >
+                        Show all albums
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <div className="grid gap-5" style={gridStyle}>

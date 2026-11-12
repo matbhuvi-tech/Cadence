@@ -157,6 +157,16 @@ pub fn db_get_releases(
 }
 
 #[tauri::command]
+pub fn db_set_release_favorite(
+    db: State<'_, AppDb>,
+    release_id: String,
+    is_favorite: bool,
+) -> Result<(), String> {
+    let conn = db.conn.lock();
+    DbOperations::set_release_favorite(&conn, &release_id, is_favorite).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn db_save_tracks_batch(
     db: State<'_, AppDb>,
 

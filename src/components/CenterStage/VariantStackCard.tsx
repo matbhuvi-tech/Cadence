@@ -42,6 +42,7 @@ interface VariantStackCardProps {
   onSelectVariant: (releaseId: string, variantId: string) => void
   onInspectRelease: (releaseId: string) => void
   onCustomizeRelease?: (release: Release) => void
+  onToggleFavorite?: (releaseId: string, isFavorite: boolean) => void
 }
 
 const formatClockTime = (seconds: number) => {
@@ -110,9 +111,10 @@ export const VariantStackCard: React.FC<VariantStackCardProps> = ({
   onSelectVariant,
   onInspectRelease,
   onCustomizeRelease,
+  onToggleFavorite,
 }) => {
   const { currentTrack, isPlaying, playTrack, togglePlayPause, seek } = useAudioPlayer()
-  const [isLiked, setIsLiked] = useState(false)
+  const isLiked = Boolean(release.isFavorite)
   const [localExpanded, setLocalExpanded] = useState(isSelected)
 
   // Determine effective expansion state
@@ -660,11 +662,11 @@ export const VariantStackCard: React.FC<VariantStackCardProps> = ({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setIsLiked(!isLiked)}
+                      onClick={() => onToggleFavorite?.(release.id, !isLiked)}
                       className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
-                        isLiked ? 'text-[#EC4899]' : 'text-[#64748B] hover:text-white'
+                        isLiked ? 'text-[#F43F5E]' : 'text-[#64748B] hover:text-white'
                       }`}
-                      title="Favorite Album"
+                      title={isLiked ? 'Remove Favorite' : 'Mark Favorite'}
                     >
                       <Heart className={`w-3.5 h-3.5 ${isLiked ? 'fill-current' : ''}`} />
                     </button>

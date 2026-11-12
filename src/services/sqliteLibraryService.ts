@@ -620,6 +620,7 @@ export class SqliteLibraryService {
             hasBookletPdf: false,
           },
           isCompilation: Boolean(r.isCompilation),
+          isFavorite: Boolean(r.isFavorite),
           physicalComboTitle: (r as any).physicalComboTitle || r.physicalComboTitle,
           metadataAuthorityOverride: (r as any).metadataAuthorityOverride || (r as any).metadata_authority_override || undefined,
           genre: (r as any).genre || undefined,
@@ -1070,6 +1071,19 @@ export class SqliteLibraryService {
       }
     } catch (err) {
       console.warn('[SqliteLibraryService] Failed to update release artwork in SQLite:', err)
+    }
+  }
+
+  /**
+   * Persists an individual release's favorite state directly into SQLite
+   */
+  public async persistReleaseFavoriteToDb(releaseId: string, isFavorite: boolean): Promise<void> {
+    if (!tauriBridge.isTauri()) return
+
+    try {
+      await tauriBridge.dbSetReleaseFavorite(releaseId, isFavorite)
+    } catch (err) {
+      console.warn('[SqliteLibraryService] Failed to update release favorite in SQLite:', err)
     }
   }
 

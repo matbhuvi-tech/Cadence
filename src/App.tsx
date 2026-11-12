@@ -1016,7 +1016,8 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
     facets.genre ||
     facets.ensemble ||
     facets.mastering ||
-    facets.reviewStatus
+    facets.reviewStatus ||
+    facets.favoritesOnly
   )
 
   // Set of all release IDs that currently have items staged for review (sidecars, pending edits, or cover art)
@@ -1073,6 +1074,10 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
           t.sidecarStatus === 'uncommitted_sidecar' ||
           Boolean(t.pendingSidecarEdits && Object.keys(t.pendingSidecarEdits).length > 0)
       )
+    }
+    if (facets.favoritesOnly) {
+      const favoriteReleaseIds = new Set(releases.filter((r) => r.isFavorite).map((r) => r.id))
+      result = result.filter((t) => favoriteReleaseIds.has(t.releaseId))
     }
     return result
   }, [searchQuery, facets, selectedMountId, selectedFolderFilter, tracks, releases, works, auditIssues, storageMounts, stagedReleaseIds])
@@ -1404,6 +1409,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
       if (updates.rating !== undefined) {
         showToast(updates.rating > 0 ? `Rated "${res.release.title}" ${updates.rating}★` : `Cleared rating for "${res.release.title}"`)
       } else if (updates.isFavorite !== undefined) {
+        sqliteLibraryService.persistReleaseFavoriteToDb(releaseId, updates.isFavorite)
         showToast(updates.isFavorite ? `Added "${res.release.title}" to Favorites` : `Removed "${res.release.title}" from Favorites`)
       } else if (res.affectedTracksCount > 0) {
         showToast(`Updated "${res.release.title}" & staged edits across ${res.affectedTracksCount} tracks`)

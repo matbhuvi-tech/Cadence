@@ -56,6 +56,8 @@ pub struct DbRelease {
     pub created_at: String,
     #[serde(default)]
     pub master_album_id: Option<String>,
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,14 +702,14 @@ impl DbOperations {
         let sql = if only_online.unwrap_or(false) {
             "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
                     r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path,
-                    r.is_compilation, r.physical_combo_title, r.created_at, r.master_album_id
+                    r.is_compilation, r.physical_combo_title, r.created_at, r.master_album_id, r.is_favorite
              FROM releases r
              WHERE r.id IN (SELECT DISTINCT release_id FROM tracks WHERE is_online = 1)
              ORDER BY r.title ASC"
         } else {
             "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
                     release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
-                    is_compilation, physical_combo_title, created_at, master_album_id
+                    is_compilation, physical_combo_title, created_at, master_album_id, is_favorite
              FROM releases ORDER BY title ASC"
         };
 
@@ -730,6 +732,7 @@ impl DbOperations {
                 physical_combo_title: row.get(12)?,
                 created_at: row.get(13)?,
                 master_album_id: row.get(14)?,
+                is_favorite: row.get::<_, i32>(15).unwrap_or(0) != 0,
             })
         })?;
 
@@ -1591,6 +1594,14 @@ impl DbOperations {
         Ok(())
     }
 
+    pub fn set_release_favorite(conn: &Connection, release_id: &str, is_favorite: bool) -> Result<()> {
+        conn.execute(
+            "UPDATE releases SET is_favorite = ?1 WHERE id = ?2",
+            params![if is_favorite { 1 } else { 0 }, release_id],
+        )?;
+        Ok(())
+    }
+
     // --- Relational Artist Methods ---
 
     pub fn normalize_artist_alias(name: &str) -> String {
@@ -1895,7 +1906,7 @@ impl DbOperations {
         let mut rel_stmt = conn.prepare(
             "SELECT DISTINCT r.id, r.title, r.folder_path, r.folder_name, r.artist_credit, r.composer_name,
                              r.release_year, r.genre_tags, r.front_cover_url, r.backdrop_url, r.target_folder_path,
-                             r.is_compilation, r.physical_combo_title, r.created_at, r.master_album_id
+                             r.is_compilation, r.physical_combo_title, r.created_at, r.master_album_id, r.is_favorite
              FROM releases r
              JOIN tracks t ON t.release_id = r.id
              JOIN track_artist_credits tac ON tac.track_id = t.id
@@ -1920,6 +1931,7 @@ impl DbOperations {
                 physical_combo_title: row.get(12)?,
                 created_at: row.get(13)?,
                 master_album_id: row.get(14)?,
+                is_favorite: row.get::<_, i32>(15).unwrap_or(0) != 0,
             })
         })?;
 
@@ -2292,7 +2304,7 @@ impl DbOperations {
             let mut stmt = conn.prepare(
                 "SELECT id, title, folder_path, folder_name, artist_credit, composer_name,
                         release_year, genre_tags, front_cover_url, backdrop_url, target_folder_path,
-                        is_compilation, physical_combo_title, created_at, master_album_id
+                        is_compilation, physical_combo_title, created_at, master_album_id, is_favorite
                  FROM releases
                  WHERE title LIKE ?1 OR artist_credit LIKE ?1 OR composer_name LIKE ?1 OR folder_name LIKE ?1
                  LIMIT ?2"
@@ -2314,6 +2326,7 @@ impl DbOperations {
                     physical_combo_title: row.get(12)?,
                     created_at: row.get(13)?,
                     master_album_id: row.get(14)?,
+                    is_favorite: row.get::<_, i32>(15).unwrap_or(0) != 0,
                 })
             })?;
             for r in rows.flatten() {

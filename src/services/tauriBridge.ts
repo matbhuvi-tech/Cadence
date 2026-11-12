@@ -662,6 +662,12 @@ class TauriBridgeService {
     return []
   }
 
+  public async dbSetReleaseFavorite(releaseId: string, isFavorite: boolean): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('db_set_release_favorite', { releaseId, isFavorite })
+    }
+  }
+
   public async dbSaveTracksBatch(tracks: any[], releases: any[]): Promise<void> {
     if (this.isTauri()) {
       await invoke('db_save_tracks_batch', { tracks, releases })

@@ -88,6 +88,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
             is_compilation INTEGER NOT NULL DEFAULT 0,
             physical_combo_title TEXT,
             master_album_id TEXT REFERENCES master_albums(id) ON DELETE SET NULL,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );
 
@@ -334,6 +335,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE skipped_files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE releases ADD COLUMN is_compilation INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE releases ADD COLUMN physical_combo_title TEXT", []);
+    let _ = conn.execute("ALTER TABLE releases ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN is_compilation INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN album_artist TEXT", []);
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN original_album TEXT", []);

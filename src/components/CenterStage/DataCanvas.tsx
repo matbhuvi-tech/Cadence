@@ -16,6 +16,7 @@ import {
   RotateCcw,
   FolderPlus,
   Filter,
+  Heart,
 } from 'lucide-react'
 import { Work, Track, Release, AlbumDisplayMode, AuditIssue, CanvasViewMode } from '../../core/types'
 import { AlbumCoverGrid, EntityTab, SortBy, CardSize } from './AlbumCoverGrid'
@@ -65,6 +66,7 @@ interface DataCanvasProps {
       artistCredit?: string
       releaseYear?: number
       coverArtUrl?: string
+      isFavorite?: boolean
     }
   ) => void
   onOpenSidecar: (trackId: string) => void
@@ -270,6 +272,9 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
     if (facets.reviewStatus === 'staged') {
       tokens.push({ key: 'reviewStatus', label: 'Review', value: 'Staged for Review' })
     }
+    if (facets.favoritesOnly) {
+      tokens.push({ key: 'favoritesOnly', label: 'Favorites', value: 'Only' })
+    }
     if (facets.era) {
       tokens.push({ key: 'era', label: 'Era', value: facets.era })
     }
@@ -424,6 +429,30 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
         {/* Right: Operational Tool Triggers & Filter Shelf Toggle */}
         {!selectedAlbumId && (
           <div className="flex items-center gap-3 shrink-0">
+            <button
+              type="button"
+              onClick={() =>
+                onFacetChange?.({
+                  ...facets,
+                  favoritesOnly: facets.favoritesOnly ? undefined : true,
+                })
+              }
+              aria-pressed={Boolean(facets.favoritesOnly)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                facets.favoritesOnly
+                  ? 'bg-[#F43F5E]/15 border-[#F43F5E]/40 text-[#FDA4AF] shadow-sm'
+                  : 'bg-white/[0.04] border-white/[0.08] text-[#8E8E93] hover:text-white hover:border-white/15'
+              }`}
+              title={facets.favoritesOnly ? 'Show all albums' : 'Filter by favorite albums'}
+            >
+              <Heart
+                className={`w-3.5 h-3.5 ${
+                  facets.favoritesOnly ? 'text-[#F43F5E] fill-[#F43F5E]' : ''
+                }`}
+              />
+              <span>Favorites</span>
+            </button>
+
             <ViewControlCluster
               tier={tier}
               isFilterShelfOpen={isFilterShelfOpen}
@@ -603,6 +632,23 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                 />
                 <span>Staged for Review ({stagedAlbumsCount})</span>
               </button>
+
+              <button
+                onClick={() =>
+                  onFacetChange?.({
+                    ...facets,
+                    favoritesOnly: facets.favoritesOnly ? undefined : true,
+                  })
+                }
+                className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 ${
+                  facets.favoritesOnly
+                    ? 'bg-[#F43F5E] text-white font-semibold shadow-sm'
+                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                }`}
+              >
+                <Heart className={`w-3 h-3 ${facets.favoritesOnly ? 'fill-white' : 'text-[#F43F5E]'}`} />
+                <span>Favorites Only</span>
+              </button>
             </div>
           </div>
         </div>
@@ -781,6 +827,9 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                       onSelectVariant={onSelectVariant}
                       onInspectRelease={onInspectRelease}
                       onCustomizeRelease={onCustomizeRelease}
+                      onToggleFavorite={(relId, nextFav) =>
+                        onUpdateReleaseDetails?.(relId, { isFavorite: nextFav })
+                      }
                     />
                   )
                 })}
