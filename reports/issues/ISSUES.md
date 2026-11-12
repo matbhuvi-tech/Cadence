@@ -1,5 +1,23 @@
 # Issue Log
 
+## GitHub #35: Enriched artist editorial profile (bioSummary, etc.) not persistent across navigation & bio text truncation
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/35
+- **Reported:** When clicking "Enrich Profile" on an artist detail page (e.g., Ilaiyaraaja), the biography and era appear, but navigating away and returning causes the bio to disappear. Additionally, the biography text in the artist hero is hard-truncated to 3 lines (`line-clamp-3`) with no way to read or expand the full biographical details.
+- **Cause:**
+  1. `canonicalArtistsMetadataCache` in `src/services/sqliteLibraryService.ts` only stored `portraitUrl`, `portraitStatus`, and `eraActive`, omitting `bioSummary`, `primaryRole`, `mbid`, and `appleArtistId`.
+  2. `sqliteLibraryService.getCanonicalArtistDetail(...)` reconstructed the artist object from in-memory releases/tracks and only picked up `portraitUrl` and `eraActive` from the cache, leaving `bioSummary` undefined.
+  3. `sqliteLibraryService.updateArtistEditorialProfile(...)` forwarded to Tauri IPC but never updated `canonicalArtistsMetadataCache`.
+  4. In `src/components/CenterStage/ArtistsView.tsx`, if audio was playing during enrichment, the write was completely skipped without an idle queue mechanism.
+  5. The hero bio paragraph had a fixed `line-clamp-3` constraint without an expandable toggle (e.g., "Read more" / "Show less").
+- **Fix:**
+  1. Expand `canonicalArtistsMetadataCache` in `sqliteLibraryService.ts` to cache the full editorial payload (`bioSummary`, `eraActive`, `primaryRole`, `portraitUrl`, `mbid`, `appleArtistId`, etc.).
+  2. Update `getCanonicalArtistDetail` to merge all cached editorial properties (including `bioSummary`) onto the artist entity.
+  3. Ensure `updateArtistEditorialProfile` immediately updates the cache in addition to persisting to SQLite.
+  4. In `ArtistsView.tsx`, handle playback-active states cleanly by queuing/scheduling the editorial write for idle transport or persisting asynchronously without blocking audio streaming.
+  5. Add an interactive expandable bio toggle ("Read more" / "Show less") with clean Apple HIG typography so users can expand truncated artist biographies.
+- **Status:** In progress on `fix/35-persist-enriched-artist-profile`.
+
 ## GitHub #34: Clicking album cover art in Listen workspace navigates to Curate instead of album drill-down
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/34

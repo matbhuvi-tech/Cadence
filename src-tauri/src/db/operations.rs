@@ -220,6 +220,9 @@ pub struct DbArtistSummary {
     pub tracks_count: i64,
     pub roles: Vec<String>,
     pub era_active: Option<String>,
+    pub bio_summary: Option<String>,
+    pub mbid: Option<String>,
+    pub apple_artist_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1837,7 +1840,7 @@ impl DbOperations {
                 COUNT(DISTINCT t.release_id) AS albums_count,
                 COUNT(DISTINCT tac.track_id) AS tracks_count,
                 COALESCE(GROUP_CONCAT(DISTINCT tac.role), ca.primary_role) AS all_roles,
-                ca.portrait_status
+                ca.portrait_status, ca.bio_summary, ca.mbid, ca.apple_artist_id
              FROM canonical_artists ca
              JOIN track_artist_credits tac ON tac.canonical_artist_id = ca.id
              JOIN tracks t ON t.id = tac.track_id
@@ -1864,6 +1867,9 @@ impl DbOperations {
                 tracks_count: row.get(7)?,
                 roles,
                 portrait_status: row.get(9).unwrap_or_else(|_| "pending".to_string()),
+                bio_summary: row.get(10).ok(),
+                mbid: row.get(11).ok(),
+                apple_artist_id: row.get(12).ok(),
             })
         })?;
 
@@ -2402,7 +2408,8 @@ impl DbOperations {
                 "SELECT a.id, a.name, a.sort_name, a.portrait_url, a.portrait_status, a.primary_role,
                         a.era_active,
                         COUNT(DISTINCT t.release_id) as albums_count,
-                        COUNT(DISTINCT tac.track_id) as tracks_count
+                        COUNT(DISTINCT tac.track_id) as tracks_count,
+                        a.bio_summary, a.mbid, a.apple_artist_id
                  FROM canonical_artists a
                  LEFT JOIN track_artist_credits tac ON tac.canonical_artist_id = a.id
                  LEFT JOIN tracks t ON t.id = tac.track_id
@@ -2423,6 +2430,9 @@ impl DbOperations {
                     albums_count: row.get(7)?,
                     tracks_count: row.get(8)?,
                     roles: vec![row.get(5)?],
+                    bio_summary: row.get(9).ok(),
+                    mbid: row.get(10).ok(),
+                    apple_artist_id: row.get(11).ok(),
                 })
             })?;
             for a in rows.flatten() {

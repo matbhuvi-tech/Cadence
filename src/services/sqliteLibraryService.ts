@@ -178,7 +178,18 @@ export function parseAudioSpecsFromString(
 }
 
 export class SqliteLibraryService {
-  private canonicalArtistsMetadataCache = new Map<string, { portraitUrl?: string; portraitStatus?: any; eraActive?: string }>()
+  private canonicalArtistsMetadataCache = new Map<
+    string,
+    {
+      portraitUrl?: string
+      portraitStatus?: any
+      eraActive?: string
+      bioSummary?: string
+      primaryRole?: string
+      mbid?: string
+      appleArtistId?: string
+    }
+  >()
   private unlistenProgress: UnlistenFn | null = null
   private unlistenChunk: UnlistenFn | null = null
   private unlistenComplete: UnlistenFn | null = null
@@ -1260,10 +1271,16 @@ export class SqliteLibraryService {
           raw.forEach((a: any) => {
             const key = (a.name || '').trim().toLowerCase()
             if (key) {
+              const existing = this.canonicalArtistsMetadataCache.get(key) || {}
               this.canonicalArtistsMetadataCache.set(key, {
-                portraitUrl: a.portraitUrl || a.portrait_url,
-                portraitStatus: (a.portraitStatus || a.portrait_status || 'pending') as any,
-                eraActive: a.eraActive || a.era_active,
+                ...existing,
+                portraitUrl: a.portraitUrl || a.portrait_url || existing.portraitUrl,
+                portraitStatus: (a.portraitStatus || a.portrait_status || existing.portraitStatus || 'pending') as any,
+                eraActive: a.eraActive || a.era_active || existing.eraActive,
+                bioSummary: a.bioSummary || a.bio_summary || existing.bioSummary,
+                primaryRole: a.primaryRole || a.primary_role || existing.primaryRole,
+                mbid: a.mbid || existing.mbid,
+                appleArtistId: a.appleArtistId || a.apple_artist_id || existing.appleArtistId,
               })
             }
           })
@@ -1384,8 +1401,11 @@ export class SqliteLibraryService {
           name: summary.name,
           portraitUrl: cached?.portraitUrl || summary.portraitUrl,
           portraitStatus: (cached?.portraitStatus || summary.portraitStatus) as any,
-          primaryRole: summary.primaryRole,
+          primaryRole: cached?.primaryRole || summary.primaryRole,
           eraActive: cached?.eraActive || summary.eraActive,
+          bioSummary: cached?.bioSummary,
+          mbid: cached?.mbid,
+          appleArtistId: cached?.appleArtistId,
           createdAt: new Date().toISOString(),
         },
         albumsCount: groupedMatching.length,
@@ -1500,11 +1520,17 @@ export class SqliteLibraryService {
   public async setArtistPortrait(
     artistId: string,
     portraitUrl: string,
-    status: string = 'enriched'
+    status: string = 'enriched',
+    artistName?: string
   ): Promise<void> {
-    const key = artistId.toLowerCase()
-    const existing = this.canonicalArtistsMetadataCache.get(key) || {}
-    this.canonicalArtistsMetadataCache.set(key, { ...existing, portraitUrl, portraitStatus: status as any })
+    const keys = [artistId.toLowerCase()]
+    if (artistName) {
+      keys.push(artistName.trim().toLowerCase())
+    }
+    for (const key of keys) {
+      const existing = this.canonicalArtistsMetadataCache.get(key) || {}
+      this.canonicalArtistsMetadataCache.set(key, { ...existing, portraitUrl, portraitStatus: status as any })
+    }
     if (tauriBridge.isTauri()) {
       await tauriBridge.dbSetArtistPortrait(artistId, portraitUrl, status)
     }
@@ -1646,9 +1672,29 @@ export class SqliteLibraryService {
 
   public async updateArtistEditorialProfile(
     artistId: string,
-    payload: UpdateArtistEditorialPayload
+    payload: UpdateArtistEditorialPayload,
+    artistName?: string
   ): Promise<void> {
-    await tauriBridge.updateCanonicalArtistEditorial(artistId, payload)
+    const keys = [artistId.toLowerCase()]
+    if (artistName) {
+      keys.push(artistName.trim().toLowerCase())
+    }
+    for (const key of keys) {
+      const existing = this.canonicalArtistsMetadataCache.get(key) || {}
+      this.canonicalArtistsMetadataCache.set(key, {
+        ...existing,
+        portraitUrl: payload.portraitUrl !== undefined ? payload.portraitUrl : existing.portraitUrl,
+        portraitStatus: payload.portraitUrl !== undefined ? ('enriched' as any) : existing.portraitStatus,
+        eraActive: payload.eraActive !== undefined ? payload.eraActive : existing.eraActive,
+        bioSummary: payload.bioSummary !== undefined ? payload.bioSummary : existing.bioSummary,
+        primaryRole: payload.primaryRole !== undefined ? payload.primaryRole : existing.primaryRole,
+        mbid: payload.mbid !== undefined ? payload.mbid : existing.mbid,
+        appleArtistId: payload.appleArtistId !== undefined ? payload.appleArtistId : existing.appleArtistId,
+      })
+    }
+    if (tauriBridge.isTauri()) {
+      await tauriBridge.updateCanonicalArtistEditorial(artistId, payload)
+    }
   }
 
   public cleanupListeners(): void {

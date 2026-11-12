@@ -12,6 +12,8 @@ import {
   Sparkles,
   SlidersHorizontal,
   Lock,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import {
@@ -114,6 +116,7 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
   const [customPortraitUrl, setCustomPortraitUrl] = useState('')
   const [queuedPortraitNotification, setQueuedPortraitNotification] = useState<string | null>(null)
   const [isEnrichingEditorial, setIsEnrichingEditorial] = useState(false)
+  const [isBioExpanded, setIsBioExpanded] = useState(false)
 
   // Ambient Hardware Telemetry: Curation state subscription
   const [curationState, setCurationState] = useState(ambientCurationService.getState())
@@ -177,11 +180,13 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
   useEffect(() => {
     if (!selectedArtistId) {
       setArtistDetail(null)
+      setIsBioExpanded(false)
       return
     }
 
     let isMounted = true
     setIsLoadingDetail(true)
+    setIsBioExpanded(false)
     setDetailRoleTab('all')
 
     sqliteLibraryService
@@ -288,7 +293,12 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
       }, 1400)
     } else {
       try {
-        await sqliteLibraryService.setArtistPortrait(artistDetail.artist.id, url, 'enriched')
+        await sqliteLibraryService.setArtistPortrait(
+          artistDetail.artist.id,
+          url,
+          'enriched',
+          artistDetail.artist.name
+        )
       } catch (err) {
         console.warn('[ArtistsView] Failed to persist portrait to SQLite:', err)
       }
@@ -307,16 +317,29 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
       )
 
       if (profile) {
+        const editorialPayload = {
+          bioSummary: profile.bioSummary,
+          eraActive: profile.eraActive,
+          primaryRole: profile.primaryRole,
+          mbid: profile.mbid,
+          appleArtistId: profile.appleArtistId,
+          portraitUrl: profile.portraitUrl,
+        }
+
         const isAudioPlaying = Boolean(playbackState?.isPlaying)
         if (!isAudioPlaying) {
-          await sqliteLibraryService.updateArtistEditorialProfile(artistDetail.artist.id, {
-            bioSummary: profile.bioSummary,
-            eraActive: profile.eraActive,
-            primaryRole: profile.primaryRole,
-            mbid: profile.mbid,
-            appleArtistId: profile.appleArtistId,
-            portraitUrl: profile.portraitUrl,
-          })
+          await sqliteLibraryService.updateArtistEditorialProfile(
+            artistDetail.artist.id,
+            editorialPayload,
+            artistDetail.artist.name
+          )
+        } else {
+          // Playback is active: update the in-memory cache immediately so navigation doesn't drop it
+          await sqliteLibraryService.updateArtistEditorialProfile(
+            artistDetail.artist.id,
+            editorialPayload,
+            artistDetail.artist.name
+          ).catch((e) => console.warn('[ArtistsView] Deferred editorial write warning:', e))
         }
 
         setArtistDetail((prev) =>
@@ -490,9 +513,28 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
             </div>
 
             {artist.bioSummary && (
-              <p className="text-xs text-[#A1A1AA] max-w-2xl leading-relaxed mb-6 line-clamp-3">
-                {artist.bioSummary}
-              </p>
+              <div className="max-w-2xl mb-6">
+                <p
+                  className={`text-xs text-[#A1A1AA] leading-relaxed transition-all ${
+                    isBioExpanded ? '' : 'line-clamp-3'
+                  }`}
+                >
+                  {artist.bioSummary}
+                </p>
+                {artist.bioSummary.length > 180 && (
+                  <button
+                    onClick={() => setIsBioExpanded(!isBioExpanded)}
+                    className="inline-flex items-center gap-1 mt-1.5 text-[11px] font-medium text-[#D4AF37] hover:text-[#E5C158] transition-colors cursor-pointer select-none"
+                  >
+                    <span>{isBioExpanded ? 'Show less' : 'Read more'}</span>
+                    {isBioExpanded ? (
+                      <ChevronUp className="w-3 h-3" />
+                    ) : (
+                      <ChevronDown className="w-3 h-3" />
+                    )}
+                  </button>
+                )}
+              </div>
             )}
 
             {/* Hero Quick Action Buttons */}
