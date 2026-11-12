@@ -10,6 +10,7 @@ Houses Tauri IPC command handler modules exposed to the frontend TypeScript laye
 - `gemini_config.rs`: Handlers for DPAPI secure key storage and AI musicologist queries (`get_gemini_config`, `save_gemini_api_key`, `gemini_resolve`).
 - `library.rs`: Handlers for library queries, track/release/artist fetches, canonical artist editorial updates (`db_update_canonical_artist_editorial`), and commit queue inspection.
 - `maintenance.rs`: Handlers for running background maintenance tasks, fetching stats, and artist portrait sync.
+- `metadata_providers.rs`: Native HTTP handlers for Apple iTunes and MusicBrainz metadata searches (`search_itunes_metadata`, `search_musicbrainz_metadata`, `cancel_provider_request`) used in packaged desktop builds.
 - `remote.rs`: Handlers for launching, querying, and stopping the mobile PWA remote HTTP and WebSocket server (`get_remote_server_info`, `get_remote_pairing_token`, `regenerate_remote_token`).
 - `scanner.rs`: Handlers for starting directory scans, monitoring progress, and handling cancellations.
 

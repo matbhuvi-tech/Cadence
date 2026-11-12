@@ -1126,13 +1126,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       const appleId = linkedAppleId ?? savedAppleId
       if (appleId) {
         onProgress({ phase: 'querying_apple', message: 'Fetching the Apple release and tracklist…', elapsedMs: 0 })
-        directAppleCandidate = await federatedResolversService.fetchItunesAlbumCandidate({
-          sanitizedTitle: localRelease.title,
-          sanitizedArtist: localRelease.artistCredit || '',
-          trackCount: selectedAlbum.rawTracks.length,
-        }, record, signal, 1, { appleReleaseId: appleId })
+        try {
+          directAppleCandidate = await federatedResolversService.fetchItunesAlbumCandidate({
+            sanitizedTitle: localRelease.title,
+            sanitizedArtist: localRelease.artistCredit || '',
+            trackCount: selectedAlbum.rawTracks.length,
+          }, record, signal, 1, { appleReleaseId: appleId })
+        } catch (appleErr) {
+          signal.throwIfAborted()
+          if (linkedAppleId && !aiMasterResult) throw appleErr
+        }
         signal.throwIfAborted()
-        if (!directAppleCandidate) throw new Error('Apple could not find the linked release.')
+        if (linkedAppleId && !directAppleCandidate && !aiMasterResult) {
+          throw new Error('Apple could not find the linked release.')
+        }
       }
 
       // 3. Build steered release for federated provider resolution
@@ -1154,7 +1161,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           onProgress,
           signal,
           record,
-          appleId ? 0 : CURATE_REFRESH_PROVIDER_BUDGET / 2,
+          directAppleCandidate ? 0 : CURATE_REFRESH_PROVIDER_BUDGET / 2,
           CURATE_REFRESH_PROVIDER_BUDGET / 2 - Number(useWikipedia || useAi),
           true,
         )

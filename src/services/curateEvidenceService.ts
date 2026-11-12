@@ -58,6 +58,7 @@ export async function fetchCurateCandidate<T>(
     : timeout ?? signal ?? new AbortController().signal
   let outcome: CurateProviderAttempt['outcome'] = 'network_error'
   let httpStatus: number | undefined
+  let errorMessage: string | undefined
   let summary: CurateProviderAttempt['candidate']
   try {
     requestSignal.throwIfAborted()
@@ -65,8 +66,12 @@ export async function fetchCurateCandidate<T>(
     httpStatus = response.status
     if (!response.ok) {
       outcome = 'http_error'
+      const details = await response.json().catch(() => null)
+      const message = typeof details?.message === 'string' && details.message.trim()
+        ? details.message.trim()
+        : `Request failed (HTTP ${response.status}).`
+      errorMessage = message.slice(0, 500)
       if (options?.requireResponse && response.status !== 404) {
-        const details = await response.json().catch(() => null)
         throw new Error(typeof details?.message === 'string'
           ? details.message : `Apple evidence request failed (HTTP ${response.status}).`)
       }
@@ -78,13 +83,16 @@ export async function fetchCurateCandidate<T>(
     if (candidate !== null) summary = summarize?.(candidate)
     return candidate
   } catch (error) {
+    if (!errorMessage) {
+      errorMessage = (error instanceof Error ? error.message : String(error)).slice(0, 500)
+    }
     if (signal?.aborted) outcome = 'cancelled'
     else if (timeout?.aborted) outcome = 'timeout'
     if (options?.requireResponse && !signal?.aborted) throw error
     return null
   } finally {
     record?.({
-      provider, query, startedAt, httpStatus, outcome, candidate: summary,
+      provider, query, startedAt, httpStatus, outcome, errorMessage, candidate: summary,
       completedAt: new Date().toISOString(),
       durationMs: Math.round(performance.now() - started),
     })

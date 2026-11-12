@@ -1,6 +1,17 @@
 # Issue Log
 
-## Issue #20 — Refactor storage manager modal and Left Rail storage entry: remove SQLite jargon and fix sidebar label
+## GitHub #31: Apple & MusicBrainz return parse_error in packaged desktop builds and discard successful Gemini AI results
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/31
+- **Reported:** Curate Steer Providers refresh shows `Apple · parse error (3 ms · HTTP 200)` and `MusicBrainz · parse error (3 ms · HTTP 200)`, marks the run `failed`, and leaves `Gemini AI Master` at `—` despite `Gemini AI · success`.
+- **Cause:**
+  1. `fetchItunesAlbumCandidate` and `fetchMusicBrainzReleaseCandidate` called `/api/itunes-search` and `/api/musicbrainz-search`, which exist only as Vite dev-server middleware; in packaged Tauri builds, the app origin returns `index.html` (HTTP 200) in ~3 ms, causing `response.json()` to throw `SyntaxError`.
+  2. `resolve2of3ReleaseConsensus(..., refresh = true)` passed `requireResponse: true` on Apple and re-threw `apple.reason` unconditionally, discarding `aiMasterResult` before `setAlbumItems` could apply it.
+- **Fix:**
+  1. Added native Tauri commands `search_itunes_metadata`, `search_musicbrainz_metadata`, and `cancel_provider_request` in `src-tauri/src/commands/metadata_providers.rs`, routed via `fetchProviderEndpoint` when `tauriBridge.isTauri()` is true.
+  2. Updated `resolve2of3ReleaseConsensus` and `UnifiedCurateCockpit.tsx` to preserve available Gemini AI / peer-provider results when one provider fails, while still failing when all remote sources fail.
+  3. Recorded `errorMessage` on failed provider attempts in `fetchCurateCandidate`.
+- **Status:** Implemented on `fix/31-curate-desktop-providers`; pending user verification.
 
 - **Reproduction:** In the main desktop window, the Left Rail sidebar under "STORAGE MOUNTS" renders a button with the arbitrary first mount name ("Drive E: [4]"). Clicking it unexpectedly opens a global modal titled "Library & Storage Management" which controls all mounts and watched folders. In that modal, the telemetry bar displays internal SQLite details ("Native SQLite WAL Active"), the body has a static educational banner ("Non-Destructive Library Integrity Guarantee"), and the footer shows the raw file path "Database location: %APPDATA%/com.cadence.core/cadence.db".
 - **Resolution:**

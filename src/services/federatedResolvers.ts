@@ -243,6 +243,33 @@ export class FederatedResolversService {
     return 'http://127.0.0.1:5173'
   }
 
+  private async fetchProviderEndpoint(
+    command: 'search_itunes_metadata' | 'search_musicbrainz_metadata',
+    params: Record<string, unknown>,
+    fallbackUrl: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    if (!tauriBridge.isTauri()) {
+      return fetch(fallbackUrl, { signal })
+    }
+    signal?.throwIfAborted()
+    const requestId = signal ? globalThis.crypto.randomUUID() : undefined
+    const cancel = () => {
+      if (requestId) void invoke('cancel_provider_request', { requestId }).catch(() => {})
+    }
+    signal?.addEventListener('abort', cancel, { once: true })
+    try {
+      const res = await invoke<{ status: number; body: unknown }>(command, { params, requestId })
+      signal?.throwIfAborted()
+      return new Response(JSON.stringify(res.body ?? {}), {
+        status: typeof res.status === 'number' ? res.status : 502,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    } finally {
+      signal?.removeEventListener('abort', cancel)
+    }
+  }
+
   /**
    * Fetches real candidate from Apple iTunes Search API with fuzzy search fallback.
    */
@@ -255,7 +282,11 @@ export class FederatedResolversService {
       const url = `${this.getBaseUrl()}/api/itunes-search?artist=${encodeURIComponent(
         artist
       )}&title=${encodeURIComponent(title)}&album=${encodeURIComponent(album || '')}`
-      const res = await fetch(url)
+      const res = await this.fetchProviderEndpoint(
+        'search_itunes_metadata',
+        { artist, title, album: album || '' },
+        url,
+      )
       if (!res.ok) return null
       const data = await res.json()
       if (!data.success) return null
@@ -297,7 +328,11 @@ export class FederatedResolversService {
       )}&title=${encodeURIComponent(title)}&album=${encodeURIComponent(album || '')}&trackNum=${encodeURIComponent(
         trackNumber || 0
       )}`
-      const res = await fetch(url)
+      const res = await this.fetchProviderEndpoint(
+        'search_musicbrainz_metadata',
+        { artist, title, album: album || '', trackNum: trackNumber || 0 },
+        url,
+      )
       if (!res.ok) return null
       const data = await res.json()
       if (!data.success) return null
@@ -1259,6 +1294,21 @@ export class FederatedResolversService {
         signature.sanitizedTitle
       )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&composer=${encodeURIComponent(signature.sanitizedComposer || '')}${maxRequests ? `&maxRequests=${maxRequests}` : ''}${refresh ? '&refresh=1' : ''}`
     const request = (requestSignal: AbortSignal) => {
+      if (tauriBridge.isTauri()) {
+        return this.fetchProviderEndpoint(
+          'search_itunes_metadata',
+          {
+            album: signature.sanitizedTitle,
+            artist: signature.sanitizedArtist,
+            composer: signature.sanitizedComposer || '',
+            maxRequests,
+            refresh: Boolean(refresh),
+            releaseId,
+          },
+          url,
+          requestSignal,
+        )
+      }
       if (!releaseId) return fetch(url, { signal: requestSignal })
       const id = encodeURIComponent(releaseId)
       // The proxy can read Apple's Retry-After even when CORS hides it from the browser.
@@ -1325,7 +1375,17 @@ export class FederatedResolversService {
       const url = `${this.getBaseUrl()}/api/musicbrainz-search?album=${encodeURIComponent(
           signature.sanitizedTitle
         )}&artist=${encodeURIComponent(signature.sanitizedArtist)}&trackNum=1${maxRequests ? `&maxRequests=${maxRequests}` : ''}`
-      return fetchCurateCandidate('musicbrainz', signature.sanitizedTitle, signal => fetch(url, { signal }), data => {
+      return fetchCurateCandidate('musicbrainz', signature.sanitizedTitle, requestSignal => this.fetchProviderEndpoint(
+        'search_musicbrainz_metadata',
+        {
+          album: signature.sanitizedTitle,
+          artist: signature.sanitizedArtist,
+          trackNum: 1,
+          maxRequests,
+        },
+        url,
+        requestSignal,
+      ), data => {
         if (!data.success) return null
 
         return normalizationService.applyToCandidate<ProviderResult>({
@@ -1526,10 +1586,13 @@ export class FederatedResolversService {
         isPrefetch ? undefined : musicbrainzRequests, refresh ? 55_000 : undefined),
     ])
     abortSignal?.throwIfAborted()
-    if (apple.status === 'rejected') throw apple.reason
-    if (musicbrainz.status === 'rejected') throw musicbrainz.reason
-    const rawItunes = apple.value
-    const rawMb = musicbrainz.value
+    const appleError = apple.status === 'rejected' ? apple.reason : null
+    const mbError = musicbrainz.status === 'rejected' ? musicbrainz.reason : null
+    const rawItunes = apple.status === 'fulfilled' ? apple.value : null
+    const rawMb = musicbrainz.status === 'fulfilled' ? musicbrainz.value : null
+    if ((appleError || mbError) && !rawItunes && !rawMb && !aiMaster) {
+      throw appleError ?? mbError
+    }
 
     const itunesVerified = directAppleCandidate ? true : this.isProviderCandidateAcceptable(signature, rawItunes, localRelease.releaseYear)
     const mbVerified = this.isProviderCandidateAcceptable(signature, rawMb, localRelease.releaseYear)
@@ -2157,9 +2220,16 @@ export class FederatedResolversService {
     if (appliedCount > 0) {
       outcomeStatus = 'matched_applied'
       headlineSummary = `Matched and staged ${appliedCount} field${appliedCount > 1 ? 's' : ''} from provider consensus with ${Math.round(overallConfidence * 100)}% confidence.`
-    } else if (candidateTelemetry.length === 0 || (!itunesVerified && !mbVerified && !aiMaster)) {
+    } else if ((candidateTelemetry.length === 0 && !aiMaster) || (!itunesVerified && !mbVerified && !aiMaster)) {
       outcomeStatus = 'incomplete'
       headlineSummary = 'Evaluation incomplete: no remote candidate passed verification gates.'
+    }
+    const partialErrors = [
+      appleError ? `Apple (${appleError instanceof Error ? appleError.message : String(appleError)})` : null,
+      mbError ? `MusicBrainz (${mbError instanceof Error ? mbError.message : String(mbError)})` : null,
+    ].filter(Boolean)
+    if (partialErrors.length > 0) {
+      headlineSummary += ` Partial failure: ${partialErrors.join('; ')}.`
     }
 
     const decisionTrace: CurationDecisionTrace = {
@@ -2327,7 +2397,12 @@ export class FederatedResolversService {
       // 3. Apple iTunes Artist portrait lookup
       try {
         const itunesUrl = `${this.getBaseUrl()}/api/itunes-search?artist=${encodeURIComponent(cleanName)}&title=${encodeURIComponent(cleanName)}`
-        const itunesRes = await fetch(itunesUrl, { signal: AbortSignal.timeout(4000) })
+        const itunesRes = await this.fetchProviderEndpoint(
+          'search_itunes_metadata',
+          { artist: cleanName, title: cleanName },
+          itunesUrl,
+          AbortSignal.timeout(4000),
+        )
         if (itunesRes.ok) {
           const itunesData = await itunesRes.json()
           if (itunesData.coverArtUrl) {

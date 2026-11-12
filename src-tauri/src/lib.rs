@@ -15,6 +15,7 @@ use commands::diagnostics::*;
 use commands::gemini_config::*;
 use commands::library::*;
 use commands::maintenance::*;
+use commands::metadata_providers::*;
 use commands::remote::*;
 use commands::scanner::*;
 use db::AppDb;
@@ -212,6 +213,9 @@ pub fn run() {
             cancel_gemini_request,
             get_gemini_quota,
             search_artist_portraits,
+            search_itunes_metadata,
+            search_musicbrainz_metadata,
+            cancel_provider_request,
             play_track,
             pause_audio,
             resume_audio,
