@@ -6,12 +6,16 @@ interface TopHeaderProps {
   status: PlaybackStatus;
   isConnected: boolean;
   isConnecting: boolean;
+  serverLabel?: string;
+  onOpenDiagnostics?: () => void;
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
   status,
   isConnected,
   isConnecting,
+  serverLabel,
+  onOpenDiagnostics,
 }) => {
   const stream = status.streamInfo;
 
@@ -50,17 +54,23 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             {isConnected ? (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-[10px] text-emerald-400 font-medium">CONNECTED</span>
+                <span className="text-[10px] text-emerald-400 font-medium truncate max-w-[130px]">
+                  {serverLabel ? `CONNECTED • ${serverLabel}` : 'CONNECTED'}
+                </span>
               </>
             ) : isConnecting ? (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
-                <span className="text-[10px] text-amber-400 font-medium">SYNCING...</span>
+                <span className="text-[10px] text-amber-400 font-medium truncate max-w-[130px]">
+                  SYNCING...
+                </span>
               </>
             ) : (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                <span className="text-[10px] text-rose-400 font-medium">OFFLINE</span>
+                <span className="text-[10px] text-rose-400 font-medium truncate max-w-[130px]">
+                  {serverLabel ? `OFFLINE • ${serverLabel}` : 'OFFLINE'}
+                </span>
               </>
             )}
           </div>
@@ -68,7 +78,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
       </div>
 
       {/* Audiophile Transport Badge */}
-      <div className="flex items-center space-x-2">
+      <div className="flex items-center space-x-1.5">
         <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-zinc-900/80 border border-amber-500/30 text-[#D4AF37]">
           <ShieldCheck className="w-3.5 h-3.5" />
           <span className="text-[11px] font-mono font-semibold tracking-wide">
@@ -76,13 +86,18 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           </span>
         </div>
 
-        <div className="p-1.5 text-zinc-400">
+        <button
+          type="button"
+          onClick={onOpenDiagnostics}
+          aria-label="Open connection status and diagnostics"
+          className="min-w-[44px] min-h-[44px] -mr-2 rounded-xl flex items-center justify-center text-zinc-400 hover:bg-zinc-900 active:scale-95 transition-transform"
+        >
           {isConnected ? (
             <Wifi className="w-4 h-4 text-emerald-400" />
           ) : (
             <WifiOff className="w-4 h-4 text-rose-400" />
           )}
-        </div>
+        </button>
       </div>
     </header>
   );

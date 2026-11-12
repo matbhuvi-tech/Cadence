@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
-import { QrCode, RefreshCw, AlertTriangle, Speaker } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import type { PluginListenerHandle } from '@capacitor/core';
+import { RefreshCw, AlertTriangle, Speaker } from 'lucide-react';
 import { useRemoteSocket } from './hooks/useRemoteSocket';
 import { useMediaSession } from './hooks/useMediaSession';
 import { TopHeader } from './components/Navigation/TopHeader';
@@ -8,6 +9,9 @@ import { MiniPlayer } from './components/Navigation/MiniPlayer';
 import { NowPlayingView } from './components/NowPlaying/NowPlayingView';
 import { CatalogView } from './components/Catalog/CatalogView';
 import { QueueView } from './components/Queue/QueueView';
+import { PairingView } from './components/Connection/PairingView';
+import { DiagnosticsSheet } from './components/Connection/DiagnosticsSheet';
+import { CapApp, isNativeAndroid } from './platform/cadenceBridge';
 
 interface ToastState {
   id: number;
@@ -18,15 +22,39 @@ interface ToastState {
 export function App() {
   const [activeTab, setActiveTab] = useState<TabId>('catalog');
   const [isNowPlayingOpen, setIsNowPlayingOpen] = useState<boolean>(false);
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState<boolean>(false);
+  const [showSwitchingPairing, setShowSwitchingPairing] = useState<boolean>(false);
   const [toast, setToast] = useState<ToastState | null>(null);
 
+  const isNowPlayingOpenRef = useRef(isNowPlayingOpen);
+  const isDiagnosticsOpenRef = useRef(isDiagnosticsOpen);
+  const showSwitchingPairingRef = useRef(showSwitchingPairing);
+
+  useEffect(() => {
+    isNowPlayingOpenRef.current = isNowPlayingOpen;
+    isDiagnosticsOpenRef.current = isDiagnosticsOpen;
+    showSwitchingPairingRef.current = showSwitchingPairing;
+  }, [isNowPlayingOpen, isDiagnosticsOpen, showSwitchingPairing]);
+
   const {
+    activeProfile,
+    baseUrl,
     token,
+    setToken,
+    selectServerProfile,
+    clearServerProfile,
+    trustObservedCertificate,
+    lockScreenControls,
+    setLockScreenControls,
     status,
     queue,
     isConnected,
     isConnecting,
     error,
+    connectionDiagnostic,
+    runDiagnostics,
+    probeAlternateEndpoints,
+    retryConnection,
     outputDevices,
     isLoadingDevices,
     isChangingDevice,
@@ -37,7 +65,6 @@ export function App() {
     setDeviceUnavailableEvent,
     refreshOutputDevices,
     changeOutputDevice,
-    connect,
     playPause,
     nextTrack,
     prevTrack,
@@ -54,15 +81,52 @@ export function App() {
     clearQueue,
   } = useRemoteSocket();
 
-  // Android Chrome MediaSession Background / Lock-screen Controls
+  // Browser fallback MediaSession (no-op on native Android where CadenceMediaService handles lock screen)
   useMediaSession({
     status,
     token,
+    baseUrl,
     onPlayPause: playPause,
     onNextTrack: nextTrack,
     onPrevTrack: prevTrack,
     onSeek: seek,
   });
+
+  // Android hardware Back button integration for overlays & sheets
+  useEffect(() => {
+    if (!isNativeAndroid()) return;
+    let handle: PluginListenerHandle | null = null;
+    let mounted = true;
+    void CapApp.addListener('backButton', ({ canGoBack }) => {
+      if (showSwitchingPairingRef.current) {
+        setShowSwitchingPairing(false);
+      } else if (isDiagnosticsOpenRef.current) {
+        setIsDiagnosticsOpen(false);
+      } else if (isNowPlayingOpenRef.current) {
+        if (window.history.state?.modal === 'now-playing') {
+          window.history.back();
+        } else {
+          setIsNowPlayingOpen(false);
+        }
+      } else if (canGoBack) {
+        window.history.back();
+      } else {
+        void CapApp.exitApp();
+      }
+    }).then((h) => {
+      if (!mounted) {
+        void h.remove();
+      } else {
+        handle = h;
+      }
+    });
+    return () => {
+      mounted = false;
+      if (handle) {
+        void handle.remove();
+      }
+    };
+  }, []);
 
   // Auto-dismiss toast after 4.5 seconds
   useEffect(() => {
@@ -81,30 +145,16 @@ export function App() {
     });
   };
 
-  // Pairing prompt if no token exists
-  if (!token) {
+  // Pairing / Desktop Discovery Screen when unpaired or switching servers
+  if (!activeProfile || showSwitchingPairing) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center p-6 text-center bg-[#0D0E11] text-zinc-100">
-        <div className="w-16 h-16 rounded-3xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-[#D4AF37] mb-4 shadow-xl">
-          <QrCode className="w-8 h-8" />
-        </div>
-        <h1 className="text-xl font-bold tracking-tight mb-2">Cadence Mobile Remote</h1>
-        <p className="text-xs text-zinc-400 max-w-xs mb-6 leading-relaxed">
-          To connect to your bit-perfect audio engine, scan the QR code displayed in Cadence on your desktop.
-        </p>
-        <button
-          onClick={() => {
-            const prompted = window.prompt('Or paste your Cadence Remote token:');
-            if (prompted && prompted.trim()) {
-              localStorage.setItem('cadence_token', prompted.trim());
-              window.location.reload();
-            }
-          }}
-          className="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-[#D4AF37] hover:bg-zinc-800 active:scale-95 transition-all"
-        >
-          Enter Token Manually
-        </button>
-      </div>
+      <PairingView
+        onPaired={(profile) => {
+          selectServerProfile(profile);
+          setShowSwitchingPairing(false);
+        }}
+        onCancel={activeProfile ? () => setShowSwitchingPairing(false) : undefined}
+      />
     );
   }
 
@@ -115,19 +165,37 @@ export function App() {
         status={status}
         isConnected={isConnected}
         isConnecting={isConnecting}
+        serverLabel={activeProfile.label}
+        onOpenDiagnostics={() => setIsDiagnosticsOpen(true)}
       />
 
-      {/* Network / Offline Notice Banner if disconnected */}
+      {/* Network / Offline Notice Banner with Diagnostics & Retry */}
       {error && !isConnected && (
-        <div className="bg-rose-950/40 border-b border-rose-900/60 px-4 py-1.5 flex items-center justify-between text-xs text-rose-300 shrink-0">
-          <span className="truncate">{error}</span>
+        <div className="bg-rose-950/45 border-b border-rose-900/60 px-3 py-1.5 flex items-center justify-between gap-2 text-xs text-rose-200 shrink-0">
           <button
-            onClick={connect}
-            className="flex items-center space-x-1 px-2 py-0.5 rounded bg-rose-900/60 hover:bg-rose-800 text-rose-100 font-medium shrink-0 ml-2"
+            type="button"
+            onClick={() => setIsDiagnosticsOpen(true)}
+            className="min-w-0 flex-1 text-left truncate underline decoration-rose-400/40 underline-offset-2"
           >
-            <RefreshCw className="w-3 h-3" />
-            <span>Retry</span>
+            {connectionDiagnostic?.title || error}
           </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsDiagnosticsOpen(true)}
+              className="px-2.5 py-1 rounded bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200 font-medium"
+            >
+              Details
+            </button>
+            <button
+              type="button"
+              onClick={retryConnection}
+              className="flex items-center space-x-1 px-2.5 py-1 rounded bg-rose-900/70 hover:bg-rose-800 text-rose-100 font-medium"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Retry</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -136,6 +204,7 @@ export function App() {
         {activeTab === 'catalog' && (
           <CatalogView
             token={token}
+            baseUrl={baseUrl}
             activeTrackPath={
               status.isPlaying || status.isPaused ? (status.currentFile ?? null) : null
             }
@@ -209,6 +278,7 @@ export function App() {
           <NowPlayingView
             status={status}
             token={token}
+            baseUrl={baseUrl}
             onClose={() => setIsNowPlayingOpen(false)}
             onPlayPause={playPause}
             onNextTrack={nextTrack}
@@ -226,7 +296,32 @@ export function App() {
         </div>
       )}
 
-      {/* CUJ 11: Hardware Device Disconnection Alert Sheet */}
+      {/* Connection Diagnostics & Android Remote Settings Sheet */}
+      <DiagnosticsSheet
+        isOpen={isDiagnosticsOpen}
+        onClose={() => setIsDiagnosticsOpen(false)}
+        activeProfile={activeProfile}
+        isConnected={isConnected}
+        isConnecting={isConnecting}
+        connectionDiagnostic={connectionDiagnostic}
+        lockScreenControls={lockScreenControls}
+        onToggleLockScreenControls={setLockScreenControls}
+        onRunDiagnostics={runDiagnostics}
+        onProbeAlternateEndpoints={probeAlternateEndpoints}
+        onRetryConnection={retryConnection}
+        onUpdatePin={setToken}
+        onTrustFingerprint={trustObservedCertificate}
+        onSwitchDesktop={() => {
+          setIsDiagnosticsOpen(false);
+          setShowSwitchingPairing(true);
+        }}
+        onDisconnectDesktop={() => {
+          setIsDiagnosticsOpen(false);
+          clearServerProfile();
+        }}
+      />
+
+      {/* Hardware Device Disconnection Alert Sheet */}
       {deviceUnavailableEvent && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-[#14161C] border border-zinc-800 rounded-3xl p-5 w-full max-w-sm flex flex-col gap-4 shadow-2xl">

@@ -78,7 +78,17 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
   const activePort = status?.port || 4040
   const activeToken = status?.pairingToken || ''
   const hasValidIp = lifecycle === 'verified' && Boolean(selectedIp) && selectedIp !== '127.0.0.1'
-  const pairingUrl = hasValidIp ? `https://${selectedIp}:${activePort}/?token=${activeToken}` : ''
+  const pairingUrl = (() => {
+    if (!hasValidIp) return ''
+    const params = new URLSearchParams({ token: activeToken })
+    if (status?.mDnsHost) params.set('mdns', status.mDnsHost)
+    if (status?.certFingerprint) params.set('fp', status.certFingerprint)
+    const otherIps = (status?.interfaces || [])
+      .map((i) => i.ip)
+      .filter((ip) => ip && ip !== selectedIp)
+    if (otherIps.length > 0) params.set('ips', otherIps.join(','))
+    return `https://${selectedIp}:${activePort}/?${params.toString()}`
+  })()
   const mDnsUrl = status?.mDnsHost && hasValidIp
     ? `https://${status.mDnsHost}:${activePort}/?token=${activeToken}`
     : ''

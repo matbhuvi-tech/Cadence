@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Search, Disc3, RefreshCw } from 'lucide-react';
 import type { DbRelease } from '../../types/remote';
 import { fetchReleases, getArtworkUrl } from '../../services/api';
+import { buildProfileCacheKey } from '../../services/serverProfiles';
 import { FacetShelf, CatalogFilter } from './FacetShelf';
 import { AlbumModal } from './AlbumModal';
 
@@ -9,6 +10,7 @@ const releaseCache = new Map<string, DbRelease[]>();
 
 interface CatalogViewProps {
   token: string;
+  baseUrl?: string;
   activeTrackPath?: string | null;
   isPlaybackPlaying?: boolean;
   onPlayRelease: (releaseId: string) => Promise<boolean> | boolean | void;
@@ -21,6 +23,7 @@ interface CatalogViewProps {
 
 export const CatalogView: React.FC<CatalogViewProps> = ({
   token,
+  baseUrl,
   activeTrackPath = null,
   isPlaybackPlaying = false,
   onPlayRelease,
@@ -30,7 +33,8 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   onQueueTrack,
   onTriggerToast,
 }) => {
-  const [releases, setReleases] = useState<DbRelease[]>(() => releaseCache.get(token) ?? []);
+  const cacheKey = buildProfileCacheKey(baseUrl || '', token);
+  const [releases, setReleases] = useState<DbRelease[]>(() => releaseCache.get(cacheKey) ?? []);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filter, setFilter] = useState<CatalogFilter>('all');
@@ -38,7 +42,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadData = (force = false) => {
-    const cached = releaseCache.get(token);
+    const cached = releaseCache.get(cacheKey);
     if (!force && cached) {
       setReleases(cached);
       setLoading(false);
@@ -46,9 +50,9 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
     }
     setLoading(true);
     setLoadError(null);
-    fetchReleases(token, 2000, 0)
+    fetchReleases(token, 2000, 0, baseUrl)
       .then((data) => {
-        releaseCache.set(token, data);
+        releaseCache.set(cacheKey, data);
         setReleases(data);
         setLoading(false);
       })
@@ -60,8 +64,9 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   };
 
   useEffect(() => {
+    setSelectedRelease(null);
     loadData();
-  }, [token]);
+  }, [cacheKey]);
 
   // Filter and search
   const filteredReleases = useMemo(() => {
@@ -155,7 +160,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {filteredReleases.map((release) => {
-              const artUrl = getArtworkUrl(release.id, token);
+              const artUrl = getArtworkUrl(release.id, token, baseUrl);
               const versionCount = release.versions ? release.versions.length : 0;
               return (
                 <div
@@ -210,6 +215,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
       <AlbumModal
         release={selectedRelease}
         token={token}
+        baseUrl={baseUrl}
         activeTrackPath={activeTrackPath}
         isPlaybackPlaying={isPlaybackPlaying}
         onClose={() => setSelectedRelease(null)}

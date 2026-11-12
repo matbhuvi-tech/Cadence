@@ -831,9 +831,10 @@ class TauriBridgeService {
       computerName: 'CADENCE-DEV',
       mDnsHost: 'cadence-dev.local',
       pairingToken: '4242',
+      certFingerprint: '',
       interfaces: [{ name: 'Wi-Fi', ip: '192.168.1.100', isRecommended: true }],
       connectedClients: 0,
-      qrUrl: 'http://192.168.1.100:4040/?token=4242',
+      qrUrl: 'https://192.168.1.100:4040/?token=4242&mdns=cadence-dev.local',
     }
   }
 
@@ -1631,6 +1632,7 @@ export interface RemoteServerStatus {
   computerName: string
   mDnsHost: string
   pairingToken: string
+  certFingerprint?: string
   interfaces: LanInterfaceInfo[]
   connectedClients: number
   qrUrl: string | null

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Centered inside the 66dp adaptive safe zone (radius 19.5dp around 54,54) -->
+    <path
+        android:pathData="M54,34.5 A19.5,19.5 0 1,1 53.99,34.5 Z"
+        android:strokeWidth="2.4"
+        android:strokeColor="#D4AF37"
+        android:strokeAlpha="0.42"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M54,40.5 A13.5,13.5 0 1,1 53.99,40.5 Z"
+        android:strokeWidth="3.0"
+        android:strokeColor="#D4AF37"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M51.5,48 L60,54 L51.5,60 Z"
+        android:fillColor="#D4AF37" />
+</vector>
+

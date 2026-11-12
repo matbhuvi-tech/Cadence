@@ -6,8 +6,9 @@ pub mod state;
 pub mod ws;
 
 pub use net_discovery::{
-    discover_lan_interfaces, generate_pairing_token, load_or_create_pairing_token,
-    save_pairing_token, LanInterfaceInfo, RemoteDiscoveryInfo,
+    build_enriched_qr_url, discover_lan_interfaces, generate_pairing_token,
+    load_or_create_pairing_token, register_mdns_service, save_pairing_token, LanInterfaceInfo,
+    RemoteDiscoveryInfo,
 };
 pub use server::start_remote_server;
 pub use state::{RemoteEvent, RemoteQueue, RemoteState, RemoteTrackItem};

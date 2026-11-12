@@ -55,6 +55,136 @@ pub fn get_computer_name() -> String {
         .unwrap_or_else(|_| "cadence-core".to_string())
 }
 
+fn percent_encode_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        let ch = *byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
+}
+
+/// Builds the pairing URL encoded in the desktop QR code.
+/// Keeps `https://<ip>:<port>/?token=<pin>` as the primary browser-compatible URL
+/// while appending mDNS host, SPKI SHA-256 fingerprint, and fallback LAN IPs for
+/// the native Android companion app.
+pub fn build_enriched_qr_url(
+    ip: &str,
+    port: u16,
+    token: &str,
+    m_dns_host: &str,
+    cert_fingerprint: &str,
+    interfaces: &[LanInterfaceInfo],
+) -> String {
+    let mut url = format!(
+        "https://{}:{}/?token={}",
+        ip,
+        port,
+        percent_encode_component(token)
+    );
+    if !m_dns_host.trim().is_empty() {
+        url.push_str("&mdns=");
+        url.push_str(&percent_encode_component(m_dns_host.trim()));
+    }
+    if !cert_fingerprint.trim().is_empty() {
+        url.push_str("&fp=");
+        url.push_str(&percent_encode_component(cert_fingerprint.trim()));
+    }
+    let extra_ips: Vec<&str> = interfaces
+        .iter()
+        .map(|i| i.ip.as_str())
+        .filter(|candidate| *candidate != ip)
+        .collect();
+    if !extra_ips.is_empty() {
+        url.push_str("&ips=");
+        url.push_str(&percent_encode_component(&extra_ips.join(",")));
+    }
+    url
+}
+
+fn sanitized_mdns_host(computer_name: &str) -> String {
+    let label: String = computer_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let final_label = if label.is_empty() {
+        "cadence-core".to_string()
+    } else {
+        label
+    };
+    format!("{}.local", final_label)
+}
+
+/// Registers `_cadence._tcp.local.` via mDNS/DNS-SD for zero-config mobile discovery.
+/// Failures are logged and ignored so the HTTPS/WebSocket remote still starts cleanly.
+pub fn register_mdns_service(
+    discovery: &RemoteDiscoveryInfo,
+    port: u16,
+    cert_fingerprint: &str,
+) -> Option<mdns_sd::ServiceDaemon> {
+    let ips: Vec<IpAddr> = discovery
+        .interfaces
+        .iter()
+        .filter_map(|iface| iface.ip.parse::<IpAddr>().ok())
+        .collect();
+    if ips.is_empty() {
+        return None;
+    }
+
+    let daemon = match mdns_sd::ServiceDaemon::new() {
+        Ok(d) => d,
+        Err(err) => {
+            eprintln!("[Cadence Remote] mDNS daemon unavailable: {}", err);
+            return None;
+        }
+    };
+
+    let host_fqdn = format!("{}.", discovery.m_dns_host.trim_end_matches('.'));
+    let instance_name = format!("Cadence ({})", discovery.computer_name);
+
+    let props = [
+        ("path", "/"),
+        ("proto", "https"),
+        ("fp", cert_fingerprint),
+        ("host", discovery.computer_name.as_str()),
+        ("mdns", discovery.m_dns_host.as_str()),
+    ];
+
+    match mdns_sd::ServiceInfo::new(
+        "_cadence._tcp.local.",
+        &instance_name,
+        &host_fqdn,
+        ips.as_slice(),
+        port,
+        &props[..],
+    ) {
+        Ok(service_info) => {
+            if let Err(err) = daemon.register(service_info) {
+                eprintln!("[Cadence Remote] mDNS service registration failed: {}", err);
+                let _ = daemon.shutdown();
+                return None;
+            }
+            eprintln!(
+                "[Cadence Remote] mDNS registered _cadence._tcp.local. on {}:{} ({:?})",
+                host_fqdn, port, ips
+            );
+            Some(daemon)
+        }
+        Err(err) => {
+            eprintln!("[Cadence Remote] mDNS ServiceInfo build failed: {}", err);
+            let _ = daemon.shutdown();
+            None
+        }
+    }
+}
+
 pub fn is_valid_physical_lan_interface(name: &str, ipv4: std::net::Ipv4Addr) -> Option<LanInterfaceInfo> {
     // 1. Filter out loopback (127.x.x.x)
     if ipv4.is_loopback() {
@@ -107,7 +237,7 @@ pub fn is_valid_physical_lan_interface(name: &str, ipv4: std::net::Ipv4Addr) -> 
 
 pub fn discover_lan_interfaces(target_port: u16, pairing_token: &str) -> RemoteDiscoveryInfo {
     let computer_name = get_computer_name();
-    let m_dns_host = format!("{}.local", computer_name.to_lowercase());
+    let m_dns_host = sanitized_mdns_host(&computer_name);
 
     let mut valid_interfaces: Vec<LanInterfaceInfo> = Vec::new();
 
@@ -186,5 +316,33 @@ mod tests {
         assert!(is_valid_physical_lan_interface("Ethernet 2", ip).is_some());
         // Virtual interface on Class B should be filtered
         assert!(is_valid_physical_lan_interface("docker0", ip).is_none());
+    }
+
+    #[test]
+    fn test_build_enriched_qr_url() {
+        let interfaces = vec![
+            LanInterfaceInfo {
+                name: "Wi-Fi".to_string(),
+                ip: "192.168.1.42".to_string(),
+                is_recommended: true,
+            },
+            LanInterfaceInfo {
+                name: "Ethernet".to_string(),
+                ip: "10.0.0.15".to_string(),
+                is_recommended: true,
+            },
+        ];
+        let url = build_enriched_qr_url(
+            "192.168.1.42",
+            4041,
+            "9182",
+            "studio-pc.local",
+            "abcdef1234",
+            &interfaces,
+        );
+        assert_eq!(
+            url,
+            "https://192.168.1.42:4041/?token=9182&mdns=studio-pc.local&fp=abcdef1234&ips=10.0.0.15"
+        );
     }
 }

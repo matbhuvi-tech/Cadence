@@ -7,6 +7,7 @@ import { VolumeGuard } from './VolumeGuard';
 interface NowPlayingViewProps {
   status: PlaybackStatus;
   token: string;
+  baseUrl?: string;
   onClose?: () => void;
   onPlayPause: () => void;
   onNextTrack: () => void;
@@ -48,6 +49,7 @@ function formatSignalSource(stream?: AudioStreamInfo | null): string {
 export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   status,
   token,
+  baseUrl,
   onClose,
   onPlayPause,
   onNextTrack,
@@ -117,7 +119,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   const albumName = stream?.album || 'Ready for Playback';
 
   const artworkId = status.currentFile || '';
-  const artworkUrl = artworkId ? getArtworkUrl(artworkId, token) : '';
+  const artworkUrl = artworkId ? getArtworkUrl(artworkId, token, baseUrl) : '';
   const upnpRouteLocked = Boolean(status.isPlaying && status.activeDevice?.startsWith('[UPnP]'));
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {

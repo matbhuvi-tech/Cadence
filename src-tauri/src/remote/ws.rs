@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,11 +98,14 @@ pub async fn monitor_queue_completion(state: Arc<RemoteState>) {
 #[derive(Debug, Deserialize)]
 pub struct WsAuthQuery {
     pub token: Option<String>,
+    #[serde(default)]
+    pub heartbeat: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ClientCommand {
+    SetClientMode { heartbeat: bool },
     PlayTrack { file_path: String },
     Pause,
     Resume,
@@ -176,10 +179,11 @@ pub async fn ws_handler(
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    let initial_heartbeat = query.heartbeat.unwrap_or(true);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, initial_heartbeat))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>, initial_heartbeat: bool) {
     CONNECTED_CLIENTS.fetch_add(1, Ordering::Relaxed);
     let (mut sender, mut receiver) = socket.split();
 
@@ -227,8 +231,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
 
     let mut event_rx = state.event_tx.subscribe();
     let state_for_heartbeat = Arc::clone(&state);
+    let send_heartbeats = Arc::new(AtomicBool::new(initial_heartbeat));
+    let send_heartbeats_out = Arc::clone(&send_heartbeats);
 
-    // 2. Outgoing Task: Event-Driven broadcasts + Slow 5s Heartbeat
+    // 2. Outgoing Task: Event-Driven broadcasts + Slow 5s Heartbeat (suppressed when background/locked)
     let mut send_task = tokio::spawn(async move {
         let mut heartbeat_timer = interval(Duration::from_secs(5));
 
@@ -242,8 +248,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
                         }
                     }
                 }
-                // Slow 5-second Heartbeat Sync (Only sent if playing to eliminate Wi-Fi traffic)
+                // Slow 5-second Heartbeat Sync (Only sent if playing and client requests heartbeats)
                 _ = heartbeat_timer.tick() => {
+                    if !send_heartbeats_out.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     let engine_for_hb = state_for_heartbeat.engine.clone();
                     let Ok(status) = tokio::task::spawn_blocking(move || engine_for_hb.get_status()).await else {
                         continue;
@@ -269,10 +278,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
 
     // 3. Incoming Task: Process client commands from mobile
     let state_for_recv = Arc::clone(&state);
+    let send_heartbeats_in = Arc::clone(&send_heartbeats);
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
                 match serde_json::from_str::<ClientCommand>(&text) {
+                    Ok(ClientCommand::SetClientMode { heartbeat }) => {
+                        send_heartbeats_in.store(heartbeat, Ordering::Relaxed);
+                    }
                     Ok(cmd) => {
                         if let Err(err) = handle_client_command(cmd, &state_for_recv).await {
                             eprintln!("[Cadence Remote] WS command error: {}", err);
@@ -368,6 +381,7 @@ fn next_up_insert_index(q: &super::state::RemoteQueue) -> usize {
 
 pub async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) -> Result<(), String> {
     match cmd {
+        ClientCommand::SetClientMode { .. } => Ok(()),
         ClientCommand::PlayTrack { file_path } => {
             let found_idx = {
                 let mut q = state.queue.lock();
@@ -865,4 +879,16 @@ async fn clear_queue(state: &RemoteState, expected_revision: Option<u64>) -> Res
     }
     state.broadcast_queue_update();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientCommand;
+
+    #[test]
+    fn test_deserialize_set_client_mode() {
+        let cmd: ClientCommand =
+            serde_json::from_str(r#"{"action":"set_client_mode","heartbeat":false}"#).unwrap();
+        assert!(matches!(cmd, ClientCommand::SetClientMode { heartbeat: false }));
+    }
 }

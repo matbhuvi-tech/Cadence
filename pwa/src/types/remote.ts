@@ -157,3 +157,74 @@ export interface DbTrack {
   isOnline: boolean;
 }
 
+export interface ServerProfile {
+  id: string;
+  label: string;
+  baseUrl: string;
+  mDnsHost?: string;
+  fallbackIps?: string[];
+  port: number;
+  token: string;
+  certFingerprint?: string;
+  trustInsecure?: boolean;
+  lastConnectedAt?: number;
+}
+
+export interface DiscoveredServer {
+  serviceName: string;
+  hostName: string;
+  mDnsHost?: string;
+  ip: string;
+  port: number;
+  protocol: string;
+  baseUrl: string;
+  fingerprint?: string;
+}
+
+export type DiagnosticErrorKind =
+  | 'ok'
+  | 'unauthorized'
+  | 'cert_mismatch'
+  | 'cert_untrusted'
+  | 'timeout'
+  | 'connection_refused'
+  | 'dns_error'
+  | 'no_wifi'
+  | 'vpn_active'
+  | 'http_error'
+  | 'config_error'
+  | 'network_error';
+
+export interface ProbeResult {
+  reachable: boolean;
+  authenticated: boolean;
+  httpStatus: number;
+  port?: number;
+  service?: string;
+  certFingerprint?: string;
+  fingerprintMatches?: boolean | null;
+  errorKind: DiagnosticErrorKind;
+  errorMessage: string;
+  latencyMs: number;
+}
+
+export interface NetworkDiagnostics {
+  hasNetwork: boolean;
+  isWifi: boolean;
+  isCellular: boolean;
+  isVpn: boolean;
+  localIpv4s: string[];
+  isBatteryOptimized: boolean;
+  notificationsEnabled: boolean;
+}
+
+export interface ConnectionDiagnostic {
+  kind: DiagnosticErrorKind;
+  title: string;
+  detail: string;
+  hint?: string;
+  observedFingerprint?: string;
+  testedUrl?: string;
+}
+
+

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      Local LAN support:
+      Cadence defaults to pinned local HTTPS (SPKI SHA-256) and permits cleartext HTTP/WS
+      only when the user explicitly configures a local private-LAN http:// server.
+      Public internet http:// URLs are rejected at the application layer in CadencePinnedStore.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
+

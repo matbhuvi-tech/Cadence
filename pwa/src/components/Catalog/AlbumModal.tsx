@@ -17,6 +17,7 @@ import { fetchTracks, getArtworkUrl } from '../../services/api';
 interface AlbumModalProps {
   release: DbRelease | null;
   token: string;
+  baseUrl?: string;
   activeTrackPath?: string | null;
   isPlaybackPlaying?: boolean;
   onClose: () => void;
@@ -46,6 +47,7 @@ function formatVersionLabel(version: AlbumVersionSummary): string {
 export const AlbumModal: React.FC<AlbumModalProps> = ({
   release,
   token,
+  baseUrl,
   activeTrackPath = null,
   isPlaybackPlaying = false,
   onClose,
@@ -95,7 +97,7 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
     setError(null);
     setAcceptedTrack(null);
     setQueuedTrackId(null);
-    fetchTracks(token, activeReleaseId)
+    fetchTracks(token, activeReleaseId, baseUrl)
       .then((data) => {
         setTracks(data);
         setLoading(false);
@@ -105,13 +107,13 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
         setLoading(false);
         console.error(err);
       });
-  }, [activeReleaseId, token]);
+  }, [activeReleaseId, token, baseUrl]);
 
   if (!release) return null;
 
   const activeVersion = versions.find((v) => v.releaseId === activeReleaseId);
   const isSelectedOffline = activeVersion ? !activeVersion.isOnline : false;
-  const artworkUrl = getArtworkUrl(activeReleaseId || release.id, token);
+  const artworkUrl = getArtworkUrl(activeReleaseId || release.id, token, baseUrl);
 
   const dispatchRemoteAction = async (
     action: () => Promise<boolean> | boolean | void,

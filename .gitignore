@@ -33,6 +33,17 @@ target/
 *.pem
 *.cert
 *.pfx
+*.keystore
+*.jks
+
+# Android / Capacitor generated outputs & local signing secrets
+pwa/android/.gradle/
+pwa/android/build/
+pwa/android/app/build/
+pwa/android/local.properties
+pwa/android/keystore.properties
+pwa/android/app/src/main/assets/public/
+pwa/android/capacitor-cordova-android-plugins/
 
 # Scratch & Temporary Testing Directories
 scratch/

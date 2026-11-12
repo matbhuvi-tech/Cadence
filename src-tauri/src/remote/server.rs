@@ -1,13 +1,14 @@
-use std::net::IpAddr;
 use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::collections::HashMap;
-use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 
@@ -71,12 +72,7 @@ pub async fn start_remote_server(
     // 2. Main API & PWA Router
     let app = Router::new()
         .fallback(serve_embedded_pwa)
-
-
-
-
-
-
+        .route("/api/remote/ping", get(get_ping))
         .route("/api/remote/status", get(get_status))
         .route("/api/remote/playback/:action", post(handle_playback))
         .route("/api/remote/command", post(handle_command))
@@ -87,6 +83,7 @@ pub async fn start_remote_server(
         .route("/api/remote/ws", get(ws_handler))
         .nest("/api/remote/library/artwork", artwork_router)
         .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(add_private_network_header))
         .with_state(Arc::clone(&state));
 
     // 3. Port binding with graceful fallback (4040 .. 4050)
@@ -113,7 +110,18 @@ pub async fn start_remote_server(
         )
     })?;
 
-    let (cert_path, key_path) = ensure_tls_certificate(&state.token_file)?;
+    let discovery = super::net_discovery::discover_lan_interfaces(bound_port, "");
+    let (cert_path, key_path, spki_fingerprint) =
+        ensure_tls_certificate(&state.token_file, &discovery)?;
+
+    state.set_bound_port(bound_port);
+    state.set_tls_fingerprint(spki_fingerprint.clone());
+
+    if let Some(daemon) =
+        super::net_discovery::register_mdns_service(&discovery, bound_port, &spki_fingerprint)
+    {
+        state.set_mdns_daemon(daemon);
+    }
 
     // Playback status checks stay local to the host. A track boundary produces
     // one event-driven broadcast; this does not increase WebSocket traffic.
@@ -143,34 +151,87 @@ pub async fn start_remote_server(
 
 fn ensure_tls_certificate(
     token_path: &FsPath,
-) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error + Send + Sync>> {
+    discovery: &super::net_discovery::RemoteDiscoveryInfo,
+) -> Result<(std::path::PathBuf, std::path::PathBuf, String), Box<dyn std::error::Error + Send + Sync>> {
     let cert_path = token_path.with_file_name("remote_tls_cert.pem");
     let key_path = token_path.with_file_name("remote_tls_key.pem");
-    if cert_path.is_file() && key_path.is_file() {
-        return Ok((cert_path, key_path));
+    let sans_path = token_path.with_file_name("remote_tls_sans.txt");
+
+    let key_pair = if key_path.is_file() {
+        let pem = std::fs::read_to_string(&key_path)?;
+        match rcgen::KeyPair::from_pem(&pem) {
+            Ok(existing) => existing,
+            Err(_) => {
+                let fresh = rcgen::KeyPair::generate()?;
+                std::fs::write(&key_path, fresh.serialize_pem())?;
+                fresh
+            }
+        }
+    } else {
+        let fresh = rcgen::KeyPair::generate()?;
+        std::fs::write(&key_path, fresh.serialize_pem())?;
+        fresh
+    };
+
+    let digest = Sha256::digest(key_pair.public_key_der());
+    let spki_fingerprint: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+
+    let mut san_entries: Vec<String> = discovery
+        .interfaces
+        .iter()
+        .map(|iface| iface.ip.clone())
+        .collect();
+    if !discovery.m_dns_host.trim().is_empty() {
+        san_entries.push(discovery.m_dns_host.clone());
+    }
+    san_entries.push("localhost".to_string());
+    san_entries.push("127.0.0.1".to_string());
+    san_entries.sort();
+    san_entries.dedup();
+    let expected_sans_marker = san_entries.join(",");
+
+    let existing_sans_match = cert_path.is_file()
+        && sans_path
+            .is_file()
+            .then(|| std::fs::read_to_string(&sans_path).ok())
+            .flatten()
+            .map(|s| s.trim() == expected_sans_marker)
+            .unwrap_or(false);
+
+    if existing_sans_match {
+        return Ok((cert_path, key_path, spki_fingerprint));
     }
 
-    let discovery = super::net_discovery::discover_lan_interfaces(0, "");
-    let mut params = rcgen::CertificateParams::new(
-        discovery
-            .interfaces
-            .iter()
-            .map(|iface| iface.ip.clone())
-            .chain(std::iter::once(discovery.m_dns_host))
-            .collect::<Vec<_>>(),
-    )?;
-    params.subject_alt_names.extend(
-        discovery
-            .interfaces
-            .iter()
-            .filter_map(|iface| iface.ip.parse::<IpAddr>().ok())
-            .map(rcgen::SanType::IpAddress),
-    );
-    let key_pair = rcgen::KeyPair::generate()?;
+    let params = rcgen::CertificateParams::new(san_entries)?;
     let certificate = params.self_signed(&key_pair)?;
     std::fs::write(&cert_path, certificate.pem())?;
-    std::fs::write(&key_path, key_pair.serialize_pem())?;
-    Ok((cert_path, key_path))
+    let _ = std::fs::write(&sans_path, expected_sans_marker);
+    Ok((cert_path, key_path, spki_fingerprint))
+}
+
+async fn add_private_network_header(req: Request, next: Next) -> Response {
+    let is_pna = req
+        .headers()
+        .get("access-control-request-private-network")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut res = next.run(req).await;
+    if is_pna {
+        res.headers_mut().insert(
+            HeaderName::from_static("access-control-allow-private-network"),
+            HeaderValue::from_static("true"),
+        );
+    }
+    res
+}
+
+async fn get_ping(State(state): State<Arc<RemoteState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "service": "cadence-remote",
+        "version": 1,
+        "port": state.get_bound_port(),
+    }))
 }
 
 fn resolve_token(headers: &HeaderMap, explicit_token: Option<&str>) -> Option<String> {
@@ -563,5 +624,56 @@ async fn get_artwork(
     } else {
         // Return 204 No Content so client falls back to default placeholder with 0 network penalty
         Ok(StatusCode::NO_CONTENT.into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::net_discovery::{LanInterfaceInfo, RemoteDiscoveryInfo};
+
+    #[test]
+    fn test_tls_certificate_spki_stable_across_ip_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "cadence_tls_test_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token_path = dir.join("remote_token.txt");
+
+        let d1 = RemoteDiscoveryInfo {
+            interfaces: vec![LanInterfaceInfo {
+                name: "Wi-Fi".to_string(),
+                ip: "192.168.1.10".to_string(),
+                is_recommended: true,
+            }],
+            primary_ip: Some("192.168.1.10".to_string()),
+            has_verified_lan: true,
+            computer_name: "STUDIO-PC".to_string(),
+            m_dns_host: "studio-pc.local".to_string(),
+            port: 4040,
+            pairing_token: "1234".to_string(),
+        };
+
+        let (_, _, fp1) = ensure_tls_certificate(&token_path, &d1).unwrap();
+        assert_eq!(fp1.len(), 64);
+
+        let d2 = RemoteDiscoveryInfo {
+            interfaces: vec![LanInterfaceInfo {
+                name: "Wi-Fi".to_string(),
+                ip: "192.168.1.88".to_string(),
+                is_recommended: true,
+            }],
+            primary_ip: Some("192.168.1.88".to_string()),
+            ..d1
+        };
+
+        let (cert_path2, _, fp2) = ensure_tls_certificate(&token_path, &d2).unwrap();
+        assert_eq!(fp1, fp2);
+        let sans = std::fs::read_to_string(token_path.with_file_name("remote_tls_sans.txt")).unwrap();
+        assert!(sans.contains("192.168.1.88"));
+        assert!(cert_path2.is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -94,6 +95,9 @@ pub struct RemoteState {
     pub artwork_cache: ArtworkCache,
     pub token: Arc<Mutex<String>>,
     pub token_file: PathBuf,
+    pub bound_port: Arc<AtomicU16>,
+    pub tls_fingerprint: Arc<Mutex<String>>,
+    pub mdns_daemon: Arc<Mutex<Option<mdns_sd::ServiceDaemon>>>,
     pub queue: Arc<Mutex<RemoteQueue>>,
     pub event_tx: broadcast::Sender<RemoteEvent>,
     pub app_handle: Arc<Mutex<Option<AppHandle>>>,
@@ -116,10 +120,34 @@ impl RemoteState {
             artwork_cache,
             token: Arc::new(Mutex::new(initial_token)),
             token_file,
+            bound_port: Arc::new(AtomicU16::new(4040)),
+            tls_fingerprint: Arc::new(Mutex::new(String::new())),
+            mdns_daemon: Arc::new(Mutex::new(None)),
             queue: Arc::new(Mutex::new(RemoteQueue::default())),
             event_tx,
             app_handle: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_bound_port(&self, port: u16) {
+        self.bound_port.store(port, Ordering::Relaxed);
+    }
+
+    pub fn get_bound_port(&self) -> u16 {
+        let port = self.bound_port.load(Ordering::Relaxed);
+        if port == 0 { 4040 } else { port }
+    }
+
+    pub fn set_tls_fingerprint(&self, fingerprint: String) {
+        *self.tls_fingerprint.lock() = fingerprint;
+    }
+
+    pub fn get_tls_fingerprint(&self) -> String {
+        self.tls_fingerprint.lock().clone()
+    }
+
+    pub fn set_mdns_daemon(&self, daemon: mdns_sd::ServiceDaemon) {
+        *self.mdns_daemon.lock() = Some(daemon);
     }
 
     pub fn reset_token(&self) -> String {

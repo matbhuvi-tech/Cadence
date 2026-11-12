@@ -5,7 +5,8 @@ use tauri::State;
 use crate::diag_log;
 use crate::diagnostics::DiagCategory;
 use crate::remote::{
-    discover_lan_interfaces, get_connected_client_count, LanInterfaceInfo, RemoteState,
+    build_enriched_qr_url, discover_lan_interfaces, get_connected_client_count, LanInterfaceInfo,
+    RemoteState,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -18,6 +19,7 @@ pub struct RemoteServerStatus {
     pub computer_name: String,
     pub m_dns_host: String,
     pub pairing_token: String,
+    pub cert_fingerprint: String,
     pub interfaces: Vec<LanInterfaceInfo>,
     pub connected_clients: usize,
     pub qr_url: Option<String>,
@@ -28,13 +30,20 @@ pub fn get_remote_server_info(
     remote_state: State<'_, Arc<RemoteState>>,
 ) -> RemoteServerStatus {
     let token = remote_state.token.lock().clone();
-    let port = 4040; // Default or configured port
+    let port = remote_state.get_bound_port();
+    let cert_fingerprint = remote_state.get_tls_fingerprint();
     let discovery = discover_lan_interfaces(port, &token);
     let connected = get_connected_client_count();
-    let qr_url = discovery
-        .primary_ip
-        .as_ref()
-        .map(|ip| format!("https://{}:{}/?token={}", ip, port, token));
+    let qr_url = discovery.primary_ip.as_ref().map(|ip| {
+        build_enriched_qr_url(
+            ip,
+            port,
+            &token,
+            &discovery.m_dns_host,
+            &cert_fingerprint,
+            &discovery.interfaces,
+        )
+    });
 
     RemoteServerStatus {
         enabled: true,
@@ -44,6 +53,7 @@ pub fn get_remote_server_info(
         computer_name: discovery.computer_name,
         m_dns_host: discovery.m_dns_host,
         pairing_token: token,
+        cert_fingerprint,
         interfaces: discovery.interfaces,
         connected_clients: connected,
         qr_url,

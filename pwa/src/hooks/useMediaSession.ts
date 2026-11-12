@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { PlaybackStatus } from '../types/remote';
 import { getArtworkUrl } from '../services/api';
+import { isNativeAndroid } from '../platform/cadenceBridge';
 
 /**
  * Builds a ~1 second silent 8-bit mono PCM WAV as a Blob URL.
@@ -36,6 +37,7 @@ function createSilentWavUrl(): string {
 interface MediaSessionProps {
   status: PlaybackStatus;
   token: string;
+  baseUrl?: string;
   onPlayPause: () => void;
   onNextTrack: () => void;
   onPrevTrack: () => void;
@@ -45,6 +47,7 @@ interface MediaSessionProps {
 export function useMediaSession({
   status,
   token,
+  baseUrl,
   onPlayPause,
   onNextTrack,
   onPrevTrack,
@@ -57,7 +60,9 @@ export function useMediaSession({
 
   // Create the silent loop once and unlock it on the first user gesture
   // (iOS Safari and Chrome both require a gesture before audio.play()).
+  // Native Android uses CadenceMediaService (MediaSessionCompat) instead.
   useEffect(() => {
+    if (isNativeAndroid()) return;
     const audio = new Audio();
     audio.src = createSilentWavUrl();
     audio.loop = true;
@@ -97,7 +102,7 @@ export function useMediaSession({
   }, [status.isPlaying]);
 
   useEffect(() => {
-    if (!('mediaSession' in navigator)) return;
+    if (isNativeAndroid() || !('mediaSession' in navigator)) return;
 
     const stream = status.streamInfo;
     const title = stream?.title || (status.currentFile ? status.currentFile.split(/[/\\]/).pop() : 'Cadence');
@@ -105,7 +110,7 @@ export function useMediaSession({
     const album = stream?.album || 'Bit-Perfect Playback';
 
     const artworkUrl = status.currentFile
-      ? getArtworkUrl(status.currentFile, token)
+      ? getArtworkUrl(status.currentFile, token, baseUrl)
       : '';
 
     try {
@@ -165,6 +170,6 @@ export function useMediaSession({
         // ignore
       }
     };
-  }, [status, token, onPlayPause, onNextTrack, onPrevTrack, onSeek]);
+  }, [status, token, baseUrl, onPlayPause, onNextTrack, onPrevTrack, onSeek]);
 }
 

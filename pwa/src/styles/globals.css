@@ -90,3 +90,10 @@
   }
 }
 
+
+html.cadence-qr-scanning,
+html.cadence-qr-scanning body,
+html.cadence-qr-scanning #root {
+  background: transparent !important;
+  background-color: transparent !important;
+}
