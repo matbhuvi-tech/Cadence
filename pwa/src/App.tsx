@@ -136,6 +136,10 @@ export function App() {
         {activeTab === 'catalog' && (
           <CatalogView
             token={token}
+            activeTrackPath={
+              status.isPlaying || status.isPaused ? (status.currentFile ?? null) : null
+            }
+            isPlaybackPlaying={status.isPlaying && !status.isPaused}
             onPlayRelease={playRelease}
             onQueueRelease={queueRelease}
             onPlayTrack={playTrack}
@@ -165,7 +169,7 @@ export function App() {
 
       {/* Non-blocking Transient Action Toast with [Undo] */}
       {toast && (
-        <div className="fixed bottom-24 left-4 right-4 z-40 bg-zinc-900/95 border border-amber-500/30 text-zinc-100 px-4 py-2.5 rounded-2xl shadow-xl flex items-center justify-between backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 duration-200">
+        <div className="fixed bottom-24 left-4 right-4 z-[60] bg-zinc-900/95 border border-amber-500/30 text-zinc-100 px-4 py-2.5 rounded-2xl shadow-xl flex items-center justify-between backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 duration-200">
           <span className="text-xs font-medium truncate">{toast.message}</span>
           {toast.onUndo && (
             <button

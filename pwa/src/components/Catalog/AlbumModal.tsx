@@ -1,17 +1,30 @@
-import React, { useState, useEffect } from 'react';
-import { X, Play, Plus, ListPlus, Disc3, Clock, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  X,
+  Play,
+  Plus,
+  ListPlus,
+  Disc3,
+  Clock,
+  AlertTriangle,
+  Volume2,
+  Pause,
+  Check,
+} from 'lucide-react';
 import type { DbRelease, DbTrack, AlbumVersionSummary } from '../../types/remote';
 import { fetchTracks, getArtworkUrl } from '../../services/api';
 
 interface AlbumModalProps {
   release: DbRelease | null;
   token: string;
+  activeTrackPath?: string | null;
+  isPlaybackPlaying?: boolean;
   onClose: () => void;
-  onPlayRelease: (releaseId: string) => void;
-  onQueueRelease: (releaseId: string, playNext?: boolean) => void;
-  onPlayTrack: (filePath: string) => void;
-  onPlayTrackInRelease?: (releaseId: string, trackId: string) => void;
-  onQueueTrack: (filePath: string, playNext?: boolean) => void;
+  onPlayRelease: (releaseId: string) => Promise<boolean> | boolean | void;
+  onQueueRelease: (releaseId: string, playNext?: boolean) => Promise<boolean> | boolean | void;
+  onPlayTrack: (filePath: string) => Promise<boolean> | boolean | void;
+  onPlayTrackInRelease?: (releaseId: string, trackId: string) => Promise<boolean> | boolean | void;
+  onQueueTrack: (filePath: string, playNext?: boolean) => Promise<boolean> | boolean | void;
   onTriggerToast?: (message: string, onUndo?: () => void) => void;
 }
 
@@ -33,6 +46,8 @@ function formatVersionLabel(version: AlbumVersionSummary): string {
 export const AlbumModal: React.FC<AlbumModalProps> = ({
   release,
   token,
+  activeTrackPath = null,
+  isPlaybackPlaying = false,
   onClose,
   onPlayRelease,
   onQueueRelease,
@@ -45,14 +60,32 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
   const [tracks, setTracks] = useState<DbTrack[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [acceptedTrack, setAcceptedTrack] = useState<{ trackId: string; nonce: number } | null>(null);
+  const [queuedTrackId, setQueuedTrackId] = useState<string | null>(null);
+  const acceptTimerRef = useRef<number | null>(null);
+  const queueFeedbackTimerRef = useRef<number | null>(null);
+  const acceptNonceRef = useRef<number>(0);
 
   const versions = release?.versions || [];
+
+  useEffect(() => {
+    return () => {
+      if (acceptTimerRef.current !== null) {
+        window.clearTimeout(acceptTimerRef.current);
+      }
+      if (queueFeedbackTimerRef.current !== null) {
+        window.clearTimeout(queueFeedbackTimerRef.current);
+      }
+    };
+  }, []);
 
   // Determine active release id upon initial mount or release change
   useEffect(() => {
     if (!release) return;
     const defaultVer = versions.find((v) => v.isDefault);
     setActiveReleaseId(defaultVer ? defaultVer.releaseId : release.id);
+    setAcceptedTrack(null);
+    setQueuedTrackId(null);
   }, [release]);
 
   // Fetch tracks whenever activeReleaseId changes
@@ -60,6 +93,8 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
     if (!activeReleaseId) return;
     setLoading(true);
     setError(null);
+    setAcceptedTrack(null);
+    setQueuedTrackId(null);
     fetchTracks(token, activeReleaseId)
       .then((data) => {
         setTracks(data);
@@ -78,13 +113,78 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
   const isSelectedOffline = activeVersion ? !activeVersion.isOnline : false;
   const artworkUrl = getArtworkUrl(activeReleaseId || release.id, token);
 
+  const dispatchRemoteAction = async (
+    action: () => Promise<boolean> | boolean | void,
+    failureMessage: string,
+    onSuccess?: () => void
+  ): Promise<boolean> => {
+    const result = await action();
+    if (result !== false) {
+      onSuccess?.();
+      return true;
+    }
+    if (onTriggerToast) {
+      onTriggerToast(failureMessage);
+    }
+    return false;
+  };
+
+  const handlePlayTrack = (track: DbTrack) => {
+    if (acceptTimerRef.current !== null) {
+      window.clearTimeout(acceptTimerRef.current);
+    }
+    const nextNonce = ++acceptNonceRef.current;
+    setAcceptedTrack({ trackId: track.id, nonce: nextNonce });
+    acceptTimerRef.current = window.setTimeout(() => {
+      setAcceptedTrack((current) => (current?.nonce === nextNonce ? null : current));
+      acceptTimerRef.current = null;
+    }, 750);
+
+    void dispatchRemoteAction(
+      () =>
+        onPlayTrackInRelease
+          ? onPlayTrackInRelease(activeReleaseId, track.id)
+          : onPlayTrack(track.filePath),
+      'Unable to reach Cadence to start track playback.'
+    ).then((ok) => {
+      if (!ok) {
+        setAcceptedTrack((current) => (current?.nonce === nextNonce ? null : current));
+      }
+    });
+  };
+
+  const handleQueueTrack = (track: DbTrack) => {
+    if (queueFeedbackTimerRef.current !== null) {
+      window.clearTimeout(queueFeedbackTimerRef.current);
+    }
+    setQueuedTrackId(track.id);
+    queueFeedbackTimerRef.current = window.setTimeout(() => {
+      setQueuedTrackId((current) => (current === track.id ? null : current));
+      queueFeedbackTimerRef.current = null;
+    }, 750);
+
+    void dispatchRemoteAction(
+      () => onQueueTrack(track.filePath, false),
+      'Unable to reach Cadence to add track to queue.'
+    ).then((ok) => {
+      if (!ok) {
+        setQueuedTrackId((current) => (current === track.id ? null : current));
+      }
+    });
+  };
+
   const handlePlayAlbum = () => {
     if (isSelectedOffline) return;
-    onPlayRelease(activeReleaseId);
-    if (onTriggerToast) {
-      onTriggerToast(`▶ Playing ${release.title} • Previous queue preserved`);
-    }
-    onClose();
+    void dispatchRemoteAction(
+      () => onPlayRelease(activeReleaseId),
+      'Unable to reach Cadence to start playback.',
+      () => {
+        if (onTriggerToast) {
+          onTriggerToast(`▶ Playing ${release.title} • Previous queue preserved`);
+        }
+        onClose();
+      }
+    );
   };
 
   return (
@@ -109,8 +209,10 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white"
+            aria-label="Close album details"
+            className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white focus-visible:outline-2 focus-visible:outline-[#D4AF37] focus-visible:outline-offset-2"
           >
             <X className="w-4 h-4" />
           </button>
@@ -176,7 +278,12 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
             <span>Play Album</span>
           </button>
           <button
-            onClick={() => onQueueRelease(activeReleaseId, true)}
+            onClick={() =>
+              void dispatchRemoteAction(
+                () => onQueueRelease(activeReleaseId, true),
+                'Unable to reach Cadence to queue album next.'
+              )
+            }
             disabled={isSelectedOffline}
             className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -184,7 +291,12 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
             <span>Play Next</span>
           </button>
           <button
-            onClick={() => onQueueRelease(activeReleaseId, false)}
+            onClick={() =>
+              void dispatchRemoteAction(
+                () => onQueueRelease(activeReleaseId, false),
+                'Unable to reach Cadence to add album to queue.'
+              )
+            }
             disabled={isSelectedOffline}
             className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -205,46 +317,102 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
           ) : tracks.length === 0 ? (
             <div className="p-6 text-center text-zinc-500 text-xs">No tracks in this release</div>
           ) : (
-            tracks.map((track, idx) => (
-              <div
-                key={track.id}
-                className="flex items-center justify-between p-3 rounded-xl hover:bg-zinc-800/40 active:bg-zinc-800/80 transition-colors"
-              >
+            tracks.map((track, idx) => {
+              const isAccepted = acceptedTrack?.trackId === track.id;
+              const isCurrentTrack = Boolean(
+                activeTrackPath && track.filePath === activeTrackPath
+              );
+              const isHighlighted = isAccepted || isCurrentTrack;
+              const isQueued = queuedTrackId === track.id;
+
+              return (
                 <div
-                  onClick={() => {
-                    if (onPlayTrackInRelease) {
-                      onPlayTrackInRelease(activeReleaseId, track.id);
-                    } else {
-                      onPlayTrack(track.filePath);
-                    }
-                    onClose();
-                  }}
-                  className="flex items-center space-x-3 flex-1 min-w-0 cursor-pointer"
+                  key={track.id}
+                  data-track-id={track.id}
+                  data-track-accepted={isAccepted ? 'true' : 'false'}
+                  data-track-active={isCurrentTrack ? 'true' : 'false'}
+                  className={`relative overflow-hidden flex items-center justify-between px-3 py-2.5 rounded-xl transition-colors duration-200 ${
+                    isHighlighted
+                      ? 'bg-amber-500/12 ring-1 ring-inset ring-amber-500/35'
+                      : 'hover:bg-zinc-800/40'
+                  }`}
                 >
-                  <span className="text-xs font-mono text-zinc-500 w-5 text-center">
-                    {track.trackNumber ?? idx + 1}
-                  </span>
-                  <div className="truncate flex-1">
-                    <p className="text-xs font-medium text-zinc-200 truncate">{track.title}</p>
-                    <p className="text-[10px] text-zinc-500 truncate">{track.artistCredit}</p>
+                  {isAccepted && (
+                    <span
+                      key={acceptedTrack.nonce}
+                      aria-hidden="true"
+                      className="track-accept-sweep pointer-events-none absolute inset-0 rounded-xl"
+                    />
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => handlePlayTrack(track)}
+                    className="relative flex items-center space-x-3 flex-1 min-w-0 py-0.5 text-left cursor-pointer rounded-lg active:scale-[0.985] transition-transform duration-150 focus-visible:outline-2 focus-visible:outline-[#D4AF37] focus-visible:outline-offset-2"
+                  >
+                    <span className="relative w-6 h-6 flex items-center justify-center shrink-0">
+                      {isAccepted ? (
+                        <>
+                          <span
+                            key={`ring-${acceptedTrack.nonce}`}
+                            aria-hidden="true"
+                            className="track-accept-ring pointer-events-none absolute inset-0 rounded-full border border-[#D4AF37]/75"
+                          />
+                          <span
+                            key={`badge-${acceptedTrack.nonce}`}
+                            className="track-accept-pop relative flex h-6 w-6 items-center justify-center rounded-full bg-[#D4AF37] text-zinc-950 shadow-sm"
+                          >
+                            <Play className="w-3 h-3 fill-current ml-0.5" />
+                          </span>
+                        </>
+                      ) : isCurrentTrack ? (
+                        isPlaybackPlaying ? (
+                          <Volume2 className="w-4 h-4 text-[#D4AF37]" />
+                        ) : (
+                          <Pause className="w-3.5 h-3.5 text-[#D4AF37]" />
+                        )
+                      ) : (
+                        <span className="text-xs font-mono text-zinc-500">
+                          {track.trackNumber ?? idx + 1}
+                        </span>
+                      )}
+                    </span>
+                    <div className="truncate flex-1">
+                      <p
+                        className={`text-xs truncate transition-colors duration-200 ${
+                          isHighlighted
+                            ? 'text-[#D4AF37] font-semibold'
+                            : 'text-zinc-200 font-medium'
+                        }`}
+                      >
+                        {track.title}
+                      </p>
+                      <p className="text-[10px] text-zinc-500 truncate">{track.artistCredit}</p>
+                    </div>
+                  </button>
+
+                  <div className="relative flex items-center space-x-2 pl-2 shrink-0">
+                    <span className="text-[11px] font-mono text-zinc-500 flex items-center space-x-1">
+                      <Clock className="w-3 h-3 text-zinc-600" />
+                      <span>{formatDuration(track.durationSecs)}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleQueueTrack(track)}
+                      className="p-2 rounded-lg text-zinc-400 hover:text-[#D4AF37] hover:bg-zinc-800 active:scale-95 transition-transform duration-150 focus-visible:outline-2 focus-visible:outline-[#D4AF37] focus-visible:outline-offset-2"
+                      title="Add to Queue"
+                      aria-label={`Add ${track.title} to queue`}
+                    >
+                      {isQueued ? (
+                        <Check className="w-4 h-4 text-[#D4AF37] track-accept-pop" />
+                      ) : (
+                        <Plus className="w-4 h-4" />
+                      )}
+                    </button>
                   </div>
                 </div>
-
-                <div className="flex items-center space-x-2 pl-2">
-                  <span className="text-[11px] font-mono text-zinc-500 flex items-center space-x-1">
-                    <Clock className="w-3 h-3 text-zinc-600" />
-                    <span>{formatDuration(track.durationSecs)}</span>
-                  </span>
-                  <button
-                    onClick={() => onQueueTrack(track.filePath, false)}
-                    className="p-1.5 rounded-lg text-zinc-400 hover:text-[#D4AF37] hover:bg-zinc-800 active:scale-95"
-                    title="Add to Queue"
-                  >
-                    <Plus className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>

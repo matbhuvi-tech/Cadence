@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { PlaybackStatus, RemoteQueue, RemoteEvent } from '../types/remote';
-import { fetchOutputDevices, fetchQueue, getStoredToken, selectOutputDevice, sendPlaybackAction } from '../services/api';
+import { fetchOutputDevices, fetchQueue, getStoredToken, selectOutputDevice, sendRemoteCommand } from '../services/api';
 
 const INITIAL_STATUS: PlaybackStatus = {
   isPlaying: false,
@@ -107,6 +107,17 @@ export function useRemoteSocket() {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isManuallyClosedRef = useRef<boolean>(false);
 
+  const detachAndCloseSocket = useCallback((ws: WebSocket | null) => {
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
+  }, []);
+
   const connect = useCallback(() => {
     if (!token) {
       setError('No pairing token found. Please scan the desktop QR code.');
@@ -115,6 +126,11 @@ export function useRemoteSocket() {
 
     if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) {
       return;
+    }
+
+    if (socketRef.current) {
+      detachAndCloseSocket(socketRef.current);
+      socketRef.current = null;
     }
 
     if (reconnectTimeoutRef.current) {
@@ -130,8 +146,10 @@ export function useRemoteSocket() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/api/remote/ws?token=${encodeURIComponent(token)}`;
       const ws = new WebSocket(wsUrl);
+      socketRef.current = ws;
 
       ws.onopen = () => {
+        if (socketRef.current !== ws) return;
         setIsConnected(true);
         setIsConnecting(false);
         setError(null);
@@ -141,6 +159,7 @@ export function useRemoteSocket() {
       };
 
       ws.onmessage = (event) => {
+        if (socketRef.current !== ws) return;
         try {
           const data: RemoteEvent = JSON.parse(event.data);
           if (data.type === 'STATE_CHANGE') {
@@ -206,29 +225,32 @@ export function useRemoteSocket() {
       };
 
       ws.onerror = () => {
+        if (socketRef.current !== ws) return;
         setError('Connection error. Reconnecting when visible...');
       };
 
       ws.onclose = () => {
+        if (socketRef.current !== ws) return;
+        socketRef.current = null;
         setIsConnected(false);
         setIsConnecting(false);
-        socketRef.current = null;
 
         // Audiophile Guard: Do not reconnect if the handset screen is asleep / hidden
         if (!isManuallyClosedRef.current && document.visibilityState === 'visible') {
+          if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+          }
           reconnectTimeoutRef.current = setTimeout(() => {
             connect();
           }, 3000);
         }
       };
-
-      socketRef.current = ws;
     } catch (e) {
       console.error('[RemoteSocket] Setup error:', e);
       setIsConnecting(false);
       setError('Unable to initialize connection.');
     }
-  }, [token]);
+  }, [token, applyRemoteQueue, detachAndCloseSocket]);
 
   const disconnect = useCallback(() => {
     isManuallyClosedRef.current = true;
@@ -236,13 +258,12 @@ export function useRemoteSocket() {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-    if (socketRef.current) {
-      socketRef.current.close();
-      socketRef.current = null;
-    }
+    const ws = socketRef.current;
+    socketRef.current = null;
+    detachAndCloseSocket(ws);
     setIsConnected(false);
     setIsConnecting(false);
-  }, []);
+  }, [detachAndCloseSocket]);
 
   // Audiophile Network Purity: Handle Mobile Background Sleep & Handset Wakeup
   useEffect(() => {
@@ -270,79 +291,87 @@ export function useRemoteSocket() {
     };
   }, [connect, disconnect]);
 
-  // Command dispatcher
-  const sendCommand = useCallback((cmd: Record<string, unknown>) => {
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify(cmd));
-      return true;
+  // Command dispatcher with full HTTP REST fallback
+  const sendCommand = useCallback(async (cmd: Record<string, unknown>): Promise<boolean> => {
+    const activeSocket = socketRef.current;
+    if (activeSocket && activeSocket.readyState === WebSocket.OPEN) {
+      try {
+        activeSocket.send(JSON.stringify(cmd));
+        return true;
+      } catch (err) {
+        console.error('[RemoteSocket] Send error, falling back to HTTP:', err);
+      }
     }
 
-    // Fallback to HTTP REST for common transport actions
-    const action = cmd.action as string;
-    if (action === 'play') {
-      sendPlaybackAction('play', { file_path: cmd.file_path }, token);
-    } else if (action === 'pause') {
-      sendPlaybackAction('pause', {}, token);
-    } else if (action === 'resume') {
-      sendPlaybackAction('resume', {}, token);
-    } else if (action === 'stop') {
-      sendPlaybackAction('stop', {}, token);
-    } else if (action === 'seek') {
-      sendPlaybackAction('seek', { position_secs: cmd.position_secs }, token);
-    } else if (action === 'set_volume') {
-      sendPlaybackAction('volume', { volume: cmd.volume }, token);
-    } else if (action === 'toggle_purity') {
-      sendPlaybackAction('purity', { enabled: cmd.enabled }, token);
+    if (!token) {
+      return false;
     }
-    return false;
-  }, [token]);
 
-  const playPause = useCallback(() => {
-    if (status.isPlaying) {
-      sendCommand({ action: 'pause' });
-    } else {
-      sendCommand({ action: 'resume' });
+    const ok = await sendRemoteCommand(cmd, token);
+    if (ok) {
+      fetchQueue(token).then(applyRemoteQueue).catch(() => {});
+      if (document.visibilityState === 'visible' && !isManuallyClosedRef.current) {
+        connect();
+      }
     }
-  }, [status.isPlaying, sendCommand]);
+    return ok;
+  }, [token, applyRemoteQueue, connect]);
+
+  const playPause = useCallback((): Promise<boolean> => {
+    if (status.isPlaying && !status.isPaused) {
+      return sendCommand({ action: 'pause' });
+    }
+    if (status.isPaused && status.currentFile) {
+      return sendCommand({ action: 'resume' });
+    }
+    if (queue.items.length > 0) {
+      const idx =
+        queue.currentIndex >= 0 && queue.currentIndex < queue.items.length
+          ? queue.currentIndex
+          : 0;
+      return sendCommand({ action: 'jump_to_queue_index', index: idx });
+    }
+    return Promise.resolve(false);
+  }, [status.isPlaying, status.isPaused, status.currentFile, queue.items.length, queue.currentIndex, sendCommand]);
 
   const nextTrack = useCallback(() => {
-    sendCommand({ action: 'next_track' });
+    return sendCommand({ action: 'next_track' });
   }, [sendCommand]);
 
   const prevTrack = useCallback(() => {
-    sendCommand({ action: 'prev_track' });
+    return sendCommand({ action: 'prev_track' });
   }, [sendCommand]);
 
   const seek = useCallback((positionSecs: number) => {
-    sendCommand({ action: 'seek', position_secs: positionSecs });
+    return sendCommand({ action: 'seek', position_secs: positionSecs });
   }, [sendCommand]);
 
   const setVolume = useCallback((volume: number) => {
-    sendCommand({ action: 'set_volume', volume });
+    return sendCommand({ action: 'set_volume', volume });
   }, [sendCommand]);
 
   const togglePurity = useCallback((enabled: boolean) => {
-    sendCommand({ action: 'toggle_purity', enabled });
+    return sendCommand({ action: 'toggle_purity', enabled });
   }, [sendCommand]);
 
   const playTrack = useCallback((filePath: string) => {
-    sendCommand({ action: 'play_track', file_path: filePath });
+    return sendCommand({ action: 'play_track', file_path: filePath });
   }, [sendCommand]);
 
   const playRelease = useCallback((releaseId: string) => {
-    sendCommand({ action: 'play_release', release_id: releaseId });
+    return sendCommand({ action: 'play_release', release_id: releaseId });
   }, [sendCommand]);
 
   const playTrackInRelease = useCallback((releaseId: string, trackId: string) => {
-    sendCommand({ action: 'play_track_in_release', release_id: releaseId, track_id: trackId });
+    return sendCommand({ action: 'play_track_in_release', release_id: releaseId, track_id: trackId });
   }, [sendCommand]);
 
   const queueTrack = useCallback((filePath: string, playNext = false) => {
-    sendCommand({ action: 'queue_track', file_path: filePath, play_next: playNext, expected_revision: queue.revision });
+    return sendCommand({ action: 'queue_track', file_path: filePath, play_next: playNext, expected_revision: queue.revision });
   }, [sendCommand, queue.revision]);
 
   const queueRelease = useCallback((releaseId: string, playNext = false, playNow = false) => {
-    sendCommand({
+    return sendCommand({
       action: 'queue_release',
       release_id: releaseId,
       play_next: playNext,
@@ -352,7 +381,7 @@ export function useRemoteSocket() {
   }, [sendCommand, queue.revision]);
 
   const reorderQueue = useCallback((queueEntryId: string, targetQueueEntryId: string) => {
-    sendCommand({
+    return sendCommand({
       action: 'reorder_queue',
       queue_entry_id: queueEntryId,
       target_queue_entry_id: targetQueueEntryId,
@@ -361,11 +390,11 @@ export function useRemoteSocket() {
   }, [sendCommand, queue.revision]);
 
   const jumpToQueueIndex = useCallback((index: number) => {
-    sendCommand({ action: 'jump_to_queue_index', index });
+    return sendCommand({ action: 'jump_to_queue_index', index });
   }, [sendCommand]);
 
   const removeFromQueue = useCallback((index?: number, trackId?: string, queueEntryId?: string) => {
-    sendCommand({
+    return sendCommand({
       action: 'remove_from_queue',
       index,
       track_id: trackId,
@@ -375,7 +404,7 @@ export function useRemoteSocket() {
   }, [sendCommand, queue.revision]);
 
   const clearQueue = useCallback(() => {
-    sendCommand({ action: 'clear_queue', expected_revision: queue.revision });
+    return sendCommand({ action: 'clear_queue', expected_revision: queue.revision });
   }, [sendCommand, queue.revision]);
 
   return {

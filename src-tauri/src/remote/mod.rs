@@ -11,4 +11,4 @@ pub use net_discovery::{
 };
 pub use server::start_remote_server;
 pub use state::{RemoteEvent, RemoteQueue, RemoteState, RemoteTrackItem};
-pub use ws::get_connected_client_count;
+pub use ws::{get_connected_client_count, replace_queue_preserving_upcoming};

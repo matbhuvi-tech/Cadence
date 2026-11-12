@@ -1,4 +1,4 @@
-use cadence_core_lib::remote::{RemoteQueue, RemoteTrackItem};
+use cadence_core_lib::remote::{replace_queue_preserving_upcoming, RemoteQueue, RemoteTrackItem};
 
 fn make_item(id: &str, title: &str, file_path: &str) -> RemoteTrackItem {
     RemoteTrackItem {
@@ -270,6 +270,53 @@ fn test_prune_past_tracks_on_jump_and_advance() {
 
     assert!(q.items.is_empty(), "Queue empty after final track");
     assert_eq!(q.current_index, -1);
+}
+
+#[test]
+fn test_replace_queue_preserving_upcoming_handles_empty_queue_negative_index() {
+    let mut q = RemoteQueue::default();
+    q.current_index = -1;
+    q.revision = 2;
+
+    let replacement = vec![
+        make_item("r1", "Track 1", "D:/Music/r1.flac"),
+        make_item("r2", "Track 2", "D:/Music/r2.flac"),
+    ];
+    let first_path = replace_queue_preserving_upcoming(&mut q, replacement);
+
+    assert_eq!(first_path.as_deref(), Some("D:/Music/r1.flac"));
+    assert_eq!(q.items.len(), 2);
+    assert_eq!(q.current_index, 0);
+    assert_eq!(q.revision, 3);
+    assert_eq!(
+        q.current_queue_entry_id.as_deref(),
+        Some(q.items[0].queue_entry_id.as_str())
+    );
+}
+
+#[test]
+fn test_replace_queue_preserving_upcoming_keeps_future_items() {
+    let mut q = RemoteQueue::default();
+    q.items = vec![
+        make_item("cur", "Playing", "D:/Music/cur.flac"),
+        make_item("next1", "Next 1", "D:/Music/next1.flac"),
+    ];
+    q.current_index = 0;
+    q.revision = 1;
+
+    let replacement = vec![
+        make_item("a1", "Album 1", "D:/Music/a1.flac"),
+        make_item("a2", "Album 2", "D:/Music/a2.flac"),
+    ];
+    let first_path = replace_queue_preserving_upcoming(&mut q, replacement);
+
+    assert_eq!(first_path.as_deref(), Some("D:/Music/a1.flac"));
+    assert_eq!(
+        q.items.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+        vec!["a1", "a2", "next1"]
+    );
+    assert_eq!(q.current_index, 0);
+    assert_eq!(q.revision, 2);
 }
 
 

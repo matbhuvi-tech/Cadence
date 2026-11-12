@@ -1236,28 +1236,28 @@ impl AudioEngine {
 
                     AudioWorkerMsg::Resume { meta } => {
                         let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Resume", meta);
-                        if is_upnp_active {
-                            let upnp_clone = Arc::clone(&upnp_worker_ref);
-                            std::thread::spawn(move || {
-                                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-                                if let Ok(runtime) = rt {
-                                    let _ = runtime.block_on(async { upnp_clone.resume().await });
-                                }
-                            });
-                        }
-                        if let Some(s) = &sink {
-                            if is_paused {
+                        if !can_resume_active_track(is_paused, current_file.is_some()) {
+                            diag_cmd_end("Resume", meta, cmd_t0, Some("ignored_not_paused"));
+                        } else {
+                            if is_upnp_active {
+                                let upnp_clone = Arc::clone(&upnp_worker_ref);
+                                std::thread::spawn(move || {
+                                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+                                    if let Ok(runtime) = rt {
+                                        let _ = runtime.block_on(async { upnp_clone.resume().await });
+                                    }
+                                });
+                            }
+                            if let Some(s) = &sink {
                                 s.play();
                             }
-                        }
-                        if is_paused {
                             playback_start = Some(Instant::now());
                             is_paused = false;
+                            is_playing_worker.store(true, Ordering::Release);
+                            is_paused_worker.store(false, Ordering::Release);
+                            diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "resumed", "pos={:.2}", accumulated_position.as_secs_f64());
+                            diag_cmd_end("Resume", meta, cmd_t0, None);
                         }
-                        is_playing_worker.store(true, Ordering::Release);
-                        is_paused_worker.store(false, Ordering::Release);
-                        diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "resumed", "pos={:.2}", accumulated_position.as_secs_f64());
-                        diag_cmd_end("Resume", meta, cmd_t0, None);
                     }
 
                     AudioWorkerMsg::Stop { meta } => {
@@ -2463,4 +2463,16 @@ mod tests {
         assert_eq!(rate_u, None);
         assert_eq!(ch_u, None);
     }
+
+    #[test]
+    fn resume_is_ignored_when_not_paused_with_active_track() {
+        assert!(!can_resume_active_track(false, false));
+        assert!(!can_resume_active_track(false, true));
+        assert!(!can_resume_active_track(true, false));
+        assert!(can_resume_active_track(true, true));
+    }
+}
+
+fn can_resume_active_track(is_paused: bool, has_current_file: bool) -> bool {
+    is_paused && has_current_file
 }

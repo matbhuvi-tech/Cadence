@@ -96,3 +96,24 @@ export async function sendPlaybackAction(
   }
 }
 
+export async function sendRemoteCommand(
+  cmd: Record<string, unknown>,
+  token: string
+): Promise<boolean> {
+  if (!token) return false;
+  try {
+    const res = await fetch(`/api/remote/command?token=${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-cadence-token': token,
+      },
+      body: JSON.stringify(cmd),
+    });
+    return res.ok;
+  } catch (err) {
+    console.error('Remote command error:', err);
+    return false;
+  }
+}
+

@@ -9,16 +9,20 @@ const releaseCache = new Map<string, DbRelease[]>();
 
 interface CatalogViewProps {
   token: string;
-  onPlayRelease: (releaseId: string) => void;
-  onQueueRelease: (releaseId: string, playNext?: boolean) => void;
-  onPlayTrack: (filePath: string) => void;
-  onPlayTrackInRelease?: (releaseId: string, trackId: string) => void;
-  onQueueTrack: (filePath: string, playNext?: boolean) => void;
+  activeTrackPath?: string | null;
+  isPlaybackPlaying?: boolean;
+  onPlayRelease: (releaseId: string) => Promise<boolean> | boolean | void;
+  onQueueRelease: (releaseId: string, playNext?: boolean) => Promise<boolean> | boolean | void;
+  onPlayTrack: (filePath: string) => Promise<boolean> | boolean | void;
+  onPlayTrackInRelease?: (releaseId: string, trackId: string) => Promise<boolean> | boolean | void;
+  onQueueTrack: (filePath: string, playNext?: boolean) => Promise<boolean> | boolean | void;
   onTriggerToast?: (message: string, onUndo?: () => void) => void;
 }
 
 export const CatalogView: React.FC<CatalogViewProps> = ({
   token,
+  activeTrackPath = null,
+  isPlaybackPlaying = false,
   onPlayRelease,
   onQueueRelease,
   onPlayTrack,
@@ -206,6 +210,8 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
       <AlbumModal
         release={selectedRelease}
         token={token}
+        activeTrackPath={activeTrackPath}
+        isPlaybackPlaying={isPlaybackPlaying}
         onClose={() => setSelectedRelease(null)}
         onPlayRelease={onPlayRelease}
         onQueueRelease={onQueueRelease}

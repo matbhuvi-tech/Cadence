@@ -79,6 +79,7 @@ pub async fn start_remote_server(
 
         .route("/api/remote/status", get(get_status))
         .route("/api/remote/playback/:action", post(handle_playback))
+        .route("/api/remote/command", post(handle_command))
         .route("/api/remote/devices", get(list_devices).post(set_device))
         .route("/api/remote/queue", get(get_queue))
         .route("/api/remote/library/releases", get(get_releases))
@@ -248,6 +249,23 @@ async fn get_status(
     Ok(Json(state.engine.get_status()))
 }
 
+async fn handle_command(
+    headers: HeaderMap,
+    Query(q): Query<AuthQuery>,
+    State(state): State<Arc<RemoteState>>,
+    Json(cmd): Json<super::ws::ClientCommand>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let token = resolve_token(&headers, q.token.as_deref());
+    if !state.validate_token(token.as_deref()) {
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized".to_string()));
+    }
+
+    super::ws::handle_client_command(cmd, &state)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err))
+}
+
 async fn handle_playback(
     Path(action): Path<String>,
     headers: HeaderMap,
@@ -259,64 +277,39 @@ async fn handle_playback(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    match action.as_str() {
-        "play" => {
-            if let Some(path) = payload.file_path {
-                let found = {
-                    let mut q = state.queue.lock();
-                    let norm_target = path.replace('\\', "/").to_lowercase();
-                    if let Some(pos) = q.items.iter().position(|t| {
-                        t.file_path.replace('\\', "/").to_lowercase() == norm_target || t.id == path
-                    }) {
-                        if pos > 0 {
-                            q.items = q.items.split_off(pos);
-                        }
-                        q.current_index = 0;
-                        q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
-                        q.revision += 1;
-                        true
-                    } else {
-                        false
-                    }
-                };
-                let _ = state.engine.play_track(&path);
-                if found {
-                    state.broadcast_queue_update();
-                }
-            } else {
-                let _ = state.engine.resume();
-            }
-        }
-        "pause" => {
-            let _ = state.engine.pause();
-        }
-        "resume" => {
-            let _ = state.engine.resume();
-        }
-        "stop" => {
-            let _ = state.engine.stop();
-        }
+    let cmd = match action.as_str() {
+        "play" => match payload.file_path {
+            Some(path) => super::ws::ClientCommand::PlayTrack { file_path: path },
+            None => super::ws::ClientCommand::Resume,
+        },
+        "pause" => super::ws::ClientCommand::Pause,
+        "resume" => super::ws::ClientCommand::Resume,
+        "stop" => super::ws::ClientCommand::Stop,
         "seek" => {
-            if let Some(pos) = payload.position_secs {
-                let _ = state.engine.seek(pos);
-            }
+            let Some(pos) = payload.position_secs else {
+                return Err(StatusCode::BAD_REQUEST);
+            };
+            super::ws::ClientCommand::Seek { position_secs: pos }
         }
         "volume" => {
-            if let Some(vol) = payload.volume {
-                let _ = state.engine.set_volume(vol);
-            }
+            let Some(vol) = payload.volume else {
+                return Err(StatusCode::BAD_REQUEST);
+            };
+            super::ws::ClientCommand::SetVolume { volume: vol }
         }
         "purity" => {
-            if let Some(enabled) = payload.enabled {
-                let _ = state.engine.set_purity_mode(enabled);
-            }
+            let Some(enabled) = payload.enabled else {
+                return Err(StatusCode::BAD_REQUEST);
+            };
+            super::ws::ClientCommand::TogglePurity { enabled }
         }
         _ => return Err(StatusCode::BAD_REQUEST),
-    }
+    };
 
-    let status = state.engine.get_status();
-    state.broadcast_state_change(&status);
-    Ok(StatusCode::OK)
+    super::ws::handle_client_command(cmd, &state)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn list_devices(

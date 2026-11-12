@@ -9,3 +9,4 @@
 - [#26](https://github.com/matbhuvi-tech/Cadence/issues/26): Crash / AppHangB1 during playback and when selecting WASAPI output device.
 - [#27](https://github.com/matbhuvi-tech/Cadence/issues/27): WASAPI-to-UPnP endpoint routing override and signal-path telemetry mismatch.
 - [#29](https://github.com/matbhuvi-tech/Cadence/issues/29): Sustained idle/paused CPU, WebView2 GPU/React overhead, and RS130 DSD256 playback stuttering (phased remediation; Phase 1 targets idle/background CPU, commit telemetry/projection, React re-renders, and GPU compositing animations).
+- [#30](https://github.com/matbhuvi-tech/Cadence/issues/30): Mobile playback control fails with `ws.rs` empty-queue integer overflow panic, dropped/stale WebSocket state (`CONNECTED` dot with null socket), missing full REST command fallback, and unguarded idle `Resume`.

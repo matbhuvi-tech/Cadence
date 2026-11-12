@@ -78,7 +78,9 @@ pub async fn monitor_queue_completion(state: Arc<RemoteState>) {
                 q_rev,
                 current_file
             );
-            advance_queue(&state, 1).await;
+            if let Err(err) = advance_queue(&state, 1).await {
+                eprintln!("[Cadence Remote] Auto-advance error: {}", err);
+            }
         } else {
             diag_log!(
                 DiagCategory::QueueCoordination,
@@ -182,7 +184,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
     let (mut sender, mut receiver) = socket.split();
 
     // 1. Send initial state and queue to newly connected client
-    let initial_status = state.engine.get_status();
+    let engine_for_init = state.engine.clone();
+    let initial_status = tokio::task::spawn_blocking(move || engine_for_init.get_status())
+        .await
+        .unwrap_or_else(|_| state.engine.get_status());
     let initial_event = RemoteEvent::StateChange {
         is_playing: initial_status.is_playing,
         is_paused: initial_status.is_paused,
@@ -239,7 +244,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
                 }
                 // Slow 5-second Heartbeat Sync (Only sent if playing to eliminate Wi-Fi traffic)
                 _ = heartbeat_timer.tick() => {
-                    let status = state_for_heartbeat.engine.get_status();
+                    let engine_for_hb = state_for_heartbeat.engine.clone();
+                    let Ok(status) = tokio::task::spawn_blocking(move || engine_for_hb.get_status()).await else {
+                        continue;
+                    };
                     if status.is_playing && !status.is_paused {
                         let heartbeat = RemoteEvent::Heartbeat {
                             position_secs: status.position_secs,
@@ -264,8 +272,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
-                if let Ok(cmd) = serde_json::from_str::<ClientCommand>(&text) {
-                    handle_client_command(cmd, &state_for_recv).await;
+                match serde_json::from_str::<ClientCommand>(&text) {
+                    Ok(cmd) => {
+                        if let Err(err) = handle_client_command(cmd, &state_for_recv).await {
+                            eprintln!("[Cadence Remote] WS command error: {}", err);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("[Cadence Remote] Invalid WS command payload: {}", err);
+                    }
                 }
             }
         }
@@ -280,7 +295,78 @@ async fn handle_socket(socket: WebSocket, state: Arc<RemoteState>) {
     CONNECTED_CLIENTS.fetch_sub(1, Ordering::Relaxed);
 }
 
-async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
+async fn run_engine_action<F>(
+    state: &RemoteState,
+    broadcast_queue: bool,
+    op: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&crate::audio::AudioEngine) -> Result<(), String> + Send + 'static,
+{
+    let engine = state.engine.clone();
+    let (res, status) = tokio::task::spawn_blocking(move || {
+        let res = op(&engine);
+        let status = engine.get_status();
+        (res, status)
+    })
+    .await
+    .map_err(|e| format!("Audio engine blocking task failed: {}", e))?;
+
+    state.broadcast_state_change(&status);
+    if broadcast_queue {
+        state.broadcast_queue_update();
+    }
+    if let Err(ref err) = res {
+        eprintln!("[Cadence Remote] Engine command failed: {}", err);
+    }
+    res
+}
+
+async fn play_track_and_broadcast(
+    state: &RemoteState,
+    file_path: String,
+    broadcast_queue: bool,
+) -> Result<(), String> {
+    run_engine_action(state, broadcast_queue, move |eng| {
+        eng.play_track(&file_path).map(|_| ())
+    })
+    .await
+}
+
+pub fn replace_queue_preserving_upcoming(
+    q: &mut super::state::RemoteQueue,
+    replacement_tracks: Vec<crate::remote::state::RemoteTrackItem>,
+) -> Option<String> {
+    if replacement_tracks.is_empty() {
+        return None;
+    }
+    let remaining_upcoming = usize::try_from(q.current_index)
+        .ok()
+        .and_then(|idx| idx.checked_add(1))
+        .filter(|&split_at| split_at < q.items.len())
+        .map(|split_at| q.items.split_off(split_at))
+        .unwrap_or_default();
+
+    let mut new_items = replacement_tracks;
+    new_items.extend(remaining_upcoming);
+    let first_path = new_items.first().map(|t| t.file_path.clone());
+    q.items = new_items;
+    q.current_index = 0;
+    q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
+    q.next_up_end_index = None;
+    q.revision += 1;
+    first_path
+}
+
+fn next_up_insert_index(q: &super::state::RemoteQueue) -> usize {
+    let after_current = usize::try_from(q.current_index)
+        .ok()
+        .and_then(|idx| idx.checked_add(1))
+        .unwrap_or(0);
+    q.next_up_end_index.unwrap_or(after_current).min(q.items.len())
+}
+
+pub async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) -> Result<(), String> {
     match cmd {
         ClientCommand::PlayTrack { file_path } => {
             let found_idx = {
@@ -302,10 +388,7 @@ async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
             };
 
             if found_idx.is_some() {
-                let _ = state.engine.play_track(&file_path);
-                let status = state.engine.get_status();
-                state.broadcast_state_change(&status);
-                state.broadcast_queue_update();
+                play_track_and_broadcast(state, file_path, true).await
             } else {
                 let alt_path = if file_path.contains('/') {
                     file_path.replace('/', "\\")
@@ -327,61 +410,33 @@ async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
                 };
 
                 if let Some((rel_id, trk_id)) = release_match {
-                    play_release_track(state, &rel_id, &trk_id).await;
+                    play_release_track(state, &rel_id, &trk_id).await
                 } else {
-                    let _ = state.engine.play_track(&file_path);
-                    let status = state.engine.get_status();
-                    state.broadcast_state_change(&status);
+                    play_track_and_broadcast(state, file_path, false).await
                 }
             }
         }
-        ClientCommand::Pause => {
-            let _ = state.engine.pause();
-            let status = state.engine.get_status();
-            state.broadcast_state_change(&status);
-        }
-        ClientCommand::Resume => {
-            let _ = state.engine.resume();
-            let status = state.engine.get_status();
-            state.broadcast_state_change(&status);
-        }
-        ClientCommand::Stop => {
-            let _ = state.engine.stop();
-            let status = state.engine.get_status();
-            state.broadcast_state_change(&status);
-        }
+        ClientCommand::Pause => run_engine_action(state, false, |eng| eng.pause()).await,
+        ClientCommand::Resume => run_engine_action(state, false, |eng| eng.resume()).await,
+        ClientCommand::Stop => run_engine_action(state, false, |eng| eng.stop()).await,
         ClientCommand::Seek { position_secs } => {
-            let _ = state.engine.seek(position_secs);
-            let status = state.engine.get_status();
-            state.broadcast_state_change(&status);
+            run_engine_action(state, false, move |eng| eng.seek(position_secs)).await
         }
         ClientCommand::SetVolume { volume } => {
-            let _ = state.engine.set_volume(volume);
-            let status = state.engine.get_status();
-            state.broadcast_state_change(&status);
+            run_engine_action(state, false, move |eng| eng.set_volume(volume)).await
         }
         ClientCommand::TogglePurity { enabled } => {
-            let _ = state.engine.set_purity_mode(enabled);
-            let status = state.engine.get_status();
-            state.broadcast_state_change(&status);
+            run_engine_action(state, false, move |eng| eng.set_purity_mode(enabled).map(|_| ())).await
         }
-        ClientCommand::NextTrack => {
-            advance_queue(state, 1).await;
-        }
-        ClientCommand::PrevTrack => {
-            advance_queue(state, -1).await;
-        }
-        ClientCommand::JumpToQueueIndex { index } => {
-            jump_queue(state, index).await;
-        }
-        ClientCommand::PlayRelease { release_id } => {
-            play_release(state, &release_id).await;
-        }
+        ClientCommand::NextTrack => advance_queue(state, 1).await,
+        ClientCommand::PrevTrack => advance_queue(state, -1).await,
+        ClientCommand::JumpToQueueIndex { index } => jump_queue(state, index).await,
+        ClientCommand::PlayRelease { release_id } => play_release(state, &release_id).await,
         ClientCommand::PlayTrackInRelease { release_id, track_id } => {
-            play_release_track(state, &release_id, &track_id).await;
+            play_release_track(state, &release_id, &track_id).await
         }
         ClientCommand::QueueTrack { file_path, play_next, expected_revision } => {
-            queue_track(state, &file_path, play_next.unwrap_or(false), expected_revision).await;
+            queue_track(state, &file_path, play_next.unwrap_or(false), expected_revision).await
         }
         ClientCommand::QueueRelease { release_id, play_next, play_now, expected_revision } => {
             queue_release(
@@ -391,17 +446,15 @@ async fn handle_client_command(cmd: ClientCommand, state: &RemoteState) {
                 play_now.unwrap_or(false),
                 expected_revision,
             )
-            .await;
+            .await
         }
         ClientCommand::RemoveFromQueue { index, track_id, queue_entry_id, expected_revision } => {
-            remove_from_queue(state, index, track_id, queue_entry_id, expected_revision).await;
+            remove_from_queue(state, index, track_id, queue_entry_id, expected_revision).await
         }
         ClientCommand::ReorderQueue { queue_entry_id, target_queue_entry_id, expected_revision } => {
-            reorder_queue(state, &queue_entry_id, &target_queue_entry_id, expected_revision).await;
+            reorder_queue(state, &queue_entry_id, &target_queue_entry_id, expected_revision).await
         }
-        ClientCommand::ClearQueue { expected_revision } => {
-            clear_queue(state, expected_revision).await;
-        }
+        ClientCommand::ClearQueue { expected_revision } => clear_queue(state, expected_revision).await,
     }
 }
 
@@ -429,7 +482,7 @@ fn check_revision(state: &RemoteState, expected_revision: Option<u64>) -> Result
     Ok(())
 }
 
-async fn advance_queue(state: &RemoteState, delta: isize) {
+async fn advance_queue(state: &RemoteState, delta: isize) -> Result<(), String> {
     let (next_file, new_rev, entry_id): (Option<String>, u64, Option<String>) = {
         let mut q = state.queue.lock();
         if q.items.is_empty() {
@@ -491,19 +544,13 @@ async fn advance_queue(state: &RemoteState, delta: isize) {
     );
 
     if let Some(path) = next_file {
-        let _ = state.engine.play_track(&path);
-        let status = state.engine.get_status();
-        state.broadcast_state_change(&status);
-        state.broadcast_queue_update();
+        play_track_and_broadcast(state, path, true).await
     } else {
-        let _ = state.engine.stop();
-        let status = state.engine.get_status();
-        state.broadcast_state_change(&status);
-        state.broadcast_queue_update();
+        run_engine_action(state, true, |eng| eng.stop()).await
     }
 }
 
-async fn jump_queue(state: &RemoteState, index: usize) {
+async fn jump_queue(state: &RemoteState, index: usize) -> Result<(), String> {
     let target_file: Option<String> = {
         let mut q = state.queue.lock();
         if index < q.items.len() {
@@ -520,10 +567,9 @@ async fn jump_queue(state: &RemoteState, index: usize) {
     };
 
     if let Some(path) = target_file {
-        let _ = state.engine.play_track(&path);
-        let status = state.engine.get_status();
-        state.broadcast_state_change(&status);
-        state.broadcast_queue_update();
+        play_track_and_broadcast(state, path, true).await
+    } else {
+        Err(format!("Queue index {} out of bounds", index))
     }
 }
 
@@ -568,37 +614,29 @@ fn query_release_tracks(state: &RemoteState, release_id: &str) -> Vec<crate::rem
     query.unwrap_or_default()
 }
 
-async fn play_release(state: &RemoteState, release_id: &str) {
-    queue_release(state, release_id, false, true, None).await;
+async fn play_release(state: &RemoteState, release_id: &str) -> Result<(), String> {
+    queue_release(state, release_id, false, true, None).await
 }
 
-async fn play_release_track(state: &RemoteState, release_id: &str, track_id: &str) {
+async fn play_release_track(state: &RemoteState, release_id: &str, track_id: &str) -> Result<(), String> {
     let tracks = query_release_tracks(state, release_id);
-    if !tracks.is_empty() {
-        let target_idx = tracks.iter().position(|t| t.id == track_id).unwrap_or(0);
-        let target_path = tracks[target_idx].file_path.clone();
-        {
-            let mut q = state.queue.lock();
-            let split_at = (q.current_index as usize) + 1;
-            let remaining_upcoming = if q.current_index >= 0 && split_at < q.items.len() {
-                q.items.split_off(split_at)
-            } else {
-                Vec::new()
-            };
-            // Prune tracks preceding target_idx so past tracks are excluded from queue
-            let mut new_items: Vec<crate::remote::state::RemoteTrackItem> =
-                tracks.into_iter().skip(target_idx).collect();
-            new_items.extend(remaining_upcoming);
-            q.items = new_items;
-            q.current_index = 0;
-            q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
-            q.next_up_end_index = None;
-            q.revision += 1;
-        }
-        let _ = state.engine.play_track(&target_path);
-        let status = state.engine.get_status();
-        state.broadcast_state_change(&status);
-        state.broadcast_queue_update();
+    if tracks.is_empty() {
+        return Err(format!("No online tracks found for release {}", release_id));
+    }
+
+    let target_idx = tracks.iter().position(|t| t.id == track_id).unwrap_or(0);
+    // Prune tracks preceding target_idx so past tracks are excluded from queue
+    let remaining_tracks: Vec<crate::remote::state::RemoteTrackItem> =
+        tracks.into_iter().skip(target_idx).collect();
+    let target_path = {
+        let mut q = state.queue.lock();
+        replace_queue_preserving_upcoming(&mut q, remaining_tracks)
+    };
+
+    if let Some(path) = target_path {
+        play_track_and_broadcast(state, path, true).await
+    } else {
+        Err(format!("No playable track found in release {}", release_id))
     }
 }
 
@@ -607,10 +645,10 @@ async fn queue_track(
     file_path: &str,
     play_next: bool,
     expected_revision: Option<u64>,
-) {
+) -> Result<(), String> {
     if let Err(conflict) = check_revision(state, expected_revision) {
         let _ = state.event_tx.send(conflict);
-        return;
+        return Err("Queue revision conflict".to_string());
     }
 
     let item: Option<crate::remote::state::RemoteTrackItem> = {
@@ -651,9 +689,7 @@ async fn queue_track(
         {
             let mut q = state.queue.lock();
             if play_next && !q.items.is_empty() && q.current_index >= 0 {
-                let insert_idx = q
-                    .next_up_end_index
-                    .unwrap_or(((q.current_index as usize) + 1).min(q.items.len()));
+                let insert_idx = next_up_insert_index(&q);
                 q.items.insert(insert_idx, track);
                 q.next_up_end_index = Some(insert_idx + 1);
             } else {
@@ -662,6 +698,9 @@ async fn queue_track(
             q.revision += 1;
         }
         state.broadcast_queue_update();
+        Ok(())
+    } else {
+        Err(format!("Track not found in library: {}", file_path))
     }
 }
 
@@ -671,47 +710,33 @@ async fn queue_release(
     play_next: bool,
     play_now: bool,
     expected_revision: Option<u64>,
-) {
+) -> Result<(), String> {
     if let Err(conflict) = check_revision(state, expected_revision) {
         let _ = state.event_tx.send(conflict);
-        return;
+        return Err("Queue revision conflict".to_string());
     }
 
     let tracks = query_release_tracks(state, release_id);
     if tracks.is_empty() {
-        return;
+        return Err(format!("No online tracks found for release {}", release_id));
     }
 
     if play_now {
-        let first_path = tracks[0].file_path.clone();
-        {
+        let first_path = {
             let mut q = state.queue.lock();
-            let split_at = (q.current_index as usize) + 1;
-            let remaining_upcoming = if q.current_index >= 0 && split_at < q.items.len() {
-                q.items.split_off(split_at)
-            } else {
-                Vec::new()
-            };
-            let mut new_items = tracks;
-            new_items.extend(remaining_upcoming);
-            q.items = new_items;
-            q.current_index = 0;
-            q.current_queue_entry_id = q.items.first().map(|t| t.queue_entry_id.clone());
-            q.next_up_end_index = None;
-            q.revision += 1;
+            replace_queue_preserving_upcoming(&mut q, tracks)
+        };
+        if let Some(path) = first_path {
+            play_track_and_broadcast(state, path, true).await
+        } else {
+            Err(format!("No playable track found in release {}", release_id))
         }
-        let _ = state.engine.play_track(&first_path);
-        let status = state.engine.get_status();
-        state.broadcast_state_change(&status);
-        state.broadcast_queue_update();
     } else {
         {
             let mut q = state.queue.lock();
             let count = tracks.len();
             if play_next && !q.items.is_empty() && q.current_index >= 0 {
-                let insert_idx = q
-                    .next_up_end_index
-                    .unwrap_or(((q.current_index as usize) + 1).min(q.items.len()));
+                let insert_idx = next_up_insert_index(&q);
                 for (offset, t) in tracks.into_iter().enumerate() {
                     q.items.insert(insert_idx + offset, t);
                 }
@@ -722,6 +747,7 @@ async fn queue_release(
             q.revision += 1;
         }
         state.broadcast_queue_update();
+        Ok(())
     }
 }
 
@@ -731,10 +757,10 @@ async fn remove_from_queue(
     track_id: Option<String>,
     queue_entry_id: Option<String>,
     expected_revision: Option<u64>,
-) {
+) -> Result<(), String> {
     if let Err(conflict) = check_revision(state, expected_revision) {
         let _ = state.event_tx.send(conflict);
-        return;
+        return Err("Queue revision conflict".to_string());
     }
 
     let removed = {
@@ -781,11 +807,11 @@ async fn remove_from_queue(
     };
 
     if let Some(next_file) = removed {
-        let _ = state.engine.play_track(&next_file);
-        let status = state.engine.get_status();
-        state.broadcast_state_change(&status);
+        play_track_and_broadcast(state, next_file, true).await
+    } else {
+        state.broadcast_queue_update();
+        Ok(())
     }
-    state.broadcast_queue_update();
 }
 
 async fn reorder_queue(
@@ -793,10 +819,10 @@ async fn reorder_queue(
     queue_entry_id: &str,
     target_queue_entry_id: &str,
     expected_revision: Option<u64>,
-) {
+) -> Result<(), String> {
     if let Err(conflict) = check_revision(state, expected_revision) {
         let _ = state.event_tx.send(conflict);
-        return;
+        return Err("Queue revision conflict".to_string());
     }
     {
         let mut q = state.queue.lock();
@@ -814,12 +840,13 @@ async fn reorder_queue(
         }
     }
     state.broadcast_queue_update();
+    Ok(())
 }
 
-async fn clear_queue(state: &RemoteState, expected_revision: Option<u64>) {
+async fn clear_queue(state: &RemoteState, expected_revision: Option<u64>) -> Result<(), String> {
     if let Err(conflict) = check_revision(state, expected_revision) {
         let _ = state.event_tx.send(conflict);
-        return;
+        return Err("Queue revision conflict".to_string());
     }
     {
         let mut q = state.queue.lock();
@@ -837,4 +864,5 @@ async fn clear_queue(state: &RemoteState, expected_revision: Option<u64>) {
         q.revision += 1;
     }
     state.broadcast_queue_update();
+    Ok(())
 }
