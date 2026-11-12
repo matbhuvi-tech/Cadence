@@ -149,3 +149,28 @@ export function mergeCurateProposal<T extends Proposal>(current: T, fresh: T): T
 export function selectCurateTrackFields(track: CurateDraftTrack, ...fields: CurateTrackField[]): CurateDraftTrack {
   return { ...track, selectedOverrides: [...new Set([...track.selectedOverrides ?? [], ...fields])] }
 }
+
+/**
+ * Applies a provider or local track cell selection, updating both track title and artists when present
+ * and recording the updated fields in `selectedOverrides` so they survive refreshes and draft restores.
+ */
+export function applyCurateTrackSelection(
+  track: CurateDraftTrack,
+  selection: { title?: string; artists?: string; source?: TrackCandidateState['source'] },
+): CurateDraftTrack {
+  const fields: CurateTrackField[] = []
+  const next: CurateDraftTrack = {
+    ...track,
+    source: selection.source ?? 'single_provider_match',
+    requiresHumanReview: false,
+  }
+  if (selection.title) {
+    next.matchedTitle = selection.title
+    fields.push('matchedTitle')
+  }
+  if (selection.artists !== undefined) {
+    next.matchedArtists = selection.artists
+    fields.push('matchedArtists')
+  }
+  return fields.length ? selectCurateTrackFields(next, ...fields) : next
+}

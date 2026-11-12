@@ -10,14 +10,12 @@
  * - Inline manual override pencil on every tag (including custom artwork URL).
  * - Audiophile Transport Quietness Guard (yields background disk I/O when isPlaying is active).
  * - Real-time Behavioral Learning integration (remembers user spelling & delimiter corrections).
- * - Unified Health & Audit drawer.
  */
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   Sparkles,
   CheckCircle2,
-  Layers,
   BookOpen,
   Volume2,
   Pause,
@@ -43,7 +41,6 @@ import {
 import {
   Track,
   Release,
-  AuditIssue,
   MetadataFieldState,
   TrackCandidateState,
   LearnedRule,
@@ -57,7 +54,7 @@ import { CurateCommitPreviewModal, type CommitPreviewAlbumInput } from './Curate
 import { labels } from './curateProblemLabels'
 import type { EnqueueBatchPayload } from '../../types/commit'
 import {
-  captureCurateDraft, captureCurateBaseline, restoreCurateDraft, migrateCurateDraft, mergeCurateProposal, selectCurateTrackFields,
+  applyCurateTrackSelection, captureCurateDraft, captureCurateBaseline, restoreCurateDraft, migrateCurateDraft, mergeCurateProposal, selectCurateTrackFields,
   type CurateDraft, type CurateDraftTrack,
 } from '../../core/curateDraft'
 import { federatedResolversService, type ProviderResult } from '../../services/federatedResolvers'
@@ -84,7 +81,6 @@ export interface UnifiedCurateCockpitProps {
   dismissedProblems?: DismissedProblemsMap
   onPrioritySettingsChange?: (settings: PrioritySettings) => void
   onDismissedProblemsChange?: (dismissals: DismissedProblemsMap) => void
-  auditIssues?: AuditIssue[]
   initialSelectedAlbumId?: string | null
   onReturnToAnchor?: () => void
   onBackToLibrary: () => void
@@ -124,7 +120,6 @@ function captureAlbumDraft(album: AlbumWorkItem): CurateDraft {
   return { ...draft, baseline: album.draftBasedOn ?? draft.baseline }
 }
 
-const emptyAuditIssues: AuditIssue[] = []
 const albumReviewFields = ['albumTitle', 'albumArtist', 'composer', 'year', 'coverArt', 'genre'] as const
 
 function SelectedChangeNote({ change, label }: { change: CurateValueChange | null | undefined; label?: string }) {
@@ -389,7 +384,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   dismissedProblems: dismissalsProp,
   onPrioritySettingsChange: _onPrioritySettingsChange,
   onDismissedProblemsChange,
-  auditIssues = emptyAuditIssues,
   initialSelectedAlbumId,
   onReturnToAnchor,
   onBackToLibrary,
@@ -448,7 +442,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     onDismissedProblemsChange?.(dismissals)
   }
   const [isRulesModalOpen, setIsRulesModalOpen] = useState(false)
-  const [isHealthDrawerOpen, setIsHealthDrawerOpen] = useState(false)
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(initialSelectedAlbumId || null)
   const [learnedRules, setLearnedRules] = useState<LearnedRule[]>(() => behavioralLearningService.getLearnedRules())
   const [conventions, setConventions] = useState<SemanticConventions>(() => behavioralLearningService.getConventions())
@@ -939,23 +932,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     setEditingFieldKey(null)
   }
 
-  // Select source for track vocalists
-  const handleSelectTrackArtist = (trackId: string, artists: string, source: any) => {
+  // Select source for track title & vocalists
+  const handleSelectTrack = (
+    trackId: string,
+    selection: { title?: string; artists?: string; source?: ConsensusFieldSource },
+  ) => {
     if (!selectedAlbum) return
     setAlbumItems((prev) => {
       const next = new Map(prev)
       const current = next.get(selectedAlbum.id)
       if (!current) return prev
 
-      const updatedTracks = current.tracks.map((t) => {
-        if (t.trackId !== trackId) return t
-        return selectCurateTrackFields({
-          ...t,
-          matchedArtists: artists,
-          source: source || 'single_provider_match',
-          requiresHumanReview: false,
-        }, 'matchedArtists')
-      })
+      const updatedTracks = current.tracks.map((t) =>
+        t.trackId === trackId ? applyCurateTrackSelection(t, selection) : t,
+      )
 
       next.set(selectedAlbum.id, { ...current, tracks: updatedTracks })
       return next
@@ -1501,14 +1491,13 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         if (document.querySelector('[data-curate-priority-popover]:popover-open')) return
         if (preview) return
         if (isRulesModalOpen) setIsRulesModalOpen(false)
-        else if (isHealthDrawerOpen) setIsHealthDrawerOpen(false)
         else onBackToLibrary()
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [filteredAlbums, preview, isRulesModalOpen, isHealthDrawerOpen, onBackToLibrary])
+  }, [filteredAlbums, preview, isRulesModalOpen, onBackToLibrary])
 
   // Row Renderer: Album Text Field
   const renderFieldRow = (
@@ -1839,19 +1828,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
             {isPlaying ? <Volume2 className="w-3.5 h-3.5 animate-pulse text-amber-400" /> : <Pause className="w-3.5 h-3.5" />}
             <span className="text-[11px]">{isPlaying ? 'Playing (Bus Silent)' : 'Engine Idle'}</span>
           </div>
-
-          <button
-            onClick={() => setIsHealthDrawerOpen(true)}
-            className="px-2.5 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-white/70 hover:text-white text-xs border border-white/[0.08] transition-colors flex items-center gap-1.5 cursor-pointer"
-          >
-            <Layers className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Health & Audit</span>
-            {auditIssues.length > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 text-[10px]">
-                {auditIssues.length}
-              </span>
-            )}
-          </button>
 
           <button
             onClick={() => setIsRulesModalOpen(true)}
@@ -2382,6 +2358,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                     Apple Music
                   </button>
                   <button
+                    onClick={() => handleAdoptAllTracks('musicbrainz')}
+                    className="px-2 py-1 rounded bg-white/[0.06] hover:bg-white/[0.12] text-white/80 border border-white/15 cursor-pointer"
+                  >
+                    MusicBrainz
+                  </button>
+                  <button
                     onClick={() => handleAdoptAllTracks('ai')}
                     className="px-2 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 cursor-pointer"
                   >
@@ -2419,7 +2401,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                         decision.mapping?.provider === 'apple' && decision.mapping.status === 'conflicted') ||
                         (savedAppleTrack?.conflicted && (!hasLiveAppleTrack ||
                           (appleTitle === savedAppleTrack.title && appleCredit === savedAppleTrack.artist)))
-                      const selectableAppleCredit = appleConflict ? undefined : appleCredit
+                      const hasAppleTrack = Boolean(appleTitle || appleCredit)
                       const isEditing = editingTrack?.trackId === trk.trackId
                       const change = selectedChanges?.tracks.get(trk.trackId)
                       const hasChange = change && Object.values(change).some(Boolean)
@@ -2437,7 +2419,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           {/* Local Track Cell */}
                           <td
                             data-testid={`track-cell-${idx}-local`}
-                            onClick={() => handleSelectTrackArtist(trk.trackId, trk.localArtists, 'local_fallback')}
+                            onClick={() => handleSelectTrack(trk.trackId, {
+                              title: trk.localTitle,
+                              artists: trk.localArtists,
+                              source: 'local_fallback',
+                            })}
                             className="py-3 px-3 cursor-pointer text-white/60 hover:text-white transition-colors"
                           >
                             <div className="font-medium text-white/80">{trk.localTitle}</div>
@@ -2475,10 +2461,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           {/* Apple Music Cell */}
                           <td
                             data-testid={`track-cell-${idx}-apple`}
-                            onClick={selectableAppleCredit ? () => {
-                              handleSelectTrackArtist(trk.trackId, selectableAppleCredit, 'single_provider_match')
+                            onClick={hasAppleTrack ? () => {
+                              handleSelectTrack(trk.trackId, {
+                                title: appleTitle,
+                                artists: appleCredit,
+                                source: 'single_provider_match',
+                              })
                             } : undefined}
-                            className={`py-3 px-3 text-white/70 ${selectableAppleCredit ? 'cursor-pointer hover:text-[#D4AF37] transition-colors' : ''}`}
+                            className={`py-3 px-3 text-white/70 ${hasAppleTrack ? 'cursor-pointer hover:text-[#D4AF37] transition-colors' : ''}`}
                           >
                             <div className="font-medium text-white/70">{appleTitle || '—'}</div>
                             <div className="text-[10px] text-white/50 mt-0.5">{appleCredit || '—'}</div>
@@ -2493,9 +2483,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-musicbrainz`}
                             onClick={() => {
-                              const targetArtist = trk.mbArtists
-                              if (targetArtist) {
-                                handleSelectTrackArtist(trk.trackId, targetArtist, 'single_provider_match')
+                              if (trk.mbTitle || trk.mbArtists) {
+                                handleSelectTrack(trk.trackId, {
+                                  title: trk.mbTitle,
+                                  artists: trk.mbArtists,
+                                  source: 'single_provider_match',
+                                })
                               }
                             }}
                             className="py-3 px-3 cursor-pointer text-white/60 hover:text-white transition-colors"
@@ -2512,9 +2505,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                           <td
                             data-testid={`track-cell-${idx}-ai`}
                             onClick={() => {
-                              const candArtist = trk.aiArtists
-                              if (candArtist) {
-                                handleSelectTrackArtist(trk.trackId, candArtist, 'ai_synthesized')
+                              if (trk.aiTitle || trk.aiArtists) {
+                                handleSelectTrack(trk.trackId, {
+                                  title: trk.aiTitle,
+                                  artists: trk.aiArtists,
+                                  source: 'ai_synthesized',
+                                })
                               }
                             }}
                             className="py-3 px-3 cursor-pointer text-white/70 hover:text-cyan-300 transition-colors"
@@ -2823,69 +2819,6 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 className="px-4 py-1.5 rounded-lg bg-white/[0.08] text-xs font-medium text-white cursor-pointer"
               >
                 Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 4. Unified Health & Audit Drawer */}
-      {isHealthDrawerOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex justify-end">
-          <div className="w-96 bg-[#121318] border-l border-white/[0.1] p-6 shadow-2xl flex flex-col">
-            <div className="flex items-center justify-between pb-4 border-b border-white/[0.08]">
-              <div className="flex items-center gap-2">
-                <Layers className="w-5 h-5 text-cyan-400" />
-                <h3 className="text-sm font-semibold text-white">Catalog Hygiene & Health</h3>
-              </div>
-              <button
-                onClick={() => setIsHealthDrawerOpen(false)}
-                className="text-white/40 hover:text-white cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="mt-4 space-y-3 flex-1 overflow-y-auto">
-              <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-                <div className="text-[11px] text-white/50">Total Library Tracks</div>
-                <div className="text-xl font-semibold text-white mt-0.5">{tracks.length}</div>
-              </div>
-              <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-                <div className="text-[11px] text-white/50">Curated / Total Releases</div>
-                <div className="text-xl font-semibold text-emerald-300 mt-0.5">
-                  {releases.length - filteredAlbums.length} / {releases.length}
-                </div>
-              </div>
-              <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-                <div className="text-[11px] text-white/50">Pending Review (Tier 2)</div>
-                <div className="text-xl font-semibold text-[#D4AF37] mt-0.5">{filteredAlbums.length}</div>
-              </div>
-
-              {auditIssues.length > 0 && (
-                <div className="pt-2">
-                  <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider mb-2">
-                    Active Audit Alerts
-                  </h4>
-                  <div className="space-y-2">
-                    {auditIssues.map((issue) => (
-                      <div
-                        key={issue.id}
-                        className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.06] text-xs"
-                      >
-                        <div className="font-medium text-white/90">{issue.title}</div>
-                        <div className="text-[11px] text-white/50 mt-0.5">{issue.description}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="mt-auto pt-4 border-t border-white/[0.08]">
-              <button
-                onClick={() => setIsHealthDrawerOpen(false)}
-                className="w-full py-2.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-xs font-medium text-white cursor-pointer"
-              >
-                Close
               </button>
             </div>
           </div>

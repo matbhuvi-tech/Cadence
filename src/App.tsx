@@ -1971,7 +1971,6 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
             commitQueueHostRef={setCurateQueueHost}
             onCommitQueued={refreshCurateCommits}
             onDraftSaved={noteCurateDraftSaved}
-            auditIssues={auditIssues}
             initialSelectedAlbumId={navigationAnchor?.selectedAlbumId}
             onReturnToAnchor={() => {
               if (navigationAnchor) {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { MetadataFieldState, TrackCandidateState } from '../core/types'
-import { captureCurateDraft, captureCurateBaseline, migrateCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields } from '../core/curateDraft'
+import { applyCurateTrackSelection, captureCurateDraft, captureCurateBaseline, migrateCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields } from '../core/curateDraft'
 
 const field = (selected: string): MetadataFieldState<string> => ({ selected, local: selected, source: 'local_fallback', confidence: 1 })
 const track: TrackCandidateState = {
@@ -110,4 +110,32 @@ test('legacy proposals fall back to physical values while explicit edits survive
   assert.equal(restored.tracks[0].matchedTitle, track.localTitle)
   assert.equal(restored.tracks[0].matchedArtists, 'Manual singer')
   assert.equal(restored.tracks[0].requiresHumanReview, true)
+})
+
+test('applyCurateTrackSelection copies both title and artists and preserves them across proposal merge', () => {
+  const initial = {
+    ...track,
+    matchedTitle: 'Shallow (16_44_1_DSD256 PGGB)',
+    matchedArtists: 'Lady Gaga, Bradley Cooper',
+    appleTitle: 'Shallow',
+    appleArtists: 'Lady Gaga & Bradley Cooper',
+    requiresHumanReview: true,
+  }
+  const selected = applyCurateTrackSelection(initial, {
+    title: initial.appleTitle,
+    artists: initial.appleArtists,
+    source: 'single_provider_match',
+  })
+  assert.equal(selected.matchedTitle, 'Shallow')
+  assert.equal(selected.matchedArtists, 'Lady Gaga & Bradley Cooper')
+  assert.equal(selected.source, 'single_provider_match')
+  assert.equal(selected.requiresHumanReview, false)
+  assert.deepEqual(selected.selectedOverrides, ['matchedTitle', 'matchedArtists'])
+
+  const merged = mergeCurateProposal(
+    { ...baseline, tracks: [selected] },
+    { ...baseline, tracks: [{ ...track, matchedTitle: 'Shallow (16_44_1_DSD256 PGGB)', matchedArtists: 'Other Artist' }] },
+  )
+  assert.equal(merged.tracks[0].matchedTitle, 'Shallow')
+  assert.equal(merged.tracks[0].matchedArtists, 'Lady Gaga & Bradley Cooper')
 })
