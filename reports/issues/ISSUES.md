@@ -1,5 +1,13 @@
 # Issue Log
 
+## GitHub #34: Clicking album cover art in Listen workspace navigates to Curate instead of album drill-down
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/34
+- **Reported:** Clicking in the middle of an album cover art card in the Listen workspace (`Albums` Cover Grid) navigates to the Curate workspace instead of opening the Listen workspace album drill-down view.
+- **Cause:** `handleSelectAlbumCard` in `src/components/CenterStage/AlbumCoverGrid.tsx` called `setSelectedAlbumId(album.id)` and also called `onInspectRelease(album.release.id)`, which invokes `handleInspectRelease` in `src/App.tsx` and switches `topMode` to `'curate'`.
+- **Fix:** Removed the `onInspectRelease(album.release.id)` call from `handleSelectAlbumCard` so clicking an album card opens the in-place Listen workspace album drill-down, while the dedicated Curate hover button (`SlidersHorizontal`) and drill-down "Edit Metadata" button continue to route to Curate.
+- **Status:** Implemented on `fix/34-album-cover-click-listen-drilldown`; pending user verification.
+
 ## GitHub #31: Apple & MusicBrainz return parse_error in packaged desktop builds and discard successful Gemini AI results
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/31

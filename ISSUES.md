@@ -13,3 +13,4 @@
 - [#31](https://github.com/matbhuvi-tech/Cadence/issues/31): Packaged desktop Curate refresh fails Apple & MusicBrainz with `parse_error` (HTTP 200 HTML fallback) and discards successful Gemini AI results.
 - [#32](https://github.com/matbhuvi-tech/Cadence/issues/32): Curate: clicking a provider track cell only copies artist, not track title, to Selected Track & Singers.
 - [#33](https://github.com/matbhuvi-tech/Cadence/issues/33): Album overflow menu ('Edit Metadata in Curate') disappears when moving mouse to click due to hover gap.
+- [#34](https://github.com/matbhuvi-tech/Cadence/issues/34): Clicking album cover art in Listen workspace navigates to Curate instead of album drill-down.

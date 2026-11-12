@@ -726,10 +726,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
     if (album.tracks.length > 0) {
       onSelectTrack(album.tracks[0].id)
     }
-    if (album.release) {
-      onInspectRelease(album.release.id)
-    }
-  }, [setSelectedAlbumId, onSelectTrack, onInspectRelease])
+  }, [setSelectedAlbumId, onSelectTrack])
 
   const handleSelectArtistFromCard = useCallback((artist: string, e: React.MouseEvent) => {
     e.stopPropagation()
