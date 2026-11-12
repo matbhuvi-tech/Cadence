@@ -30,6 +30,7 @@ import {
   PanelLeft,
   FileText,
   Disc,
+  SlidersHorizontal,
 } from 'lucide-react'
 import { CurateArtworkThumbnail } from './CurateArtworkThumbnail'
 import { SelectedOutputCard } from './SelectedOutputCard'
@@ -121,6 +122,22 @@ function captureAlbumDraft(album: AlbumWorkItem): CurateDraft {
 }
 
 const albumReviewFields = ['albumTitle', 'albumArtist', 'composer', 'year', 'coverArt', 'genre'] as const
+
+const priorityChipNames: Record<string, string> = { P0: 'Critical', P1: 'High', P2: 'Medium', P3: 'Low' }
+
+function formatAlbumDiscriminator(album: AlbumWorkItem): string | null {
+  const leafFolder = album.folderName.split(/[\\/]/).filter(Boolean).pop() ?? ''
+  const title = (album.albumTitle.selected || album.currentTitle || '').toLowerCase()
+  const editionMatch = leafFolder.match(/[[(]([^\]()]{2,28})[\])]\s*$/)
+  if (editionMatch) {
+    const hint = editionMatch[1].trim()
+    if (hint && !title.includes(hint.toLowerCase())) return hint
+  }
+  const mediaFormat = album.rawRelease?.mediaFormat?.trim()
+  if (mediaFormat) return mediaFormat
+  const trackFormat = album.tracks[0]?.format?.trim().toUpperCase()
+  return trackFormat || null
+}
 
 function SelectedChangeNote({ change, label }: { change: CurateValueChange | null | undefined; label?: string }) {
   if (!change) return null
@@ -419,6 +436,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     return [...byId.values()]
   }, [releases, tracks])
   const filteredAlbums = useMemo(() => filterAndRankCurateAlbums(albums, problemSummary, filter), [albums, problemSummary, filter])
+  const hasActiveFilters = Boolean(filter.priorities.length || filter.categories.length || filter.selectedAlbumIdFilter)
   const changeFilter = (next: CurateFilterState) => {
     directSelection.current = null
     const transition = resolveFilterTransition(albums, problemSummary, next, 'filter_change')
@@ -426,10 +444,10 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     setFilter(transition.filter)
     if (transition.toastMessage) showToast(transition.toastMessage)
     const applied = transition.filter
-    const addedFilter = applied.priorities.some(priority => !filter.priorities.includes(priority)) ||
+    const addedCategoryOrAlbum =
       applied.categories.some(category => !filter.categories.includes(category)) ||
       (applied.selectedAlbumIdFilter && applied.selectedAlbumIdFilter !== filter.selectedAlbumIdFilter)
-    if (showFilters && addedFilter) {
+    if (showFilters && addedCategoryOrAlbum) {
       setShowFilters(false)
       filterToggleRef.current?.focus()
     }
@@ -476,6 +494,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
   // 3. Build Rich Album Work Items
   const [albumItems, setAlbumItems] = useState<Map<string, AlbumWorkItem>>(new Map())
+  const displayedAlbums = useMemo(
+    () => filteredAlbums.flatMap(({ id }) => albumItems.get(id) ?? []),
+    [filteredAlbums, albumItems],
+  )
+  const filteredTrackCount = useMemo(
+    () => displayedAlbums.reduce((sum, alb) => sum + alb.tracks.length, 0),
+    [displayedAlbums],
+  )
   const previousDraftItems = useRef(albumItems)
   const loadedDrafts = useRef(new Map<string, {
     serialized: string
@@ -1842,8 +1868,20 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       {/* 2. Main Body Split Deck */}
       <div className="flex-1 flex overflow-hidden">
         <div className={`relative shrink-0 overflow-hidden border-r border-white/10 bg-[#121318] motion-safe:transition-[width] motion-safe:duration-200 motion-safe:ease-in-out ${showFilters ? 'w-52 xl:w-64' : 'w-9'}`}>
-          <div className="relative z-10 flex h-10 items-center justify-end border-b border-white/[0.06] px-1">
-            {showFilters && <span className="absolute left-3 text-xs font-semibold text-zinc-300">Filters</span>}
+          <div className="relative z-10 flex h-10 items-center justify-end gap-1 border-b border-white/[0.06] px-1">
+            {showFilters && <span className="mr-auto pl-2 text-xs font-semibold text-zinc-300">Filters</span>}
+            {showFilters && hasActiveFilters && (
+              <button
+                type="button"
+                aria-label="Reset Filters"
+                title="Reset Filters"
+                onClick={() => changeFilter({ priorities: [], categories: [] })}
+                className="flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-white"
+              >
+                <RotateCcw aria-hidden="true" className="h-3 w-3" />
+                <span>Reset</span>
+              </button>
+            )}
             <button
               ref={filterToggleRef}
               type="button"
@@ -1851,7 +1889,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               aria-controls="curate-filters"
               aria-expanded={showFilters}
               title={filterToggleLabel}
-              className="cursor-pointer rounded-lg p-1.5 text-white/70 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline focus-visible:outline-cyan-300 aria-expanded:bg-white/[0.08] aria-expanded:text-white"
+              className={`cursor-pointer rounded-lg p-1.5 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline focus-visible:outline-cyan-300 ${
+                !showFilters && hasActiveFilters
+                  ? 'bg-amber-400/15 text-amber-300 ring-1 ring-amber-400/30'
+                  : 'text-white/70 aria-expanded:bg-white/[0.08] aria-expanded:text-white'
+              }`}
               onClick={() => setShowFilters(visible => !visible)}
             >
               <PanelLeft aria-hidden="true" className="h-4 w-4" />
@@ -1860,94 +1902,175 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
           <div inert={!showFilters}
             className={`absolute bottom-0 right-0 top-10 flex motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-in-out ${showFilters ? '' : '-translate-x-9'}`}>
             <CurateFilterBar summary={problemSummary} settings={prioritySettings} filter={filter}
-              albums={albums} onFilterChange={changeFilter} />
+              albums={albums} onFilterChange={changeFilter} hideReset />
           </div>
         </div>
         {/* Left Album Rail */}
         <aside className="w-60 border-r border-white/[0.08] bg-[#0A0B0E] flex flex-col shrink-0 xl:w-72">
           <div className="p-3 border-b border-white/[0.06] flex items-center justify-end">
-            {
-              <button
-                onClick={openCommitPreview}
-                disabled={isBatchCommitting || isPlaying || Boolean(stagingAlbumId || queuingAlbumId)}
-                className="px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-[11px] cursor-pointer transition-colors shadow-sm disabled:opacity-50"
-              >
-                {isBatchCommitting
-                  ? 'Preparing queue…'
-                  : `Commit All (${stagedIds.size})`}
-              </button>
-            }
+            <button
+              onClick={openCommitPreview}
+              disabled={isBatchCommitting || isPlaying || Boolean(stagingAlbumId || queuingAlbumId)}
+              className={`px-2.5 py-1 rounded font-semibold text-[11px] cursor-pointer transition-colors shadow-sm disabled:opacity-50 ${
+                stagedIds.size > 0
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-black'
+                  : 'bg-white/[0.06] hover:bg-white/[0.1] text-zinc-400 border border-white/10'
+              }`}
+            >
+              {isBatchCommitting
+                ? 'Preparing queue…'
+                : `Commit All (${stagedIds.size})`}
+            </button>
           </div>
 
-          <div className="shrink-0 space-y-1 border-b border-white/[0.06] px-3 py-2">
-            <h2 className="text-xs font-semibold text-white">
-              {filter.categories.length === 1 ? labels[filter.categories[0]] : 'Albums to curate'}
-              <span className="ml-1 whitespace-nowrap font-normal text-zinc-400">({filteredAlbums.length})</span>
-            </h2>
-            <CurateAlbumSearch summary={problemSummary} settings={prioritySettings} filter={filter}
-              albums={albums} onFilterChange={changeFilter} />
+          <div className="shrink-0 space-y-2 border-b border-white/[0.06] px-3 py-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h2 className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                  {filter.categories.length === 1 ? (
+                    <>
+                      <span className="shrink-0 rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] font-bold text-rose-300">
+                        {prioritySettings[filter.categories[0]]}
+                      </span>
+                      <span className="truncate">{labels[filter.categories[0]]}</span>
+                    </>
+                  ) : (
+                    <span className="truncate">Albums requiring attention</span>
+                  )}
+                </h2>
+                <p className="mt-0.5 text-[11px] text-zinc-400 tabular-nums">
+                  {filteredAlbums.length} {filteredAlbums.length === 1 ? 'album' : 'albums'} • {filteredTrackCount} {filteredTrackCount === 1 ? 'track' : 'tracks'}
+                </p>
+              </div>
+              {!showFilters && (
+                <button
+                  type="button"
+                  onClick={() => setShowFilters(true)}
+                  className="flex shrink-0 cursor-pointer items-center gap-1 rounded-md border border-white/15 bg-white/[0.05] px-2 py-1 text-[11px] font-medium text-zinc-200 transition-colors hover:bg-white/[0.1] hover:text-white"
+                >
+                  <SlidersHorizontal aria-hidden="true" className="h-3 w-3" />
+                  <span>Open Filters</span>
+                </button>
+              )}
+            </div>
+
+            {hasActiveFilters && (
+              <div className="flex flex-wrap items-center gap-1.5" aria-label="Active filters">
+                {filter.priorities
+                  .filter(tier => !filter.categories.some(cat => prioritySettings[cat] === tier))
+                  .map(tier => (
+                    <button
+                      key={tier}
+                      type="button"
+                      onClick={() => changeFilter({ ...filter, priorities: filter.priorities.filter(p => p !== tier) })}
+                      className="inline-flex items-center gap-1 rounded-full border border-rose-400/30 bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-200 transition-colors hover:bg-rose-500/25"
+                    >
+                      <span>{tier} · {priorityChipNames[tier] ?? tier}</span>
+                      <X aria-hidden="true" className="h-2.5 w-2.5" />
+                    </button>
+                  ))}
+                {filter.categories.map(categoryId => (
+                  <button
+                    key={categoryId}
+                    type="button"
+                    onClick={() => changeFilter({ ...filter, categories: filter.categories.filter(c => c !== categoryId) })}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2 py-0.5 text-[10px] font-medium text-amber-200 transition-colors hover:bg-amber-400/25"
+                  >
+                    <span className="truncate">
+                      {labels[categoryId]} ({problemSummary.categoryCounts[categoryId].count})
+                    </span>
+                    <X aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
+                  </button>
+                ))}
+                {filter.selectedAlbumIdFilter && (
+                  <button
+                    type="button"
+                    onClick={() => changeFilter({ ...filter, selectedAlbumIdFilter: undefined })}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-cyan-400/30 bg-cyan-500/15 px-2 py-0.5 text-[10px] font-medium text-cyan-200 transition-colors hover:bg-cyan-500/25"
+                  >
+                    <span className="truncate">
+                      {albums.find(a => a.id === filter.selectedAlbumIdFilter)?.title ?? 'Selected album'}
+                    </span>
+                    <X aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
+                  </button>
+                )}
+              </div>
+            )}
+
+            <CurateAlbumSearch
+              summary={problemSummary}
+              settings={prioritySettings}
+              filter={filter}
+              albums={albums}
+              onFilterChange={changeFilter}
+              placeholder={`Search within ${filteredAlbums.length} ${filteredAlbums.length === 1 ? 'album' : 'albums'}...`}
+            />
           </div>
           <div className="flex-1 overflow-y-auto divide-y divide-white/[0.04]">
-            {filteredAlbums.flatMap(({ id }) => albumItems.get(id) ?? []).map((alb) => (
-              <div
-                key={alb.id}
-                data-testid="curate-album-item"
-                data-album-id={alb.id}
-                role="button"
-                tabIndex={0}
-                aria-pressed={selectedAlbumId === alb.id}
-                onClick={() => { directSelection.current = null; setSelectedAlbumId(alb.id) }}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    directSelection.current = null
-                    setSelectedAlbumId(alb.id)
-                  }
-                }}
-                className={`p-3.5 transition-colors cursor-pointer flex gap-3 ${
-                  selectedAlbum?.id === alb.id
-                    ? 'bg-white/[0.08] border-l-2 border-[#D4AF37]'
-                    : 'hover:bg-white/[0.03]'
-                }`}
-              >
-                <CurateArtworkThumbnail
-                  src={alb.coverArt.selected || alb.coverArt.apple || alb.coverArt.local || null}
-                  alt={alb.currentTitle}
-                  className="w-12 h-12 rounded-lg shrink-0 border border-white/10"
-                  testId={`curate-rail-cover-${alb.id}`}
-                />
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-xs font-medium text-white truncate">{alb.albumTitle.selected || alb.currentTitle}</h3>
-                  <p className="text-[11px] text-white/50 truncate mt-0.5">
-                    {alb.albumArtist.selected || 'Requires Review'} • {alb.year.selected || '—'}
-                  </p>
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-white/[0.06] text-white/60">
-                      {alb.tracks.length} tracks
-                    </span>
-                    {alb.offsetApplied !== undefined && (
-                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#D4AF37]/20 text-[#D4AF37] font-mono">
-                        +{alb.offsetApplied} offset
+            {displayedAlbums.map((alb) => {
+              const discriminator = formatAlbumDiscriminator(alb)
+              return (
+                <div
+                  key={alb.id}
+                  data-testid="curate-album-item"
+                  data-album-id={alb.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={selectedAlbumId === alb.id}
+                  onClick={() => { directSelection.current = null; setSelectedAlbumId(alb.id) }}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      directSelection.current = null
+                      setSelectedAlbumId(alb.id)
+                    }
+                  }}
+                  className={`p-3.5 transition-colors cursor-pointer flex gap-3 ${
+                    selectedAlbum?.id === alb.id
+                      ? 'bg-white/[0.08] border-l-2 border-[#D4AF37]'
+                      : 'hover:bg-white/[0.03]'
+                  }`}
+                >
+                  <CurateArtworkThumbnail
+                    src={alb.coverArt.selected || alb.coverArt.apple || alb.coverArt.local || null}
+                    alt={alb.currentTitle}
+                    className="w-12 h-12 rounded-lg shrink-0 border border-white/10"
+                    testId={`curate-rail-cover-${alb.id}`}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-xs font-medium text-white truncate">{alb.albumTitle.selected || alb.currentTitle}</h3>
+                    <p className="text-[11px] text-white/50 truncate mt-0.5">
+                      {alb.albumArtist.selected || 'Unknown Artist'} • {alb.year.selected || '—'}
+                      {discriminator ? ` • ${discriminator}` : ''}
+                    </p>
+                    <div className="flex items-center gap-2 mt-1.5">
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-white/[0.06] text-white/60">
+                        {alb.tracks.length} {alb.tracks.length === 1 ? 'track' : 'tracks'}
                       </span>
-                    )}
-                    {stagedIds.has(alb.id) && (
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-medium">
-                        ✓ Staged
-                      </span>
-                    )}
-                    {problemSummary.albumProblems.get(alb.id)?.filter(problem =>
-                      (!filter.priorities.length || filter.priorities.includes(problem.priority)) &&
-                      (!filter.categories.length || filter.categories.includes(problem.categoryId)),
-                    ).sort((a, b) => a.priority.localeCompare(b.priority)).slice(0, 1).map(problem => (
-                      <span key={problem.categoryId} title={labels[problem.categoryId]}
-                        className="min-w-0 truncate rounded bg-amber-500/20 px-1.5 text-[9px] text-amber-300">
-                        {problem.priority} · {labels[problem.categoryId]}
-                      </span>
-                    ))}
+                      {alb.offsetApplied !== undefined && (
+                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#D4AF37]/20 text-[#D4AF37] font-mono">
+                          +{alb.offsetApplied} offset
+                        </span>
+                      )}
+                      {stagedIds.has(alb.id) && (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-medium">
+                          ✓ Staged
+                        </span>
+                      )}
+                      {filter.categories.length !== 1 && problemSummary.albumProblems.get(alb.id)?.filter(problem =>
+                        (!filter.priorities.length || filter.priorities.includes(problem.priority)) &&
+                        (!filter.categories.length || filter.categories.includes(problem.categoryId)),
+                      ).sort((a, b) => a.priority.localeCompare(b.priority)).slice(0, 1).map(problem => (
+                        <span key={problem.categoryId} title={labels[problem.categoryId]}
+                          className="min-w-0 truncate rounded bg-amber-500/20 px-1.5 text-[9px] text-amber-300">
+                          {problem.priority} · {labels[problem.categoryId]}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
 
             {filteredAlbums.length === 0 && (
               <div className="p-8 text-center text-white/40 text-xs">
