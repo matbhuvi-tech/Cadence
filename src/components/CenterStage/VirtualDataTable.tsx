@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import {
   Disc3,
   SlidersHorizontal,
@@ -215,6 +215,31 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
 
   // Track collapsed groups (all folders expanded by default across any number of albums)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [openMenuGroupId, setOpenMenuGroupId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!openMenuGroupId) return
+
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null
+      if (!target?.closest('[data-album-overflow-menu]')) {
+        setOpenMenuGroupId(null)
+      }
+    }
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpenMenuGroupId(null)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [openMenuGroupId])
 
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -505,46 +530,70 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                     </button>
 
                     {/* Secondary Overflow Actions */}
-                    <div className="relative group/menu">
+                    <div data-album-overflow-menu className="relative group/menu">
                       <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setOpenMenuGroupId((prev) => (prev === group.id ? null : group.id))
+                        }}
+                        aria-expanded={openMenuGroupId === group.id}
+                        aria-haspopup="menu"
                         className="p-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white/80 hover:text-white border border-white/[0.12] transition-all text-xs flex items-center justify-center cursor-pointer"
                         title="More album actions"
                       >
                         <MoreHorizontal className="w-4 h-4" />
                       </button>
-                      <div className="absolute right-0 top-full mt-1.5 w-48 rounded-xl bg-[#12151D] border border-white/10 shadow-2xl p-1.5 hidden group-hover/menu:flex flex-col gap-1 z-30">
-                        <button
-                          onClick={() => handleEditAlbum(group)}
-                          className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left cursor-pointer"
+                      <div
+                        className={`absolute right-0 top-full pt-1.5 z-30 ${
+                          openMenuGroupId === group.id ? 'block' : 'hidden group-hover/menu:block'
+                        }`}
+                      >
+                        <div
+                          role="menu"
+                          className="w-48 rounded-xl bg-[#12151D] border border-white/10 shadow-2xl p-1.5 flex flex-col gap-1"
                         >
-                          <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400" />
-                          <span>Edit Metadata in Curate</span>
-                        </button>
-                        {backdropAnalyzer.isBackdropUnformatted(group.release).isUnformatted && (
                           <button
-                            onClick={async () => {
-                              if (group.release) {
-                                const res = await backdropAnalyzer.formatBackdropForRelease(group.release.id)
-                                if (res.success && res.backdropUrl) {
-                                  onUpdateReleaseDetails?.(group.release.id, { backdropUrl: res.backdropUrl })
-                                  window.dispatchEvent(
-                                    new CustomEvent('cadence:toast', {
-                                      detail: `Generated 2400×320 panoramic backdrop for "${group.title}"`,
-                                    })
-                                  )
-                                } else {
-                                  window.dispatchEvent(
-                                    new CustomEvent('cadence:toast', { detail: res.message })
-                                  )
-                                }
-                              }
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setOpenMenuGroupId(null)
+                              handleEditAlbum(group)
                             }}
-                            className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-amber-300 text-xs flex items-center gap-2 text-left cursor-pointer"
+                            className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-white text-xs flex items-center gap-2 text-left cursor-pointer"
                           >
-                            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                            <span>Format Backdrop</span>
+                            <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400" />
+                            <span>Edit Metadata in Curate</span>
                           </button>
-                        )}
+                          {backdropAnalyzer.isBackdropUnformatted(group.release).isUnformatted && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={async () => {
+                                setOpenMenuGroupId(null)
+                                if (group.release) {
+                                  const res = await backdropAnalyzer.formatBackdropForRelease(group.release.id)
+                                  if (res.success && res.backdropUrl) {
+                                    onUpdateReleaseDetails?.(group.release.id, { backdropUrl: res.backdropUrl })
+                                    window.dispatchEvent(
+                                      new CustomEvent('cadence:toast', {
+                                        detail: `Generated 2400×320 panoramic backdrop for "${group.title}"`,
+                                      })
+                                    )
+                                  } else {
+                                    window.dispatchEvent(
+                                      new CustomEvent('cadence:toast', { detail: res.message })
+                                    )
+                                  }
+                                }
+                              }}
+                              className="w-full px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-amber-300 text-xs flex items-center gap-2 text-left cursor-pointer"
+                            >
+                              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Format Backdrop</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
