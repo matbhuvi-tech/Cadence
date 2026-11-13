@@ -3,7 +3,13 @@ import { Search, Disc3, RefreshCw } from 'lucide-react';
 import type { DbRelease } from '../../types/remote';
 import { fetchReleases, getArtworkUrl } from '../../services/api';
 import { buildProfileCacheKey } from '../../services/serverProfiles';
-import { FacetShelf, CatalogFilter } from './FacetShelf';
+import { FacetShelf } from './FacetShelf';
+import {
+  CatalogFacets,
+  SortBy,
+  filterAndSortReleases,
+  getAvailableLanguages,
+} from './catalogFilters';
 import { AlbumModal } from './AlbumModal';
 
 const releaseCache = new Map<string, DbRelease[]>();
@@ -37,7 +43,9 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   const [releases, setReleases] = useState<DbRelease[]>(() => releaseCache.get(cacheKey) ?? []);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [filter, setFilter] = useState<CatalogFilter>('all');
+  const [facets, setFacets] = useState<CatalogFacets>({});
+  const [sortBy, setSortBy] = useState<SortBy>('year_desc');
+  const [isFilterShelfOpen, setIsFilterShelfOpen] = useState<boolean>(false);
   const [selectedRelease, setSelectedRelease] = useState<DbRelease | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -68,36 +76,13 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
     loadData();
   }, [cacheKey]);
 
-  // Filter and search
-  const filteredReleases = useMemo(() => {
-    return releases.filter((rel) => {
-      // Search text
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchesTitle = rel.title.toLowerCase().includes(q);
-        const matchesArtist = rel.artistCredit.toLowerCase().includes(q);
-        if (!matchesTitle && !matchesArtist) return false;
-      }
+  const availableLanguages = useMemo(() => getAvailableLanguages(releases), [releases]);
 
-      // Filter chips
-      if (filter === 'compilations') {
-        return rel.isCompilation;
-      } else if (filter === 'dsd') {
-        return rel.hasDsd || rel.folderName?.toLowerCase().includes('dsd') || false;
-      } else if (filter === 'hires') {
-        return rel.hasHighRes || (
-          rel.folderName?.toLowerCase().includes('hi-res') ||
-          rel.folderName?.toLowerCase().includes('24bit') ||
-          rel.folderName?.toLowerCase().includes('flac 24') ||
-          false
-        );
-      } else if (filter === 'flac') {
-        return rel.hasFlac || rel.folderName?.toLowerCase().includes('flac') || false;
-      }
-
-      return true;
-    });
-  }, [releases, searchQuery, filter]);
+  // Filter, search, and sort (matching desktop defaults: Year Newest First)
+  const filteredReleases = useMemo(
+    () => filterAndSortReleases(releases, searchQuery, facets, sortBy),
+    [releases, searchQuery, facets, sortBy],
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#0D0E11]">
@@ -136,8 +121,16 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
         </div>
       </div>
 
-      {/* Filter Chips */}
-      <FacetShelf activeFilter={filter} onSelectFilter={setFilter} />
+      {/* Favorites, Filter Shelf & Sort Controls */}
+      <FacetShelf
+        facets={facets}
+        onChangeFacets={setFacets}
+        sortBy={sortBy}
+        onChangeSortBy={setSortBy}
+        availableLanguages={availableLanguages}
+        isFilterShelfOpen={isFilterShelfOpen}
+        onToggleFilterShelf={() => setIsFilterShelfOpen((prev) => !prev)}
+      />
 
       {/* Album Grid */}
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-28">

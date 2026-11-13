@@ -130,11 +130,13 @@ export interface DbRelease {
   frontCoverUrl?: string | null;
   backdropUrl?: string | null;
   isCompilation: boolean;
+  isFavorite?: boolean;
   masterAlbumId?: string | null;
   versions?: AlbumVersionSummary[];
   hasDsd: boolean;
   hasHighRes: boolean;
   hasFlac: boolean;
+  formats?: string[];
 }
 
 export interface DbTrack {

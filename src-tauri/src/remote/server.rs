@@ -55,6 +55,7 @@ struct RemoteRelease {
     has_dsd: bool,
     has_high_res: bool,
     has_flac: bool,
+    formats: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     versions: Vec<crate::db::AlbumVersionSummary>,
 }
@@ -433,25 +434,33 @@ async fn get_releases(
             "SELECT release_id,
                     MAX(CASE WHEN upper(format) IN ('DSF', 'DFF', 'DSDIFF') THEN 1 ELSE 0 END),
                     MAX(CASE WHEN COALESCE(sample_rate, 0) > 48000 OR COALESCE(bit_depth, 0) > 16 THEN 1 ELSE 0 END),
-                    MAX(CASE WHEN upper(format) = 'FLAC' THEN 1 ELSE 0 END)
+                    MAX(CASE WHEN upper(format) = 'FLAC' THEN 1 ELSE 0 END),
+                    COALESCE(GROUP_CONCAT(DISTINCT upper(format)), '')
              FROM tracks WHERE is_online = 1 GROUP BY release_id",
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let facet_rows = stmt
         .query_map([], |row| {
+            let raw_formats: String = row.get(4)?;
+            let formats: Vec<String> = raw_formats
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i32>(1)? != 0,
                 row.get::<_, i32>(2)? != 0,
                 row.get::<_, i32>(3)? != 0,
+                formats,
             ))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut facets = HashMap::new();
     for row in facet_rows {
-        let (release_id, has_dsd, has_high_res, has_flac) =
+        let (release_id, has_dsd, has_high_res, has_flac, formats) =
             row.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        facets.insert(release_id, (has_dsd, has_high_res, has_flac));
+        facets.insert(release_id, (has_dsd, has_high_res, has_flac, formats));
     }
     let limit = q.limit.unwrap_or(100);
     let offset = q.offset.unwrap_or(0);
@@ -460,8 +469,8 @@ async fn get_releases(
         .skip(offset)
         .take(limit)
         .map(|release| {
-            let (has_dsd, has_high_res, has_flac) =
-                facets.get(&release.id).copied().unwrap_or_default();
+            let (has_dsd, has_high_res, has_flac, formats) =
+                facets.get(&release.id).cloned().unwrap_or_default();
             let versions = if let Some(ref mid) = release.master_album_id {
                 crate::db::DbOperations::get_album_versions(&conn, mid).unwrap_or_default()
             } else {
@@ -472,6 +481,7 @@ async fn get_releases(
                 has_dsd,
                 has_high_res,
                 has_flac,
+                formats,
                 versions,
             }
         })
