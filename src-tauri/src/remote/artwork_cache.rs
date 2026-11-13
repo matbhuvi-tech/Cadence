@@ -49,6 +49,7 @@ impl ArtworkCache {
         &self,
         id: &str,
         source_audio_path: Option<&str>,
+        cover_art_path: Option<&str>,
     ) -> Option<(Vec<u8>, &'static str)> {
         if let Some(cached) = self.get_cached_only(id) {
             return Some(cached);
@@ -71,9 +72,86 @@ impl ArtworkCache {
         let t0 = diagnostics::is_active().then(std::time::Instant::now);
 
         // 3. Audio is idle: Attempt extraction and resize to 300x300
-        let audio_path_str = source_audio_path?;
-        let audio_path = Path::new(audio_path_str);
-        if !audio_path.exists() {
+        // Try extracting embedded cover art first (with native DSF tail seeking), then adjacent folder art,
+        // and finally fall back to release-level cover_art_path (e.g. front_cover_url from DB).
+        let raw_bytes: Option<Vec<u8>> = (|| {
+            if let Some(audio_path_str) = source_audio_path {
+                let audio_path = Path::new(audio_path_str);
+                if audio_path.exists() {
+                    let ext_lower = audio_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    if ext_lower == "dsf" {
+                        if let Some(dsf_art) = crate::maintenance::worker::extract_dsf_artwork(audio_path) {
+                            return Some(dsf_art);
+                        }
+                    }
+
+                    if let Ok(tagged_file) = Probe::open(audio_path).and_then(|p| p.read()) {
+                        if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+                            if let Some(pic) = tag.pictures().first() {
+                                return Some(pic.data().to_vec());
+                            }
+                        }
+                    }
+
+                    if let Some(parent) = audio_path.parent() {
+                        let candidates = [
+                            "cover.jpg", "folder.jpg", "front.jpg", "album.jpg",
+                            "cover.png", "folder.png", "front.png", "Cover.jpg", "Folder.jpg"
+                        ];
+                        for cand in candidates {
+                            let p = parent.join(cand);
+                            if p.is_file() {
+                                if let Ok(b) = fs::read(&p) {
+                                    return Some(b);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(cover_str) = cover_art_path {
+                let local_str = cover_str
+                    .strip_prefix("file:///")
+                    .or_else(|| cover_str.strip_prefix("file://"))
+                    .unwrap_or(cover_str);
+                let cover_path = Path::new(local_str);
+                if cover_path.is_file() {
+                    if let Ok(b) = fs::read(cover_path) {
+                        return Some(b);
+                    }
+                }
+            }
+
+            None
+        })();
+
+        let raw_data = raw_bytes?;
+        let dur_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+        if let Some((thumb_bytes, mime)) = self.cache_thumbnail_from_bytes(id, &raw_data) {
+            diag_log!(
+                DiagCategory::BackgroundWorkers,
+                0,
+                0,
+                dur_us,
+                "artwork_thumb_cached",
+                "id={} bytes={}",
+                id,
+                thumb_bytes.len()
+            );
+            return Some((thumb_bytes, mime));
+        }
+
+        None
+    }
+
+    /// Resize raw image bytes to a 300x300 JPEG thumbnail, persist to NVMe cache, and return it.
+    pub fn cache_thumbnail_from_bytes(
+        &self,
+        id: &str,
+        raw_data: &[u8],
+    ) -> Option<(Vec<u8>, &'static str)> {
+        if (self.is_playing_fn)() {
             return None;
         }
 
@@ -83,61 +161,12 @@ impl ArtworkCache {
             .collect();
         let cached_path = self.cache_dir.join(format!("{}.jpg", safe_id));
 
-        // Try extracting embedded cover art first (with native DSF tail seeking), then adjacent folder art
-        let raw_bytes: Option<Vec<u8>> = (|| {
-            let ext_lower = audio_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-            if ext_lower == "dsf" {
-                if let Some(dsf_art) = crate::maintenance::worker::extract_dsf_artwork(audio_path) {
-                    return Some(dsf_art);
-                }
-            }
-
-            if let Ok(tagged_file) = Probe::open(audio_path).and_then(|p| p.read()) {
-                if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
-                    if let Some(pic) = tag.pictures().first() {
-                        return Some(pic.data().to_vec());
-                    }
-                }
-            }
-
-            if let Some(parent) = audio_path.parent() {
-                let candidates = [
-                    "cover.jpg", "folder.jpg", "front.jpg", "album.jpg",
-                    "cover.png", "folder.png", "front.png", "Cover.jpg", "Folder.jpg"
-                ];
-                for cand in candidates {
-                    let p = parent.join(cand);
-                    if p.is_file() {
-                        if let Ok(b) = fs::read(&p) {
-                            return Some(b);
-                        }
-                    }
-                }
-            }
-
-            None
-        })();
-
-        let raw_data = raw_bytes?;
-
-        // Resize image to max 300x300 JPEG thumbnail (~15-25 KB)
-        if let Ok(img) = image::load_from_memory(&raw_data) {
+        if let Ok(img) = image::load_from_memory(raw_data) {
             let thumb = img.resize(300, 300, FilterType::Triangle);
             let mut out = Cursor::new(Vec::new());
             if thumb.write_to(&mut out, image::ImageFormat::Jpeg).is_ok() {
                 let thumb_bytes = out.into_inner();
                 let _ = fs::write(&cached_path, &thumb_bytes);
-                let dur_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
-                diag_log!(
-                    DiagCategory::BackgroundWorkers,
-                    0,
-                    0,
-                    dur_us,
-                    "artwork_thumb_cached",
-                    "id={} bytes={}",
-                    id,
-                    thumb_bytes.len()
-                );
                 return Some((thumb_bytes, "image/jpeg"));
             }
         }

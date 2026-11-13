@@ -609,11 +609,42 @@ async fn get_artwork(
             s.query_row(rusqlite::params![&id], |row| row.get(0)).ok()
         })
     });
+    let release_cover_url: Option<String> = {
+        let conn = state.db.conn.lock();
+        let stmt = conn
+            .prepare("SELECT front_cover_url FROM releases WHERE id = ?1 LIMIT 1")
+            .ok();
+        stmt.and_then(|mut s| {
+            s.query_row(rusqlite::params![target_key], |row| row.get(0)).ok()
+        })
+    };
 
-    if let Some((bytes, mime)) = state
+    let mut thumb = state
         .artwork_cache
-        .get_or_create_thumbnail(target_key, resolved_source.as_deref())
-    {
+        .get_or_create_thumbnail(target_key, resolved_source.as_deref(), release_cover_url.as_deref());
+
+    if thumb.is_none() {
+        if let Some(ref url) = release_cover_url {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                if let Ok(client) = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                {
+                    if let Ok(resp) = client.get(url).send().await {
+                        if resp.status().is_success() {
+                            if let Ok(raw_bytes) = resp.bytes().await {
+                                thumb = state
+                                    .artwork_cache
+                                    .cache_thumbnail_from_bytes(target_key, &raw_bytes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some((bytes, mime)) = thumb {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
         headers.insert(
