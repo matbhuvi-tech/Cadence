@@ -74,6 +74,7 @@ import { AddTracksToPlaylistModal } from './components/Modals/AddTracksToPlaylis
 import { PlaylistDetailView } from './components/CenterStage/PlaylistDetailView'
 import { backgroundArtworkService } from './services/backgroundArtworkService'
 import { CadenceLogo } from './components/common/CadenceLogo'
+import { StartupSplashScreen } from './components/common/StartupSplashScreen'
 import { useStagedChanges } from './hooks/useStagedChanges'
 import { GeminiSetupScreen } from './components/GeminiSetupScreen'
 
@@ -195,6 +196,10 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
   const [offlineMounts, setOfflineMounts] = useState<StorageMount[]>([])
   const [offlineStats, setOfflineStats] = useState<{ tracks: number; releases: number }>({ tracks: 0, releases: 0 })
   const [isCheckingConnectivity, setIsCheckingConnectivity] = useState<boolean>(false)
+  const [isDbInitializing, setIsDbInitializing] = useState<boolean>(true)
+  const [dbInitStatus, setDbInitStatus] = useState<string>('Warming up the listening room...')
+  const [dbInitProgress, setDbInitProgress] = useState<number>(15)
+  const [showStartupSplash, setShowStartupSplash] = useState<boolean>(true)
 
   // Split releases persisted from SQLite
   const [splitReleaseIds, setSplitReleaseIds] = useState<Set<string>>(new Set())
@@ -636,137 +641,160 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
     let mounted = true
 
     async function initSqliteAndLibrary() {
-      // 1. Check & migrate legacy IndexedDB scans into SQLite
-      const migration = await sqliteLibraryService.checkAndMigrateFromIndexedDB()
-      if (migration.migrated && mounted) {
-        showToast(
-          `Migrated ${migration.tracksCount} tracks from previous scan cache into native SQLite database`
-        )
-      }
-
-      // 2. Load from SQLite
-      const dbData = await sqliteLibraryService.loadLibraryFromDb()
-      if (dbData && mounted) {
-        setStorageMounts(dbData.storageMounts)
-        setWatchedFolders(dbData.watchedFolders)
-        setSkippedFiles(dbData.skippedFiles)
-        setScanTelemetry((prev) => ({
-          ...prev,
-          skippedCount: dbData.skippedFiles.length,
-        }))
-
-        if (dbData.offlineMounts.length > 0) {
-          setOfflineMounts(dbData.offlineMounts)
-          setOfflineStats({
-            tracks: dbData.offlineTracksCount,
-            releases: dbData.offlineReleasesCount,
-          })
-        } else {
-          setOfflineMounts([])
-          setOfflineStats({ tracks: 0, releases: 0 })
+      try {
+        if (mounted) {
+          setDbInitStatus('Preparing your personal music sanctuary...')
+          setDbInitProgress(25)
+        }
+        // 1. Check & migrate legacy IndexedDB scans into SQLite
+        const migration = await sqliteLibraryService.checkAndMigrateFromIndexedDB()
+        if (migration.migrated && mounted) {
+          showToast(
+            `Migrated ${migration.tracksCount} tracks from previous scan cache into native SQLite database`
+          )
         }
 
-        if (dbData.tracks.length > 0) {
-          graphEngine.loadCustomLibrary({
-            tracks: dbData.tracks,
-            releases: dbData.releases,
-            works: [],
-            auditIssues: [],
-            storageMounts: dbData.storageMounts,
-          })
-          refreshFromEngine()
-          if (dbData.tracks.length > 0) {
-            setSelectedTrackId(dbData.tracks[0].id)
-          }
+        if (mounted) {
+          setDbInitStatus('Gathering your albums & master recordings...')
+          setDbInitProgress(55)
+        }
+        // 2. Load from SQLite
+        const dbData = await sqliteLibraryService.loadLibraryFromDb()
+        if (dbData && mounted) {
+          setDbInitStatus('Tuning the audiophile stage...')
+          setDbInitProgress(85)
+          setStorageMounts(dbData.storageMounts)
+          setWatchedFolders(dbData.watchedFolders)
+          setSkippedFiles(dbData.skippedFiles)
+          setScanTelemetry((prev) => ({
+            ...prev,
+            skippedCount: dbData.skippedFiles.length,
+          }))
+
           if (dbData.offlineMounts.length > 0) {
-            showToast(
-              `Loaded ${dbData.tracks.length} active tracks. Notice: "${dbData.offlineMounts[0].name}" is offline (${dbData.offlineReleasesCount} albums withheld).`
-            )
+            setOfflineMounts(dbData.offlineMounts)
+            setOfflineStats({
+              tracks: dbData.offlineTracksCount,
+              releases: dbData.offlineReleasesCount,
+            })
           } else {
-            showToast(`Loaded ${dbData.tracks.length} tracks from SQLite database (WAL active)`)
+            setOfflineMounts([])
+            setOfflineStats({ tracks: 0, releases: 0 })
           }
-        } else if (dbData.offlineMounts.length > 0) {
-          // All tracks are on offline network storage!
-          // Withhold all album data as requested by user to prevent unplayable playback and failed commits
-          graphEngine.clearLibrary()
-          refreshFromEngine()
-          showToast(
-            `Network folder not accessible (${dbData.offlineMounts[0].mountPath}). Albums withheld from display.`
-          )
-        } else if (tauriBridge.isTauri()) {
-          // In desktop environment with empty library: do not load stale legacy IndexedDB cache
-          graphEngine.clearLibrary()
-          refreshFromEngine()
-        } else {
-          // Fallback to legacy IndexedDB if SQLite has no data and not in Tauri
-          const saved = await storagePersistence.loadLibrary()
-          if (saved && saved.tracks && saved.tracks.length > 0 && mounted) {
+
+          if (dbData.tracks.length > 0) {
             graphEngine.loadCustomLibrary({
-              tracks: saved.tracks,
-              releases: saved.releases,
-              works: saved.works,
-              auditIssues: saved.auditIssues,
-              storageMounts: saved.storageMounts,
+              tracks: dbData.tracks,
+              releases: dbData.releases,
+              works: [],
+              auditIssues: [],
+              storageMounts: dbData.storageMounts,
             })
             refreshFromEngine()
-            if (saved.tracks.length > 0) {
-              setSelectedTrackId(saved.tracks[0].id)
+            if (dbData.tracks.length > 0) {
+              setSelectedTrackId(dbData.tracks[0].id)
             }
-            showToast(`Loaded personal library (${saved.tracks.length} tracks) from storage cache`)
+            if (dbData.offlineMounts.length > 0) {
+              showToast(
+                `Loaded ${dbData.tracks.length} active tracks. Notice: "${dbData.offlineMounts[0].name}" is offline (${dbData.offlineReleasesCount} albums withheld).`
+              )
+            } else {
+              showToast(`Loaded ${dbData.tracks.length} tracks from SQLite database (WAL active)`)
+            }
+          } else if (dbData.offlineMounts.length > 0) {
+            // All tracks are on offline network storage!
+            // Withhold all album data as requested by user to prevent unplayable playback and failed commits
+            graphEngine.clearLibrary()
+            refreshFromEngine()
+            showToast(
+              `Network folder not accessible (${dbData.offlineMounts[0].mountPath}). Albums withheld from display.`
+            )
+          } else if (tauriBridge.isTauri()) {
+            // In desktop environment with empty library: do not load stale legacy IndexedDB cache
+            graphEngine.clearLibrary()
+            refreshFromEngine()
+          } else {
+            // Fallback to legacy IndexedDB if SQLite has no data and not in Tauri
+            const saved = await storagePersistence.loadLibrary()
+            if (saved && saved.tracks && saved.tracks.length > 0 && mounted) {
+              graphEngine.loadCustomLibrary({
+                tracks: saved.tracks,
+                releases: saved.releases,
+                works: saved.works,
+                auditIssues: saved.auditIssues,
+                storageMounts: saved.storageMounts,
+              })
+              refreshFromEngine()
+              if (saved.tracks.length > 0) {
+                setSelectedTrackId(saved.tracks[0].id)
+              }
+              showToast(`Loaded personal library (${saved.tracks.length} tracks) from storage cache`)
+            }
           }
         }
-      }
 
-      // Sync user's scan playback policy to Rust backend
-      const savedScanPolicy = (localStorage.getItem('cadence_scan_playback_policy') || 'purist') as
-        | 'purist'
-        | 'paced'
-        | 'unthrottled'
-      tauriBridge.setScannerPlaybackPolicy(savedScanPolicy).catch(() => {})
+        // Sync user's scan playback policy to Rust backend
+        const savedScanPolicy = (localStorage.getItem('cadence_scan_playback_policy') || 'purist') as
+          | 'purist'
+          | 'paced'
+          | 'unthrottled'
+        tauriBridge.setScannerPlaybackPolicy(savedScanPolicy).catch(() => {})
 
-      // 3. Subscribe to real-time native scanner events
-      await sqliteLibraryService.subscribeToScannerEvents({
-        onProgress: (payload) => {
-          if (mounted) {
-            setScanTelemetry(payload)
-          }
-        },
-        onChunk: (chunk) => {
-          if (mounted && chunk.tracks.length > 0) {
-            chunk.tracks.forEach((t) => graphEngine.addOrUpdateTrack(t))
-            chunk.releases.forEach((r) => graphEngine.addOrUpdateRelease(r))
-            refreshFromEngine()
-          }
-        },
-        onComplete: async (result) => {
-          if (mounted) {
-            showToast(
-              `Indexing complete: ${result.importedCount} imported, ${result.skippedCount} skipped (${result.durationSecs}s)`
-            )
-            const refreshed = await sqliteLibraryService.loadLibraryFromDb()
-            if (refreshed) {
-              setWatchedFolders(refreshed.watchedFolders)
-              setSkippedFiles(refreshed.skippedFiles)
-              setScanTelemetry((prev) => ({
-                ...prev,
-                skippedCount: refreshed.skippedFiles.length,
-              }))
-              setStorageMounts(refreshed.storageMounts)
-              setOfflineMounts(refreshed.offlineMounts)
-              if (refreshed.tracks.length > 0) {
-                graphEngine.loadCustomLibrary({
-                  tracks: refreshed.tracks,
-                  releases: refreshed.releases,
-                  works: [],
-                  auditIssues: [],
-                  storageMounts: refreshed.storageMounts,
-                })
-              }
+        // 3. Subscribe to real-time native scanner events
+        await sqliteLibraryService.subscribeToScannerEvents({
+          onProgress: (payload) => {
+            if (mounted) {
+              setScanTelemetry(payload)
+            }
+          },
+          onChunk: (chunk) => {
+            if (mounted && chunk.tracks.length > 0) {
+              chunk.tracks.forEach((t) => graphEngine.addOrUpdateTrack(t))
+              chunk.releases.forEach((r) => graphEngine.addOrUpdateRelease(r))
               refreshFromEngine()
             }
-          }
-        },
-      })
+          },
+          onComplete: async (result) => {
+            if (mounted) {
+              showToast(
+                `Indexing complete: ${result.importedCount} imported, ${result.skippedCount} skipped (${result.durationSecs}s)`
+              )
+              const refreshed = await sqliteLibraryService.loadLibraryFromDb()
+              if (refreshed) {
+                setWatchedFolders(refreshed.watchedFolders)
+                setSkippedFiles(refreshed.skippedFiles)
+                setScanTelemetry((prev) => ({
+                  ...prev,
+                  skippedCount: refreshed.skippedFiles.length,
+                }))
+                setStorageMounts(refreshed.storageMounts)
+                setOfflineMounts(refreshed.offlineMounts)
+                if (refreshed.tracks.length > 0) {
+                  graphEngine.loadCustomLibrary({
+                    tracks: refreshed.tracks,
+                    releases: refreshed.releases,
+                    works: [],
+                    auditIssues: [],
+                    storageMounts: refreshed.storageMounts,
+                  })
+                }
+                refreshFromEngine()
+              }
+            }
+          },
+        })
+
+        if (mounted) {
+          setDbInitStatus('Welcome to your Audiophile World')
+          setDbInitProgress(100)
+        }
+      } catch (err) {
+        console.error('[App] Failed to initialize SQLite library:', err)
+      } finally {
+        if (mounted) {
+          setIsDbInitializing(false)
+        }
+      }
     }
 
     initSqliteAndLibrary()
@@ -1686,6 +1714,14 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0D0E12] text-[#F1F5F9] select-none font-sans">
+      {showStartupSplash && (
+        <StartupSplashScreen
+          isReady={!isDbInitializing}
+          statusText={dbInitStatus}
+          progress={dbInitProgress}
+          onExited={() => setShowStartupSplash(false)}
+        />
+      )}
       {/* Apple HIG Unified macOS-Style Toolbar */}
       <header className="h-[52px] border-b border-white/[0.06] bg-[#0C0D10]/95 backdrop-blur-2xl px-3.5 flex items-center justify-between shrink-0 z-30 select-none">
         {/* Left: Brand Lockup & Telemetry Monospace */}
@@ -2615,7 +2651,7 @@ export function App() {
   }, [])
 
   if (geminiConfigured === null) {
-    return <div className="min-h-screen bg-[#090b10]" aria-label="Loading configuration" />
+    return <div className="min-h-screen bg-[#0a0a0c]" aria-label="Loading configuration" />
   }
 
   if (!geminiConfigured) {
