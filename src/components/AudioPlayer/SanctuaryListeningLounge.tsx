@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   X,
   Play,
@@ -7,7 +7,6 @@ import {
   SkipForward,
   Volume2,
   VolumeX,
-  Disc3,
   Music2,
   Sparkles,
   Users,
@@ -16,6 +15,7 @@ import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerConte
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath } from '../../core/endpointRouting'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
+import { CadenceArtworkFallback } from '../common/CadenceArtworkFallback'
 
 interface SanctuaryListeningLoungeProps {
   isOpen: boolean
@@ -104,6 +104,8 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     toggleMute,
   } = useAudioPlayer()
 
+  const [imgError, setImgError] = useState(false)
+
   // Listen for Escape key to close lounge
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -115,12 +117,18 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isOpen, onClose])
 
-  if (!isOpen) return null
-
   const fallbackDuration = currentTrack?.durationSeconds || currentTrack?.duration || 0
   const resolvedRelease =
     currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
   const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+
+  useEffect(() => {
+    setImgError(false)
+  }, [coverUrl])
+
+  if (!isOpen) return null
+
+  const showCoverImage = Boolean(coverUrl) && !imgError
 
   const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
   const isHiRes = Boolean(streamTelemetry?.isHighRes || currentTrack?.isHighRes)
@@ -166,11 +174,15 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     >
       {/* Reworked Cover Art Backdrop (consistent with Listen - Track view) */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden -z-10" aria-hidden="true">
-        <PanoramicAtmosphericBackdrop
-          coverArtUrl={coverUrl}
-          backdropUrl={resolvedRelease?.backdropUrl}
-          overlayVariant="minimal"
-        />
+        {showCoverImage ? (
+          <PanoramicAtmosphericBackdrop
+            coverArtUrl={coverUrl}
+            backdropUrl={resolvedRelease?.backdropUrl}
+            overlayVariant="minimal"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_35%_48%,rgba(196,145,42,0.16)_0%,rgba(28,22,14,0.6)_42%,#08090c_85%)]" />
+        )}
         <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-black/55 to-black/80 backdrop-blur-xl" />
       </div>
 
@@ -219,18 +231,15 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
         {/* Cover Art Sleeve */}
         <div className="relative group shrink-0">
           <div className="w-72 h-72 sm:w-88 sm:h-88 md:w-[400px] md:h-[400px] rounded-2xl bg-[#131418] border border-white/15 shadow-[0_28px_70px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center relative">
-            {coverUrl ? (
+            {showCoverImage ? (
               <img
                 src={coverUrl}
                 alt={`${resolvedRelease?.title || currentTrack?.title || 'Album'} cover art`}
+                onError={() => setImgError(true)}
                 className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.015]"
               />
             ) : (
-              <Disc3
-                className={`w-28 h-28 text-white/20 ${isPlaying ? 'animate-spin' : ''}`}
-                style={{ animationDuration: '6s' }}
-                aria-hidden="true"
-              />
+              <CadenceArtworkFallback isPlaying={isPlaying} size="lg" />
             )}
           </div>
         </div>

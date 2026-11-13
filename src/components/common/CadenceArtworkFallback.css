@@ -1,0 +1,48 @@
+/* Pure CSS compositor-only golden embers for CadenceArtworkFallback */
+.cadence-fallback-root {
+  background:
+    radial-gradient(circle at 50% 45%, rgba(62, 48, 20, 0.42) 0%, rgba(18, 16, 14, 0.92) 55%, #0a0a0d 100%);
+}
+
+.cadence-fallback-tile {
+  background: radial-gradient(130% 130% at 30% 20%, #1e1d1f 0%, #121214 70%, #0c0c0e 100%);
+  box-shadow:
+    0 20px 44px -12px rgba(0, 0, 0, 0.85),
+    0 0 36px -8px rgba(212, 175, 55, 0.2),
+    inset 0 1px 1px rgba(255, 230, 150, 0.18),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.7);
+  border: 1px solid rgba(220, 180, 80, 0.24);
+}
+
+.cadence-fallback-ember {
+  position: absolute;
+  bottom: -10px;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cadence-fallback-root[data-playing="true"] .cadence-fallback-ember {
+    animation: cadenceFallbackEmberRise var(--ember-duration, 8s) linear infinite var(--ember-delay, 0s);
+  }
+}
+
+@keyframes cadenceFallbackEmberRise {
+  0% {
+    transform: translate3d(0, 0, 0) scale(0.8);
+    opacity: 0;
+  }
+  15% {
+    opacity: var(--ember-opacity, 0.55);
+  }
+  80% {
+    opacity: var(--ember-opacity, 0.55);
+  }
+  100% {
+    transform: translate3d(var(--ember-drift, 14px), -440px, 0) scale(1.05);
+    opacity: 0;
+  }
+}
+

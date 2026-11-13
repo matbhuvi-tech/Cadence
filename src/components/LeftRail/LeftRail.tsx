@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import {
   Music4,
   FolderTree,
@@ -15,7 +15,6 @@ import {
   ShieldAlert,
   Maximize2,
   ChevronDown,
-  Disc3,
 } from 'lucide-react'
 import { AuditIssue, StorageMount, Track, Release, WatchedFolder, CanvasViewMode, Playlist } from '../../core/types'
 import { FacetSelections } from './FacetedFilters'
@@ -23,6 +22,7 @@ import { AmbientCurationCapsule } from './AmbientCurationCapsule'
 import { FEATURES } from '../../config/features'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { graphEngine } from '../../core/graphEngine'
+import { CadenceArtworkFallback } from '../common/CadenceArtworkFallback'
 
 interface LeftRailProps {
   auditIssues?: AuditIssue[]
@@ -75,12 +75,19 @@ const LeftRailArtworkCard: React.FC<{
   onCollapse?: () => void
 }> = React.memo(({ onOpenSanctuary, onCollapse }) => {
   const { currentTrack, currentRelease, isPlaying } = useAudioPlayer()
+  const [imgError, setImgError] = useState(false)
+
+  const resolvedRelease =
+    currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
+  const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+
+  useEffect(() => {
+    setImgError(false)
+  }, [coverUrl])
 
   if (!currentTrack) return null
 
-  const resolvedRelease =
-    currentRelease || (currentTrack.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
-  const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+  const showCoverImage = Boolean(coverUrl) && !imgError
 
   return (
     <div className="pt-2">
@@ -98,20 +105,15 @@ const LeftRailArtworkCard: React.FC<{
         aria-label={`Open Now Playing for ${currentTrack.title}`}
         className="relative w-full aspect-square rounded-xl bg-[#131418] border border-white/10 shadow-2xl overflow-hidden group cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
       >
-        {coverUrl ? (
+        {showCoverImage ? (
           <img
             src={coverUrl}
             alt={`${resolvedRelease?.title || currentTrack.title} cover art`}
+            onError={() => setImgError(true)}
             className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center bg-[#131418]">
-            <Disc3
-              className={`w-14 h-14 text-white/25 ${isPlaying ? 'animate-spin' : ''}`}
-              style={{ animationDuration: '6s' }}
-              aria-hidden="true"
-            />
-          </div>
+          <CadenceArtworkFallback isPlaying={isPlaying} size="sm" />
         )}
 
         {/* Hover / Focus Scrim + Centered Expand Icon */}

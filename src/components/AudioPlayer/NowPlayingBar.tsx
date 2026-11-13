@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   Play,
   Pause,
@@ -29,6 +29,7 @@ import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerConte
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath, getEndpointDisplayName } from '../../core/endpointRouting'
+import { CadenceLogo } from '../common/CadenceLogo'
 
 interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
@@ -147,6 +148,12 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
   const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
 
+  const [imgError, setImgError] = useState(false)
+
+  useEffect(() => {
+    setImgError(false)
+  }, [coverUrl])
+
   const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
   const isHiRes = streamTelemetry?.isHighRes || currentTrack?.isHighRes
 
@@ -190,17 +197,15 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                   title="Open Now Playing (⌘L)"
                   className="relative w-9 h-9 rounded-md bg-[#131418] border border-white/[0.08] overflow-hidden shrink-0 flex items-center justify-center shadow-md cursor-pointer hover:border-white/30 transition-all group"
                 >
-                  {coverUrl ? (
+                  {coverUrl && !imgError ? (
                     <img
                       src={coverUrl}
                       alt={currentTrack?.title || 'Album Art'}
+                      onError={() => setImgError(true)}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                     />
                   ) : (
-                    <Disc3
-                      className={`w-4 h-4 text-white/30 ${isPlaying ? 'animate-spin' : ''}`}
-                      style={{ animationDuration: '4s' }}
-                    />
+                    <CadenceLogo variant="gold" className="w-5 h-5" />
                   )}
                   {isPlaying && <div className="absolute inset-0 bg-white/[0.04] pointer-events-none" />}
                 </div>
