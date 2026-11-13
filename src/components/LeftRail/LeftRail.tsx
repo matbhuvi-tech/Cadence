@@ -13,11 +13,16 @@ import {
   Radio,
   ListMusic,
   ShieldAlert,
+  Maximize2,
+  ChevronDown,
+  Disc3,
 } from 'lucide-react'
 import { AuditIssue, StorageMount, Track, Release, WatchedFolder, CanvasViewMode, Playlist } from '../../core/types'
 import { FacetSelections } from './FacetedFilters'
 import { AmbientCurationCapsule } from './AmbientCurationCapsule'
 import { FEATURES } from '../../config/features'
+import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { graphEngine } from '../../core/graphEngine'
 
 interface LeftRailProps {
   auditIssues?: AuditIssue[]
@@ -60,7 +65,84 @@ interface LeftRailProps {
   onOpenCreatePlaylist?: () => void
 
   isIconOnly?: boolean
+  onOpenSanctuary?: () => void
+  isArtworkDockExpanded?: boolean
+  onCollapseArtworkDock?: () => void
 }
+
+const LeftRailArtworkCard: React.FC<{
+  onOpenSanctuary?: () => void
+  onCollapse?: () => void
+}> = React.memo(({ onOpenSanctuary, onCollapse }) => {
+  const { currentTrack, currentRelease, isPlaying } = useAudioPlayer()
+
+  if (!currentTrack) return null
+
+  const resolvedRelease =
+    currentRelease || (currentTrack.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
+  const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+
+  return (
+    <div className="pt-2">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onOpenSanctuary}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onOpenSanctuary?.()
+          }
+        }}
+        title="Open Now Playing (⌘L)"
+        aria-label={`Open Now Playing for ${currentTrack.title}`}
+        className="relative w-full aspect-square rounded-xl bg-[#131418] border border-white/10 shadow-2xl overflow-hidden group cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
+      >
+        {coverUrl ? (
+          <img
+            src={coverUrl}
+            alt={`${resolvedRelease?.title || currentTrack.title} cover art`}
+            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-[#131418]">
+            <Disc3
+              className={`w-14 h-14 text-white/25 ${isPlaying ? 'animate-spin' : ''}`}
+              style={{ animationDuration: '6s' }}
+              aria-hidden="true"
+            />
+          </div>
+        )}
+
+        {/* Hover / Focus Scrim + Centered Expand Icon */}
+        <div
+          className="absolute inset-0 bg-black/25 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity duration-200 flex items-center justify-center"
+          aria-hidden="true"
+        >
+          <div className="p-2.5 rounded-full bg-black/55 backdrop-blur-md border border-white/20 text-white shadow-xl">
+            <Maximize2 className="w-4 h-4" />
+          </div>
+        </div>
+
+        {/* Top-right Collapse Button */}
+        {onCollapse && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onCollapse()
+            }}
+            aria-label="Collapse artwork preview"
+            title="Collapse artwork preview"
+            className="absolute top-2 right-2 p-1 rounded-full bg-black/60 hover:bg-black/80 backdrop-blur-md border border-white/15 text-white/80 hover:text-white opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity cursor-pointer focus-visible:outline-2 focus-visible:outline-white"
+          >
+            <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+        )}
+      </div>
+    </div>
+  )
+})
 
 export const LeftRail: React.FC<LeftRailProps> = ({
   facets,
@@ -83,6 +165,9 @@ export const LeftRail: React.FC<LeftRailProps> = ({
   onOpenCreatePlaylist,
   auditIssues = [],
   isIconOnly = false,
+  onOpenSanctuary,
+  isArtworkDockExpanded = true,
+  onCollapseArtworkDock,
 }) => {
   // Derive active smart tier directly from facets state
   const activeSmartTier = useMemo(() => {
@@ -142,11 +227,11 @@ export const LeftRail: React.FC<LeftRailProps> = ({
 
   return (
     <aside
-      className={`shrink-0 h-full overflow-y-auto flex flex-col justify-between border-r border-white/[0.06] bg-[#0C0D10]/95 backdrop-blur-2xl select-none text-xs transition-all duration-200 ${
+      className={`shrink-0 h-full overflow-hidden flex flex-col justify-between border-r border-white/[0.06] bg-[#0C0D10]/95 backdrop-blur-2xl select-none text-xs transition-all duration-200 ${
         isIconOnly ? 'w-16 p-2 items-center' : 'w-[260px] p-3'
       }`}
     >
-      <div className={`space-y-4 ${isIconOnly ? 'w-full flex flex-col items-center' : 'w-full'}`}>
+      <div className={`flex-1 min-h-0 overflow-y-auto space-y-4 ${isIconOnly ? 'w-full flex flex-col items-center' : 'w-full pr-0.5'}`}>
         {/* 0. Primary Ingestion Action */}
         <div className={`pb-2 ${isIconOnly ? 'w-full flex justify-center' : ''}`}>
           <button
@@ -348,15 +433,24 @@ export const LeftRail: React.FC<LeftRailProps> = ({
         </div>
       </div>
 
-      {/* Footer Stats: Apple minimalist style */}
-      <div className={`pt-2 pb-16 border-t border-white/[0.05] text-[10px] font-mono text-[#636366] flex items-center ${isIconOnly ? 'justify-center' : 'justify-between px-1'}`}>
-        {!isIconOnly ? (
-          <>
-            <span>{releases.length} Albums</span>
-            <span>{tracks.length} Tracks</span>
-          </>
-        ) : (
-          <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]/50" title={`${releases.length} Albums · ${tracks.length} Tracks`} />
+      {/* Footer Stats & Docked Now Playing Artwork */}
+      <div className="shrink-0 w-full pb-16 space-y-2">
+        <div className={`pt-2 border-t border-white/[0.05] text-[10px] font-mono text-[#636366] flex items-center ${isIconOnly ? 'justify-center' : 'justify-between px-1'}`}>
+          {!isIconOnly ? (
+            <>
+              <span>{releases.length} Albums</span>
+              <span>{tracks.length} Tracks</span>
+            </>
+          ) : (
+            <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]/50" title={`${releases.length} Albums · ${tracks.length} Tracks`} />
+          )}
+        </div>
+
+        {!isIconOnly && isArtworkDockExpanded && (
+          <LeftRailArtworkCard
+            onOpenSanctuary={onOpenSanctuary}
+            onCollapse={onCollapseArtworkDock}
+          />
         )}
       </div>
     </aside>

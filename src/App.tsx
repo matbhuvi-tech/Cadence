@@ -359,6 +359,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
   const [topMode, setTopMode] = useState<'library' | 'curate' | 'maintain'>('library')
   const [maintainSubTab, setMaintainSubTab] = useState<MaintainSubTab>('needs_attention')
   const [isSanctuaryOpen, setIsSanctuaryOpen] = useState<boolean>(false)
+  const [isArtworkDockExpanded, setIsArtworkDockExpanded] = useState<boolean>(true)
   const [focusedWorkbenchTrack, setFocusedWorkbenchTrack] = useState<Track | null>(null)
   const [isWindowDragOver, setIsWindowDragOver] = useState<boolean>(false)
 
@@ -1926,6 +1927,9 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
             setIsCreatePlaylistOpen(true)
           }}
           isIconOnly={topMode === 'curate'}
+          onOpenSanctuary={() => setIsSanctuaryOpen(true)}
+          isArtworkDockExpanded={isArtworkDockExpanded}
+          onCollapseArtworkDock={() => setIsArtworkDockExpanded(false)}
         />
 
         {/* 2. Center Stage: MaintainCockpit OR CurationWorkbench OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
@@ -2532,6 +2536,8 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
         onOpenSanctuary={() => setIsSanctuaryOpen(true)}
         onOpenRemoteModal={() => setIsRemoteModalOpen(true)}
         topMode={topMode}
+        isArtworkDockExpanded={isArtworkDockExpanded && topMode !== 'curate'}
+        onExpandArtworkDock={() => setIsArtworkDockExpanded(true)}
       />
 
       {/* Cadence Mobile Remote QR Pairing Modal */}

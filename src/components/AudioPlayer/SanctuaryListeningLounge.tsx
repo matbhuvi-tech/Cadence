@@ -8,13 +8,14 @@ import {
   Volume2,
   VolumeX,
   Disc3,
-  ShieldCheck,
-  CheckCircle2,
+  Music2,
   Sparkles,
+  Users,
 } from 'lucide-react'
 import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath } from '../../core/endpointRouting'
+import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 
 interface SanctuaryListeningLoungeProps {
   isOpen: boolean
@@ -38,21 +39,37 @@ const SanctuaryScrubber: React.FC<{
     effectiveDuration > 0 ? Math.max(0, Math.min(1, currentTime / effectiveDuration)) : 0
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       <div
-        className="h-1.5 bg-white/10 rounded-full overflow-hidden cursor-pointer relative group"
+        role="slider"
+        tabIndex={0}
+        aria-label="Playback progress"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(effectiveDuration)}
+        aria-valuenow={Math.round(currentTime)}
+        className="h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer relative group focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-4"
         onClick={(e) => {
           const rect = e.currentTarget.getBoundingClientRect()
           const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
           onSeek(pct * effectiveDuration)
         }}
+        onKeyDown={(e) => {
+          if (!effectiveDuration) return
+          if (e.key === 'ArrowRight') {
+            e.preventDefault()
+            onSeek(Math.min(effectiveDuration, currentTime + 5))
+          } else if (e.key === 'ArrowLeft') {
+            e.preventDefault()
+            onSeek(Math.max(0, currentTime - 5))
+          }
+        }}
       >
         <div
-          className="w-full h-full origin-left bg-gradient-to-r from-[#D4AF37] to-white rounded-full relative transition-transform duration-150 ease-linear"
+          className="w-full h-full origin-left bg-white rounded-full relative transition-transform duration-150 ease-linear"
           style={{ transform: `scaleX(${progressFraction})` }}
         />
       </div>
-      <div className="flex items-center justify-between text-[11px] font-mono text-[#8E8E93] tabular-nums">
+      <div className="flex items-center justify-between text-xs font-mono text-white/65 tabular-nums">
         <span>{formatClockTime(currentTime)}</span>
         <span>{formatClockTime(effectiveDuration)}</span>
       </div>
@@ -106,228 +123,249 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
   const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
 
   const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
-  const isHiRes = streamTelemetry?.isHighRes || currentTrack?.isHighRes
+  const isHiRes = Boolean(streamTelemetry?.isHighRes || currentTrack?.isHighRes)
+  const sampleRateKhz = streamTelemetry?.sampleRate ? `${streamTelemetry.sampleRate / 1000} kHz` : null
+
+  const signalDesc = describeSignalPath({
+    selectedEndpoint,
+    activeBackendEndpoint,
+    deviceType,
+    signalPathMode,
+    isPurityMode,
+    isBitPerfect,
+    volume,
+    isMuted,
+    outputSampleRate,
+  })
+
+  const isUnavailable = activeBackendEndpoint === null || signalDesc.transportLabel === 'Unavailable'
+
+  const footerTierLabel = isDsd
+    ? 'DSD Direct'
+    : isHiRes
+      ? 'Hi-Res Lossless'
+      : signalDesc.isProvenBitPerfect
+        ? 'Bit-Perfect'
+        : 'Lossless'
+
+  const footerStatusLabel = isUnavailable
+    ? 'Output Unavailable'
+    : signalDesc.isProvenBitPerfect
+      ? 'Optimal Playback'
+      : 'Standard Playback'
+
+  const conductorName = currentTrack?.credits.find((c) => c.role === 'conductor')?.personName
+  const ensembleName = currentTrack?.credits.find((c) => c.role === 'ensemble')?.personName
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#08090C] flex flex-col justify-between p-6 sm:p-12 select-none animate-in fade-in duration-300 overflow-hidden">
-      {/* Dynamic Ambient Mesh Gradient Backdrop derived from cover art */}
-      <div className="absolute inset-0 pointer-events-none overflow-hidden -z-10">
-        {coverUrl ? (
-          <div
-            className="absolute inset-0 bg-cover bg-center filter blur-[100px] scale-125 opacity-25 transition-all duration-1000"
-            style={{ backgroundImage: `url(${coverUrl})` }}
-          />
-        ) : (
-          <div className="absolute inset-0 bg-radial from-[#181920] to-[#08090C] opacity-50" />
-        )}
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-3xl" />
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Now Playing"
+      className="fixed inset-0 z-50 bg-[#08090C] flex flex-col justify-between p-6 sm:p-10 lg:p-12 select-none animate-in fade-in duration-300 overflow-hidden"
+    >
+      {/* Reworked Cover Art Backdrop (consistent with Listen - Track view) */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden -z-10" aria-hidden="true">
+        <PanoramicAtmosphericBackdrop
+          coverArtUrl={coverUrl}
+          backdropUrl={resolvedRelease?.backdropUrl}
+          overlayVariant="minimal"
+        />
+        <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-black/55 to-black/80 backdrop-blur-xl" />
       </div>
 
-      {/* Top Header: Clean Apple-Style Bar */}
+      {/* Top Header */}
       <header className="flex items-center justify-between z-10 shrink-0">
-        <div className="flex items-center gap-3">
-          <span className="w-2 h-2 rounded-full bg-[#10B981]" />
-          <span className="text-[11px] font-mono tracking-widest text-[#8E8E93] uppercase">
-            Sanctuary Listening Lounge
+        <div className="flex items-center gap-2.5">
+          <span
+            className={`w-2 h-2 rounded-full ${isUnavailable ? 'bg-rose-400' : 'bg-[#10B981]'}`}
+            aria-hidden="true"
+          />
+          <span className="text-xs font-medium tracking-wide text-white/70">
+            Now Playing
           </span>
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Hardware Lock Badge */}
-          <div className="px-3 py-1 rounded-full bg-white/[0.05] border border-white/10 text-xs font-mono text-[#E5E5EA] flex items-center gap-2">
+          {/* Format Badge */}
+          <div className="px-3 py-1 rounded-full bg-white/[0.08] backdrop-blur-md border border-white/15 text-xs font-mono text-white/90 flex items-center gap-2">
             <span
               className="w-1.5 h-1.5 rounded-full"
               style={{ backgroundColor: isDsd ? '#818CF8' : isHiRes ? '#F59E0B' : '#10B981' }}
+              aria-hidden="true"
             />
             <span>
               {streamTelemetry?.format || currentTrack?.format || 'PCM'}
-              {streamTelemetry?.sampleRate ? ` · ${streamTelemetry.sampleRate / 1000}kHz` : ''}
-              {streamTelemetry?.bitDepth ? `/${streamTelemetry.bitDepth}b` : ''}
+              {sampleRateKhz ? ` · ${sampleRateKhz}` : ''}
+              {streamTelemetry?.bitDepth ? ` · ${streamTelemetry.bitDepth}-bit` : ''}
             </span>
           </div>
 
           <button
+            type="button"
             onClick={onClose}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-xs font-mono text-white transition-all cursor-pointer"
+            aria-label="Close Now Playing"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/[0.08] hover:bg-white/[0.16] backdrop-blur-md border border-white/15 text-xs font-medium text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
             title="Return to Library (Esc)"
           >
-            <X className="w-3.5 h-3.5" />
+            <X className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Esc</span>
           </button>
         </div>
       </header>
 
-      {/* Center Stage: Editorial Sleeve & Typography */}
-      <main className="flex-1 flex flex-col lg:flex-row items-center justify-center gap-8 lg:gap-20 py-8 z-10 overflow-y-auto">
+      {/* Center Stage: Cover Art & Track Details */}
+      <main className="flex-1 flex flex-col lg:flex-row items-center justify-center gap-8 lg:gap-16 xl:gap-20 py-6 z-10 overflow-y-auto">
         {/* Cover Art Sleeve */}
         <div className="relative group shrink-0">
-          <div className="w-72 h-72 sm:w-88 sm:h-88 md:w-[420px] md:h-[420px] rounded-xl bg-[#131418] border border-white/10 shadow-2xl overflow-hidden flex items-center justify-center relative apple-album-shadow">
+          <div className="w-72 h-72 sm:w-88 sm:h-88 md:w-[400px] md:h-[400px] rounded-2xl bg-[#131418] border border-white/15 shadow-[0_28px_70px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center relative">
             {coverUrl ? (
               <img
                 src={coverUrl}
-                alt={currentTrack?.title || 'Album Art'}
-                className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.02]"
+                alt={`${resolvedRelease?.title || currentTrack?.title || 'Album'} cover art`}
+                className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.015]"
               />
             ) : (
               <Disc3
                 className={`w-28 h-28 text-white/20 ${isPlaying ? 'animate-spin' : ''}`}
                 style={{ animationDuration: '6s' }}
+                aria-hidden="true"
               />
             )}
           </div>
         </div>
 
-        {/* Editorial Metadata & Liner Notes */}
+        {/* Track Metadata & Playback Status */}
         <div className="max-w-lg w-full space-y-6 text-left">
-          {/* Classical Work & Movement Hierarchy in Editorial Serif */}
           <div>
             {currentTrack?.workId && (
-              <div className="text-xs font-mono uppercase tracking-widest text-[#D4AF37] font-semibold mb-1">
+              <div className="text-xs font-medium uppercase tracking-widest text-amber-300/90 mb-1.5">
                 Classical Work
               </div>
             )}
-            <h1 className="text-3xl sm:text-4xl font-serif text-white tracking-tight leading-tight">
+            <h1 className="text-3xl sm:text-4xl font-semibold text-white tracking-tight leading-tight">
               {currentTrack?.title || 'No Track Selected'}
             </h1>
-            <p className="text-lg text-[#F5F5F7] font-medium mt-1.5">
+            <p className="text-lg text-white/90 font-medium mt-1.5">
               {currentTrack?.artistCredit || 'Unknown Artist'}
             </p>
-            <p className="text-sm text-[#8E8E93] mt-0.5">
-              {currentRelease?.title || 'Release'} ({currentRelease?.releaseYear || 'Unknown Year'})
+            <p className="text-sm text-white/60 mt-0.5">
+              {currentRelease?.title || 'Release'}
+              {currentRelease?.releaseYear ? ` (${currentRelease.releaseYear})` : ''}
             </p>
           </div>
 
-          {/* Editorial Credits Pills (Conductor, Orchestra, Composer) */}
-          <div className="flex flex-wrap gap-2 pt-1">
-            {currentTrack?.composerName && (
-              <span className="px-3 py-1 rounded-full bg-white/[0.05] border border-white/[0.08] text-xs text-[#E5E5EA] flex items-center gap-1.5">
-                <span className="text-[#D4AF37]">🎼 Composer:</span>
-                <span className="font-medium">{currentTrack.composerName}</span>
-              </span>
-            )}
-            {currentTrack?.credits.find((c) => c.role === 'ensemble')?.personName && (
-              <span className="px-3 py-1 rounded-full bg-white/[0.05] border border-white/[0.08] text-xs text-[#E5E5EA] flex items-center gap-1.5">
-                <span className="text-cyan-400">🎻 Orchestra:</span>
-                <span className="font-medium">
-                  {currentTrack.credits.find((c) => c.role === 'ensemble')?.personName}
+          {/* Simplified Credits Pills */}
+          {(currentTrack?.composerName || ensembleName || conductorName) && (
+            <div className="flex flex-wrap gap-2">
+              {currentTrack?.composerName && (
+                <span className="px-3 py-1.5 rounded-full bg-white/[0.08] backdrop-blur-md border border-white/[0.14] text-xs text-white/90 flex items-center gap-1.5">
+                  <Music2 className="w-3.5 h-3.5 text-white/60" aria-hidden="true" />
+                  <span className="text-white/65">Composer:</span>
+                  <span className="font-medium text-white">{currentTrack.composerName}</span>
                 </span>
-              </span>
-            )}
-            {currentTrack?.credits.find((c) => c.role === 'conductor')?.personName && (
-              <span className="px-3 py-1 rounded-full bg-white/[0.05] border border-white/[0.08] text-xs text-[#E5E5EA] flex items-center gap-1.5">
-                <span className="text-amber-400">🪄 Conductor:</span>
-                <span className="font-medium">
-                  {currentTrack.credits.find((c) => c.role === 'conductor')?.personName}
+              )}
+              {ensembleName && (
+                <span className="px-3 py-1.5 rounded-full bg-white/[0.08] backdrop-blur-md border border-white/[0.14] text-xs text-white/90 flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-white/60" aria-hidden="true" />
+                  <span className="text-white/65">Ensemble:</span>
+                  <span className="font-medium text-white">{ensembleName}</span>
                 </span>
-              </span>
-            )}
-            {currentTrack?.drScore && (
-              <span className="px-3 py-1 rounded-full bg-white/[0.05] border border-white/[0.08] text-xs font-mono text-[#D4AF37] flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-[#D4AF37]" />
-                <span>DR{currentTrack.drScore} Master Dynamic Range</span>
-              </span>
-            )}
-          </div>
-
-          {/* Minimalist Signal Path Capsule */}
-          {(() => {
-            const signalDesc = describeSignalPath({
-              selectedEndpoint,
-              activeBackendEndpoint,
-              deviceType,
-              signalPathMode,
-              isPurityMode,
-              isBitPerfect,
-              volume,
-              isMuted,
-              outputSampleRate,
-            })
-            return (
-              <div className="p-4 rounded-xl bg-white/[0.03] border border-white/[0.07] font-mono text-xs space-y-2">
-                <div className="flex items-center justify-between text-[#8E8E93] text-[10px] uppercase font-bold tracking-wider">
-                  <span>{signalDesc.isProvenBitPerfect ? 'UPnP Raw Signal Path' : 'Audio Signal Path'}</span>
-                  <span className={`${activeBackendEndpoint === null ? 'text-rose-400' : 'text-[#10B981]'} flex items-center gap-1`}>
-                    <CheckCircle2 className="w-3 h-3" />
-                    <span>{signalDesc.transportLabel}</span>
-                  </span>
-                </div>
-                <div className="text-[11px] text-[#F5F5F7] flex items-center justify-between pt-1 border-t border-white/[0.05] gap-2">
-                  <span className="text-[#8E8E93] shrink-0">Transport:</span>
-                  <span className="truncate text-right">{signalDesc.clockStepDetail}</span>
-                </div>
-                <div className="text-[11px] text-[#F5F5F7] flex items-center justify-between gap-2">
-                  <span className="text-[#8E8E93] shrink-0">Output Endpoint:</span>
-                  <span className="truncate max-w-[240px] text-right">{signalDesc.transportDetail}</span>
-                </div>
-              </div>
-            )
-          })()}
+              )}
+              {conductorName && (
+                <span className="px-3 py-1.5 rounded-full bg-white/[0.08] backdrop-blur-md border border-white/[0.14] text-xs text-white/90 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-white/60" aria-hidden="true" />
+                  <span className="text-white/65">Conductor:</span>
+                  <span className="font-medium text-white">{conductorName}</span>
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </main>
 
-      {/* Bottom Minimalist Transport Controls & Scrubber */}
+      {/* Bottom Transport Controls & Scrubber */}
       <footer className="w-full max-w-2xl mx-auto space-y-4 z-10 shrink-0">
-        {/* Scrubber */}
         <SanctuaryScrubber fallbackDuration={fallbackDuration} onSeek={seek} />
 
-        {/* Transport Controls */}
         <div className="flex items-center justify-between gap-4">
-          <div className="w-24 text-[10px] font-mono text-[#636366]">
-            Press Esc to return
+          <div className="w-36 text-xs text-white/55">
+            <button
+              type="button"
+              onClick={onClose}
+              className="hover:text-white transition-colors cursor-pointer whitespace-nowrap focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2 rounded"
+            >
+              Press Esc to return
+            </button>
           </div>
 
           <div className="flex items-center gap-6">
             <button
+              type="button"
               onClick={prevTrack}
-              className="p-2 text-[#8E8E93] hover:text-white transition-colors cursor-pointer"
+              aria-label="Previous track"
+              className="p-2 text-white/70 hover:text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2 rounded-full"
               title="Previous Track"
             >
-              <SkipBack className="w-5 h-5 fill-current" />
+              <SkipBack className="w-5 h-5 fill-current" aria-hidden="true" />
             </button>
             <button
+              type="button"
               onClick={togglePlayPause}
-              className="w-12 h-12 rounded-full bg-white hover:bg-white/95 text-black flex items-center justify-center hover:scale-105 active:scale-95 transition-transform cursor-pointer shadow-2xl"
+              aria-label={isPlaying ? 'Pause' : 'Play'}
+              className="w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 backdrop-blur-md border border-white/25 text-white flex items-center justify-center hover:scale-105 active:scale-95 transition-all cursor-pointer shadow-xl focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
               title={isPlaying ? 'Pause' : 'Play'}
             >
-              {isPlaying ? <Pause className="w-5 h-5 fill-black stroke-black" /> : <Play className="w-5 h-5 fill-black stroke-black ml-0.5" />}
+              {isPlaying ? (
+                <Pause className="w-5 h-5 fill-white stroke-white" aria-hidden="true" />
+              ) : (
+                <Play className="w-5 h-5 fill-white stroke-white ml-0.5" aria-hidden="true" />
+              )}
             </button>
             <button
+              type="button"
               onClick={nextTrack}
-              className="p-2 text-[#8E8E93] hover:text-white transition-colors cursor-pointer"
+              aria-label="Next track"
+              className="p-2 text-white/70 hover:text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2 rounded-full"
               title="Next Track"
             >
-              <SkipForward className="w-5 h-5 fill-current" />
+              <SkipForward className="w-5 h-5 fill-current" aria-hidden="true" />
             </button>
           </div>
 
           {/* Volume */}
-          <div className="flex items-center gap-2 w-24 justify-end">
+          <div className="flex items-center gap-2.5 w-36 justify-end">
             <button
+              type="button"
               onClick={toggleMute}
-              className="text-[#8E8E93] hover:text-white transition-colors cursor-pointer"
+              aria-label={isMuted || volume === 0 ? 'Unmute' : 'Mute'}
+              className="text-white/70 hover:text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2 rounded"
             >
               {isMuted || volume === 0 ? (
-                <VolumeX className="w-4 h-4 text-rose-400" />
+                <VolumeX className="w-4 h-4 text-rose-400" aria-hidden="true" />
               ) : (
-                <Volume2 className="w-4 h-4 text-[#8E8E93]" />
+                <Volume2 className="w-4 h-4" aria-hidden="true" />
               )}
             </button>
             <input
               type="range"
+              aria-label="Volume"
               min={0}
               max={1}
               step={0.01}
               value={isPurityMode ? 1 : isMuted ? 0 : volume}
               disabled={isPurityMode}
               onChange={(e) => setVolume(Number(e.target.value))}
-              className="w-16 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-white"
+              className="w-20 h-1 bg-white/25 rounded-lg appearance-none cursor-pointer accent-white focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
             />
           </div>
         </div>
 
-        {/* Minimalist Telemetry Footer */}
-        <div className="text-center text-[10px] font-mono text-[#636366] pt-1">
-          Bit-Perfect · {streamTelemetry?.sampleRate ? `${streamTelemetry.sampleRate / 1000}kHz` : '192kHz'} · RAM Play Active · Zero Host Jitter
+        {/* Simplified Footer Status */}
+        <div className="text-center text-xs text-white/55 pt-0.5">
+          {footerTierLabel}
+          {sampleRateKhz ? ` · ${sampleRateKhz}` : ''}
+          {` · ${footerStatusLabel}`}
         </div>
       </footer>
     </div>

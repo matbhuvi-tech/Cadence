@@ -34,6 +34,8 @@ interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
   onOpenRemoteModal?: () => void
   topMode?: 'library' | 'curate' | 'maintain'
+  isArtworkDockExpanded?: boolean
+  onExpandArtworkDock?: () => void
 }
 
 const formatClockTime = (seconds: number) => {
@@ -97,6 +99,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   onOpenSanctuary,
   onOpenRemoteModal,
   topMode,
+  isArtworkDockExpanded = false,
+  onExpandArtworkDock,
 }) => {
   const {
     currentTrack,
@@ -176,28 +180,43 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             onSeek={seek}
           />
 
-          {/* LEFT SECTION: TRACK CREDITS & SANCTUARY TRIGGER */}
+          {/* LEFT SECTION: TRACK CREDITS & NOW PLAYING TRIGGER */}
           <div className="transport-track flex items-center gap-2.5 min-w-0 max-w-[300px]">
-            {/* Artwork Thumbnail */}
-            <div
-              onClick={onOpenSanctuary}
-              title="Expand Audiophile Sanctuary Lounge (⌘L)"
-              className="relative w-9 h-9 rounded-md bg-[#131418] border border-white/[0.08] overflow-hidden shrink-0 flex items-center justify-center shadow-md cursor-pointer hover:border-white/30 transition-all group"
-            >
-              {coverUrl ? (
-                <img
-                  src={coverUrl}
-                  alt={currentTrack?.title || 'Album Art'}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                />
-              ) : (
-                <Disc3
-                  className={`w-4 h-4 text-white/30 ${isPlaying ? 'animate-spin' : ''}`}
-                  style={{ animationDuration: '4s' }}
-                />
-              )}
-              {isPlaying && <div className="absolute inset-0 bg-white/[0.04] pointer-events-none" />}
-            </div>
+            {/* Artwork Thumbnail (hidden when Left Rail artwork dock is expanded to avoid duplicate art) */}
+            {(!isArtworkDockExpanded || !currentTrack) && (
+              <div className="flex items-center gap-1 shrink-0">
+                <div
+                  onClick={onOpenSanctuary}
+                  title="Open Now Playing (⌘L)"
+                  className="relative w-9 h-9 rounded-md bg-[#131418] border border-white/[0.08] overflow-hidden shrink-0 flex items-center justify-center shadow-md cursor-pointer hover:border-white/30 transition-all group"
+                >
+                  {coverUrl ? (
+                    <img
+                      src={coverUrl}
+                      alt={currentTrack?.title || 'Album Art'}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                    />
+                  ) : (
+                    <Disc3
+                      className={`w-4 h-4 text-white/30 ${isPlaying ? 'animate-spin' : ''}`}
+                      style={{ animationDuration: '4s' }}
+                    />
+                  )}
+                  {isPlaying && <div className="absolute inset-0 bg-white/[0.04] pointer-events-none" />}
+                </div>
+                {currentTrack && onExpandArtworkDock && (
+                  <button
+                    type="button"
+                    onClick={onExpandArtworkDock}
+                    aria-label="Show artwork preview in sidebar"
+                    title="Show artwork preview"
+                    className="p-1 rounded text-[#8E8E93] hover:text-white hover:bg-white/[0.08] transition-colors cursor-pointer"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Track Info */}
             <div className="flex flex-col min-w-0 pr-1">
@@ -416,14 +435,16 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               <Smartphone className="w-3.5 h-3.5" />
             </button>
 
-            {/* Sanctuary Lounge Trigger */}
+            {/* Now Playing Trigger (Secondary Fallback) */}
             {onOpenSanctuary && (
               <button
+                type="button"
                 onClick={onOpenSanctuary}
-                title="Expand Audiophile Sanctuary Lounge (⌘L)"
+                aria-label="Open Now Playing"
+                title="Open Now Playing (⌘L)"
                 className="p-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white transition-all cursor-pointer"
               >
-                <Maximize2 className="w-3.5 h-3.5" />
+                <Maximize2 className="w-3.5 h-3.5" aria-hidden="true" />
               </button>
             )}
           </div>
