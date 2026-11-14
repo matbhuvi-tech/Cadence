@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Track, Release, Playlist, SampleRateTransition } from '../core/types'
-import { tauriBridge, AudioStreamTelemetry } from '../services/tauriBridge'
+import { Track, Release, Playlist, SampleRateTransition, AudioFormat } from '../core/types'
+import { tauriBridge, AudioStreamTelemetry, ScannedAudioFileInfo } from '../services/tauriBridge'
 import { sqliteLibraryService } from '../services/sqliteLibraryService'
 import { graphEngine } from '../core/graphEngine'
 import { emitDiag, setFrontendCaptureMode } from '../core/diagnostics'
@@ -89,6 +89,68 @@ function isSameStreamTelemetry(
     a.format === b.format &&
     a.isHighRes === b.isHighRes
   )
+}
+
+function mapExtensionToAudioFormat(ext: string): AudioFormat {
+  switch (ext.toLowerCase()) {
+    case 'dsf':
+    case 'dff':
+      return 'DSD'
+    case 'wav':
+    case 'aiff':
+    case 'aif':
+      return 'WAV'
+    case 'm4a':
+      return 'ALAC'
+    case 'aac':
+      return 'AAC'
+    case 'mp3':
+    case 'ogg':
+      return 'MP3'
+    case 'flac':
+    default:
+      return 'FLAC'
+  }
+}
+
+function buildTrackFromExternalFile(info: ScannedAudioFileInfo): Track {
+  const format = mapExtensionToAudioFormat(info.extension)
+  const fallbackTitle = info.filename.replace(/\.[^/.]+$/, '') || info.file_path
+  const sampleRateKhz = info.sample_rate ? `${(info.sample_rate / 1000).toFixed(1)} kHz` : ''
+  const bitDepthStr = info.bit_depth ? `${info.bit_depth}-bit` : ''
+  const sampleRateStr = [bitDepthStr, sampleRateKhz].filter(Boolean).join(' / ') || format
+  const nowIso = new Date().toISOString()
+
+  return {
+    id: `ext:${info.file_path}`,
+    releaseId: `ext-release:${info.album || fallbackTitle}`,
+    recordingId: `ext-rec:${info.file_path}`,
+    trackNumber: info.track_number || 1,
+    discNumber: 1,
+    title: info.title || fallbackTitle,
+    composerName: info.composer || undefined,
+    artistCredit: info.artist || 'Unknown Artist',
+    durationSeconds: info.duration_secs || 0,
+    duration: info.duration_secs || 0,
+    filePath: info.file_path,
+    fileSize: info.size_bytes,
+    storageMountId: 'external',
+    sidecarStatus: 'synced',
+    modifiedTimestamp: nowIso,
+    checksumValid: true,
+    accurateRipConfidence: 0,
+    sampleRateStr,
+    format,
+    isHighRes: (info.sample_rate || 0) > 48000 || (info.bit_depth || 0) > 16 || format === 'DSD',
+    sampleRate: info.sample_rate || undefined,
+    bitDepth: info.bit_depth || undefined,
+    credits: [],
+    masterReleaseId: `ext-master:${info.album || fallbackTitle}`,
+    isOnline: true,
+    albumTitle: info.album || undefined,
+    releaseTitle: info.album || undefined,
+    genre: info.genre || undefined,
+  }
 }
 
 export interface AudioProgressContextType {
@@ -780,6 +842,41 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     },
     [queue, handleAutoAdvance]
   )
+
+  const playTrackRef = useRef(playTrack)
+  playTrackRef.current = playTrack
+
+  // Handle OS "Open with Cadence" (cold-start CLI args + warm-start single-instance events)
+  useEffect(() => {
+    if (!isNativeTauri) return
+    let active = true
+    let unlisten: (() => void) | null = null
+
+    const handleOpenExternalFiles = async (filePaths: string[]) => {
+      if (!active || !filePaths.length) return
+      try {
+        const scanned = await tauriBridge.inspectAudioFiles(filePaths)
+        if (!active || scanned.length === 0) return
+        const tracks = scanned.map(buildTrackFromExternalFile)
+        await playTrackRef.current(tracks[0], tracks)
+      } catch (err) {
+        console.error('[AudioPlayer] Failed to open external audio files:', err)
+      }
+    }
+
+    ;(async () => {
+      unlisten = await tauriBridge.onOpenFiles(handleOpenExternalFiles)
+      const pending = await tauriBridge.takePendingOpenFiles()
+      if (pending.length > 0) {
+        await handleOpenExternalFiles(pending)
+      }
+    })()
+
+    return () => {
+      active = false
+      if (unlisten) unlisten()
+    }
+  }, [isNativeTauri])
 
   // Toggle Play / Pause
   const togglePlayPause = useCallback(async () => {

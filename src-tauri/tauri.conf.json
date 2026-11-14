@@ -36,6 +36,57 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "fileAssociations": [
+      {
+        "ext": ["flac"],
+        "name": "FLAC Audio File",
+        "description": "Free Lossless Audio Codec File",
+        "mimeType": "audio/flac",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["dsf", "dff"],
+        "name": "DSD Audio File",
+        "description": "Direct Stream Digital Audio File",
+        "mimeType": "audio/dsd",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["wav"],
+        "name": "WAV Audio File",
+        "description": "Waveform Audio File",
+        "mimeType": "audio/wav",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["mp3"],
+        "name": "MP3 Audio File",
+        "description": "MPEG Layer-3 Audio File",
+        "mimeType": "audio/mpeg",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["m4a", "aac"],
+        "name": "AAC / ALAC Audio File",
+        "description": "MPEG-4 Audio File",
+        "mimeType": "audio/mp4",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["aiff", "aif"],
+        "name": "AIFF Audio File",
+        "description": "Audio Interchange File Format",
+        "mimeType": "audio/aiff",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["ogg"],
+        "name": "Ogg Vorbis Audio File",
+        "description": "Ogg Vorbis Audio File",
+        "mimeType": "audio/ogg",
+        "role": "Viewer"
+      }
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

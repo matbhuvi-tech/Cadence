@@ -22,7 +22,75 @@ use db::AppDb;
 use scanner::ScannerController;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+struct PendingOpenFilesState {
+    files: parking_lot::Mutex<Vec<String>>,
+    frontend_ready: std::sync::atomic::AtomicBool,
+}
+
+impl PendingOpenFilesState {
+    fn new() -> Self {
+        Self {
+            files: parking_lot::Mutex::new(Vec::new()),
+            frontend_ready: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+fn normalize_opened_path(path: &std::path::Path) -> String {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let s = resolved.to_string_lossy().to_string();
+    #[cfg(windows)]
+    if let Some(stripped) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{}", stripped);
+    } else if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        return stripped.to_string();
+    }
+    s
+}
+
+fn extract_audio_file_args(args: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut files = Vec::new();
+    for arg in args.iter().skip(1) {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() || trimmed.starts_with('-') {
+            continue;
+        }
+        let candidate = std::path::Path::new(trimmed);
+        let path = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else if let Some(dir) = cwd.filter(|d| !d.is_empty()) {
+            std::path::Path::new(dir).join(candidate)
+        } else {
+            candidate.to_path_buf()
+        };
+        if commands::scanner::is_supported_audio_file(&path) {
+            let normalized = normalize_opened_path(&path);
+            if !files.contains(&normalized) {
+                files.push(normalized);
+            }
+        }
+    }
+    files
+}
+
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command]
+fn take_pending_open_files(state: tauri::State<'_, PendingOpenFilesState>) -> Vec<String> {
+    state
+        .frontend_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut guard = state.files.lock();
+    std::mem::take(&mut *guard)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -35,15 +103,42 @@ pub fn run() {
     let scanner_controller = ScannerController::new(Some(audio_engine.clone()));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            focus_main_window(app);
+            let files = extract_audio_file_args(&argv, Some(cwd.as_str()));
+            if files.is_empty() {
+                return;
+            }
+            if let Some(pending) = app.try_state::<PendingOpenFilesState>() {
+                if pending
+                    .frontend_ready
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let _ = app.emit("cadence:open-files", files);
+                } else {
+                    pending.files.lock().extend(files);
+                }
+            } else {
+                let _ = app.emit("cadence:open-files", files);
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_window_state::Builder::default()
             .with_state_flags(tauri_plugin_window_state::StateFlags::all() ^ tauri_plugin_window_state::StateFlags::VISIBLE)
             .build())
+        .manage(PendingOpenFilesState::new())
         .manage(audio_engine)
         .manage(scanner_controller)
         .setup(move |app| {
+            let startup_args: Vec<String> = std::env::args().collect();
+            let startup_files = extract_audio_file_args(&startup_args, None);
+            if !startup_files.is_empty() {
+                if let Some(pending) = app.try_state::<PendingOpenFilesState>() {
+                    pending.files.lock().extend(startup_files);
+                }
+            }
             let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let diag_engine = engine_for_diag.clone();
             let _ = diagnostics::configure_persistence(
@@ -237,6 +332,8 @@ pub fn run() {
             invalidate_next_track,
             set_settling_delay_ms,
             scan_directory_native,
+            inspect_audio_files,
+            take_pending_open_files,
             read_cover_art_base64,
             commit_track_tags_native,
             // Asynchronous Background Commit Queue commands
@@ -345,4 +442,35 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cadence Core application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_audio_file_args_filters_flags_and_non_audio() {
+        let dir = std::env::temp_dir().join(format!("cadence_open_with_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let flac_path = dir.join("test_song.flac");
+        let txt_path = dir.join("notes.txt");
+        std::fs::write(&flac_path, b"fLaC").unwrap();
+        std::fs::write(&txt_path, b"hello").unwrap();
+
+        let args = vec![
+            "cadence-core.exe".to_string(),
+            "--minimized".to_string(),
+            txt_path.to_string_lossy().to_string(),
+            "test_song.flac".to_string(),
+            flac_path.to_string_lossy().to_string(),
+            dir.join("missing.mp3").to_string_lossy().to_string(),
+        ];
+
+        let extracted = extract_audio_file_args(&args, Some(dir.to_str().unwrap()));
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].to_lowercase().ends_with("test_song.flac"));
+        assert!(!extracted[0].starts_with(r"\\?\"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

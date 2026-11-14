@@ -39,6 +39,114 @@ pub struct CommitTagsPayload {
     pub genre: Option<String>,
 }
 
+pub const SUPPORTED_AUDIO_EXTENSIONS: &[&str] = &[
+    "flac", "wav", "mp3", "m4a", "aac", "aiff", "aif", "ogg", "dsf", "dff",
+];
+
+pub fn is_supported_audio_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| SUPPORTED_AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+            .unwrap_or(false)
+}
+
+/// Inspects a single audio file on disk and extracts its tags and stream properties.
+pub fn inspect_single_audio_file(path: &Path) -> Option<ScannedAudioFile> {
+    if !is_supported_audio_file(path) {
+        return None;
+    }
+
+    let ext_lower = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let probe_res = Probe::open(path).and_then(|p| p.read());
+
+    let (
+        title,
+        artist,
+        album,
+        year,
+        track_number,
+        genre,
+        composer,
+        mut duration_secs,
+        mut sample_rate,
+        mut bit_depth,
+        mut channels,
+        has_embedded_art,
+    ) = match probe_res {
+        Ok(tagged_file) => {
+            let props = tagged_file.properties();
+            let dur = props.duration().as_secs_f64();
+            let sr = props.sample_rate();
+            let bd = props.bit_depth();
+            let ch = props.channels().map(|c| c as u16);
+
+            let tag = tagged_file
+                .primary_tag()
+                .or_else(|| tagged_file.first_tag());
+
+            let t = tag.and_then(|t| t.title().map(|s| s.to_string()));
+            let a = tag.and_then(|t| t.artist().map(|s| s.to_string()));
+            let alb = tag.and_then(|t| t.album().map(|s| s.to_string()));
+            let yr = tag.and_then(|t| t.year());
+            let trk = tag.and_then(|t| t.track());
+            let g = tag.and_then(|t| t.genre().map(|s| s.to_string()));
+            let comp = tag.and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
+            let has_art = tag.map(|t| !t.pictures().is_empty()).unwrap_or(false);
+
+            (t, a, alb, yr, trk, g, comp, dur, sr, bd, ch, has_art)
+        }
+        Err(_) => (None, None, None, None, None, None, None, 0.0, None, None, None, false),
+    };
+
+    if ext_lower == "dsf" && (duration_secs <= 0.0 || sample_rate.is_none()) {
+        if let Some(dsf) = crate::audio::stream_tuning::parse_dsf_header(path) {
+            duration_secs = dsf.duration_secs;
+            sample_rate = Some(dsf.sample_rate);
+            bit_depth = Some(dsf.bits_per_sample);
+            channels = Some(dsf.channels);
+        }
+    }
+
+    Some(ScannedAudioFile {
+        file_path: path.to_string_lossy().to_string(),
+        filename,
+        extension: ext_lower,
+        size_bytes,
+        title,
+        artist,
+        album,
+        year,
+        track_number,
+        genre,
+        composer,
+        duration_secs,
+        sample_rate,
+        bit_depth,
+        channels,
+        has_embedded_art,
+    })
+}
+
+#[tauri::command]
+pub fn inspect_audio_files(file_paths: Vec<String>) -> Vec<ScannedAudioFile> {
+    file_paths
+        .into_iter()
+        .filter_map(|p| inspect_single_audio_file(Path::new(&p)))
+        .collect()
+}
+
 #[tauri::command]
 pub fn scan_directory_native(directory_path: String) -> Result<Vec<ScannedAudioFile>, String> {
     let dir = Path::new(&directory_path);
@@ -49,61 +157,8 @@ pub fn scan_directory_native(directory_path: String) -> Result<Vec<ScannedAudioF
     let mut audio_files = Vec::new();
 
     for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                if ["flac", "wav", "mp3", "m4a", "aac", "aiff", "aif", "ogg", "dsf", "dff"].contains(&ext_lower.as_str()) {
-                    let metadata = entry.metadata().ok();
-                    let size_bytes = metadata.map(|m| m.len()).unwrap_or(0);
-                    let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-
-                    let probe_res = Probe::open(path).and_then(|p| p.read());
-                    
-                    let (title, artist, album, year, track_number, genre, composer, duration_secs, sample_rate, bit_depth, channels, has_embedded_art) = match probe_res {
-                        Ok(tagged_file) => {
-                            let props = tagged_file.properties();
-                            let dur = props.duration().as_secs_f64();
-                            let sr = props.sample_rate();
-                            let bd = props.bit_depth();
-                            let ch = props.channels().map(|c| c as u16);
-
-                            let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
-                            
-                            let t = tag.and_then(|t| t.title().map(|s| s.to_string()));
-                            let a = tag.and_then(|t| t.artist().map(|s| s.to_string()));
-                            let alb = tag.and_then(|t| t.album().map(|s| s.to_string()));
-                            let yr = tag.and_then(|t| t.year());
-                            let trk = tag.and_then(|t| t.track());
-                            let g = tag.and_then(|t| t.genre().map(|s| s.to_string()));
-                            let comp = tag.and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
-                            let has_art = tag.map(|t| !t.pictures().is_empty()).unwrap_or(false);
-
-                            (t, a, alb, yr, trk, g, comp, dur, sr, bd, ch, has_art)
-                        }
-                        Err(_) => (None, None, None, None, None, None, None, 0.0, None, None, None, false),
-                    };
-
-                    audio_files.push(ScannedAudioFile {
-                        file_path: path.to_string_lossy().to_string(),
-                        filename,
-                        extension: ext_lower,
-                        size_bytes,
-                        title,
-                        artist,
-                        album,
-                        year,
-                        track_number,
-                        genre,
-                        composer,
-                        duration_secs,
-                        sample_rate,
-                        bit_depth,
-                        channels,
-                        has_embedded_art,
-                    });
-                }
-            }
+        if let Some(scanned) = inspect_single_audio_file(entry.path()) {
+            audio_files.push(scanned);
         }
     }
 

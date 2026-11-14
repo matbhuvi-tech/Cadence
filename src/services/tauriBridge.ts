@@ -1575,6 +1575,55 @@ class TauriBridgeService {
       await invoke('log_frontend_debug_batch', { events })
     }
   }
+
+  public async takePendingOpenFiles(): Promise<string[]> {
+    if (this.isTauri()) {
+      return await invoke<string[]>('take_pending_open_files')
+    }
+    return []
+  }
+
+  public async inspectAudioFiles(filePaths: string[]): Promise<ScannedAudioFileInfo[]> {
+    if (this.isTauri() && filePaths.length > 0) {
+      return await invoke<ScannedAudioFileInfo[]>('inspect_audio_files', { filePaths })
+    }
+    return []
+  }
+
+  public async onOpenFiles(callback: (filePaths: string[]) => void): Promise<() => void> {
+    if (this.isTauri()) {
+      try {
+        const { listen } = await import('@tauri-apps/api/event')
+        return await listen<string[]>('cadence:open-files', (event) => {
+          if (Array.isArray(event.payload) && event.payload.length > 0) {
+            callback(event.payload)
+          }
+        })
+      } catch (e) {
+        console.error('[TauriBridge] Failed to attach open-files listener:', e)
+      }
+    }
+    return () => {}
+  }
+}
+
+export interface ScannedAudioFileInfo {
+  file_path: string
+  filename: string
+  extension: string
+  size_bytes: number
+  title?: string | null
+  artist?: string | null
+  album?: string | null
+  year?: number | null
+  track_number?: number | null
+  genre?: string | null
+  composer?: string | null
+  duration_secs: number
+  sample_rate?: number | null
+  bit_depth?: number | null
+  channels?: number | null
+  has_embedded_art: boolean
 }
 
 export interface DbMasterAlbum {
