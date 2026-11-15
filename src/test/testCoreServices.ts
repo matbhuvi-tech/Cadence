@@ -7,6 +7,7 @@ import {
   parseCoreRequest,
   parseCoreSnapshot,
   type CoreDescriptor,
+  type CoreCommand,
   type CoreRequest,
   type CoreSnapshot,
 } from '../core/coreProtocol'
@@ -454,4 +455,35 @@ test('malformed response envelopes, cycles, oversized pages and regression ackno
   await assert.rejects(service.catalogPage(null, 1), errorCode('invalid_payload'))
   f.setResponse({ ok: true, data: snapshot(core, 3) })
   await assert.rejects(service.execute({ operation: 'queue.replace', entries: [], commandId: 'cmd-1', expectedRevision: 4 }), errorCode('invalid_payload'))
+})
+
+test('reconnect renegotiates protocol, capabilities and readiness before publishing a view', async () => {
+  for (const hello of [
+    { ...descriptor(), protocolVersion: 2 },
+    { ...descriptor(), capabilities: ['session.read'] },
+    { ...descriptor(), ready: false },
+  ]) {
+    const f = fixture(); const service = createRemoteEngineService(core, f.channel)
+    const controller = createEngineServiceController(createLocalEngineService(fixture(local).owner))
+    await controller.select(service, 'idle')
+    const active = controller.getView()
+    controller.setConnection(active.session.activeEpoch, core, false, active.connectionGeneration)
+    f.setHello(hello)
+    assert.equal(await controller.refresh(), 'failed')
+    assert.equal(controller.getView().session.connected, false)
+    assert.deepEqual(controller.getView().snapshot, active.snapshot)
+    assert.equal(f.calls.filter(call => call.operation === 'core.hello').length, 2)
+  }
+})
+
+test('an old socket close cannot disconnect the successfully reconnected session', async () => {
+  const f = fixture(); const service = createRemoteEngineService(core, f.channel)
+  const controller = createEngineServiceController(createLocalEngineService(fixture(local).owner))
+  await controller.select(service, 'idle')
+  const old = controller.getView()
+  controller.setConnection(old.session.activeEpoch, core, false, old.connectionGeneration)
+  assert.equal(await controller.refresh(), 'updated')
+  assert.notEqual(controller.getView().connectionGeneration, old.connectionGeneration)
+  controller.setConnection(old.session.activeEpoch, core, false, old.connectionGeneration)
+  assert.equal(controller.getView().session.connected, true)
 })
