@@ -311,6 +311,17 @@ impl Drop for LockedBuffer {
     }
 }
 
+/// Locks an arbitrary byte slice in physical RAM via Win32 `VirtualLock` and scales
+/// the process working set (`SetProcessWorkingSetSize`) with headroom.
+pub fn lock_raw_slice(data: &[u8]) -> bool {
+    platform::lock_memory(data)
+}
+
+/// Unlocks a previously `VirtualLock`-pinned byte slice and steps down the working set.
+pub fn unlock_raw_slice(data: &[u8]) {
+    platform::unlock_memory(data);
+}
+
 // ---------------------------------------------------------------------------
 // Thread / timer tuning
 // ---------------------------------------------------------------------------

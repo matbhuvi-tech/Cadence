@@ -38,6 +38,7 @@ export interface AudioEndpointInfo {
 
 export type SignalPathMode =
   | 'upnp_raw_stream'
+  | 'wasapi_exclusive_ram'
   | 'wasapi_shared_purity'
   | 'wasapi_shared'
   | 'unavailable'
@@ -348,6 +349,26 @@ export function describeSignalPath(params: {
   const activeName = activeBackendEndpoint
     ? getEndpointDisplayName(activeBackendEndpoint)
     : getEndpointDisplayName(selectedEndpoint)
+
+  const isWasapiExclusive =
+    deviceType === 'wasapi_exclusive' || signalPathMode === 'wasapi_exclusive_ram'
+
+  if (isWasapiExclusive) {
+    return {
+      pillLabel: 'WASAPI Exclusive · RAM',
+      pillSubtitle: activeName,
+      transportLabel: 'WASAPI Exclusive (Event-Driven)',
+      transportDetail: `${activeName}${outputSampleRate ? ` (${outputSampleRate / 1000} kHz Hardware Clock)` : ''}`,
+      clockStepTitle: 'Full-Track Lossless Integer RAM Preload',
+      clockStepDetail: 'Zero Disk I/O · Zero Mid-Playback Decoding · Direct DMA Ring Buffer',
+      gainLabel,
+      gainIsLocked: true,
+      isProvenBitPerfect: Boolean(isBitPerfect),
+      isRoutingMismatch,
+      canShowDacRate: typeof outputSampleRate === 'number' && outputSampleRate > 0,
+    }
+  }
+
   const sharedModeLabel = isPurityMode ? 'WASAPI Shared · Purity' : 'WASAPI Shared'
 
   return {

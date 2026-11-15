@@ -586,6 +586,7 @@ dependencies = [
  "tower-http 0.5.2",
  "uuid",
  "walkdir",
+ "windows 0.54.0",
  "windows-sys 0.59.0",
 ]
 

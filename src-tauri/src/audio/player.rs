@@ -14,6 +14,10 @@ use rodio::{Decoder, OutputStream, Sink};
 use serde::{Deserialize, Serialize};
 
 use super::upnp::{UpnpDevice, UpnpManager};
+use super::wasapi_exclusive::{
+    self, PreloadAdmissionConfig, WasapiExclusiveSession, WasapiExclusiveTelemetrySnapshot,
+    WasapiPreloadError,
+};
 use crate::diag_log;
 use crate::diagnostics::{self, DiagCategory, HygieneState};
 
@@ -274,6 +278,7 @@ fn plan_play_route(
 fn compute_signal_telemetry(
     active_backend_endpoint: Option<&AudioEndpoint>,
     purity_mode: bool,
+    is_wasapi_exclusive_active: bool,
     current_stream_rate: Option<u32>,
     current_stream_channels: Option<u16>,
     os_default_name: Option<&str>,
@@ -295,34 +300,59 @@ fn compute_signal_telemetry(
             None,
             None,
         ),
-        Some(AudioEndpoint::Wasapi { name }) => (
-            Some(name.clone()),
-            false, // cpal 0.15.3 WASAPI uses AUDCLNT_SHAREMODE_SHARED + rodio DynamicMixer; Purity Mode is never proven bit-perfect
-            "wasapi_shared".to_string(),
-            if purity_mode {
-                "wasapi_shared_purity".to_string()
+        Some(AudioEndpoint::Wasapi { name }) => {
+            if is_wasapi_exclusive_active && purity_mode {
+                (
+                    Some(name.clone()),
+                    true,
+                    "wasapi_exclusive".to_string(),
+                    "wasapi_exclusive_ram".to_string(),
+                    current_stream_rate,
+                    current_stream_channels,
+                )
             } else {
-                "wasapi_shared".to_string()
-            },
-            current_stream_rate,
-            current_stream_channels,
-        ),
-        Some(AudioEndpoint::SystemDefault) => (
-            Some(
-                os_default_name
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "Default Audio Device".to_string()),
-            ),
-            false,
-            "wasapi_shared".to_string(),
-            if purity_mode {
-                "wasapi_shared_purity".to_string()
+                (
+                    Some(name.clone()),
+                    false, // cpal 0.15.3 WASAPI uses AUDCLNT_SHAREMODE_SHARED + rodio DynamicMixer; Purity Mode is never proven bit-perfect
+                    "wasapi_shared".to_string(),
+                    if purity_mode {
+                        "wasapi_shared_purity".to_string()
+                    } else {
+                        "wasapi_shared".to_string()
+                    },
+                    current_stream_rate,
+                    current_stream_channels,
+                )
+            }
+        }
+        Some(AudioEndpoint::SystemDefault) => {
+            let label = os_default_name
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Default Audio Device".to_string());
+            if is_wasapi_exclusive_active && purity_mode {
+                (
+                    Some(label),
+                    true,
+                    "wasapi_exclusive".to_string(),
+                    "wasapi_exclusive_ram".to_string(),
+                    current_stream_rate,
+                    current_stream_channels,
+                )
             } else {
-                "wasapi_shared".to_string()
-            },
-            current_stream_rate,
-            current_stream_channels,
-        ),
+                (
+                    Some(label),
+                    false,
+                    "wasapi_shared".to_string(),
+                    if purity_mode {
+                        "wasapi_shared_purity".to_string()
+                    } else {
+                        "wasapi_shared".to_string()
+                    },
+                    current_stream_rate,
+                    current_stream_channels,
+                )
+            }
+        }
     }
 }
 
@@ -495,6 +525,17 @@ enum AudioWorkerMsg {
         delay_ms: u64,
         meta: CmdMeta,
     },
+    GetWasapiExclusiveTelemetry {
+        responder: Sender<WasapiExclusiveTelemetrySnapshot>,
+    },
+    SetWasapiVirtualLock {
+        enabled: bool,
+        responder: Sender<bool>,
+    },
+    SetWasapiMaxPreloadBytes {
+        max_bytes: usize,
+        responder: Sender<usize>,
+    },
 }
 
 #[derive(Clone)]
@@ -504,6 +545,7 @@ pub struct AudioEngine {
     is_playing_atomic: Arc<AtomicBool>,
     is_paused_atomic: Arc<AtomicBool>,
     is_loading_atomic: Arc<AtomicBool>,
+    loading_cancel_atomic: Arc<AtomicBool>,
     library_scan_io: Arc<parking_lot::Mutex<()>>,
     playback_stopped_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     cmd_seq: Arc<AtomicU64>,
@@ -521,6 +563,8 @@ impl AudioEngine {
         let is_paused_worker = Arc::clone(&is_paused_atomic);
         let is_loading_atomic = Arc::new(AtomicBool::new(false));
         let is_loading_worker = Arc::clone(&is_loading_atomic);
+        let loading_cancel_atomic = Arc::new(AtomicBool::new(false));
+        let loading_cancel_worker = Arc::clone(&loading_cancel_atomic);
         let playback_stopped_at = Arc::new(parking_lot::Mutex::new(None));
         let stopped_at_worker = Arc::clone(&playback_stopped_at);
         let cmd_seq = Arc::new(AtomicU64::new(0));
@@ -604,6 +648,10 @@ impl AudioEngine {
                 .map(|c| c.channels())
                 .or_else(|| stream_handle.as_ref().map(|_| 2));
             let mut is_upnp_active = false;
+            let mut exclusive_session: Option<WasapiExclusiveSession> = None;
+            let mut last_exclusive_telemetry: WasapiExclusiveTelemetrySnapshot =
+                WasapiExclusiveTelemetrySnapshot::default();
+            let mut preload_admission = PreloadAdmissionConfig::default();
             let mut staged_next_file: Option<String> = None;
             let mut staged_next_buffer: Option<Vec<u8>> = None;
             let mut settling_delay_ms: u64 = 350;
@@ -619,9 +667,21 @@ impl AudioEngine {
                             if let Some(s) = &sink {
                                 s.set_volume(1.0);
                             }
+                            // If idle on local WASAPI, release shared cpal stream so Exclusive lock is uncontested
+                            if sink.is_none() && _stream.is_some() {
+                                _stream = None;
+                                stream_handle = None;
+                            }
                             eprintln!("[Cadence AudioEngine] Bit-Perfect Purity Mode ENABLED. Volume locked to 1.0 (Unity Gain).");
                         } else {
                             volume = saved_user_volume;
+                            if let Some(mut excl) = exclusive_session.take() {
+                                last_exclusive_telemetry = excl.snapshot_telemetry();
+                                excl.stop();
+                                is_playing_worker.store(false, Ordering::Release);
+                                is_paused_worker.store(false, Ordering::Release);
+                                playback_start = None;
+                            }
                             if let Some(s) = &sink {
                                 s.set_volume(volume);
                             }
@@ -648,6 +708,7 @@ impl AudioEngine {
                     AudioWorkerMsg::Play { file_path, meta, responder } => {
                         let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Play", meta);
                         is_loading_worker.store(true, Ordering::Release);
+                        loading_cancel_worker.store(false, Ordering::Release);
                         let _loading_guard = LoadingGuard(&is_loading_worker);
                         let prev_file = current_file.clone();
 
@@ -655,8 +716,12 @@ impl AudioEngine {
                             i.format.to_uppercase().contains("DSD") || i.format.to_uppercase().contains("DSF") || i.format.to_uppercase().contains("DFF")
                         }).unwrap_or(false);
 
-                        // Immediately stop any running local sink or UPnP playback
+                        // Immediately stop any running WASAPI Exclusive session, local sink, or UPnP playback
                         // This prevents previous song from continuing to play from memory on errors or transitions!
+                        if let Some(mut excl) = exclusive_session.take() {
+                            last_exclusive_telemetry = excl.snapshot_telemetry();
+                            excl.stop();
+                        }
                         if let Some(s) = sink.take() {
                             if is_prev_dsd {
                                 eprintln!("[Cadence AudioEngine] Flushed DSD silence pattern (0x69) before clock transition.");
@@ -671,6 +736,8 @@ impl AudioEngine {
                             }
                             is_upnp_active = false;
                         }
+                        is_playing_worker.store(false, Ordering::Release);
+                        is_paused_worker.store(false, Ordering::Release);
                         playback_start = None;
                         accumulated_position = Duration::ZERO;
                         is_paused = false;
@@ -867,10 +934,161 @@ impl AudioEngine {
                             }
                         };
 
-                        // Local Playback Path: Dynamic Clock/Sample-Rate Matching on strictly selected WASAPI endpoint
+                        // Local Playback Path:
+                        // When Purity Mode is enabled, route exclusively through WASAPI Exclusive with full-track
+                        // lossless integer RAM preload (`wasapi_exclusive.rs`) and zero disk I/O during playback.
                         let target_rate = stream_info.sample_rate.unwrap_or(48000);
                         let target_channels = stream_info.channels.unwrap_or(2);
 
+                        if purity_mode {
+                            // Release any shared-mode cpal OutputStream before acquiring WASAPI Exclusive hardware lock!
+                            if _stream.is_some() {
+                                diag_log!(
+                                    DiagCategory::WasapiLifecycle,
+                                    meta.id,
+                                    0,
+                                    0,
+                                    "wasapi_stream_disposed",
+                                    "reason=entering_wasapi_exclusive"
+                                );
+                                _stream = None;
+                                stream_handle = None;
+                            }
+
+                            let rate_changed = current_stream_rate.is_some()
+                                && (current_stream_rate != Some(target_rate)
+                                    || current_stream_channels != Some(target_channels));
+                            if rate_changed && settling_delay_ms > 0 {
+                                let is_same_family = match (current_stream_rate, Some(target_rate)) {
+                                    (Some(r1), Some(r2)) => {
+                                        (r1 % 44100 == 0 && r2 % 44100 == 0)
+                                            || (r1 % 48000 == 0 && r2 % 48000 == 0)
+                                    }
+                                    _ => false,
+                                };
+                                let effective_settle_ms = if is_same_family {
+                                    (settling_delay_ms / 2).clamp(100, 500)
+                                } else {
+                                    settling_delay_ms.clamp(200, 2000)
+                                };
+                                std::thread::sleep(Duration::from_millis(effective_settle_ms));
+                            }
+
+                            let preload_res = wasapi_exclusive::decode_file_to_ram(
+                                path,
+                                &preload_admission,
+                                Some(&loading_cancel_worker),
+                            );
+
+                            let preloaded = match preload_res {
+                                Ok(p) => p,
+                                Err(err) => {
+                                    let err_msg = err.to_string();
+                                    diag_log!(
+                                        DiagCategory::WasapiLifecycle,
+                                        meta.id,
+                                        0,
+                                        0,
+                                        "wasapi_excl_preload_failed",
+                                        "endpoint={} file={} err={}",
+                                        local_selected.id(),
+                                        file_path,
+                                        err_msg
+                                    );
+                                    current_stream_rate = None;
+                                    current_stream_channels = None;
+                                    active_backend_endpoint = None;
+                                    current_file = None;
+                                    current_info = None;
+                                    diag_cmd_end("Play", meta, cmd_t0, Some(&err_msg));
+                                    let _ = responder.send(Err(err_msg));
+                                    continue;
+                                }
+                            };
+
+                            let decoded_dur_secs = preloaded.duration_secs();
+                            let decoded_rate = preloaded.sample_rate;
+                            let decoded_ch = preloaded.channels;
+
+                            match wasapi_exclusive::spawn_exclusive_session(
+                                exact_wasapi_name.clone(),
+                                preloaded,
+                                Some(&loading_cancel_worker),
+                            ) {
+                                Ok(session) => {
+                                    if matches!(local_selected, AudioEndpoint::SystemDefault) {
+                                        active_os_default_name = Some(session.device_name.clone());
+                                    }
+                                    current_stream_rate = Some(decoded_rate);
+                                    current_stream_channels = Some(decoded_ch);
+                                    active_backend_endpoint = Some(local_selected);
+                                    last_exclusive_telemetry = session.snapshot_telemetry();
+                                    exclusive_session = Some(session);
+                                    current_file = Some(file_path.clone());
+                                    duration = Duration::from_secs_f64(if decoded_dur_secs > 0.0 {
+                                        decoded_dur_secs
+                                    } else {
+                                        stream_info.duration_secs
+                                    });
+                                    playback_start = Some(Instant::now());
+                                    accumulated_position = Duration::ZERO;
+                                    is_paused = false;
+                                    current_info = Some(stream_info.clone());
+                                    is_playing_worker.store(true, Ordering::Release);
+                                    is_paused_worker.store(false, Ordering::Release);
+
+                                    if let Some(ref pf) = prev_file {
+                                        diag_log!(
+                                            DiagCategory::PlaybackLifecycle,
+                                            meta.id,
+                                            0,
+                                            0,
+                                            "track_transition",
+                                            "from={} to={} transport=wasapi_exclusive",
+                                            pf,
+                                            file_path
+                                        );
+                                    }
+                                    diag_log!(
+                                        DiagCategory::PlaybackLifecycle,
+                                        meta.id,
+                                        0,
+                                        0,
+                                        "play_started",
+                                        "transport=wasapi_exclusive file={} fmt={} rate={}",
+                                        file_path,
+                                        stream_info.format,
+                                        decoded_rate
+                                    );
+                                    diag_cmd_end("Play", meta, cmd_t0, None);
+                                    let _ = responder.send(Ok(stream_info));
+                                    continue;
+                                }
+                                Err(err) => {
+                                    let err_msg = err.to_string();
+                                    diag_log!(
+                                        DiagCategory::WasapiLifecycle,
+                                        meta.id,
+                                        0,
+                                        0,
+                                        "wasapi_excl_init_failed",
+                                        "endpoint={} err={}",
+                                        local_selected.id(),
+                                        err_msg
+                                    );
+                                    current_stream_rate = None;
+                                    current_stream_channels = None;
+                                    active_backend_endpoint = None;
+                                    current_file = None;
+                                    current_info = None;
+                                    diag_cmd_end("Play", meta, cmd_t0, Some(&err_msg));
+                                    let _ = responder.send(Err(err_msg));
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // WASAPI Shared Mode Path (Purity Mode == false):
                         let endpoint_needs_open = active_backend_endpoint.as_ref() != Some(&local_selected)
                             || stream_handle.is_none();
                         let rate_mismatch = endpoint_needs_open
@@ -1216,14 +1434,22 @@ impl AudioEngine {
                                 }
                             });
                         }
+                        if let Some(ref excl) = exclusive_session {
+                            if !is_paused {
+                                excl.set_paused(true);
+                                accumulated_position = Duration::from_secs_f64(excl.position_secs());
+                            }
+                        }
                         if let Some(s) = &sink {
                             if !is_paused {
                                 s.pause();
                             }
                         }
                         if !is_paused {
-                            if let Some(start) = playback_start {
-                                accumulated_position += start.elapsed();
+                            if exclusive_session.is_none() {
+                                if let Some(start) = playback_start {
+                                    accumulated_position += start.elapsed();
+                                }
                             }
                             playback_start = None;
                             is_paused = true;
@@ -1248,6 +1474,9 @@ impl AudioEngine {
                                     }
                                 });
                             }
+                            if let Some(ref excl) = exclusive_session {
+                                excl.set_paused(false);
+                            }
                             if let Some(s) = &sink {
                                 s.play();
                             }
@@ -1271,6 +1500,10 @@ impl AudioEngine {
                                 }
                             });
                         }
+                        if let Some(mut excl) = exclusive_session.take() {
+                            last_exclusive_telemetry = excl.snapshot_telemetry();
+                            excl.stop();
+                        }
                         if let Some(s) = sink.take() {
                             s.stop();
                         }
@@ -1291,7 +1524,24 @@ impl AudioEngine {
                     AudioWorkerMsg::Seek { position_secs, meta } => {
                         let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Seek", meta);
                         let target_pos = Duration::from_secs_f64(position_secs.max(0.0));
-                        if !is_upnp_active && active_backend_endpoint.as_ref() == Some(&selected_endpoint) {
+                        if let Some(ref excl) = exclusive_session {
+                            excl.seek_to_secs(target_pos.as_secs_f64());
+                            accumulated_position = target_pos;
+                            if !is_paused {
+                                playback_start = Some(Instant::now());
+                            } else {
+                                playback_start = None;
+                            }
+                            diag_log!(
+                                DiagCategory::PlaybackLifecycle,
+                                meta.id,
+                                0,
+                                0,
+                                "seeked",
+                                "pos={:.2} transport=wasapi_exclusive",
+                                target_pos.as_secs_f64()
+                            );
+                        } else if !is_upnp_active && active_backend_endpoint.as_ref() == Some(&selected_endpoint) {
                             if let (Some(fp), Some(handle)) = (current_file.as_ref(), stream_handle.as_ref()) {
                                 let path = Path::new(fp);
                                 if let Ok(file) = File::open(path) {
@@ -1344,6 +1594,16 @@ impl AudioEngine {
                         let prev_endpoint = selected_endpoint.clone();
                         let inventory = EndpointInventory::from_host(&upnp_worker_ref);
                         selected_endpoint = endpoint.clone();
+
+                        // Always stop and release any active WASAPI Exclusive session before switching endpoints
+                        let mut was_excl_playing = false;
+                        if let Some(mut excl) = exclusive_session.take() {
+                            was_excl_playing = !is_paused && !excl.is_finished();
+                            accumulated_position = Duration::from_secs_f64(excl.position_secs());
+                            last_exclusive_telemetry = excl.snapshot_telemetry();
+                            excl.stop();
+                        }
+
                         let resolved = resolve_endpoint_selection(&endpoint, &inventory);
                         let res = match resolved {
                             Err(err_msg) => {
@@ -1400,7 +1660,8 @@ impl AudioEngine {
                                 if let Some(dev) = inventory.find_exact_upnp(&udn).cloned() {
                                     upnp_worker_ref.set_active_device_exact(dev);
                                 }
-                                let was_playing = sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
+                                let was_playing = was_excl_playing
+                                    || sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
                                     || (is_upnp_active && !is_paused && current_file.is_some());
                                 if let Some(s) = sink.take() {
                                     s.stop();
@@ -1477,134 +1738,214 @@ impl AudioEngine {
                                 upnp_worker_ref.clear_active_device();
                                 is_upnp_active = false;
 
-                                let host = cpal::default_host();
-                                let target_device = match &local_ep {
-                                    AudioEndpoint::SystemDefault => host.default_output_device(),
-                                    AudioEndpoint::Wasapi { name } => host
-                                        .output_devices()
-                                        .ok()
-                                        .and_then(|mut devs| devs.find(|d| d.name().map(|n| &n == name).unwrap_or(false))),
-                                    AudioEndpoint::Upnp { .. } => None,
-                                };
-
-                                match target_device {
-                                    None => {
-                                        if let Some(s) = sink.take() {
-                                            s.stop();
-                                        }
-                                        if _stream.is_some() {
-                                            diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=cpal_not_found");
-                                        }
-                                        _stream = None;
-                                        stream_handle = None;
-                                        current_stream_rate = None;
-                                        current_stream_channels = None;
-                                        active_backend_endpoint = None;
-                                        let err = format!("Audio device '{}' not found", local_ep.display_label());
-                                        diag_log!(DiagCategory::DeviceSelection, meta.id, 0, 0, "endpoint_selection_failed", "prev={} requested={} source={} reason=cpal_not_found", prev_endpoint.id(), endpoint.id(), source);
-                                        Err(err)
+                                if purity_mode {
+                                    // In Purity Mode (WASAPI Exclusive), do NOT open a cpal Shared stream that would hold a shared handle.
+                                    if let Some(s) = sink.take() {
+                                        s.stop();
                                     }
-                                    Some(device) => {
-                                        if matches!(local_ep, AudioEndpoint::SystemDefault) {
-                                            active_os_default_name = device.name().ok();
+                                    _stream = None;
+                                    stream_handle = None;
+                                    if matches!(local_ep, AudioEndpoint::SystemDefault) {
+                                        active_os_default_name = inventory.default_wasapi_name.clone();
+                                    }
+                                    active_backend_endpoint = Some(local_ep.clone());
+                                    diag_log!(
+                                        DiagCategory::DeviceSelection,
+                                        meta.id,
+                                        0,
+                                        0,
+                                        "endpoint_selected",
+                                        "prev={} selected={} source={} reason=user_or_api_switch",
+                                        prev_endpoint.id(),
+                                        local_ep.id(),
+                                        source
+                                    );
+                                    diag_log!(
+                                        DiagCategory::AudioRouting,
+                                        meta.id,
+                                        0,
+                                        0,
+                                        "route_decision",
+                                        "requested={} actual={} decision=wasapi_exclusive",
+                                        endpoint.id(),
+                                        local_ep.id()
+                                    );
+
+                                    let mut current_pos = accumulated_position.as_secs_f64();
+                                    if let Some(start) = playback_start {
+                                        if !is_paused {
+                                            current_pos += start.elapsed().as_secs_f64();
                                         }
-                                        let wasapi_open_t0 = diagnostics::is_active().then(Instant::now);
-                                        diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_init_start", "endpoint={} source={}", local_ep.id(), source);
-                                        match OutputStream::try_from_device(&device) {
-                                            Err(e) => {
-                                                let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
-                                                diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, dur_us, "wasapi_stream_init_failed", "endpoint={} err={}", local_ep.id(), e);
-                                                if let Some(s) = sink.take() {
-                                                    s.stop();
-                                                }
-                                                _stream = None;
-                                                stream_handle = None;
-                                                current_stream_rate = None;
-                                                current_stream_channels = None;
-                                                active_backend_endpoint = None;
-                                                Err(format!("Failed to open output stream: {}", e))
-                                            }
-                                            Ok((new_s, new_h)) => {
-                                                if let Ok(cfg) = device.default_output_config() {
-                                                    current_stream_rate = Some(cfg.sample_rate().0);
-                                                    current_stream_channels = Some(cfg.channels());
+                                    }
+                                    let was_playing = was_excl_playing || (!is_paused && current_file.is_some());
+                                    if let Some(fp) = current_file.as_ref() {
+                                        let exact_name = match &local_ep {
+                                            AudioEndpoint::SystemDefault => None,
+                                            AudioEndpoint::Wasapi { name } => Some(name.clone()),
+                                            AudioEndpoint::Upnp { .. } => None,
+                                        };
+                                        loading_cancel_worker.store(false, Ordering::Release);
+                                        if let Ok(preloaded) = wasapi_exclusive::decode_file_to_ram(
+                                            Path::new(fp),
+                                            &preload_admission,
+                                            Some(&loading_cancel_worker),
+                                        ) {
+                                            current_stream_rate = Some(preloaded.sample_rate);
+                                            current_stream_channels = Some(preloaded.channels);
+                                            if let Ok(session) = wasapi_exclusive::spawn_exclusive_session(
+                                                exact_name,
+                                                preloaded,
+                                                Some(&loading_cancel_worker),
+                                            ) {
+                                                session.seek_to_secs(current_pos);
+                                                if !was_playing || is_paused {
+                                                    session.set_paused(true);
+                                                    playback_start = None;
+                                                    is_playing_worker.store(false, Ordering::Release);
+                                                    is_paused_worker.store(true, Ordering::Release);
                                                 } else {
+                                                    playback_start = Some(Instant::now());
+                                                    is_playing_worker.store(true, Ordering::Release);
+                                                    is_paused_worker.store(false, Ordering::Release);
+                                                }
+                                                accumulated_position = Duration::from_secs_f64(current_pos);
+                                                last_exclusive_telemetry = session.snapshot_telemetry();
+                                                exclusive_session = Some(session);
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                } else {
+                                    let host = cpal::default_host();
+                                    let target_device = match &local_ep {
+                                        AudioEndpoint::SystemDefault => host.default_output_device(),
+                                        AudioEndpoint::Wasapi { name } => host
+                                            .output_devices()
+                                            .ok()
+                                            .and_then(|mut devs| devs.find(|d| d.name().map(|n| &n == name).unwrap_or(false))),
+                                        AudioEndpoint::Upnp { .. } => None,
+                                    };
+
+                                    match target_device {
+                                        None => {
+                                            if let Some(s) = sink.take() {
+                                                s.stop();
+                                            }
+                                            if _stream.is_some() {
+                                                diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_disposed", "reason=cpal_not_found");
+                                            }
+                                            _stream = None;
+                                            stream_handle = None;
+                                            current_stream_rate = None;
+                                            current_stream_channels = None;
+                                            active_backend_endpoint = None;
+                                            let err = format!("Audio device '{}' not found", local_ep.display_label());
+                                            diag_log!(DiagCategory::DeviceSelection, meta.id, 0, 0, "endpoint_selection_failed", "prev={} requested={} source={} reason=cpal_not_found", prev_endpoint.id(), endpoint.id(), source);
+                                            Err(err)
+                                        }
+                                        Some(device) => {
+                                            if matches!(local_ep, AudioEndpoint::SystemDefault) {
+                                                active_os_default_name = device.name().ok();
+                                            }
+                                            let wasapi_open_t0 = diagnostics::is_active().then(Instant::now);
+                                            diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, 0, "wasapi_stream_init_start", "endpoint={} source={}", local_ep.id(), source);
+                                            match OutputStream::try_from_device(&device) {
+                                                Err(e) => {
+                                                    let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                                    diag_log!(DiagCategory::WasapiLifecycle, meta.id, 0, dur_us, "wasapi_stream_init_failed", "endpoint={} err={}", local_ep.id(), e);
+                                                    if let Some(s) = sink.take() {
+                                                        s.stop();
+                                                    }
+                                                    _stream = None;
+                                                    stream_handle = None;
                                                     current_stream_rate = None;
                                                     current_stream_channels = None;
+                                                    active_backend_endpoint = None;
+                                                    Err(format!("Failed to open output stream: {}", e))
                                                 }
-                                                let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
-                                                diag_log!(
-                                                    DiagCategory::WasapiLifecycle,
-                                                    meta.id,
-                                                    0,
-                                                    dur_us,
-                                                    "wasapi_stream_initialized",
-                                                    "endpoint={} rate={:?} ch={:?}",
-                                                    local_ep.id(),
-                                                    current_stream_rate,
-                                                    current_stream_channels
-                                                );
-
-                                                let mut current_pos = accumulated_position.as_secs_f64();
-                                                if let Some(start) = playback_start {
-                                                    if !is_paused {
-                                                        current_pos += start.elapsed().as_secs_f64();
+                                                Ok((new_s, new_h)) => {
+                                                    if let Ok(cfg) = device.default_output_config() {
+                                                        current_stream_rate = Some(cfg.sample_rate().0);
+                                                        current_stream_channels = Some(cfg.channels());
+                                                    } else {
+                                                        current_stream_rate = None;
+                                                        current_stream_channels = None;
                                                     }
-                                                }
-                                                let was_playing = sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false);
-                                                if let Some(s) = sink.take() {
-                                                    s.stop();
-                                                }
-                                                _stream = Some(new_s);
-                                                stream_handle = Some(new_h.clone());
-                                                active_backend_endpoint = Some(local_ep.clone());
+                                                    let dur_us = wasapi_open_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                                                    diag_log!(
+                                                        DiagCategory::WasapiLifecycle,
+                                                        meta.id,
+                                                        0,
+                                                        dur_us,
+                                                        "wasapi_stream_initialized",
+                                                        "endpoint={} rate={:?} ch={:?}",
+                                                        local_ep.id(),
+                                                        current_stream_rate,
+                                                        current_stream_channels
+                                                    );
 
-                                                diag_log!(
-                                                    DiagCategory::DeviceSelection,
-                                                    meta.id,
-                                                    0,
-                                                    0,
-                                                    "endpoint_selected",
-                                                    "prev={} selected={} source={} reason=user_or_api_switch",
-                                                    prev_endpoint.id(),
-                                                    local_ep.id(),
-                                                    source
-                                                );
-                                                diag_log!(
-                                                    DiagCategory::AudioRouting,
-                                                    meta.id,
-                                                    0,
-                                                    0,
-                                                    "route_decision",
-                                                    "requested={} actual={} decision=wasapi_shared",
-                                                    endpoint.id(),
-                                                    local_ep.id()
-                                                );
+                                                    let mut current_pos = accumulated_position.as_secs_f64();
+                                                    if let Some(start) = playback_start {
+                                                        if !is_paused {
+                                                            current_pos += start.elapsed().as_secs_f64();
+                                                        }
+                                                    }
+                                                    let was_playing = was_excl_playing
+                                                        || sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false);
+                                                    if let Some(s) = sink.take() {
+                                                        s.stop();
+                                                    }
+                                                    _stream = Some(new_s);
+                                                    stream_handle = Some(new_h.clone());
+                                                    active_backend_endpoint = Some(local_ep.clone());
 
-                                                if let Some(fp) = current_file.as_ref() {
-                                                    let path = Path::new(fp);
-                                                    if let Ok(file) = File::open(path) {
-                                                        let reader = BufReader::new(file);
-                                                        if let Ok(new_sink) = Sink::try_new(&new_h) {
-                                                            if let Ok(source) = Decoder::new(reader) {
-                                                                let effective_vol = if purity_mode { 1.0 } else { volume };
-                                                                new_sink.set_volume(effective_vol);
-                                                                new_sink.append(source);
-                                                                let _ = new_sink.try_seek(Duration::from_secs_f64(current_pos));
-                                                                if was_playing && !is_paused {
-                                                                    new_sink.play();
-                                                                    playback_start = Some(Instant::now());
-                                                                } else {
-                                                                    new_sink.pause();
-                                                                    playback_start = None;
+                                                    diag_log!(
+                                                        DiagCategory::DeviceSelection,
+                                                        meta.id,
+                                                        0,
+                                                        0,
+                                                        "endpoint_selected",
+                                                        "prev={} selected={} source={} reason=user_or_api_switch",
+                                                        prev_endpoint.id(),
+                                                        local_ep.id(),
+                                                        source
+                                                    );
+                                                    diag_log!(
+                                                        DiagCategory::AudioRouting,
+                                                        meta.id,
+                                                        0,
+                                                        0,
+                                                        "route_decision",
+                                                        "requested={} actual={} decision=wasapi_shared",
+                                                        endpoint.id(),
+                                                        local_ep.id()
+                                                    );
+
+                                                    if let Some(fp) = current_file.as_ref() {
+                                                        let path = Path::new(fp);
+                                                        if let Ok(file) = File::open(path) {
+                                                            let reader = BufReader::new(file);
+                                                            if let Ok(new_sink) = Sink::try_new(&new_h) {
+                                                                if let Ok(source) = Decoder::new(reader) {
+                                                                    let effective_vol = if purity_mode { 1.0 } else { volume };
+                                                                    new_sink.set_volume(effective_vol);
+                                                                    new_sink.append(source);
+                                                                    let _ = new_sink.try_seek(Duration::from_secs_f64(current_pos));
+                                                                    if was_playing && !is_paused {
+                                                                        new_sink.play();
+                                                                        playback_start = Some(Instant::now());
+                                                                    } else {
+                                                                        new_sink.pause();
+                                                                        playback_start = None;
+                                                                    }
+                                                                    sink = Some(new_sink);
+                                                                    accumulated_position = Duration::from_secs_f64(current_pos);
                                                                 }
-                                                                sink = Some(new_sink);
-                                                                accumulated_position = Duration::from_secs_f64(current_pos);
                                                             }
                                                         }
                                                     }
+                                                    Ok(())
                                                 }
-                                                Ok(())
                                             }
                                         }
                                     }
@@ -1618,22 +1959,43 @@ impl AudioEngine {
                     AudioWorkerMsg::GetStatus { queued_at, responder } => {
                         let start_t0 = diagnostics::is_active().then(Instant::now);
                         let mut current_pos = accumulated_position.as_secs_f64();
-                        if let Some(start) = playback_start {
+                        if let Some(ref excl) = exclusive_session {
+                            current_pos = excl.position_secs();
+                        } else if let Some(start) = playback_start {
                             if !is_paused {
                                 current_pos += start.elapsed().as_secs_f64();
                             }
                         }
 
+                        let mut excl_finished = false;
                         let is_playing = if is_upnp_active {
                             !is_paused && current_file.is_some()
+                        } else if let Some(ref excl) = exclusive_session {
+                            excl_finished = excl.is_finished();
+                            !is_paused && !excl_finished
                         } else {
                             sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false)
                         };
+
+                        if excl_finished {
+                            if let Some(mut excl) = exclusive_session.take() {
+                                last_exclusive_telemetry = excl.snapshot_telemetry();
+                                excl.stop();
+                            }
+                        }
+
                         if !is_playing && !is_paused && is_playing_worker.load(Ordering::Relaxed) {
                             *stopped_at_worker.lock() = Some(Instant::now());
                         }
                         is_playing_worker.store(is_playing, Ordering::Release);
                         is_paused_worker.store(is_paused, Ordering::Release);
+
+                        let is_wasapi_exclusive_active = exclusive_session.is_some()
+                            || (purity_mode
+                                && matches!(
+                                    active_backend_endpoint,
+                                    Some(AudioEndpoint::SystemDefault | AudioEndpoint::Wasapi { .. })
+                                ));
 
                         let (
                             active_device,
@@ -1645,6 +2007,7 @@ impl AudioEngine {
                         ) = compute_signal_telemetry(
                             active_backend_endpoint.as_ref(),
                             purity_mode,
+                            is_wasapi_exclusive_active,
                             current_stream_rate,
                             current_stream_channels,
                             active_os_default_name.as_deref(),
@@ -1713,6 +2076,25 @@ impl AudioEngine {
 
                     AudioWorkerMsg::PrepareNextTrack { file_path, meta, responder } => {
                         let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "PrepareNextTrack", meta);
+                        // In WASAPI Exclusive Purity Mode, strictly forbid mid-playback disk reads!
+                        // Full-track decoding into RAM occurs exclusively during the between-track Loading phase.
+                        if purity_mode && !is_upnp_active {
+                            staged_next_file = None;
+                            staged_next_buffer = None;
+                            diag_log!(
+                                DiagCategory::BackgroundWorkers,
+                                meta.id,
+                                0,
+                                0,
+                                "prefetch_skipped_wasapi_exclusive",
+                                "path={}",
+                                file_path
+                            );
+                            diag_cmd_end("PrepareNextTrack", meta, cmd_t0, None);
+                            let _ = responder.send(Ok(false));
+                            continue;
+                        }
+
                         let path = Path::new(&file_path);
                         if !path.exists() {
                             let err = format!("File does not exist: {}", file_path);
@@ -1773,6 +2155,27 @@ impl AudioEngine {
                             }
                         }
                     }
+
+                    AudioWorkerMsg::GetWasapiExclusiveTelemetry { responder } => {
+                        let snap = if let Some(ref excl) = exclusive_session {
+                            let s = excl.snapshot_telemetry();
+                            last_exclusive_telemetry = s.clone();
+                            s
+                        } else {
+                            last_exclusive_telemetry.clone()
+                        };
+                        let _ = responder.send(snap);
+                    }
+
+                    AudioWorkerMsg::SetWasapiVirtualLock { enabled, responder } => {
+                        preload_admission.virtual_lock_enabled = enabled;
+                        let _ = responder.send(preload_admission.virtual_lock_enabled);
+                    }
+
+                    AudioWorkerMsg::SetWasapiMaxPreloadBytes { max_bytes, responder } => {
+                        preload_admission.max_track_bytes = max_bytes.max(16 * 1024 * 1024);
+                        let _ = responder.send(preload_admission.max_track_bytes);
+                    }
                 }
             }
         });
@@ -1783,6 +2186,7 @@ impl AudioEngine {
             is_playing_atomic,
             is_paused_atomic,
             is_loading_atomic,
+            loading_cancel_atomic,
             library_scan_io: Arc::new(parking_lot::Mutex::new(())),
             playback_stopped_at,
             cmd_seq,
@@ -1889,7 +2293,13 @@ impl AudioEngine {
         cooled_down.then_some(permit)
     }
 
+    pub fn cancel_loading(&self) {
+        self.loading_cancel_atomic.store(true, Ordering::Release);
+    }
+
     pub fn play_track(&self, file_path: &str) -> Result<AudioStreamInfo, String> {
+        // Signal any in-progress Loading decode on the worker thread to abort immediately
+        self.loading_cancel_atomic.store(true, Ordering::Release);
         // Let the current scan operation finish before audio starts. The scanner cannot begin
         // another operation while this request loads audio and publishes the playback state.
         let _scan_guard = self.library_scan_io.lock();
@@ -1923,6 +2333,7 @@ impl AudioEngine {
     }
 
     pub fn stop(&self) -> Result<(), String> {
+        self.loading_cancel_atomic.store(true, Ordering::Release);
         let meta = self.enqueue_cmd("Stop");
         self.tx
             .send(AudioWorkerMsg::Stop { meta })
@@ -1955,6 +2366,7 @@ impl AudioEngine {
         endpoint: AudioEndpoint,
         source: &'static str,
     ) -> Result<(), String> {
+        self.loading_cancel_atomic.store(true, Ordering::Release);
         let (resp_tx, resp_rx) = channel();
         let meta = self.enqueue_cmd("SetEndpoint");
         self.tx
@@ -2074,6 +2486,46 @@ impl AudioEngine {
             .map_err(|e| format!("Audio worker error: {}", e))
     }
 
+    pub fn get_wasapi_exclusive_telemetry(&self) -> WasapiExclusiveTelemetrySnapshot {
+        let (resp_tx, resp_rx) = channel();
+        if self
+            .tx
+            .send(AudioWorkerMsg::GetWasapiExclusiveTelemetry { responder: resp_tx })
+            .is_ok()
+        {
+            if let Ok(snap) = resp_rx.recv() {
+                return snap;
+            }
+        }
+        WasapiExclusiveTelemetrySnapshot::default()
+    }
+
+    pub fn set_wasapi_virtual_lock(&self, enabled: bool) -> Result<bool, String> {
+        let (resp_tx, resp_rx) = channel();
+        self.tx
+            .send(AudioWorkerMsg::SetWasapiVirtualLock {
+                enabled,
+                responder: resp_tx,
+            })
+            .map_err(|e| format!("Audio worker error: {}", e))?;
+        resp_rx
+            .recv()
+            .map_err(|e| format!("Audio response timeout: {}", e))
+    }
+
+    pub fn set_wasapi_max_preload_bytes(&self, max_bytes: usize) -> Result<usize, String> {
+        let (resp_tx, resp_rx) = channel();
+        self.tx
+            .send(AudioWorkerMsg::SetWasapiMaxPreloadBytes {
+                max_bytes,
+                responder: resp_tx,
+            })
+            .map_err(|e| format!("Audio worker error: {}", e))?;
+        resp_rx
+            .recv()
+            .map_err(|e| format!("Audio response timeout: {}", e))
+    }
+
     pub fn list_audio_endpoints(&self) -> Vec<AudioEndpointInfo> {
         let inventory = EndpointInventory::from_host(&self.upnp_manager);
         let mut endpoints = Vec::new();
@@ -2086,7 +2538,7 @@ impl AudioEngine {
             udn: None,
             is_available: inventory.has_default_wasapi,
             supports_dsd: false,
-            is_bit_perfect_capable: false,
+            is_bit_perfect_capable: true,
         });
 
         for name in inventory.wasapi_names {
@@ -2098,7 +2550,7 @@ impl AudioEngine {
                 udn: None,
                 is_available: true,
                 supports_dsd: false,
-                is_bit_perfect_capable: false,
+                is_bit_perfect_capable: true,
             });
         }
 
@@ -2395,7 +2847,7 @@ mod tests {
 
         // Telemetry when selected endpoint is unavailable preserves none for active backend and rate
         let (active_device, is_bit_perfect, device_type, signal_path_mode, rate, channels) =
-            compute_signal_telemetry(None, true, Some(48000), Some(2), None);
+            compute_signal_telemetry(None, true, false, Some(48000), Some(2), None);
         assert_eq!(active_device, None);
         assert!(!is_bit_perfect);
         assert_eq!(device_type, "unavailable");
@@ -2435,13 +2887,23 @@ mod tests {
     }
 
     #[test]
-    fn signal_telemetry_does_not_equate_purity_mode_with_proven_bit_perfect_output() {
+    fn signal_telemetry_distinguishes_wasapi_exclusive_shared_and_upnp() {
         let maxwell = AudioEndpoint::Wasapi {
             name: "Speakers (Game-Audeze Maxwell)".into(),
         };
-        // Purity mode ON on local WASAPI still uses AUDCLNT_SHAREMODE_SHARED
+        // Purity mode ON on local WASAPI with WASAPI Exclusive active reports proven bit-perfect
+        let (dev_ex, bp_ex, dtype_ex, mode_ex, rate_ex, ch_ex) =
+            compute_signal_telemetry(Some(&maxwell), true, true, Some(96000), Some(2), None);
+        assert_eq!(dev_ex.as_deref(), Some("Speakers (Game-Audeze Maxwell)"));
+        assert!(bp_ex);
+        assert_eq!(dtype_ex, "wasapi_exclusive");
+        assert_eq!(mode_ex, "wasapi_exclusive_ram");
+        assert_eq!(rate_ex, Some(96000));
+        assert_eq!(ch_ex, Some(2));
+
+        // Purity mode ON on local WASAPI when Exclusive is NOT active falls back to shared telemetry
         let (dev, bp, dtype, mode, rate, ch) =
-            compute_signal_telemetry(Some(&maxwell), true, Some(44100), Some(2), None);
+            compute_signal_telemetry(Some(&maxwell), true, false, Some(44100), Some(2), None);
         assert_eq!(dev.as_deref(), Some("Speakers (Game-Audeze Maxwell)"));
         assert!(!bp);
         assert_eq!(dtype, "wasapi_shared");
@@ -2455,7 +2917,7 @@ mod tests {
             friendly_name: "ROSE-67".into(),
         };
         let (dev_u, bp_u, dtype_u, mode_u, rate_u, ch_u) =
-            compute_signal_telemetry(Some(&rose), false, Some(48000), Some(2), None);
+            compute_signal_telemetry(Some(&rose), false, false, Some(48000), Some(2), None);
         assert_eq!(dev_u.as_deref(), Some("[UPnP] ROSE-67"));
         assert!(bp_u);
         assert_eq!(dtype_u, "upnp_streamer");
@@ -2470,6 +2932,69 @@ mod tests {
         assert!(!can_resume_active_track(false, true));
         assert!(!can_resume_active_track(true, false));
         assert!(can_resume_active_track(true, true));
+    }
+
+    #[test]
+    fn loading_cancellation_and_rapid_transition_regression() {
+        use std::io::Write;
+        // Create a temporary 24-bit / 96kHz WAV file
+        let tmp_dir = std::env::temp_dir();
+        let wav_path = tmp_dir.join("cadence_transition_regression_96k24.wav");
+        {
+            let sample_rate = 96_000u32;
+            let channels = 2u16;
+            let frames = 96_000usize; // 1 second
+            let data_len = (frames * channels as usize * 3) as u32;
+            let mut f = std::fs::File::create(&wav_path).unwrap();
+            f.write_all(b"RIFF").unwrap();
+            f.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+            f.write_all(b"WAVEfmt ").unwrap();
+            f.write_all(&16u32.to_le_bytes()).unwrap();
+            f.write_all(&1u16.to_le_bytes()).unwrap();
+            f.write_all(&channels.to_le_bytes()).unwrap();
+            f.write_all(&sample_rate.to_le_bytes()).unwrap();
+            f.write_all(&(sample_rate * channels as u32 * 3).to_le_bytes()).unwrap();
+            f.write_all(&(channels * 3).to_le_bytes()).unwrap();
+            f.write_all(&24u16.to_le_bytes()).unwrap();
+            f.write_all(b"data").unwrap();
+            f.write_all(&data_len.to_le_bytes()).unwrap();
+            let buf = vec![0u8; data_len as usize];
+            f.write_all(&buf).unwrap();
+        }
+
+        // 1. Pre-set cancellation token -> decode_file_to_ram must abort immediately during Loading
+        let cancel_token = AtomicBool::new(true);
+        let cfg = PreloadAdmissionConfig::default();
+        let cancelled = wasapi_exclusive::decode_file_to_ram(&wav_path, &cfg, Some(&cancel_token));
+        assert!(matches!(cancelled, Err(WasapiPreloadError::Cancelled(_))));
+
+        // 2. Clear cancellation token -> decode_file_to_ram succeeds with S24_32LE_MSB
+        cancel_token.store(false, Ordering::Release);
+        let decoded = wasapi_exclusive::decode_file_to_ram(&wav_path, &cfg, Some(&cancel_token))
+            .expect("decode should succeed when not cancelled");
+        assert_eq!(decoded.sample_rate, 96_000);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.format, wasapi_exclusive::NativePcmFormat::I24InI32Msb);
+
+        // 3. Test AudioEngine rapid Purity Mode toggle + PrepareNextTrack suppression + Stop
+        let engine = AudioEngine::new();
+        assert_eq!(engine.set_purity_mode(true).unwrap(), true);
+        // PrepareNextTrack must be skipped (returns Ok(false)) with zero disk reads when Purity Mode is enabled on local WASAPI
+        let prefetched = engine
+            .prepare_next_track(wav_path.to_str().unwrap())
+            .expect("prepare_next_track should not error");
+        assert!(!prefetched, "PrepareNextTrack must be suppressed in WASAPI Exclusive mode");
+
+        // Rapid device switching to unavailable device and back to SystemDefault
+        let switch_err = engine.set_audio_endpoint(AudioEndpoint::Wasapi {
+            name: "NonExistent Exclusive DAC 9999".into(),
+        });
+        assert!(switch_err.is_err());
+        let _ = engine.set_audio_endpoint(AudioEndpoint::SystemDefault);
+        engine.cancel_loading();
+        engine.stop().unwrap();
+
+        let _ = std::fs::remove_file(&wav_path);
     }
 }
 

@@ -319,7 +319,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
     if (tauriBridge.isTauri()) {
       tauriBridge.getDebugLogState().then((s) => {
         if (mounted) setDebugMode(s.mode)
-      }).catch(() => {})
+      }).catch(() => { })
     }
     const unsub = tauriBridge.subscribeDebugLogState((s) => {
       if (mounted) setDebugMode(s.mode)
@@ -739,7 +739,7 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
           | 'purist'
           | 'paced'
           | 'unthrottled'
-        tauriBridge.setScannerPlaybackPolicy(savedScanPolicy).catch(() => {})
+        tauriBridge.setScannerPlaybackPolicy(savedScanPolicy).catch(() => { })
 
         // 3. Subscribe to real-time native scanner events
         await sqliteLibraryService.subscribeToScannerEvents({
@@ -962,10 +962,10 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
         const rootKey = winMatch
           ? winMatch[1]
           : uncMatch
-          ? uncMatch[1]
-          : selected.startsWith('/')
-          ? '/' + selected.split('/').filter(Boolean)[0]
-          : 'Local Audio'
+            ? uncMatch[1]
+            : selected.startsWith('/')
+              ? '/' + selected.split('/').filter(Boolean)[0]
+              : 'Local Audio'
         const expectedMountId = `mount-${rootKey.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
 
         const normSelected = selected.replace(/\//g, '\\').toLowerCase()
@@ -985,8 +985,8 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
             name: isUnc
               ? `TrueNAS Network Storage (${rootKey})`
               : isWin
-              ? `Drive ${rootKey} (Local Audio Disk)`
-              : `Storage Volume (${rootKey})`,
+                ? `Drive ${rootKey} (Local Audio Disk)`
+                : `Storage Volume (${rootKey})`,
             mountPath: isWin ? `${rootKey}\\` : rootKey,
             type: isUnc ? 'nas_array' : 'local_disk',
             fileSystem: isUnc ? 'ZFS' : isWin ? 'NTFS' : 'APFS',
@@ -1747,8 +1747,6 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
 
           <div className="hidden lg:flex items-center gap-1.5 text-[11px] font-mono text-[#8E8E93]">
             <span>{tracks.length} tracks</span>
-            <span>·</span>
-            <span className="text-[#EDEDED]">{stats.highResPercentage}% Hi-Res</span>
           </div>
         </div>
 
@@ -1760,11 +1758,10 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
               setFocusedWorkbenchTrack(null)
             }}
             title="Listening Room & Album Library (⌘1)"
-            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
-              topMode === 'library' && !focusedWorkbenchTrack
+            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${topMode === 'library' && !focusedWorkbenchTrack
                 ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
                 : 'text-[#8E8E93] hover:text-[#EDEDED]'
-            }`}
+              }`}
           >
             <span>Listen</span>
             <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘1</span>
@@ -1776,11 +1773,10 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
               setFocusedWorkbenchTrack(null)
             }}
             title="Unified Precision Metadata Workbench & Catalog Hygiene (⌘2)"
-            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
-              topMode === 'curate'
+            className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${topMode === 'curate'
                 ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
                 : 'text-[#8E8E93] hover:text-[#EDEDED]'
-            }`}
+              }`}
           >
             <span>Curate</span>
             <span className="text-[10px] text-[#636366] font-mono hidden md:inline">⌘2</span>
@@ -1842,22 +1838,20 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
             onClick={() => openSettings('diagnostics')}
             aria-label="Open Cadence Settings"
             title="Cadence Settings (⌘⇧,)"
-            className={`relative p-1.5 rounded-[7px] border transition-all cursor-pointer flex items-center gap-1.5 ${
-              isSettingsOpen
+            className={`relative p-1.5 rounded-[7px] border transition-all cursor-pointer flex items-center gap-1.5 ${isSettingsOpen
                 ? 'bg-white/[0.15] border-[#D4AF37]/50 text-[#D4AF37]'
                 : debugMode !== 'off'
-                ? 'bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 border-[#D4AF37]/30 text-[#EDEDED]'
-                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED]'
-            }`}
+                  ? 'bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 border-[#D4AF37]/30 text-[#EDEDED]'
+                  : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED]'
+              }`}
           >
             <Settings className="w-3.5 h-3.5" />
             <span className="hidden lg:inline text-[11px] font-medium">Settings</span>
             {debugMode !== 'off' && (
               <span
                 aria-hidden="true"
-                className={`w-1.5 h-1.5 rounded-full ${
-                  debugMode === 'diagnostic_capture' ? 'bg-rose-400' : 'bg-[#D4AF37]'
-                }`}
+                className={`w-1.5 h-1.5 rounded-full ${debugMode === 'diagnostic_capture' ? 'bg-rose-400' : 'bg-[#D4AF37]'
+                  }`}
               />
             )}
           </button>
@@ -1866,11 +1860,10 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
           <button
             onClick={() => toggleRightSidebar()}
             title={isRightSidebarOpen ? 'Hide Right Panel' : 'Show Right Panel (Queue & Playlists)'}
-            className={`p-1.5 rounded-[7px] border transition-all cursor-pointer ${
-              isRightSidebarOpen
+            className={`p-1.5 rounded-[7px] border transition-all cursor-pointer ${isRightSidebarOpen
                 ? 'bg-white/[0.15] border-white/[0.15] text-white'
                 : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
-            }`}
+              }`}
           >
             <PanelRight className="w-3.5 h-3.5" />
           </button>
@@ -2078,209 +2071,209 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
             }}
             showToast={showToast}
           />
-          ) : viewMode === 'playlist_detail' && selectedPlaylist ? (
-            <PlaylistDetailView
-              playlist={selectedPlaylist}
-              allTracks={tracks}
-              allReleases={releases}
-              onBackToLibrary={() => setViewMode('cover_grid')}
-              onOpenEditPlaylist={(pl) => {
-                setEditingPlaylist(pl)
-                setIsEditPlaylistOpen(true)
-              }}
-              onOpenAddTracksModal={(trks) => {
-                setTracksToAdd(trks)
-                setIsAddTracksModalOpen(true)
-              }}
-              showToast={showToast}
-            />
-          ) : tracks.length === 0 && offlineMounts.length > 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0D13] relative overflow-hidden text-center">
-              {/* Ambient background glow */}
-              <div className="absolute w-96 h-96 rounded-full bg-amber-500/10 blur-[120px] pointer-events-none" />
+        ) : viewMode === 'playlist_detail' && selectedPlaylist ? (
+          <PlaylistDetailView
+            playlist={selectedPlaylist}
+            allTracks={tracks}
+            allReleases={releases}
+            onBackToLibrary={() => setViewMode('cover_grid')}
+            onOpenEditPlaylist={(pl) => {
+              setEditingPlaylist(pl)
+              setIsEditPlaylistOpen(true)
+            }}
+            onOpenAddTracksModal={(trks) => {
+              setTracksToAdd(trks)
+              setIsAddTracksModalOpen(true)
+            }}
+            showToast={showToast}
+          />
+        ) : tracks.length === 0 && offlineMounts.length > 0 ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0D13] relative overflow-hidden text-center">
+            {/* Ambient background glow */}
+            <div className="absolute w-96 h-96 rounded-full bg-amber-500/10 blur-[120px] pointer-events-none" />
 
-              <div className="relative z-10 max-w-lg flex flex-col items-center">
-                <div className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-6 shadow-xl shadow-amber-500/10">
-                  <WifiOff className="w-8 h-8" />
+            <div className="relative z-10 max-w-lg flex flex-col items-center">
+              <div className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-6 shadow-xl shadow-amber-500/10">
+                <WifiOff className="w-8 h-8" />
+              </div>
+
+              <div className="flex items-center gap-2 mb-2">
+                <span className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-[11px] font-mono font-semibold border border-amber-500/30 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  Network Folder Offline
+                </span>
+              </div>
+
+              <h2 className="text-xl font-bold text-white mb-2">
+                Storage Location Inaccessible
+              </h2>
+
+              <p className="text-xs text-white/60 mb-4 leading-relaxed">
+                Cadence Core detected that your network folder is currently unreachable.
+                To protect playback integrity and prevent uncommittable metadata edits,
+                album data from this storage location is withheld from display.
+              </p>
+
+              {/* Storage Path Card */}
+              <div className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl p-4 mb-6 text-left">
+                <div className="text-[11px] font-medium text-white/50 mb-1">Target Storage Path:</div>
+                <div className="font-mono text-xs text-[#00F5FF] break-all bg-black/40 px-3 py-2 rounded-lg border border-white/[0.05] flex items-center gap-2">
+                  <Server className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>{offlineMounts[0]?.mountPath}</span>
                 </div>
+                {offlineStats.releases > 0 && (
+                  <div className="mt-3 flex items-center justify-between text-[11px] text-white/40 pt-2 border-t border-white/[0.05]">
+                    <span>Preserved in SQLite Database:</span>
+                    <span className="text-amber-300 font-mono">
+                      {offlineStats.releases} albums • {offlineStats.tracks} tracks
+                    </span>
+                  </div>
+                )}
+              </div>
 
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-[11px] font-mono font-semibold border border-amber-500/30 flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-amber-400" />
-                    Network Folder Offline
+              {/* Actions */}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRetryConnection}
+                  disabled={isCheckingConnectivity}
+                  className="px-5 py-2.5 rounded-xl bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 text-[#00F5FF] border border-[#00F5FF]/50 text-xs font-semibold transition-all flex items-center gap-2 shadow-lg shadow-[#00F5FF]/10 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
+                  {isCheckingConnectivity ? 'Checking Connection...' : 'Retry Connection'}
+                </button>
+
+                <button
+                  onClick={() => {
+                    setIsStorageManagerOpen(true)
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white/80 border border-white/[0.1] text-xs font-medium transition-colors"
+                >
+                  Manage Storage Roots
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+            {/* If some mounts are offline, render top alert banner */}
+            {offlineMounts.length > 0 && (
+              <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0 animate-in fade-in duration-200">
+                <div className="flex items-center gap-2 min-w-0">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span className="text-amber-300 truncate">
+                    Network Storage Offline: <span className="font-mono">{offlineMounts[0].name}</span> ({offlineMounts[0].mountPath}) is unreachable.
+                    {offlineStats.releases > 0 && ` ${offlineStats.releases} albums from this folder are withheld.`}
                   </span>
                 </div>
-
-                <h2 className="text-xl font-bold text-white mb-2">
-                  Storage Location Inaccessible
-                </h2>
-
-                <p className="text-xs text-white/60 mb-4 leading-relaxed">
-                  Cadence Core detected that your network folder is currently unreachable.
-                  To protect playback integrity and prevent uncommittable metadata edits,
-                  album data from this storage location is withheld from display.
-                </p>
-
-                {/* Storage Path Card */}
-                <div className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl p-4 mb-6 text-left">
-                  <div className="text-[11px] font-medium text-white/50 mb-1">Target Storage Path:</div>
-                  <div className="font-mono text-xs text-[#00F5FF] break-all bg-black/40 px-3 py-2 rounded-lg border border-white/[0.05] flex items-center gap-2">
-                    <Server className="w-4 h-4 text-amber-400 shrink-0" />
-                    <span>{offlineMounts[0]?.mountPath}</span>
-                  </div>
-                  {offlineStats.releases > 0 && (
-                    <div className="mt-3 flex items-center justify-between text-[11px] text-white/40 pt-2 border-t border-white/[0.05]">
-                      <span>Preserved in SQLite Database:</span>
-                      <span className="text-amber-300 font-mono">
-                        {offlineStats.releases} albums • {offlineStats.tracks} tracks
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     onClick={handleRetryConnection}
                     disabled={isCheckingConnectivity}
-                    className="px-5 py-2.5 rounded-xl bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 text-[#00F5FF] border border-[#00F5FF]/50 text-xs font-semibold transition-all flex items-center gap-2 shadow-lg shadow-[#00F5FF]/10 disabled:opacity-50"
+                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-[11px] font-mono transition-colors flex items-center gap-1.5"
                   >
-                    <RefreshCw className={`w-4 h-4 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
-                    {isCheckingConnectivity ? 'Checking Connection...' : 'Retry Connection'}
+                    <RefreshCw className={`w-3 h-3 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
+                    {isCheckingConnectivity ? 'Checking...' : 'Retry'}
                   </button>
-
                   <button
                     onClick={() => {
                       setIsStorageManagerOpen(true)
                     }}
-                    className="px-4 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white/80 border border-white/[0.1] text-xs font-medium transition-colors"
+                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 text-[11px] transition-colors"
                   >
-                    Manage Storage Roots
+                    Manage
                   </button>
                 </div>
               </div>
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-              {/* If some mounts are offline, render top alert banner */}
-              {offlineMounts.length > 0 && (
-                <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0 animate-in fade-in duration-200">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                    <span className="text-amber-300 truncate">
-                      Network Storage Offline: <span className="font-mono">{offlineMounts[0].name}</span> ({offlineMounts[0].mountPath}) is unreachable.
-                      {offlineStats.releases > 0 && ` ${offlineStats.releases} albums from this folder are withheld.`}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={handleRetryConnection}
-                      disabled={isCheckingConnectivity}
-                      className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-[11px] font-mono transition-colors flex items-center gap-1.5"
-                    >
-                      <RefreshCw className={`w-3 h-3 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
-                      {isCheckingConnectivity ? 'Checking...' : 'Retry'}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setIsStorageManagerOpen(true)
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 text-[11px] transition-colors"
-                    >
-                      Manage
-                    </button>
-                  </div>
-                </div>
-              )}
-              <DataCanvas
-                viewMode={viewMode}
-                onViewModeChange={setViewMode}
-                albumDisplayMode={albumDisplayMode}
-                onAlbumDisplayModeChange={setAlbumDisplayMode}
-                searchQuery={searchQuery}
-                onSearchChange={setSearchQuery}
-                works={works}
-                releases={displayedReleases}
-                tracks={filteredTracks}
-                mountAndFolderScopedTracks={mountAndFolderScopedTracks}
-                facets={facets}
-                onFacetChange={setFacets}
-                selectedTrackId={selectedTrackId}
-                onSelectTrack={setSelectedTrackId}
-                selectedTrackIds={selectedTrackIds}
-                onToggleTrackSelection={handleToggleTrackSelection}
-                onSelectAllTracks={handleSelectAllTracks}
-                onSelectVariant={handleSelectVariant}
-                onInspectRelease={handleInspectRelease}
-                onCustomizeRelease={rel => handleInspectRelease(rel.id)}
-                onUpdateReleaseDetails={handleUpdateReleaseDetails}
-                onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
-                onApplyBatchEdits={handleApplyBatchEdits}
-                onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
-                onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
-                onOpenImportModal={() => setIsImportModalOpen(true)}
-                onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
-                onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
-                totalLibraryTracksCount={tracks.length}
-                stagedAlbumsCount={stagedAlbumsCount}
-                splitReleaseIds={splitReleaseIds}
-                onToggleReleaseSplit={handleToggleReleaseSplit}
-                onResetFilters={() => {
-                  setFacets({})
-                  setActiveTriageFilter(undefined)
-                  setSelectedMountId(undefined)
-                  setSelectedFolderFilter(undefined)
-                  setSearchQuery('')
-                  if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
-                    graphEngine.loadCustomLibrary({
-                      tracks: catalogTracks,
-                      releases: catalogReleases,
-                      works,
-                      auditIssues,
-                      storageMounts,
-                    })
-                  }
-                }}
-                activeTriageIssue={activeTriageIssue}
-                onClearTriageFilter={() => setActiveTriageFilter(undefined)}
-                onRemediateTriageIssue={handleRemediateAudit}
-                activeCoverTab={activeCoverTab}
-                onActiveCoverTabChange={setActiveCoverTab}
-                selectedAlbumId={selectedAlbumId}
-                onSelectAlbumId={setSelectedAlbumId}
-                selectedArtist={selectedArtist}
-                onSelectArtist={setSelectedArtist}
-                selectedComposer={selectedComposer}
-                onSelectComposer={setSelectedComposer}
-              />
-            </div>
-          )}
-
-          {/* 3. Unified Right Sidebar: Queue & Playlists */}
-          {isRightSidebarOpen && (
-            <UnifiedRightSidebar
-              allReleases={releases}
-              onOpenCreatePlaylist={(trks) => {
-                setInitialPlaylistTracks(trks || [])
-                setIsCreatePlaylistOpen(true)
+            )}
+            <DataCanvas
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              albumDisplayMode={albumDisplayMode}
+              onAlbumDisplayModeChange={setAlbumDisplayMode}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              works={works}
+              releases={displayedReleases}
+              tracks={filteredTracks}
+              mountAndFolderScopedTracks={mountAndFolderScopedTracks}
+              facets={facets}
+              onFacetChange={setFacets}
+              selectedTrackId={selectedTrackId}
+              onSelectTrack={setSelectedTrackId}
+              selectedTrackIds={selectedTrackIds}
+              onToggleTrackSelection={handleToggleTrackSelection}
+              onSelectAllTracks={handleSelectAllTracks}
+              onSelectVariant={handleSelectVariant}
+              onInspectRelease={handleInspectRelease}
+              onCustomizeRelease={rel => handleInspectRelease(rel.id)}
+              onUpdateReleaseDetails={handleUpdateReleaseDetails}
+              onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
+              onApplyBatchEdits={handleApplyBatchEdits}
+              onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
+              onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
+              onOpenImportModal={() => setIsImportModalOpen(true)}
+              onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
+              onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
+              totalLibraryTracksCount={tracks.length}
+              stagedAlbumsCount={stagedAlbumsCount}
+              splitReleaseIds={splitReleaseIds}
+              onToggleReleaseSplit={handleToggleReleaseSplit}
+              onResetFilters={() => {
+                setFacets({})
+                setActiveTriageFilter(undefined)
+                setSelectedMountId(undefined)
+                setSelectedFolderFilter(undefined)
+                setSearchQuery('')
+                if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
+                  graphEngine.loadCustomLibrary({
+                    tracks: catalogTracks,
+                    releases: catalogReleases,
+                    works,
+                    auditIssues,
+                    storageMounts,
+                  })
+                }
               }}
-              onOpenEditPlaylist={(pl) => {
-                setEditingPlaylist(pl)
-                setIsEditPlaylistOpen(true)
-              }}
-              onOpenAddTracksModal={(trks) => {
-                setTracksToAdd(trks)
-                setIsAddTracksModalOpen(true)
-              }}
-              onSelectPlaylistDetail={(pl) => {
-                setSelectedPlaylist(pl)
-                setViewMode('playlist_detail')
-              }}
-              onClose={() => setIsRightSidebarOpen(false)}
-              showToast={showToast}
+              activeTriageIssue={activeTriageIssue}
+              onClearTriageFilter={() => setActiveTriageFilter(undefined)}
+              onRemediateTriageIssue={handleRemediateAudit}
+              activeCoverTab={activeCoverTab}
+              onActiveCoverTabChange={setActiveCoverTab}
+              selectedAlbumId={selectedAlbumId}
+              onSelectAlbumId={setSelectedAlbumId}
+              selectedArtist={selectedArtist}
+              onSelectArtist={setSelectedArtist}
+              selectedComposer={selectedComposer}
+              onSelectComposer={setSelectedComposer}
             />
-          )}
-        </div>
+          </div>
+        )}
+
+        {/* 3. Unified Right Sidebar: Queue & Playlists */}
+        {isRightSidebarOpen && (
+          <UnifiedRightSidebar
+            allReleases={releases}
+            onOpenCreatePlaylist={(trks) => {
+              setInitialPlaylistTracks(trks || [])
+              setIsCreatePlaylistOpen(true)
+            }}
+            onOpenEditPlaylist={(pl) => {
+              setEditingPlaylist(pl)
+              setIsEditPlaylistOpen(true)
+            }}
+            onOpenAddTracksModal={(trks) => {
+              setTracksToAdd(trks)
+              setIsAddTracksModalOpen(true)
+            }}
+            onSelectPlaylistDetail={(pl) => {
+              setSelectedPlaylist(pl)
+              setViewMode('playlist_detail')
+            }}
+            onClose={() => setIsRightSidebarOpen(false)}
+            showToast={showToast}
+          />
+        )}
+      </div>
 
       {/* Guided Tutorial Interactive Tour & Headless Agent Protocol */}
       <GuidedTutorialModal

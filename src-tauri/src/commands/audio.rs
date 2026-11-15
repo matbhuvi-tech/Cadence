@@ -1,7 +1,7 @@
 use tauri::State;
 use crate::audio::{
     AudioEndpoint, AudioEndpointInfo, AudioEngine, AudioStreamInfo, PlaybackStatus,
-    StreamBufferInfo, UpnpDevice, UpnpPacingSnapshot,
+    StreamBufferInfo, UpnpDevice, UpnpPacingSnapshot, WasapiExclusiveTelemetrySnapshot,
 };
 
 #[tauri::command]
@@ -127,5 +127,28 @@ pub fn set_settling_delay_ms(
     delay_ms: u64,
 ) -> Result<(), String> {
     engine.set_settling_delay_ms(delay_ms)
+}
+
+#[tauri::command]
+pub fn get_wasapi_exclusive_telemetry(
+    engine: State<'_, AudioEngine>,
+) -> WasapiExclusiveTelemetrySnapshot {
+    engine.get_wasapi_exclusive_telemetry()
+}
+
+#[tauri::command]
+pub fn set_wasapi_virtual_lock(
+    engine: State<'_, AudioEngine>,
+    enabled: bool,
+) -> Result<bool, String> {
+    engine.set_wasapi_virtual_lock(enabled)
+}
+
+#[tauri::command]
+pub fn set_wasapi_max_preload_bytes(
+    engine: State<'_, AudioEngine>,
+    max_bytes: usize,
+) -> Result<usize, String> {
+    engine.set_wasapi_max_preload_bytes(max_bytes)
 }
 
