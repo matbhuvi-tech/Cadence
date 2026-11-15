@@ -242,6 +242,33 @@ uses a control-plane `Mutex` never called from the pacer. Memory impact: bounded
 256-entry command receipt ring (`RECENT_COMMAND_LIMIT`), 4096-entry queue cap and
 1 MiB message ceiling. Tier 1 validation applies.
 
+Phase 4 adds the Tauri-independent headless runtime (`src-tauri/src/core_runtime/`),
+the `cadence-headless` binary (`src-tauri/src/bin/cadence_headless.rs`), and TrueNAS /
+Linux platform hygiene primitives (`platform.rs`). User explicitly reviewed and
+approved the Phase 4 TrueNAS memory and CPU hygiene impact assessment on 2026-11-15:
+- **Disk I/O impact:** `HeadlessCoreRuntime` enforces an explicit idle + 30-second
+  post-playback cooldown guard (`activity == Idle && cooldown_elapsed`) before any
+  media file admission or SQLite catalog reload. Unadmitted `play` or `queue.replace`
+  commands reject with `not_ready` (no on-demand disk read or windowed fallback).
+  On Linux/TrueNAS, idle media reads use `O_NOATIME` (with `EPERM` fallback) and
+  `POSIX_FADV_DONTNEED` to avoid dirtying ZFS `txg_sync` metadata or duplicating
+  page cache alongside locked user-space buffers.
+- **Network/NIC impact:** Zero sockets opened in Phase 4. `normalize_linux_setsockopt_sndbuf`
+  and `normalize_linux_getsockopt_sndbuf` account for Linux kernel `2x` `sk_sndbuf`
+  doubling ahead of Phase 5 UPnP pacing.
+- **Thread/CPU impact:** Windows desktop `stream_tuning.rs` and `wasapi_exclusive.rs`
+  are untouched. For TrueNAS/Linux containers, `partition_truenas_cpus` derives
+  affinity from actual allowed `cpuset.cpus.effective` / `sched_getaffinity` cores
+  rather than assuming `0..N-1`, strips IRQ cores `0` and `1` when alternatives
+  exist, isolates the highest allowed core for the synchronous pacer, and bounds
+  control-plane workers to `1..=2` threads on the remaining cores.
+- **Memory impact:** `LockedBytesArena` reconciles container cgroup v2 (`memory.max`,
+  `memory.high`, `memory.current`), host `MemAvailable` + reclaimable ZFS ARC
+  (`arcstats` `size - c_min`), `CAP_IPC_LOCK` (`CapEff` bit 14) vs `RLIMIT_MEMLOCK`,
+  retained locked bytes, and mandatory container headroom before pre-faulting and
+  locking (`mlock` / `VirtualLock`). Lock failures immediately free buffers with
+  zero pageable fallback, and `Drop` / `shutdown()` deterministically unlock all pages.
+
 ## Independently testable phases
 
 Each phase has its own acceptance fixture and rollback boundary. Use synthetic files,
@@ -275,7 +302,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 1 | Implementation ready for user verification | `src/core/engineSession.ts`; test-first fixtures in `src/test/testEngineSession.ts`; runtime integration intentionally pending |
 | 2 | User verified; merge approved | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; NSIS build passed; runtime bindings remain pending |
 | 3 | Implementation ready for user verification | `src-tauri/src/core_session/`; `queue.control` + `queue.coordinate` in `src/core/coreProtocol.ts` and `src/services/engineService.ts`; 24 native + 51 TS tests + TS-to-Rust interop fixture pass; runtime bindings remain pending |
-| 4-10 | Planned | No headless executable, Linux UPnP transport or deployment claimed yet |
+| 4 | Implementation ready for user verification | `src-tauri/src/core_runtime/` + `src-tauri/src/bin/cadence_headless.rs`; Cargo `desktop` feature split (`--no-default-features` excludes Tauri/GUI/local audio); TrueNAS cgroup v2 + `CAP_IPC_LOCK` + `RLIMIT_MEMLOCK` strict admission, 30s cooldown guard, `cpuset` partitioning and Linux `x86_64-unknown-linux-gnu` check pass |
+| 5-10 | Planned | No Linux UPnP transport or Dragonfish deployment claimed yet |
 
 Phase 1 command:
 
@@ -551,6 +579,109 @@ Priority improvements: bind `SessionOwner` into the Tauri-independent headless r
 in Phase 4 and map qualified UPnP AVTransport state transitions onto `RunToken` in
 Phase 5. Would the user agree? Expected yes for the Phase 3 fake-renderer authority
 milestone.
+
+### Phase 4 headless executable and TrueNAS / Linux platform contract
+
+`src-tauri/src/core_runtime/` (`mod.rs` and `platform.rs`) and
+`src-tauri/src/bin/cadence_headless.rs` provide the Tauri-independent headless
+executable and TrueNAS/Linux platform foundation:
+
+- **Feature-gated desktop boundary:** `src-tauri/Cargo.toml` and `src-tauri/build.rs`
+  gate `tauri`, `tauri-build`, `tauri-plugin-*`, `cpal`, `rodio`, `symphonia`,
+  `lofty` and Windows desktop crates behind the default `desktop` feature. Building
+  with `--no-default-features` (on Windows or `--target x86_64-unknown-linux-gnu`)
+  compiles only `chrono`, `libc`/`windows-sys`, `parking_lot`, `rusqlite`, `serde`,
+  `serde_json`, `sha2` and `uuid`.
+- **Temp SQLite startup, opaque catalog projection and deterministic shutdown:**
+  `HeadlessCoreRuntime` initializes SQLite in `WAL` mode (`synchronous = NORMAL`,
+  `foreign_keys = ON`, `busy_timeout = 5000`), projects online tracks into
+  `SessionOwner` with opaque v1 token IDs (deterministically hashing any legacy
+  file-path IDs so paths never cross the wire), and closes/checkpoints the database
+  and unlocks all pinned RAM buffers on `shutdown()`.
+- **TrueNAS cgroup v2, ZFS ARC and `CAP_IPC_LOCK` strict admission:**
+  `LockedBytesArena` reconciles container cgroup v2 (`memory.max`, `memory.high`,
+  `memory.current`), host `MemAvailable` plus reclaimable ZFS ARC (`size - c_min`),
+  `CAP_IPC_LOCK` (`CapEff` bit 14) vs `RLIMIT_MEMLOCK`, retained locked bytes and
+  mandatory container headroom (`DEFAULT_CONTAINER_HEADROOM_BYTES = 64 MiB`).
+  Over-budget selections fail with `AdmissionError::OverBudget` and smaller-selection
+  guidance; unprivileged containers lacking `CAP_IPC_LOCK` with a low `RLIMIT_MEMLOCK`
+  fail with `AdmissionError::LockLimitTooLow` and TrueNAS configuration guidance;
+  `mlock`/`VirtualLock` failures immediately free buffers and return
+  `AdmissionError::LockUnavailable` without pageable or windowed-read fallback.
+- **Storage-bus silence and 30-second cooldown:** `admit_tracks` and `reload_catalog`
+  require `activity == "idle"` and `elapsed >= COOLDOWN_DURATION (30s)` after any
+  stop or queue completion. Unadmitted `play` or `queue.replace` requests reject with
+  `not_ready`, and `SharedRenderer` refuses `RendererAction::Play` for any track ID
+  not currently pinned in the arena.
+- **TrueNAS `cpuset` partitioning and Linux `SO_SNDBUF` normalization:**
+  `partition_truenas_cpus` respects container `cpuset.cpus.effective` /
+  `sched_getaffinity` rather than assuming `0..N-1`, strips IRQ cores `0` and `1`
+  when alternatives exist, isolates the highest allowed core for the pacer, and
+  caps control-plane worker threads to `1..=2`. `normalize_linux_setsockopt_sndbuf`
+  and `normalize_linux_getsockopt_sndbuf` account for Linux kernel `2x` `sk_sndbuf`
+  doubling.
+
+### Phase 4 TDD and verification record (2026-11-15)
+
+Source: phase 4 in the independently testable phase table above. User journeys:
+start and cleanly shut down the headless Core executable against a temporary SQLite
+database without GUI or local-output dependencies; enforce TrueNAS container cgroup
+and lock limits with actionable diagnostics; preserve storage-bus silence during
+playback and the 30-second post-playback cooldown.
+
+- RED checkpoint `a2feae4`: `cargo test --manifest-path src-tauri/Cargo.toml --test core_headless_test`
+  failed with `E0432` (`unresolved import cadence_core_lib::core_runtime`) and missing
+  `CARGO_BIN_EXE_cadence-headless`.
+- GREEN checkpoint `2622e39`: all 7 acceptance tests in `core_headless_test` passed
+  under both default desktop features and `--no-default-features --features bundled-sqlite`,
+  and `cargo check --target x86_64-unknown-linux-gnu --no-default-features` passed
+  with 0 errors and 0 warnings.
+
+| Guarantee | Acceptance fixture | Type / result |
+| --- | --- | --- |
+| Temp SQLite WAL startup, path-free catalog projection, v1 session execution and clean handle-free shutdown | `core_headless_test.rs:temp_db_startup_projects_catalog_runs_v1_protocol_and_shuts_down_cleanly` | Native integration / PASS |
+| TrueNAS cgroup v2 (`memory.max`/`memory.high`/`memory.current`), ZFS ARC and `CAP_IPC_LOCK` vs `RLIMIT_MEMLOCK` admission | `core_headless_test.rs:truenas_cgroup_v2_and_cap_ipc_lock_admission_enforces_container_limits` | Unit + integration / PASS |
+| Over-budget and `mlock`/`VirtualLock` failure rejection with zero pageable/windowed fallback and RAII unlock | `core_headless_test.rs:strict_admission_rejects_over_budget_and_lock_failures_without_windowed_or_pageable_fallback` | Native integration / PASS |
+| Storage-bus silence during `Loading`/`Playing`/`Paused` and 30-second post-stop cooldown; unadmitted play/queue rejection | `core_headless_test.rs:storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_cooldown` | Native integration / PASS |
+| TrueNAS `cpuset` core isolation (pacer vs bounded 1-2 thread control plane) and Linux `2x` `SO_SNDBUF` normalization | `core_headless_test.rs:truenas_cpuset_affinity_and_linux_sndbuf_normalization_preserve_core_isolation` | Unit / PASS |
+| Standalone `cadence-headless` binary stdio execution and Linux headless dependency-tree exclusion gate | `core_headless_test.rs:headless_executable_runs_stdio_session_without_gui_or_audio_output_dependencies`, `headless_dependency_tree_excludes_gui_and_local_audio_crates` | Process + dependency integration / PASS |
+
+Reproduce Phase 4 verification with:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_headless_test --test core_session_test
+cargo test --manifest-path src-tauri/Cargo.toml --test core_headless_test --test core_session_test --test remote_queue_test
+$env:SQLITE3_LIB_DIR=(Resolve-Path src-tauri).Path; cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu --no-default-features --bins --lib --test core_headless_test --test core_session_test --test diagnostics_stress_test
+```
+
+- PASS: 7/7 tests in `core_headless_test`, 24/24 in `core_session_test` and 10/10 in
+  `remote_queue_test` on Windows (both `--no-default-features --features bundled-sqlite`
+  and default `desktop` features).
+- PASS: `x86_64-unknown-linux-gnu` target check for `cadence_core_lib`,
+  `cadence-headless` binary, `core_headless_test`, `core_session_test` and
+  `diagnostics_stress_test` with zero GUI/Tauri/local-audio crates in `cargo tree`.
+- PASS: Phase 1–3 TypeScript suites (`testCoreSessionProtocol.ts`,
+  `testEndpointRouting.ts`, `testRemoteQueueSync.ts`), desktop `npx tsc -b` and PWA
+  `npx --prefix pwa tsc -b`.
+- NOT RUN at implementation checkpoint: NSIS installer build (gated before `main`
+  merge per `.agents/rules/Git.md`), live TrueNAS Dragonfish container deployment
+  (Phase 6) and physical RS130 UPnP streaming (Phase 5).
+
+### Phase 4 self-review
+
+Using the agent-self-evaluation skill: overall 4.3/5; ready for user verification.
+
+| Axis | Score | Evidence and next improvement |
+| --- | --- | --- |
+| Accuracy | 4/5 | Headless binary, Windows tests and `x86_64-unknown-linux-gnu` target checks pass; live Linux kernel `mlock`/cgroup execution in a TrueNAS container remains Phase 6 verification. |
+| Completeness | 4/5 | Covers Cargo feature split, `cadence-headless` binary, temp DB startup/shutdown, TrueNAS cgroup v2/`CAP_IPC_LOCK`/`RLIMIT_MEMLOCK` admission, 30s cooldown and `cpuset` partitioning; HTTP/UPnP serving is Phase 5. |
+| Clarity | 5/5 | TrueNAS ZFS ARC, `CAP_IPC_LOCK` and `cpuset` pitfalls and remedies are documented and enforced by explicit error variants. |
+| Actionability | 5/5 | Reproducible Cargo commands verify both headless/desktop test suites and the `x86_64-unknown-linux-gnu` target check locally. |
+| Conciseness | 4/5 | `core_runtime` and `cadence_headless` stay compact and leave Windows desktop audio files untouched. |
+
+Priority improvements: wire the Linux paced UPnP HTTP server and RS130 session
+handler onto `HeadlessCoreRuntime` and `LockedBytesArena` in Phase 5. Would the user
+agree? Expected yes for the Phase 4 headless runtime and TrueNAS hygiene milestone.
 
 ## Platform references
 

@@ -45,10 +45,12 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 - `src/services/engineService.ts` provides local in-process and remote authenticated-
   channel adapters. `engineServiceController.ts` stages one catalog/queue/output view
   and rejects stale activation/refresh responses. Neither module is wired to startup.
-- The local owner port and remote transport are injected. Existing Tauri calls and
-  standalone playback remain in use; backend-authoritative ownership, native/browser
-  trust implementations and UI binding land in later phases. A fake channel passing
-  tests does not establish production TLS/pairing or hardware readiness.
+- `src-tauri/src/core_session/` implements the native v1 session and queue authority
+  (`SessionOwner<R: Renderer>`). `src-tauri/src/core_runtime/` and
+  `src-tauri/src/bin/cadence_headless.rs` provide the Tauri-independent headless
+  executable, SQLite WAL catalog projection, 30-second post-playback cooldown guard,
+  and TrueNAS/Linux cgroup v2 + `CAP_IPC_LOCK` + `RLIMIT_MEMLOCK` strict locked-RAM
+  admission (`LockedBytesArena`).
 - Plan and phase evidence: `docs/designs/OPTIONAL_LINUX_CORE.md`.
 
 ### Curation Workbench & Decision Trace Engine

@@ -11,6 +11,8 @@ Rust backend source root for Cadence. Configures the Tauri application lifecycle
 ## Subdirectories & System Boundaries
 - [audio](./audio/AGENTS.md): WASAPI Exclusive, MMCSS Pro Audio pacing, UPnP streaming, and memory pinning.
 - [commands](./commands/AGENTS.md): Tauri IPC handlers exposed to the TypeScript frontend.
+- `core_runtime`: Tauri-independent headless Core runtime, SQLite catalog projection, TrueNAS/Linux cgroup v2 + `CAP_IPC_LOCK` locked-RAM admission, and `cpuset` isolation.
+- `core_session`: Native v1 session and queue coordinator (`SessionOwner`).
 - [curation](./curation/AGENTS.md): Curation evidence runs, diagnostic snapshots, drafts, and playback-guarded decision traces.
 - [db](./db/AGENTS.md): SQLite database connections, schema migrations, and batch operations.
 - [maintenance](./maintenance/AGENTS.md): AcoustID fingerprinting, artist portrait caching, and file tag commit worker.
