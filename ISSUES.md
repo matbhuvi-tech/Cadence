@@ -15,3 +15,4 @@
 - [#33](https://github.com/matbhuvi-tech/Cadence/issues/33): Album overflow menu ('Edit Metadata in Curate') disappears when moving mouse to click due to hover gap.
 - [#34](https://github.com/matbhuvi-tech/Cadence/issues/34): Clicking album cover art in Listen workspace navigates to Curate instead of album drill-down.
 - [#35](https://github.com/matbhuvi-tech/Cadence/issues/35): Enriched artist editorial profile (bioSummary, etc.) not persistent across navigation & bio text truncation.
+- [#37](https://github.com/matbhuvi-tech/Cadence/issues/37): Snapshot import fails with `no such column: id` on legacy `playlist_tracks` schema.

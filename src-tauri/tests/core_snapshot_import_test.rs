@@ -399,3 +399,66 @@ fn cli_snapshot_export_preview_import_and_rollback_roundtrip() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn import_handles_legacy_playlist_tracks_table_without_id_column() {
+    let dir = temp_dir("legacy_playlist_schema");
+    let source_db_path = dir.join("win.db");
+    let export_db = dir.join("legacy-export.db");
+    let core_db_path = dir.join("core.db");
+    let rollback_dir = dir.join("rollback");
+    let music_root = dir.join("music_root");
+    fs::create_dir_all(&rollback_dir).unwrap();
+    fs::create_dir_all(&music_root).unwrap();
+
+    let _source_db = seed_windows_source_db(&source_db_path);
+    export_consistent_snapshot(&source_db_path, &export_db).unwrap();
+
+    // Recreate playlist_tracks using legacy composite PRIMARY KEY without an `id` column
+    let exp_conn = Connection::open(&export_db).unwrap();
+    exp_conn
+        .execute_batch(
+            "CREATE TABLE playlist_tracks_legacy (
+                playlist_id TEXT NOT NULL,
+                track_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (playlist_id, position)
+            );
+            INSERT INTO playlist_tracks_legacy (playlist_id, track_id, position, added_at)
+            SELECT playlist_id, track_id, position, added_at FROM playlist_tracks;
+            DROP TABLE playlist_tracks;
+            ALTER TABLE playlist_tracks_legacy RENAME TO playlist_tracks;",
+        )
+        .unwrap();
+    drop(exp_conn);
+
+    let result = import_snapshot_into_core(
+        &export_db,
+        &core_db_path,
+        &rollback_dir,
+        SnapshotImportOptions {
+            mappings: vec![RootMapping {
+                windows_prefix: "\\\\192.168.1.6\\Mathan\\Music Collection".into(),
+                core_prefix: music_root.to_string_lossy().to_string(),
+            }],
+            enforce_case_sensitive: false,
+            include_unmapped: false,
+            rollback_tag: "pre-legacy-import".into(),
+        },
+    )
+    .expect("import must succeed when source playlist_tracks has no id column");
+    assert_eq!(result.imported_playlists, 1);
+
+    let dst = Connection::open(&core_db_path).unwrap();
+    let count: i64 = dst
+        .query_row(
+            "SELECT count(*) FROM playlist_tracks WHERE playlist_id = 'pl-1' AND track_id = 'trk-nas-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+
+    let _ = fs::remove_dir_all(&dir);
+}

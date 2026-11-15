@@ -4,8 +4,16 @@
 
 - Requested: 2026-11-15. Preserve standalone Windows Cadence while optionally using a headless Linux UPnP engine on TrueNAS, controlled by Windows and Android.
 - Design and phase ledger: [Optional Linux Cadence Core](../../docs/designs/OPTIONAL_LINUX_CORE.md).
-- Branch: `feat/linux-core-phase4-headless`.
-- Status: Phases 1–4 implemented (pure engine-selection model, v1 contracts/adapters, native `SessionOwner` queue authority, and Tauri-independent `cadence-headless` runtime with TrueNAS cgroup v2 / `CAP_IPC_LOCK` / `cpuset` hygiene); pending user verification for Phase 4. No GitHub bug issue applies to this feature request.
+- Branch: `feat/linux-core-phase-10-release-qualification` (current fix branch: `fix/37-snapshot-import-playlist-tracks-order`).
+- Status: Phases 1–10 implemented; Phase 10 live TrueNAS import uncovered [#37](https://github.com/matbhuvi-tech/Cadence/issues/37).
+
+## GitHub #37: Snapshot import fails with 'no such column: id' on legacy playlist_tracks schema
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/37
+- **Reported:** Running `cadence-headless --import-snapshot` on TrueNAS against an exported Windows `cadence.db` failed with `no such column: id in SELECT playlist_id, track_id, position, added_at FROM playlist_tracks ORDER BY id ASC`.
+- **Cause:** Real long-lived Windows `cadence.db` instances created before `playlist_tracks` gained an `id` column use `PRIMARY KEY (playlist_id, position)` without an `id` column, whereas `src-tauri/src/core_runtime/migration.rs` sorted `playlist_tracks` by `id`.
+- **Fix:** Ordered the query by `playlist_id ASC, position ASC` in `src-tauri/src/core_runtime/migration.rs` and added a legacy-schema regression test in `src-tauri/tests/core_snapshot_import_test.rs`.
+- **Status:** In progress on `fix/37-snapshot-import-playlist-tracks-order`; pending live TrueNAS import verification.
 
 ## GitHub #35: Enriched artist editorial profile (bioSummary, etc.) not persistent across navigation & bio text truncation
 

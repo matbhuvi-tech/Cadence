@@ -502,7 +502,7 @@ pub fn import_snapshot_into_core(
     }
     {
         let mut stmt = src_conn
-            .prepare("SELECT playlist_id, track_id, position, added_at FROM playlist_tracks ORDER BY id ASC")
+            .prepare("SELECT playlist_id, track_id, position, added_at FROM playlist_tracks ORDER BY playlist_id ASC, position ASC")
             .map_err(|e| MigrationError::Database(e.to_string()))?;
         let mut rows = stmt
             .query([])
