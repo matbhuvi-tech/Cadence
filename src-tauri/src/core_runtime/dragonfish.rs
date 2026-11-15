@@ -19,6 +19,7 @@
 //!    `cadence.db`, `node-identity.json`, and `tls-cert.json`, blocks incompatible future
 //!    schemas, and restores matching backups cleanly on rollback.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -30,12 +31,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::upnp_session::{validate_advertised_lan_ip, CoreMediaServer};
+use super::upnp_session::{
+    discover_rs130_device, inspect_rs130_description, load_track_media_meta, query_renderer_state,
+    validate_advertised_lan_ip, ActiveMediaSession, CoreMediaServer, Rs130DeviceDescriptor,
+    TrackMediaMeta, UpnpBridgeRenderer,
+};
 use super::{
     HeadlessConfig, HeadlessCoreRuntime, MemoryLocker, PlatformProbe, RuntimeError,
     SystemMemoryLocker, SystemPlatformProbe, DEFAULT_CONTAINER_HEADROOM_BYTES,
 };
-use crate::core_session::{Output, Renderer, RendererAction, RendererError, MAX_MESSAGE_BYTES};
+use crate::core_session::{
+    Output, Renderer, RendererAction, RendererError, RendererEvent, MAX_MESSAGE_BYTES,
+};
 
 /// Default HTTPS/WSS controller port for TrueNAS Dragonfish deployments.
 pub const DEFAULT_CONTROL_PORT: u16 = 4040;
@@ -205,17 +212,97 @@ impl DragonfishError {
     }
 }
 
-struct DragonfishNoopRenderer;
+struct DragonfishRenderer {
+    bridge: Option<UpnpBridgeRenderer>,
+    discovered_control_url: Arc<Mutex<Option<String>>>,
+    pinned_rs130_udn: Option<String>,
+    allow_loopback_for_tests: bool,
+    media_server_addr: SocketAddr,
+    advertised_ip: Ipv4Addr,
+    active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
+    paused_flag: Arc<AtomicBool>,
+    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    track_meta: Arc<Mutex<HashMap<String, TrackMediaMeta>>>,
+    db_path: PathBuf,
+}
 
-impl Renderer for DragonfishNoopRenderer {
-    fn apply(&mut self, _action: &RendererAction) -> Result<(), RendererError> {
-        Ok(())
+impl DragonfishRenderer {
+    fn resolve_device_if_needed(&mut self) {
+        if self.bridge.is_some() || self.allow_loopback_for_tests {
+            return;
+        }
+        let desc = resolve_rs130_target(self.pinned_rs130_udn.as_deref(), self.allow_loopback_for_tests);
+        if let Some(device) = desc {
+            if let Ok(mut ctrl) = self.discovered_control_url.lock() {
+                *ctrl = Some(device.control_url.clone());
+            }
+            self.bridge = Some(UpnpBridgeRenderer {
+                device,
+                media_server_addr: self.media_server_addr,
+                advertised_ip: self.advertised_ip,
+                active_session: Arc::clone(&self.active_session),
+                paused_flag: Arc::clone(&self.paused_flag),
+                shared_buffers: Arc::clone(&self.shared_buffers),
+                track_meta: Arc::clone(&self.track_meta),
+            });
+        }
     }
+
+    fn ensure_track_meta_loaded(&self, track_id: &str) {
+        let missing = self
+            .track_meta
+            .lock()
+            .map(|g| !g.contains_key(track_id))
+            .unwrap_or(true);
+        if missing {
+            if let Ok(fresh) = load_track_media_meta(&self.db_path) {
+                if let Ok(mut guard) = self.track_meta.lock() {
+                    *guard = fresh;
+                }
+            }
+        }
+    }
+}
+
+impl Renderer for DragonfishRenderer {
+    fn apply(&mut self, action: &RendererAction) -> Result<(), RendererError> {
+        if let RendererAction::Play { entry, .. } = action {
+            self.ensure_track_meta_loaded(&entry.track_id);
+            self.resolve_device_if_needed();
+        }
+        if let Some(ref mut bridge) = self.bridge {
+            bridge.apply(action)
+        } else if self.allow_loopback_for_tests {
+            Ok(())
+        } else if matches!(action, RendererAction::Stop) {
+            Ok(())
+        } else {
+            Err(RendererError)
+        }
+    }
+}
+
+fn resolve_rs130_target(
+    pinned_udn: Option<&str>,
+    allow_loopback_for_tests: bool,
+) -> Option<Rs130DeviceDescriptor> {
+    if allow_loopback_for_tests {
+        return None;
+    }
+    if let Ok(url) = std::env::var("CADENCE_RS130_DESC_URL") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            if let Ok(desc) = inspect_rs130_description(trimmed, pinned_udn) {
+                return Some(desc);
+            }
+        }
+    }
+    discover_rs130_device(pinned_udn, allow_loopback_for_tests)
 }
 
 /// Packaged TrueNAS SCALE Dragonfish 24.04 Core node managing persistent `/var/lib/cadence`
 /// identity, certificate metadata, WAL SQLite database, fixed control/media listeners,
-/// and versioned rollback snapshots.
+/// paced RS130 UPnP streaming, and versioned rollback snapshots.
 pub struct DragonfishNode<
     P: PlatformProbe = SystemPlatformProbe,
     L: MemoryLocker = SystemMemoryLocker,
@@ -224,11 +311,12 @@ pub struct DragonfishNode<
     advertised_ip: Ipv4Addr,
     identity: PersistedNodeIdentity,
     tls_cert: PersistedTlsCertificate,
-    runtime: Arc<Mutex<HeadlessCoreRuntime<DragonfishNoopRenderer, P, L>>>,
+    runtime: Arc<Mutex<HeadlessCoreRuntime<DragonfishRenderer, P, L>>>,
     media_server: CoreMediaServer,
     control_listen_addr: SocketAddr,
     stop_control: Arc<AtomicBool>,
     control_join: Option<std::thread::JoinHandle<()>>,
+    reconcile_join: Option<std::thread::JoinHandle<()>>,
 }
 
 impl DragonfishNode<SystemPlatformProbe, SystemMemoryLocker> {
@@ -376,27 +464,67 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
         let _ = control_listener.set_nonblocking(true);
 
-        // 8. Open persistent WAL SQLite database at `/var/lib/cadence/cadence.db`
+        // 8. Resolve pinned/qualified RS130 target when not in loopback test mode
+        let initial_device = resolve_rs130_target(
+            identity.pinned_rs130_udn.as_deref(),
+            config.allow_loopback_for_tests,
+        );
+        let output_label = initial_device
+            .as_ref()
+            .map(|d| format!("{} ({})", d.friendly_name, d.model_name.as_deref().unwrap_or("RS130")))
+            .unwrap_or_else(|| "HiFi ROSE RS130".into());
+
+        // 9. Open persistent WAL SQLite database at `/var/lib/cadence/cadence.db`
         let db_path = config.app_data_dir.join("cadence.db");
+        let shared_buffers = Arc::new(Mutex::new(HashMap::new()));
+        let track_meta = Arc::new(Mutex::new(HashMap::new()));
+        let discovered_control_url = Arc::new(Mutex::new(
+            initial_device.as_ref().map(|d| d.control_url.clone()),
+        ));
+        let active_session = media_server.active_session_arc();
+        let paused_flag = media_server.paused_flag_arc();
+        let bridge = initial_device.map(|device| UpnpBridgeRenderer {
+            device,
+            media_server_addr: media_server.listen_addr(),
+            advertised_ip: media_server.advertised_ip_addr(),
+            active_session: Arc::clone(&active_session),
+            paused_flag: Arc::clone(&paused_flag),
+            shared_buffers: Arc::clone(&shared_buffers),
+            track_meta: Arc::clone(&track_meta),
+        });
+        let renderer = DragonfishRenderer {
+            bridge,
+            discovered_control_url: Arc::clone(&discovered_control_url),
+            pinned_rs130_udn: identity.pinned_rs130_udn.clone(),
+            allow_loopback_for_tests: config.allow_loopback_for_tests,
+            media_server_addr: media_server.listen_addr(),
+            advertised_ip: media_server.advertised_ip_addr(),
+            active_session: Arc::clone(&active_session),
+            paused_flag: Arc::clone(&paused_flag),
+            shared_buffers: Arc::clone(&shared_buffers),
+            track_meta: Arc::clone(&track_meta),
+            db_path: db_path.clone(),
+        };
+
         let headless_cfg = HeadlessConfig {
-            db_path,
+            db_path: db_path.clone(),
             engine_id: identity.engine_id.clone(),
             library_id: identity.library_id.clone(),
             label: identity.label.clone(),
             output: Some(Output {
                 id: "rs130-upnp".into(),
-                label: "HiFi ROSE RS130".into(),
+                label: output_label,
                 transport: "upnp".into(),
             }),
             headroom_bytes: config.headroom_bytes,
         };
-        let rt = HeadlessCoreRuntime::open_with_platform(
-            headless_cfg,
-            DragonfishNoopRenderer,
-            probe,
-            locker,
-        )
-        .map_err(DragonfishError::Runtime)?;
+        let rt = HeadlessCoreRuntime::open_with_platform(headless_cfg, renderer, probe, locker)
+            .map_err(DragonfishError::Runtime)?;
+        if let Ok(loaded_meta) = load_track_media_meta(&db_path) {
+            if let Ok(mut guard) = track_meta.lock() {
+                *guard = loaded_meta;
+            }
+        }
 
         let runtime = Arc::new(Mutex::new(rt));
         let stop_control = Arc::new(AtomicBool::new(false));
@@ -408,6 +536,7 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
         let cert_copy = tls_cert.clone();
         let music_ro = config.music_read_only;
         let adv_ip_str = advertised_ip.to_string();
+        let buffers_ctrl = Arc::clone(&shared_buffers);
 
         let control_join = std::thread::Builder::new()
             .name("cadence-dragonfish-control".into())
@@ -415,6 +544,7 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
                 run_control_listener_loop(
                     control_listener,
                     rt_ref,
+                    buffers_ctrl,
                     stop_ref,
                     id_copy,
                     cert_copy,
@@ -426,6 +556,24 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             })
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
 
+        let reconcile_join = if !config.allow_loopback_for_tests {
+            let rt_rec = Arc::clone(&runtime);
+            let stop_rec = Arc::clone(&stop_control);
+            let session_rec = Arc::clone(&active_session);
+            let ctrl_url_rec = Arc::clone(&discovered_control_url);
+            let buffers_rec = Arc::clone(&shared_buffers);
+            Some(
+                std::thread::Builder::new()
+                    .name("cadence-dragonfish-reconcile".into())
+                    .spawn(move || {
+                        run_reconcile_loop(rt_rec, stop_rec, session_rec, ctrl_url_rec, buffers_rec);
+                    })
+                    .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             advertised_ip,
@@ -436,6 +584,7 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             control_listen_addr,
             stop_control,
             control_join: Some(control_join),
+            reconcile_join,
         })
     }
 
@@ -544,6 +693,9 @@ impl<P: PlatformProbe, L: MemoryLocker> DragonfishNode<P, L> {
                 self.control_listen_addr
             };
             let _ = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(50));
+            let _ = join.join();
+        }
+        if let Some(join) = self.reconcile_join.take() {
             let _ = join.join();
         }
         self.media_server.shutdown();
@@ -907,7 +1059,8 @@ fn load_or_create_tls_certificate(
 #[allow(clippy::too_many_arguments)]
 fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
     listener: TcpListener,
-    runtime: Arc<Mutex<HeadlessCoreRuntime<DragonfishNoopRenderer, P, L>>>,
+    runtime: Arc<Mutex<HeadlessCoreRuntime<DragonfishRenderer, P, L>>>,
+    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
     stop_flag: Arc<AtomicBool>,
     identity: PersistedNodeIdentity,
     tls_cert: PersistedTlsCertificate,
@@ -983,7 +1136,11 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                 let method = parts.next().unwrap_or("");
                 let path = parts.next().unwrap_or("");
 
-                if method == "GET" && (path == "/healthz" || path == "/readyz") {
+                if method == "OPTIONS" {
+                    let header = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.flush();
+                } else if method == "GET" && (path == "/healthz" || path == "/readyz") {
                     let payload = json!({
                         "ready": true,
                         "engineId": identity.engine_id,
@@ -1009,7 +1166,15 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                         &[][..]
                     };
                     let resp_val = match runtime.lock() {
-                        Ok(mut rt) => rt.request(body_bytes),
+                        Ok(mut rt) => {
+                            if let Err(err_val) =
+                                admit_requested_tracks_for_v1_command(&mut rt, &shared_buffers, body_bytes)
+                            {
+                                err_val
+                            } else {
+                                rt.request(body_bytes)
+                            }
+                        }
                         Err(_) => json!({ "ok": false, "error": { "code": "not_ready" } }),
                     };
                     write_json_response(&mut stream, 200, "OK", &resp_val);
@@ -1035,10 +1200,154 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
     }
 }
 
+fn admit_requested_tracks_for_v1_command<P: PlatformProbe, L: MemoryLocker>(
+    rt: &mut HeadlessCoreRuntime<DragonfishRenderer, P, L>,
+    shared_buffers: &Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    body_bytes: &[u8],
+) -> Result<(), Value> {
+    let Ok(parsed) = serde_json::from_slice::<Value>(body_bytes) else {
+        return Ok(());
+    };
+    let Some(op) = parsed.get("operation").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let mut ids_to_admit: Vec<String> = Vec::new();
+    let mut keep_ids: HashSet<String> = HashSet::new();
+
+    if op == "playback.control"
+        && parsed.get("action").and_then(Value::as_str) == Some("play")
+    {
+        if let Some(tid) = parsed.get("trackId").and_then(Value::as_str) {
+            ids_to_admit.push(tid.to_string());
+            keep_ids.insert(tid.to_string());
+        }
+        if let Some(next_id) = rt.peek_next_queue_track_id() {
+            keep_ids.insert(next_id.clone());
+            ids_to_admit.push(next_id);
+        }
+    } else if op == "queue.replace" {
+        if let Some(entries) = parsed.get("entries").and_then(Value::as_array) {
+            for (idx, entry) in entries.iter().enumerate() {
+                if let Some(tid) = entry.get("trackId").and_then(Value::as_str) {
+                    if idx < 2 {
+                        ids_to_admit.push(tid.to_string());
+                    }
+                    if idx < 4 {
+                        keep_ids.insert(tid.to_string());
+                    }
+                }
+            }
+        }
+    } else {
+        return Ok(());
+    }
+
+    if ids_to_admit.is_empty() {
+        return Ok(());
+    }
+
+    let admitted = rt
+        .admit_tracks_for_explicit_user_play(&ids_to_admit, &keep_ids)
+        .map_err(|_| json!({ "ok": false, "error": { "code": "not_ready" } }))?;
+    if let Ok(mut guard) = shared_buffers.lock() {
+        guard.retain(|id, _| keep_ids.contains(id) || ids_to_admit.contains(id));
+        for (id, buf) in admitted {
+            guard.insert(id, buf);
+        }
+    }
+    Ok(())
+}
+
+fn run_reconcile_loop<P: PlatformProbe, L: MemoryLocker>(
+    runtime: Arc<Mutex<HeadlessCoreRuntime<DragonfishRenderer, P, L>>>,
+    stop_flag: Arc<AtomicBool>,
+    active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
+    control_url_ref: Arc<Mutex<Option<String>>>,
+    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+) {
+    let mut consecutive_failures: u32 = 0;
+    while !stop_flag.load(Ordering::Acquire) {
+        let session = active_session.lock().ok().and_then(|g| g.clone());
+        let Some(session) = session else {
+            consecutive_failures = 0;
+            std::thread::sleep(Duration::from_millis(400));
+            continue;
+        };
+
+        let control_url = control_url_ref.lock().ok().and_then(|g| g.clone());
+        let Some(control_url) = control_url else {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        };
+
+        let Ok(token) = session.run_token.lock().map(|g| g.clone()) else {
+            std::thread::sleep(Duration::from_millis(400));
+            continue;
+        };
+
+        match query_renderer_state(&control_url) {
+            Ok(probe) => {
+                consecutive_failures = 0;
+                if !probe.current_uri.is_empty() && probe.current_uri != session.stream_url {
+                    if let Ok(mut guard) = active_session.lock() {
+                        if let Some(prev) = guard.take() {
+                            prev.cancelled.store(true, Ordering::Release);
+                        }
+                    }
+                    if let Ok(mut rt) = runtime.lock() {
+                        let _ = rt.on_renderer_event(RendererEvent::ExternalTakeover(token));
+                    }
+                } else if probe.transport_state == "PLAYING" {
+                    if let Ok(mut rt) = runtime.lock() {
+                        let _ = rt.on_renderer_event(RendererEvent::Started(token));
+                    }
+                } else if probe.transport_state == "STOPPED" {
+                    let streamed = session.has_streamed_audio.load(Ordering::Acquire);
+                    let end_offset = session.last_audio_end_offset.load(Ordering::Acquire);
+                    if streamed && end_offset >= session.audio_payload_end {
+                        if let Ok(mut rt) = runtime.lock() {
+                            if let Some(next_id) = rt.peek_next_queue_track_id() {
+                                let mut keep = HashSet::new();
+                                keep.insert(next_id.clone());
+                                if let Ok(admitted) =
+                                    rt.admit_tracks_for_explicit_user_play(&[next_id], &keep)
+                                {
+                                    if let Ok(mut guard) = shared_buffers.lock() {
+                                        guard.retain(|id, _| keep.contains(id));
+                                        for (id, buf) in admitted {
+                                            guard.insert(id, buf);
+                                        }
+                                    }
+                                }
+                            }
+                            let _ = rt.on_renderer_event(RendererEvent::Completed(token));
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                if consecutive_failures >= 3 {
+                    if let Ok(mut guard) = active_session.lock() {
+                        if let Some(prev) = guard.take() {
+                            prev.cancelled.store(true, Ordering::Release);
+                        }
+                    }
+                    if let Ok(mut rt) = runtime.lock() {
+                        let _ = rt.on_renderer_event(RendererEvent::Failed(token));
+                    }
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(800));
+    }
+}
+
 fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, body: &Value) {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status,
         reason,
         bytes.len()

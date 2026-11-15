@@ -333,3 +333,95 @@ test('PWA TopHeader, PairingView, and DiagnosticsSheet render Core engine/output
   assert.match(diagHtml, /Reconnect/)
   assert.match(diagHtml, /Choose engine/)
 })
+
+test('Phase 10 PWA Core client paginates catalog.page cursors across multi-page libraries', async () => {
+  const { createPwaCoreClient } = await import('../../pwa/src/services/coreRemoteClient')
+  const allTracks = Array.from({ length: 410 }, (_, idx) => ({
+    id: `trk_${idx + 1}`,
+    title: `Song ${idx + 1}`,
+    artist: 'Artist',
+    album: 'Album',
+    durationSeconds: 200,
+  }))
+  const client = createPwaCoreClient(
+    {
+      id: 'https://192.168.1.6:4040',
+      label: 'Music Room Core',
+      baseUrl: 'https://192.168.1.6:4040',
+      port: 4040,
+      token: 'core-token',
+      engineKind: 'core',
+      engineId: 'core_room',
+      libraryId: 'lib_master',
+    },
+    async (_url, body) => {
+      const req = JSON.parse(body) as { operation: string; cursor?: string | null; limit?: number }
+      if (req.operation === 'core.hello') {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          errorKind: 'ok',
+          body: JSON.stringify({
+            ok: true,
+            data: {
+              protocolVersion: 1,
+              engineId: 'core_room',
+              libraryId: 'lib_master',
+              label: 'Music Room Core',
+              capabilities: ['catalog.read', 'session.read', 'playback.control', 'queue.write'],
+              ready: true,
+            },
+          }),
+        }
+      }
+      if (req.operation === 'catalog.page') {
+        const start = req.cursor?.startsWith('page_') ? Number(req.cursor.slice(5)) || 0 : 0
+        const limit = req.limit ?? 200
+        const slice = allTracks.slice(start, start + limit)
+        const end = start + slice.length
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          errorKind: 'ok',
+          body: JSON.stringify({
+            ok: true,
+            data: {
+              revision: 0,
+              tracks: slice,
+              nextCursor: end < allTracks.length ? `page_${end}` : null,
+            },
+          }),
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        errorKind: 'ok',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            engineId: 'core_room',
+            libraryId: 'lib_master',
+            revision: 0,
+            catalog: {
+              revision: 0,
+              tracks: allTracks.slice(0, 200),
+              nextCursor: 'page_200',
+            },
+            queue: { entries: [], currentEntryId: null, repeat: 'off', shuffle: false },
+            playback: { activity: 'idle', positionSeconds: 0 },
+            output: { id: 'rs130', label: 'RS130', transport: 'upnp' },
+          },
+        }),
+      }
+    },
+  )
+
+  const prepared = await client.prepare()
+  assert.equal(prepared.snapshot.catalog.tracks.length, 410)
+  assert.equal(prepared.snapshot.catalog.nextCursor, null)
+  assert.equal(prepared.snapshot.catalog.tracks.at(-1)?.id, 'trk_410')
+})

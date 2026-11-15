@@ -357,7 +357,7 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 7 | Implementation ready for user verification | Windows desktop & Android/Mobile Remote PWA controller UX (`coreControllerTransport.ts`, `EngineControllerContext.tsx`, `PlaybackEnginePanel.tsx`, `EngineSwitchPromptModal.tsx`, `coreRemoteClient.ts`, `TopHeader.tsx`, `DiagnosticsSheet.tsx`, `PairingView.tsx`, and Tauri `core_probe_endpoint`/`core_control_request`/`discover_core_nodes` commands); default `This PC` startup with zero auto-discovery/onboarding, separate `Playback engine` & `Audio output` selectors, RS130 takeover & leave-Core prompts, direct PWA `/v1/core` client + pinning guidance; 61/61 controller/session/protocol unit tests, `CadenceSettingsModal` (4/4), endpoint-routing, queue-sync, Rust `cargo check` + `core_session_test` (24/24), desktop & PWA `tsc -b`, and Vite builds pass; live TrueNAS Dragonfish host + physical RS130 / physical Android APK QA pending user verification |
 | 8 | Implementation ready for user verification | `src-tauri/src/core_runtime/curate.rs`, `src-tauri/src/core_runtime/mod.rs` (`curate.draft.save`, `curate.dry_run`, `curate.approve`, `curate.job.status`, `core_writer_leases`), `src/core/remoteCurate.ts`, `src-tauri/tests/core_remote_curate_test.rs` (5/5 pass), and `src/test/testRemoteCurate.ts` (4/4 pass); 65/65 TS unit tests and `core_headless_test` (7/7) pass |
 | 9 | Implementation ready for user verification | `src-tauri/src/core_runtime/migration.rs`, `src-tauri/src/bin/cadence_headless.rs` (`--export-snapshot`, `--preview-import`, `--import-snapshot`, `--rollback-import`), `src/core/snapshotImport.ts`, `src-tauri/tests/core_snapshot_import_test.rs` (4/4 pass), and `src/test/testSnapshotImport.ts` (2/2 pass); 67/67 TS unit tests, `core_remote_curate_test` (5/5), and `core_headless_test` (7/7) pass |
-| 10 | Planned | No Phase 10 release qualification or full live TrueNAS+RS130+Android E2E claim yet |
+| 10 | Implementation ready for user verification (live TrueNAS rebuild/import/RS130 playback QA pending interactive `sudo` shell) | `DragonfishRenderer` (`src-tauri/src/core_runtime/dragonfish.rs`, `upnp_session.rs`, `platform.rs`, `mod.rs`), desktop+PWA cursor pagination (`coreControllerTransport.ts`, `EngineControllerContext.tsx`, `pwa/src/services/coreRemoteClient.ts`), CORS on `:4040`; 64/64 headless Rust + 64/64 desktop `--lib` + `--release` 0-alloc + 69/69 TS + `npm run build` + `npm run tauri:build -- --bundles nsis` (`Cadence Core_0.1.0-2_x64-setup.exe`) pass; live TrueNAS snapshot preview (`1,886/2,585` NAS tracks mapped, `0` unmapped failures, `63` drafts, `1` playlist), `/healthz` + `core.hello`, and SSDP RS130 discovery (`ROSE-67` `uuid:6610f352-d5a1-b8dc-ffff-ffffc0860aa6` at `192.168.1.106`) verified; live TrueNAS container rebuild/import/RS130 listening check staged for user interactive `sudo` execution |
 
 Phase 1 command:
 
@@ -1039,6 +1039,32 @@ npx oxlint src/core/snapshotImport.ts src/test/testSnapshotImport.ts
 
 - PASS: `core_snapshot_import_test` (4/4), `core_remote_curate_test` (5/5), `core_headless_test` (7/7), headless `cargo check` (0 errors, 0 warnings), 67/67 TS unit tests, `npx tsc -b`, `npx --prefix pwa tsc -b`, and `oxlint` (0 warnings, 0 errors).
 - NOT RUN / PENDING END-TO-END QA: Live snapshot import on the TrueNAS Core container and full Phase 10 end-to-end qualification remain pending.
+
+### Phase 10 TDD and verification record (2026-11-15)
+
+Source: phase 10 in the independently testable phase table above. User journeys:
+end-to-end TrueNAS Dragonfish Core UPnP playback against HiFi ROSE RS130
+(`DragonfishRenderer` delegating to `UpnpBridgeRenderer`, explicit user-play
+RAM admission & `mlock` window retention, idle-only AVTransport reconciliation
+loop), CORS support for local/browser PWA controllers, full desktop + PWA
+`catalog.page` cursor pagination beyond the 200-track first page, Windows NSIS
+release bundle verification, and live Windows DB snapshot export + TrueNAS
+staging without mutating Windows `cadence.db`.
+
+- Implementation & fixes: `src-tauri/src/core_runtime/dragonfish.rs`, `src-tauri/src/core_runtime/upnp_session.rs`, `src-tauri/src/core_runtime/platform.rs`, `src-tauri/src/core_runtime/mod.rs`, `src-tauri/tests/versions_schema_test.rs`, `src/services/coreControllerTransport.ts`, `src/context/EngineControllerContext.tsx`, `pwa/src/services/coreRemoteClient.ts`, `src/test/testCoreControllerUx.ts`, `src/test/testPwaCoreController.ts`.
+
+| Guarantee | Acceptance fixture / command | Result |
+| --- | --- | --- |
+| Headless Rust test suites (`core_dragonfish_packaging_test` 8/8, `core_headless_test` 7/7, `core_remote_curate_test` 5/5, `core_session_test` 24/24, `core_snapshot_import_test` 4/4, `core_upnp_session_test` 5/5, `core_upnp_zero_alloc_test` 2/2, `diagnostics_stress_test` 2/2, `versions_schema_test` 1/1, lib 6/6) | `cargo test --manifest-path "src-tauri/Cargo.toml" --no-default-features --features bundled-sqlite` (note: one earlier parallel run hit transient `core_upnp_session_test` timing failure at line 358; clean re-run passed 5/5 and full suite exited 0) | PASS (64/64) |
+| Release-mode zero-allocation UPnP paced loop | `cargo test --manifest-path "src-tauri/Cargo.toml" --no-default-features --features bundled-sqlite --release --test core_upnp_zero_alloc_test` | PASS (2/2) |
+| Headless `--locked` compile check matching Dragonfish Dockerfile | `cargo check --manifest-path "src-tauri/Cargo.toml" --locked --no-default-features --features bundled-sqlite --bin cadence-headless` | PASS (0 warnings) |
+| Desktop library tests | `cargo test --manifest-path "src-tauri/Cargo.toml" --lib` (full `--tests` desktop binary link skipped overwrite only because live `target\debug\cadence-core.exe` PID `84800` remained open for user inspection) | PASS (64/64) |
+| Web + Mobile Remote PWA builds, lint, and Phase 1–10 TS suites (incl. 450/410-track `catalog.page` cursor pagination) | `npm run build`, `npx oxlint ...`, `node --import tsx --test src/test/testSnapshotImport.ts src/test/testRemoteCurate.ts src/test/testCoreControllerUx.ts src/test/testPwaCoreController.ts src/test/testEngineSession.ts src/test/testCoreServices.ts src/test/testCoreSessionProtocol.ts` | PASS (69/69 TS; `build` + `oxlint` exit 0) |
+| Legacy desktop script checks (`endpoint-routing`, `queue-sync`, `diagnostics`, `audit`, `commit`; pre-existing Node `.css` loader fails `AppContent` in `test:settings` 4/5 and `test:startup` 4/7) | `npm run test:endpoint-routing`, `test:queue-sync`, `test:diagnostics`, `test:audit`, `test:commit`, `test:settings`, `test:startup` | Mixed (5 suites PASS; 2 pre-existing `.css` ESM test failures outside Phase 10 scope) |
+| Windows NSIS installer bundle gate (`.agents/rules/Git.md` §5) | `npm run tauri:build -- --bundles nsis` -> `src-tauri/target/release/bundle/nsis/Cadence Core_0.1.0-2_x64-setup.exe` | PASS |
+| Live Windows snapshot export (`VACUUM INTO`), SMB/root verification (`net use`), and TrueNAS staging (`192.168.1.6`) | `cadence-headless --export-snapshot` + `--preview-import` (`2,585` total -> `1,886` NAS tracks mapped to `/music`, `699` unmapped `E:\` / `Z:\` roots skipped cleanly, `0` case/missing/ambiguous errors, `63` drafts, `1` playlist); LAN SSDP found `ROSE-67` (`uuid:6610f352-d5a1-b8dc-ffff-ffffc0860aa6` at `192.168.1.106`); `/healthz` + `POST /v1/core` `core.hello` responded `ready: true`; updated source & `cadence_windows_snapshot.db` staged on `/mnt/Home Pool/Mathan/` | Partial (PASS read/stage; rebuild/import/playback pending user interactive `sudo`) |
+
+- **Pending live hardware verification (blocked on non-interactive `sudo` over SSH):** Rebuilding `cadence-core:0.1.0` on TrueNAS (`192.168.1.6`), backing up `/mnt/Home Pool/Mathan/cadence-core-data`, importing `/mnt/Home Pool/Mathan/cadence_windows_snapshot.db`, restarting with `CADENCE_PINNED_RS130_UDN=uuid:6610f352-d5a1-b8dc-ffff-ffffc0860aa6`, and verifying PCM/DSD audio playback on HiFi ROSE RS130 + Windows/Android controller disconnect & resume.
 
 ## Platform references
 

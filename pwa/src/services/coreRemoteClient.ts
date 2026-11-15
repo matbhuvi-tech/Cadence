@@ -1,7 +1,7 @@
 import type {
   PlaybackStatus,
   RemoteQueue,
-  RemoteQueueItem,
+  RemoteTrackItem,
   ServerProfile,
 } from '../types/remote';
 
@@ -326,18 +326,18 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
   outputLabel: string | null;
 } {
   const trackMap = new Map(snapshot.catalog.tracks.map((t) => [t.id, t]));
-  const items: RemoteQueueItem[] = snapshot.queue.entries.map((entry, idx) => {
+  const items: RemoteTrackItem[] = snapshot.queue.entries.map((entry) => {
     const trk = trackMap.get(entry.trackId);
     return {
       queueEntryId: entry.entryId,
-      trackId: entry.trackId,
+      id: entry.trackId,
       title: trk?.title || entry.trackId,
       artist: trk?.artist || 'Unknown Artist',
       album: trk?.album || '',
       format: 'CORE',
       durationSecs: trk?.durationSeconds ?? 0,
       filePath: entry.trackId,
-      index: idx,
+      isHighRes: false,
     };
   });
 
@@ -351,7 +351,8 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
   const status: PlaybackStatus = {
     isPlaying,
     isPaused,
-    currentFile: activeItem?.trackId ?? null,
+    currentFile: activeItem?.id ?? null,
+    currentQueueEntryId: activeItem?.queueEntryId ?? null,
     positionSecs: snapshot.playback.positionSeconds,
     durationSecs: activeItem?.durationSecs ?? 0,
     volume: 1,
@@ -360,7 +361,7 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
     activeDevice: snapshot.output?.label ?? null,
     streamInfo: activeItem
       ? {
-          filePath: activeItem.trackId,
+          filePath: activeItem.id,
           title: activeItem.title,
           artist: activeItem.artist,
           album: activeItem.album,
@@ -374,6 +375,7 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
   const queue: RemoteQueue = {
     items,
     currentIndex: currentIdx,
+    currentQueueEntryId: snapshot.queue.currentEntryId ?? undefined,
     repeatMode: snapshot.queue.repeat,
     isShuffle: snapshot.queue.shuffle,
     revision: snapshot.revision,
@@ -390,13 +392,19 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
   const sendPost: CorePostFn =
     postJson ||
     (async (url, body) => {
-      const { pinnedHttpRequest } = await import('../platform/cadenceBridge');
-      const res = await pinnedHttpRequest(url, {
+      const { nativeOrFetchHttp } = await import('../platform/cadenceBridge');
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (profile.token) {
+        headers.Authorization = `Bearer ${profile.token}`;
+        headers['x-cadence-token'] = profile.token;
+      }
+      return nativeOrFetchHttp(url, {
         method: 'POST',
-        token: profile.token,
+        headers,
         body,
       });
-      return res;
     });
 
   let cachedDescriptor: CoreDescriptor | null = null;
@@ -463,18 +471,61 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
     return cachedDescriptor;
   }
 
+  async function hydrateCatalog(snapshot: CoreSnapshot): Promise<CoreSnapshot> {
+    if (!snapshot.catalog.nextCursor) return snapshot;
+    const merged = [...snapshot.catalog.tracks];
+    const seen = new Set(merged.map((t) => t.id));
+    let cursor: string | null = snapshot.catalog.nextCursor;
+    let pages = 0;
+    while (cursor && pages < 100) {
+      pages++;
+      const rawPage = await requestCore({ operation: 'catalog.page', cursor, limit: 200 });
+      const pageObj = assertRecord(rawPage);
+      if (!Array.isArray(pageObj.tracks)) break;
+      for (const item of pageObj.tracks) {
+        const t = assertRecord(item);
+        const dur = typeof t.durationSeconds === 'number' && Number.isFinite(t.durationSeconds) ? Math.max(0, t.durationSeconds) : 0;
+        const id = nonEmptyString(t.id);
+        if (!seen.has(id)) {
+          seen.add(id);
+          merged.push({
+            id,
+            title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled',
+            artist: typeof t.artist === 'string' ? t.artist : 'Unknown Artist',
+            album: typeof t.album === 'string' ? t.album : 'Unknown Album',
+            durationSeconds: dur,
+          });
+        }
+      }
+      const next = pageObj.nextCursor === null ? null : typeof pageObj.nextCursor === 'string' ? pageObj.nextCursor : null;
+      if (!next || next === cursor) {
+        cursor = null;
+      } else {
+        cursor = next;
+      }
+    }
+    return {
+      ...snapshot,
+      catalog: {
+        ...snapshot.catalog,
+        tracks: merged,
+        nextCursor: null,
+      },
+    };
+  }
+
   return {
     async prepare(): Promise<{ descriptor: CoreDescriptor; snapshot: CoreSnapshot }> {
       const descriptor = await ensureHello(true);
       const rawSnap = await requestCore({ operation: 'session.snapshot' });
-      const snapshot = parseCoreSnapshot(rawSnap, profile);
+      const snapshot = await hydrateCatalog(parseCoreSnapshot(rawSnap, profile));
       return { descriptor, snapshot };
     },
 
     async getSnapshot(): Promise<CoreSnapshot> {
       await ensureHello(false);
       const rawSnap = await requestCore({ operation: 'session.snapshot' });
-      return parseCoreSnapshot(rawSnap, profile);
+      return hydrateCatalog(parseCoreSnapshot(rawSnap, profile));
     },
 
     async execute(command: CoreClientCommand): Promise<CoreSnapshot> {

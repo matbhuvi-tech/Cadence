@@ -301,8 +301,12 @@ export const EngineControllerProvider: React.FC<{
 
   const { tracks: coreCatalogTracks, releases: coreCatalogReleases } = useMemo(() => {
     if (!activeCoreSnapshot) return { tracks: [], releases: [] }
-    return mapCoreCatalogToUi(activeCoreSnapshot.catalog.tracks)
-  }, [activeCoreSnapshot])
+    const allTracks =
+      state.hydratedCatalogTracks.length > activeCoreSnapshot.catalog.tracks.length
+        ? state.hydratedCatalogTracks
+        : activeCoreSnapshot.catalog.tracks
+    return mapCoreCatalogToUi(allTracks)
+  }, [activeCoreSnapshot, state.hydratedCatalogTracks])
 
   const value = useMemo<EngineControllerContextValue>(() => {
     const exec = async (cmd: CoreCommandInput) => {

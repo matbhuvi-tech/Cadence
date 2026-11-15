@@ -80,7 +80,7 @@ function createFakeCoreNode(options?: {
     catalog: {
       revision: 0,
       tracks: tracks.slice(0, 200),
-      nextCursor: null,
+      nextCursor: tracks.length > 200 ? 'page_200' : null,
     },
     queue: {
       entries: structuredClone(entries),
@@ -131,12 +131,15 @@ function createFakeCoreNode(options?: {
         return { ok: true, data: snapshot() }
       }
       if (req.operation === 'catalog.page') {
+        const start = req.cursor?.startsWith('page_') ? Number(req.cursor.slice(5)) || 0 : 0
+        const pageTracks = tracks.slice(start, start + req.limit)
+        const nextOffset = start + pageTracks.length
         return {
           ok: true,
           data: {
             revision: 0,
-            tracks: tracks.slice(0, req.limit),
-            nextCursor: null,
+            tracks: pageTracks,
+            nextCursor: nextOffset < tracks.length ? `page_${nextOffset}` : null,
           },
         }
       }
@@ -581,4 +584,40 @@ test('Phase 7 Per-controller independence: Windows returning to This PC leaves C
     core.getCommands().some((c) => c.operation === 'playback.control' && c.action === 'stop'),
     false,
   )
+})
+
+test('Phase 10 catalog hydration paginates beyond the initial 200-track snapshot page', async () => {
+  const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
+  const largeTracks: CoreCatalogTrack[] = Array.from({ length: 450 }, (_, idx) => ({
+    id: `trk_${idx + 1}`,
+    title: `Track ${idx + 1}`,
+    artist: 'Orchestra',
+    album: `Album ${(idx % 12) + 1}`,
+    durationSeconds: 180 + (idx % 60),
+  }))
+  const core = createFakeCoreNode({ tracks: largeTracks })
+  const store = createDesktopCoreControllerStore({
+    channelFactory: () => core.channel,
+    localOwner: {
+      getActivity: () => 'idle',
+      stopAndAcknowledge: async () => true,
+      request: async () => ({ ok: true, data: {} }),
+    },
+  })
+
+  await store.stageCandidate({
+    engineId: 'core_living_room',
+    libraryId: 'lib_nas_master',
+    label: 'Music Room Core',
+    baseUrl: 'https://192.168.1.50:4040',
+    musicRoots: [],
+  })
+  const outcome = await store.activateStagedCore()
+  assert.equal(outcome, 'activated')
+  assert.equal(store.getState().hydratedCatalogTracks.length, 450)
+  assert.equal(store.getState().hydratedCatalogTracks.at(-1)?.id, 'trk_450')
+
+  await store.requestSwitchToLocal()
+  assert.equal(store.getState().hydratedCatalogTracks.length, 0)
+  store.dispose()
 })

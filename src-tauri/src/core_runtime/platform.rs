@@ -280,6 +280,21 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
         Ok(())
     }
 
+    pub(crate) fn retain_keys(&mut self, keep_ids: &std::collections::HashSet<String>) {
+        let remove_ids: Vec<String> = self
+            .buffers
+            .keys()
+            .filter(|id| !keep_ids.contains(*id))
+            .cloned()
+            .collect();
+        for id in remove_ids {
+            if let Some(buf) = self.buffers.remove(&id) {
+                self.locker.unlock(buf.as_slice());
+                self.retained_bytes = self.retained_bytes.saturating_sub(buf.len() as u64);
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         for (_, buf) in self.buffers.drain() {
             self.locker.unlock(buf.as_slice());

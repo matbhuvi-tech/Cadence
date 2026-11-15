@@ -1,9 +1,11 @@
 import {
   CORE_MAX_MESSAGE_BYTES,
+  CORE_MAX_PAGE_TRACKS,
   CORE_PROTOCOL_VERSION,
   CoreServiceError,
   parseCoreSnapshot,
   type CoreCatalogPage,
+  type CoreCatalogTrack,
   type CoreCommand,
   type CoreDescriptor,
   type CoreRequest,
@@ -80,6 +82,7 @@ export type CoreSwitchPrompt =
 
 export interface CoreControllerState {
   view: EngineServiceView
+  hydratedCatalogTracks: CoreCatalogTrack[]
   savedCores: SavedCoreProfile[]
   discoveredCores: DiscoveredCoreNode[]
   isDiscovering: boolean
@@ -417,6 +420,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
 
   let state: CoreControllerState = {
     view: controller.getView(),
+    hydratedCatalogTracks: [],
     savedCores: loadSavedCoreProfiles(storage),
     discoveredCores: [],
     isDiscovering: false,
@@ -510,6 +514,32 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     }
   }
 
+  async function hydrateCatalogTracks(
+    service: EngineService,
+    snapshot: CoreSnapshot | null,
+  ): Promise<CoreCatalogTrack[]> {
+    if (!snapshot) return []
+    const merged: CoreCatalogTrack[] = [...snapshot.catalog.tracks]
+    const seen = new Set(merged.map((t) => t.id))
+    let cursor = snapshot.catalog.nextCursor
+    let pages = 0
+    while (cursor && pages < 100) {
+      pages++
+      const page = await service.catalogPage(cursor, CORE_MAX_PAGE_TRACKS)
+      for (const trk of page.tracks) {
+        if (!seen.has(trk.id)) {
+          seen.add(trk.id)
+          merged.push(trk)
+        }
+      }
+      if (!page.nextCursor || page.nextCursor === cursor) {
+        break
+      }
+      cursor = page.nextCursor
+    }
+    return merged
+  }
+
   async function activateProfileInternal(
     profile: SavedCoreProfile,
     sourceActivity: EngineActivity,
@@ -540,10 +570,19 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       activeCoreService = remoteService
       activeCoreProfile = profile
       upsertSavedProfile(profile, view.snapshot)
+      let hydratedCatalogTracks = view.snapshot?.catalog.tracks ?? []
+      if (view.snapshot?.catalog.nextCursor) {
+        try {
+          hydratedCatalogTracks = await hydrateCatalogTracks(remoteService, view.snapshot)
+        } catch {
+          // Keep first page if pagination transiently fails during switch
+        }
+      }
       const outLabel = view.snapshot?.output?.label ?? 'Unassigned'
       state = {
         ...state,
         view,
+        hydratedCatalogTracks,
         isBusy: false,
         stagedCandidate: null,
         stagingError: null,
@@ -693,6 +732,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         state = {
           ...state,
           view: controller.getView(),
+          hydratedCatalogTracks: [],
           switchPrompt: null,
           lastError: null,
           statusAnnouncement: 'Playback engine: This PC. Local playback remains stopped.',
@@ -750,6 +790,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         state = {
           ...state,
           view: controller.getView(),
+          hydratedCatalogTracks: [],
           isBusy: false,
           switchPrompt: null,
           lastError: null,
@@ -774,9 +815,20 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       const outcome = await controller.refresh()
       const nextView = controller.getView()
       if (outcome === 'updated') {
+        let hydratedCatalogTracks = state.hydratedCatalogTracks
+        if (nextView.snapshot?.catalog.nextCursor && activeCoreService) {
+          try {
+            hydratedCatalogTracks = await hydrateCatalogTracks(activeCoreService, nextView.snapshot)
+          } catch {
+            // Preserve previously hydrated catalog on transient failure
+          }
+        } else if (nextView.snapshot && !nextView.snapshot.catalog.nextCursor) {
+          hydratedCatalogTracks = nextView.snapshot.catalog.tracks
+        }
         state = {
           ...state,
           view: nextView,
+          hydratedCatalogTracks,
           isBusy: false,
           lastError: null,
           statusAnnouncement: `Reconnected to ${nextView.session.active.label}.`,

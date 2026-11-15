@@ -168,6 +168,82 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.arena.get_shared_buffer(track_id)
     }
 
+    /// Bounded explicit user-action admission helper used by live Core nodes so
+    /// manual track/album switches work immediately without relaxing background
+    /// `admit_tracks` / `reload_catalog` cooldown enforcement.
+    pub(crate) fn admit_tracks_for_explicit_user_play(
+        &mut self,
+        track_ids: &[String],
+        keep_ids: &HashSet<String>,
+    ) -> Result<Vec<(String, Arc<Vec<u8>>)>, RuntimeError> {
+        const MAX_WINDOW_TRACKS: usize = 4;
+        let mut bounded: Vec<String> = Vec::with_capacity(MAX_WINDOW_TRACKS);
+        for id in track_ids {
+            if self.track_files.contains_key(id) && !bounded.contains(id) {
+                bounded.push(id.clone());
+                if bounded.len() >= MAX_WINDOW_TRACKS {
+                    break;
+                }
+            }
+        }
+        if bounded.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut retain_set = keep_ids.clone();
+        for id in &bounded {
+            retain_set.insert(id.clone());
+        }
+
+        let needs_load = bounded.iter().any(|id| !self.arena.is_admitted(id));
+        if needs_load {
+            if self.arena.admit_files(&self.track_files, &bounded).is_err() {
+                self.arena.retain_keys(&retain_set);
+                if let Ok(mut admitted) = self.renderer.admitted_ids.lock() {
+                    admitted.retain(|id| retain_set.contains(id));
+                }
+                self.arena
+                    .admit_files(&self.track_files, &bounded)
+                    .map_err(RuntimeError::Admission)?;
+            }
+            if let Ok(mut admitted) = self.renderer.admitted_ids.lock() {
+                for id in &bounded {
+                    if self.arena.is_admitted(id) {
+                        admitted.insert(id.clone());
+                    }
+                }
+            }
+        }
+
+        let mut out = Vec::with_capacity(bounded.len());
+        for id in bounded {
+            if let Some(buf) = self.arena.get_shared_buffer(&id) {
+                out.push((id, buf));
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn peek_next_queue_track_id(&self) -> Option<String> {
+        let req = json!({
+            "protocolVersion": 1,
+            "engineId": self.config.engine_id,
+            "libraryId": self.config.library_id,
+            "operation": "session.snapshot"
+        });
+        let resp = self.owner.request(&serde_json::to_vec(&req).unwrap_or_default());
+        let data = resp.get("data")?;
+        let current_entry_id = data["queue"]["currentEntryId"].as_str()?;
+        let entries = data["queue"]["entries"].as_array()?;
+        let cur_idx = entries
+            .iter()
+            .position(|e| e["entryId"].as_str() == Some(current_entry_id))?;
+        entries
+            .get(cur_idx + 1)
+            .and_then(|e| e["trackId"].as_str())
+            .map(ToString::to_string)
+    }
+
     pub fn admit_tracks(&mut self, track_ids: &[String]) -> Result<(), RuntimeError> {
         self.admit_tracks_at(track_ids, Instant::now())
     }

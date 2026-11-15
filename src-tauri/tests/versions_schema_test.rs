@@ -67,6 +67,7 @@ fn make_release(id: &str, title: &str, folder_path: &str, year: Option<i32>) -> 
         target_folder_path: None,
         is_compilation: false,
         physical_combo_title: None,
+        is_favorite: false,
         created_at: "2026-11-09T00:00:00Z".to_string(),
         master_album_id: None,
     }

@@ -1243,22 +1243,72 @@ pub fn inspect_rs130_description(
     })
 }
 
-struct ActiveMediaSession {
-    capability_path: String,
-    stream_url: String,
-    run_token: Mutex<RunToken>,
-    buffer: Arc<Vec<u8>>,
-    content_type: &'static str,
-    realtime_bytes_per_sec: Option<f64>,
-    preroll_bytes: u64,
-    steady_sndbuf_bytes: usize,
-    fast_start_sndbuf_bytes: usize,
-    chunk_bytes: usize,
-    metadata_offset: Option<u64>,
-    audio_payload_end: u64,
-    has_streamed_audio: AtomicBool,
-    last_audio_end_offset: AtomicU64,
-    cancelled: AtomicBool,
+/// Discovers a HiFi ROSE RS130 / AVTransport MediaRenderer on the local subnet via SSDP.
+/// Returns `None` immediately when `allow_loopback` is true so hermetic tests never emit LAN multicast.
+pub(crate) fn discover_rs130_device(
+    pinned_udn: Option<&str>,
+    allow_loopback: bool,
+) -> Option<Rs130DeviceDescriptor> {
+    if allow_loopback {
+        return None;
+    }
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(300)));
+    let msearch = b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
+    let _ = socket.send_to(msearch, "239.255.255.250:1900");
+
+    let deadline = Instant::now() + Duration::from_millis(1600);
+    let mut locations: Vec<String> = Vec::new();
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        match socket.recv_from(&mut buf) {
+            Ok((n, _)) => {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                for line in text.lines() {
+                    if let Some((key, val)) = line.split_once(':') {
+                        if key.trim().eq_ignore_ascii_case("location") {
+                            let url = val.trim().to_string();
+                            if !url.is_empty() && !locations.contains(&url) {
+                                locations.push(url);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                if !locations.is_empty() && Instant::now() + Duration::from_millis(600) > deadline {
+                    break;
+                }
+            }
+        }
+    }
+
+    for loc in locations {
+        if let Ok(desc) = inspect_rs130_description(&loc, pinned_udn) {
+            if pinned_udn.is_some() || desc.is_qualified_rs130() {
+                return Some(desc);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) struct ActiveMediaSession {
+    pub(crate) capability_path: String,
+    pub(crate) stream_url: String,
+    pub(crate) run_token: Mutex<RunToken>,
+    pub(crate) buffer: Arc<Vec<u8>>,
+    pub(crate) content_type: &'static str,
+    pub(crate) realtime_bytes_per_sec: Option<f64>,
+    pub(crate) preroll_bytes: u64,
+    pub(crate) steady_sndbuf_bytes: usize,
+    pub(crate) fast_start_sndbuf_bytes: usize,
+    pub(crate) chunk_bytes: usize,
+    pub(crate) metadata_offset: Option<u64>,
+    pub(crate) audio_payload_end: u64,
+    pub(crate) has_streamed_audio: AtomicBool,
+    pub(crate) last_audio_end_offset: AtomicU64,
+    pub(crate) cancelled: AtomicBool,
 }
 
 struct StreamSlotGuard {
@@ -1395,6 +1445,18 @@ impl CoreMediaServer {
 
     pub fn pacing_snapshot(&self) -> CorePacingSnapshot {
         self.pacing_metrics.snapshot()
+    }
+
+    pub(crate) fn advertised_ip_addr(&self) -> Ipv4Addr {
+        self.advertised_ip
+    }
+
+    pub(crate) fn active_session_arc(&self) -> Arc<Mutex<Option<Arc<ActiveMediaSession>>>> {
+        Arc::clone(&self.active_session)
+    }
+
+    pub(crate) fn paused_flag_arc(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.paused_flag)
     }
 
     fn handle_client_sync(
@@ -1557,7 +1619,7 @@ impl CoreMediaServer {
         let _ = stream.flush();
     }
 
-    fn stop_active_session(&self) {
+    pub(crate) fn stop_active_session(&self) {
         if let Ok(mut guard) = self.active_session.lock() {
             if let Some(prev) = guard.take() {
                 prev.cancelled.store(true, Ordering::Release);
@@ -1591,12 +1653,12 @@ impl Drop for CoreMediaServer {
 }
 
 #[derive(Clone, Debug)]
-struct TrackMediaMeta {
-    title: String,
-    artist: String,
-    album: String,
-    duration_secs: f64,
-    extension: String,
+pub(crate) struct TrackMediaMeta {
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) album: String,
+    pub(crate) duration_secs: f64,
+    pub(crate) extension: String,
 }
 
 /// Configuration for `UpnpSessionRuntime`.
@@ -1629,14 +1691,14 @@ pub struct RestartProbeSnapshot {
     pub rel_time: String,
 }
 
-struct UpnpBridgeRenderer {
-    device: Rs130DeviceDescriptor,
-    media_server_addr: SocketAddr,
-    advertised_ip: Ipv4Addr,
-    active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
-    paused_flag: Arc<AtomicBool>,
-    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
-    track_meta: Arc<HashMap<String, TrackMediaMeta>>,
+pub(crate) struct UpnpBridgeRenderer {
+    pub(crate) device: Rs130DeviceDescriptor,
+    pub(crate) media_server_addr: SocketAddr,
+    pub(crate) advertised_ip: Ipv4Addr,
+    pub(crate) active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
+    pub(crate) paused_flag: Arc<AtomicBool>,
+    pub(crate) shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    pub(crate) track_meta: Arc<Mutex<HashMap<String, TrackMediaMeta>>>,
 }
 
 impl Renderer for UpnpBridgeRenderer {
@@ -1651,8 +1713,9 @@ impl Renderer for UpnpBridgeRenderer {
                     .ok_or(RendererError)?;
                 let meta = self
                     .track_meta
-                    .get(&entry.track_id)
-                    .cloned()
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.get(&entry.track_id).cloned())
                     .ok_or(RendererError)?;
 
                 if !self.device.supports_extension(&meta.extension) {
@@ -1836,7 +1899,7 @@ impl<P: PlatformProbe, L: MemoryLocker> UpnpSessionRuntime<P, L> {
         )
         .map_err(RuntimeError::Database)?;
 
-        let track_meta = Arc::new(load_track_media_meta(&headless_config.db_path)?);
+        let track_meta = Arc::new(Mutex::new(load_track_media_meta(&headless_config.db_path)?));
         let shared_buffers = Arc::new(Mutex::new(HashMap::new()));
 
         let bridge = UpnpBridgeRenderer {
@@ -1974,7 +2037,7 @@ impl<P: PlatformProbe, L: MemoryLocker> UpnpSessionRuntime<P, L> {
     }
 }
 
-fn load_track_media_meta(db_path: & std::path::Path) -> Result<HashMap<String, TrackMediaMeta>, RuntimeError> {
+pub(crate) fn load_track_media_meta(db_path: &std::path::Path) -> Result<HashMap<String, TrackMediaMeta>, RuntimeError> {
     let db = crate::db::AppDb::new(db_path.to_path_buf()).map_err(RuntimeError::Database)?;
     let conn = db.conn.lock();
     let mut stmt = conn
@@ -2152,7 +2215,7 @@ fn send_simple_avtransport_action(
     send_soap_post(control_url, action, &body)
 }
 
-fn query_renderer_state(control_url: &str) -> Result<RestartProbeSnapshot, String> {
+pub(crate) fn query_renderer_state(control_url: &str) -> Result<RestartProbeSnapshot, String> {
     let transport_xml = send_simple_avtransport_action(control_url, "GetTransportInfo", "")?;
     let pos_xml = send_simple_avtransport_action(control_url, "GetPositionInfo", "")?;
     let transport_state =
