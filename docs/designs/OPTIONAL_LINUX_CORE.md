@@ -223,6 +223,14 @@ audio-path changes. Tier 1 applies. Controller integration requires Tier 2; tran
 changes require Tier 3 release-build PCM/DSD validation. Hardware results stay pending
 until measured. Renew impact assessment if later implementation changes these policies.
 
+Phase 2 adds unconnected control-plane contracts, injected service adapters and an
+in-memory staging coordinator. Production imports do not reference these modules.
+Disk and network/NIC impact: none in the running application; tests use in-process
+fakes, not library drives or LAN services. Thread/CPU impact: no workers, scheduling
+changes, timers or polling. Memory impact: bounded validation/copying in explicit
+service calls, with no changes to pinned buffers or active delivery. Tier 1 applies
+to this foundation; actual IPC/network/UI bindings still require Tier 2 assessment.
+
 ## Independently testable phases
 
 Each phase has its own acceptance fixture and rollback boundary. Use synthetic files,
@@ -254,7 +262,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | --- | --- | --- |
 | 0 | Recorded | This document; direction approved in chat |
 | 1 | Implementation ready for user verification | `src/core/engineSession.ts`; test-first fixtures in `src/test/testEngineSession.ts`; runtime integration intentionally pending |
-| 2-10 | Planned | No Linux executable, remote adapters or deployment claimed yet |
+| 2 | Implementation ready for user verification | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; runtime bindings remain pending |
+| 3-10 | Planned | No authoritative backend, Linux executable or deployment claimed yet |
 
 Phase 1 command:
 
@@ -285,7 +294,7 @@ Visual QA starts when a UI is integrated; phase 1 has no user-facing control to 
 - Existing uncommitted WASAPI, desktop, Android and media assets were left in place;
   only this phase's named files belong to its checkpoint commits.
 
-### Self-review
+### Phase 1 self-review
 
 Overall 4.0/5; deliver phase 1 for user verification, not as a working Linux engine.
 
@@ -300,6 +309,124 @@ Overall 4.0/5; deliver phase 1 for user verification, not as a working Linux eng
 Priority improvements: implement adapter integration tests, then verify Linux memory
 and timing behavior. Would the user agree? Expected yes if judged as the requested
 start of phased development; end-to-end Core capability is not yet delivered.
+
+### Phase 2 contract and integration boundary
+
+`src/core/coreProtocol.ts` is the executable v1 contract. Requests carry protocol,
+engine and library identities. Allowed operations are `core.hello`,
+`session.snapshot`, `catalog.page`, `playback.control` and `queue.replace`.
+Mutations carry a caller-supplied command ID and expected session revision; the
+adapter never generates replacement IDs, retries mutations or claims server-side
+deduplication. Serialization, deduplication and exactly-one advancement are phase 3.
+Play carries a track ID; seek carries seconds. There is no raw IPC/SQL/path operation.
+
+Negotiation requires matching stable identities, protocol 1, readiness and
+`catalog.read`, `session.read`, `playback.control`, `queue.write` capabilities.
+Future well-formed capabilities are tolerated. Remote identities cannot use reserved
+`local` IDs. Identifiers/cursors are 1-128 ASCII alphanumeric/base64url-style tokens
+starting with an alphanumeric character; backend bindings must map legacy paths,
+UDNs or other identifiers to opaque IDs rather than expose those strings directly.
+Cache scope includes engine kind, engine ID and library ID, never display labels.
+
+Messages are capped at 1 MiB UTF-8 JSON, catalog pages at 200 tracks, queue entries
+at 4096 and display text at 1024 characters. Queue-entry IDs are unique; repeated
+track IDs are permitted. Snapshots contain a bounded initial catalog page and its
+cursor, queue, playback and output together. Later catalog pages are revisioned;
+future consumers must restart pagination on a catalog revision change. Unknown
+fields, paths in identifier fields, invalid numbers and mixed identities reject.
+Typed errors use safe local messages. A stale-revision error must include a fresh,
+identity-validated snapshot; the caller reviews it before another mutation.
+
+The local adapter takes a `LocalEngineOwner` in-process port. The remote adapter
+takes an `AuthenticatedCoreChannel`; it verifies the peer before negotiation and
+each public operation. This port must use a verified, authorized peer-bound channel,
+reject redirects/peer changes, bound lifetimes and cap bytes before buffering.
+The adapter's object-size check does not replace a wire-level receive limit. There
+is deliberately no permissive fetch default or trust flag accepted from hello JSON.
+Native certificate pinning, browser trust setup, endpoints and pairing remain later
+platform/controller integration work. Existing Tauri APIs are not presented as a
+coherent Core snapshot before backend authority exists.
+
+`engineServiceController.ts` keeps This PC selected initially without I/O, prepares
+the target view, then commits selection/catalog/queue/output as one value. It rejects
+late activation/refresh responses and older revisions. Active source connection
+events remain observable during preparation. A socket-open event never marks a
+disconnected view ready; explicit reconnect refresh renegotiates version, capabilities,
+readiness and trust before obtaining a fresh snapshot. Connection callbacks capture
+the committed view's `connectionGeneration` when attached and supply it alongside
+the active engine epoch. Each activation/reconnect gets a new connection generation;
+an old socket close cannot disconnect its replacement. Selection, snapshot-request
+and connection generations are distinct.
+Source activity must come from its owner; stopping is acknowledged outside this
+coordinator. Activation issues no playback or queue command. UI consumers must bind
+to the single committed view in phase 7; independent React store hydration is not
+made atomic merely by these tests.
+
+### Phase 2 TDD and verification record (2026-11-15)
+
+Source: phase 2 in the independently testable phase table above. User journeys:
+use This PC without Core configuration; safely prepare a compatible trusted Core;
+retain the previous view on failure/cancellation; reconnect without fallback or replay.
+
+RED checkpoint `c11f72f`: `node --import tsx --test src/test/testCoreServices.ts`
+failed with `ERR_MODULE_NOT_FOUND` for the not-yet-implemented `coreProtocol` module.
+GREEN checkpoint `0d980ed`: the same fixture passed 30 tests after implementation;
+strict isolated typechecking also passed. During development the fixture exposed
+the socket-open assertion conflict; it now requires authoritative snapshot refresh.
+QA then reproduced cached negotiation across reconnect and stale socket-close events.
+RED checkpoint `0435ab9` added the two failing regressions (30 pass / 2 fail).
+GREEN checkpoint `77ef113` passed all 32 tests after reconnect renegotiation and
+separate connection generations were added; strict isolated typechecking passed.
+
+| Guarantee | Acceptance fixture in `src/test/testCoreServices.ts` | Type / result |
+| --- | --- | --- |
+| Default standalone adapter does no implicit work and uses its local owner | Construction, local projection and local mutation cases | In-process integration / PASS |
+| Reject untrusted/revoked peers, version/capability/readiness and identity mismatch | Negotiation and trust cases | In-process integration / PASS |
+| Reject raw IPC/SQL/paths, oversized or malformed payloads; preserve duplicate tracks | Request, snapshot and envelope cases | Unit + integration / PASS |
+| Preserve command IDs/revision preconditions; no replay after lost acknowledgement | Mutation forwarding and lost-acknowledgement cases | In-process integration / PASS |
+| Stage a complete target view without transport mutation; retain old view on failure | Activation, stop-choice, cancellation and mixed-library cases | Controller integration / PASS |
+| Reject late success/failure and older revisions; renegotiate reconnect and ignore old socket events | Activation, refresh race/disconnect and reconnect QA regressions | Controller integration / PASS |
+
+Reproduce acceptance with `npm run test:core-services`. Coverage command:
+
+```powershell
+node --import tsx --test --experimental-test-coverage --test-coverage-include=src/core/coreProtocol.ts --test-coverage-include=src/services/engineService.ts --test-coverage-include=src/services/engineServiceController.ts src/test/testCoreServices.ts
+```
+
+- PASS: 32 adapter/contract tests; 99.79% lines, 96.99% branches and 100% functions across
+  the three new modules. This is scoped module coverage, not application coverage.
+- PASS: combined phase 1/2 fixture (49 tests), existing endpoint regression and all
+  eight remote queue scenarios.
+- PASS: repository-required QA Agent review/re-review; both reconnect findings were
+  reproduced, fixed and verified with `npm run test:core-services` (32 tests).
+- PASS: desktop `npx tsc -b`, strict isolated test/module typecheck and targeted oxlint.
+  Repository `npm run lint` completed with warnings outside these new files.
+- PASS: desktop Vite production build and PWA typecheck/Vite build. Both Vite output
+  paths were unique temporary directories to preserve modified embedded PWA assets.
+  Desktop emitted chunk-size and mixed static/dynamic import warnings.
+- NOT RUN: native tests/installer, UI QA, real trust transport, Linux/Dragonfish/RS130
+  validation. No native or UI code changed. The existing Curate click agent has no
+  Phase 2 controls to click; the in-process fixture supplies this phase's QA surface.
+
+No migration, library-file reads/writes, paid provider requests or deployment occurred.
+Unrelated Android, embedded PWA and media changes were retained. Rollback removes the
+unconnected Phase 2 modules/tests and script; existing standalone startup remains.
+
+### Phase 2 self-review
+
+Using the agent-self-evaluation skill: overall 4.0/5; ready for user verification.
+
+| Axis | Score | Evidence and next improvement |
+| --- | --- | --- |
+| Accuracy | 4/5 | Fake-channel tests/typechecks/builds pass; actual authenticated transport remains unverified. Qualify each platform trust binding before runtime integration. |
+| Completeness | 4/5 | All Phase 2 fake-API acceptance topics are covered; backend ports and UI remain deliberately unconnected. Bind against authoritative state in phases 3/7. |
+| Clarity | 4/5 | Contract bounds, ownership and runtime limits are explicit; executable TS shapes still need a server interoperability fixture when Rust lands. |
+| Actionability | 4/5 | One npm command reproduces acceptance and QA has concrete reconnect regressions; live controls become testable in phase 7. |
+| Conciseness | 4/5 | Implementation uses three focused modules and one fixture; the consolidated evidence increases the design length. Keep later deployment instructions separate. |
+
+Priority improvements: validate a real peer-bound transport and cross-language v1
+fixtures when their phases land. Would the user agree? Expected yes for the requested
+Phase 2 service foundation; no working Linux engine or changed UI is claimed.
 
 ## Platform references
 

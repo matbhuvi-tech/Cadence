@@ -38,6 +38,19 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 ## Subsystems
 
+### Optional Core service foundation
+
+- `src/core/engineSession.ts` defines the pure selection policy; `coreProtocol.ts`
+  defines version 1 requests, bounded path-free projections and runtime validation.
+- `src/services/engineService.ts` provides local in-process and remote authenticated-
+  channel adapters. `engineServiceController.ts` stages one catalog/queue/output view
+  and rejects stale activation/refresh responses. Neither module is wired to startup.
+- The local owner port and remote transport are injected. Existing Tauri calls and
+  standalone playback remain in use; backend-authoritative ownership, native/browser
+  trust implementations and UI binding land in later phases. A fake channel passing
+  tests does not establish production TLS/pairing or hardware readiness.
+- Plan and phase evidence: `docs/designs/OPTIONAL_LINUX_CORE.md`.
+
 ### Curation Workbench & Decision Trace Engine
 - Unifies defect triage queues, automated federated candidate resolution (MusicBrainz, Apple Music, Gemini AI), artwork inspection, and inline sidecar review in `UnifiedCurateCockpit.tsx`.
 - Playback-guarded decision traces buffer in RAM (`MEMORY_BUFFER`) while audio plays, flushing to SQLite only when transport is idle.
@@ -52,5 +65,6 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 ## Verification
 
 - Frontend: `npm run build`
+- Optional Core contracts/adapters: `npm run test:core-services`
 - Native backend: `cargo test --manifest-path src-tauri/Cargo.toml`
 - Windows installer: `npm run tauri:build -- --bundles nsis`
