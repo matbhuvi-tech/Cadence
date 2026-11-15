@@ -1,6 +1,7 @@
 //! Tauri-independent headless Core runtime, SQLite catalog projection,
 //! strict locked-RAM admission, and 30-second post-playback storage silence.
 
+pub mod curate;
 pub mod dragonfish;
 pub mod platform;
 pub mod upnp_session;
@@ -87,6 +88,7 @@ pub struct HeadlessCoreRuntime<
     track_files: HashMap<String, PathBuf>,
     arena: LockedBytesArena<P, L>,
     last_stopped_at: Option<Instant>,
+    music_read_only: bool,
 }
 
 impl<R: Renderer> HeadlessCoreRuntime<R, SystemPlatformProbe, SystemMemoryLocker> {
@@ -139,6 +141,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             track_files,
             arena: LockedBytesArena::new(probe, locker, headroom),
             last_stopped_at: None,
+            music_read_only: true,
         })
     }
 
@@ -218,6 +221,11 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     pub fn request_at(&mut self, input: &[u8], now: Instant) -> Value {
         if input.len() <= MAX_MESSAGE_BYTES {
             if let Ok(parsed) = serde_json::from_slice::<Value>(input) {
+                if let Some(op) = parsed.get("operation").and_then(Value::as_str) {
+                    if op.starts_with("curate.") {
+                        return self.handle_curate_request_at(&parsed, now);
+                    }
+                }
                 if self.rejects_unadmitted_target(&parsed) {
                     return json!({
                         "ok": false,
@@ -329,6 +337,178 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         }
         false
     }
+
+    pub fn set_music_read_only(&mut self, read_only: bool) {
+        self.music_read_only = read_only;
+    }
+
+    pub fn register_writable_root(
+        &mut self,
+        root_path: &std::path::Path,
+    ) -> Result<curate::RootWriterLease, curate::RemoteCurateError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| curate::RemoteCurateError::Database("runtime closed".into()))?;
+        curate::register_writable_root(db, root_path, &self.config.engine_id)
+    }
+
+    pub fn save_curate_draft(
+        &mut self,
+        input: curate::CurateDraftInput,
+    ) -> Result<curate::CurateDraftRecord, curate::RemoteCurateError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| curate::RemoteCurateError::Database("runtime closed".into()))?;
+        curate::save_draft(db, input)
+    }
+
+    pub fn dry_run_curate_draft_at(
+        &mut self,
+        draft_id: &str,
+        now: Instant,
+    ) -> Result<curate::CurateDryRunReport, curate::RemoteCurateError> {
+        self.map_idle_gate(now)?;
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| curate::RemoteCurateError::Database("runtime closed".into()))?;
+        curate::dry_run_draft(db, draft_id, self.music_read_only)
+    }
+
+    pub fn approve_curate_draft_at(
+        &mut self,
+        draft_id: &str,
+        expected_approval_hash: &str,
+        command_id: &str,
+        _now: Instant,
+    ) -> Result<curate::CurateApprovalReceipt, curate::RemoteCurateError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| curate::RemoteCurateError::Database("runtime closed".into()))?;
+        curate::approve_draft(
+            db,
+            draft_id,
+            expected_approval_hash,
+            command_id,
+            self.music_read_only,
+        )
+    }
+
+    pub fn execute_pending_curate_jobs_at(
+        &mut self,
+        now: Instant,
+    ) -> Result<Vec<curate::CurateApprovalReceipt>, curate::RemoteCurateError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| curate::RemoteCurateError::Database("runtime closed".into()))?;
+        match self.ensure_storage_idle_at(now) {
+            Ok(()) => {
+                let receipts = curate::execute_pending_jobs(db, self.music_read_only)?;
+                if !receipts.is_empty() {
+                    let _ = self.reload_catalog_at(now);
+                }
+                Ok(receipts)
+            }
+            Err(RuntimeError::TransportNotIdle) => curate::list_active_jobs(db),
+            Err(RuntimeError::CooldownActive { .. }) => curate::mark_pending_jobs_cooling_down(db),
+            Err(RuntimeError::Closed) => Err(curate::RemoteCurateError::Database("runtime closed".into())),
+            Err(e) => Err(curate::RemoteCurateError::Database(format!("{:?}", e))),
+        }
+    }
+
+    pub fn get_curate_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<curate::CurateApprovalReceipt>, curate::RemoteCurateError> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| curate::RemoteCurateError::Database("runtime closed".into()))?;
+        curate::get_job(db, job_id)
+    }
+
+    fn map_idle_gate(&self, now: Instant) -> Result<(), curate::RemoteCurateError> {
+        match self.ensure_storage_idle_at(now) {
+            Ok(()) => Ok(()),
+            Err(RuntimeError::TransportNotIdle) => Err(curate::RemoteCurateError::TransportNotIdle),
+            Err(RuntimeError::CooldownActive { remaining_ms }) => {
+                Err(curate::RemoteCurateError::CooldownActive { remaining_ms })
+            }
+            Err(RuntimeError::Closed) => Err(curate::RemoteCurateError::Database("runtime closed".into())),
+            Err(e) => Err(curate::RemoteCurateError::Database(format!("{:?}", e))),
+        }
+    }
+
+    fn handle_curate_request_at(&mut self, parsed: &Value, now: Instant) -> Value {
+        let engine_ok = parsed.get("engineId").and_then(Value::as_str) == Some(self.config.engine_id.as_str());
+        let library_ok = parsed.get("libraryId").and_then(Value::as_str) == Some(self.config.library_id.as_str());
+        if !engine_ok || !library_ok {
+            return json!({ "ok": false, "error": { "code": "identity_mismatch" } });
+        }
+        let op = parsed.get("operation").and_then(Value::as_str).unwrap_or("");
+        match op {
+            "curate.draft.save" => {
+                let Ok(input) = serde_json::from_value::<curate::CurateDraftInput>(parsed["draft"].clone()) else {
+                    return json!({ "ok": false, "error": { "code": "invalid_payload" } });
+                };
+                match self.save_curate_draft(input) {
+                    Ok(rec) => json!({ "ok": true, "data": rec }),
+                    Err(e) => curate_err_json(e),
+                }
+            }
+            "curate.dry_run" => {
+                let Some(draft_id) = parsed.get("draftId").and_then(Value::as_str) else {
+                    return json!({ "ok": false, "error": { "code": "invalid_payload" } });
+                };
+                match self.dry_run_curate_draft_at(draft_id, now) {
+                    Ok(rep) => json!({ "ok": true, "data": rep }),
+                    Err(e) => curate_err_json(e),
+                }
+            }
+            "curate.approve" => {
+                let (Some(draft_id), Some(hash), Some(cmd_id)) = (
+                    parsed.get("draftId").and_then(Value::as_str),
+                    parsed.get("approvalHash").and_then(Value::as_str),
+                    parsed.get("commandId").and_then(Value::as_str),
+                ) else {
+                    return json!({ "ok": false, "error": { "code": "invalid_payload" } });
+                };
+                match self.approve_curate_draft_at(draft_id, hash, cmd_id, now) {
+                    Ok(rec) => json!({ "ok": true, "data": rec }),
+                    Err(e) => curate_err_json(e),
+                }
+            }
+            "curate.job.status" => {
+                let Some(job_id) = parsed.get("jobId").and_then(Value::as_str) else {
+                    return json!({ "ok": false, "error": { "code": "invalid_payload" } });
+                };
+                match self.get_curate_job(job_id) {
+                    Ok(Some(rec)) => json!({ "ok": true, "data": rec }),
+                    Ok(None) => json!({ "ok": false, "error": { "code": "not_found" } }),
+                    Err(e) => curate_err_json(e),
+                }
+            }
+            _ => json!({ "ok": false, "error": { "code": "unsupported_capability" } }),
+        }
+    }
+}
+
+fn curate_err_json(err: curate::RemoteCurateError) -> Value {
+    let code = match err {
+        curate::RemoteCurateError::RevisionConflict => "stale_revision",
+        curate::RemoteCurateError::DraftNotFound | curate::RemoteCurateError::TrackNotFound => "not_found",
+        curate::RemoteCurateError::ReadOnlyRoot(_) => "read_only_root",
+        curate::RemoteCurateError::ExternalFileChanged => "external_file_changed",
+        curate::RemoteCurateError::DuplicateApproval => "duplicate_approval",
+        curate::RemoteCurateError::TransportNotIdle | curate::RemoteCurateError::CooldownActive { .. } => "not_ready",
+        curate::RemoteCurateError::RootLeasedByOtherWriter(_) => "root_leased",
+        _ => "invalid_payload",
+    };
+    json!({ "ok": false, "error": { "code": code } })
 }
 
 fn load_catalog_projection(

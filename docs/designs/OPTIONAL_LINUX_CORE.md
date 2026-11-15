@@ -355,7 +355,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 5 | Implementation ready for user verification | `src-tauri/src/core_runtime/upnp_session.rs`; opaque per-`RunToken` session URLs, exact `GET`/`Range`/`HEAD`/DSF probes from locked RAM, 512 KiB pre-roll cap, Linux `TCP_INFO`/`SO_SNDBUF`/`clock_nanosleep` pacer, RS130 simulator (`core_upnp_session_test`) and release 0-alloc gate (`core_upnp_zero_alloc_test`) pass; physical RS130 hardware qualification pending |
 | 6 | Implementation ready for user verification | `src-tauri/src/core_runtime/dragonfish.rs`, `cadence-headless` (`--dragonfish`, `--healthcheck`, `--backup`, `--restore`, `--validate-dragonfish-recipe`), and `deploy/truenas-dragonfish/` (`Dockerfile`, `custom-app-24.04.yaml`, `docker-compose.yml`); 8/8 tests in `core_dragonfish_packaging_test` and `x86_64-unknown-linux-gnu` check pass; live `docker build` / TrueNAS Dragonfish host deployment pending |
 | 7 | Implementation ready for user verification | Windows desktop & Android/Mobile Remote PWA controller UX (`coreControllerTransport.ts`, `EngineControllerContext.tsx`, `PlaybackEnginePanel.tsx`, `EngineSwitchPromptModal.tsx`, `coreRemoteClient.ts`, `TopHeader.tsx`, `DiagnosticsSheet.tsx`, `PairingView.tsx`, and Tauri `core_probe_endpoint`/`core_control_request`/`discover_core_nodes` commands); default `This PC` startup with zero auto-discovery/onboarding, separate `Playback engine` & `Audio output` selectors, RS130 takeover & leave-Core prompts, direct PWA `/v1/core` client + pinning guidance; 61/61 controller/session/protocol unit tests, `CadenceSettingsModal` (4/4), endpoint-routing, queue-sync, Rust `cargo check` + `core_session_test` (24/24), desktop & PWA `tsc -b`, and Vite builds pass; live TrueNAS Dragonfish host + physical RS130 / physical Android APK QA pending user verification |
-| 8-10 | Planned | No live physical RS130 hardware session, TrueNAS host deployment, or automated Phase 9 QA scenarios claimed yet |
+| 8 | Implementation ready for user verification | `src-tauri/src/core_runtime/curate.rs`, `src-tauri/src/core_runtime/mod.rs` (`curate.draft.save`, `curate.dry_run`, `curate.approve`, `curate.job.status`, `core_writer_leases`), `src/core/remoteCurate.ts`, `src-tauri/tests/core_remote_curate_test.rs` (5/5 pass), and `src/test/testRemoteCurate.ts` (4/4 pass); 65/65 TS unit tests and `core_headless_test` (7/7) pass |
+| 9-10 | Planned | No Phase 9 snapshot import/catalog mapping or Phase 10 release qualification claimed yet |
 
 Phase 1 command:
 
@@ -966,6 +967,41 @@ cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --feature
 - PASS: `cargo check --manifest-path src-tauri/Cargo.toml`, `cargo test --manifest-path src-tauri/Cargo.toml --test core_session_test` (24/24), and headless `--no-default-features --features bundled-sqlite` check.
 - KNOWN PRE-EXISTING HARNESS LIMITATION: `testCadenceSettingsModal.ts` test 5 (`AppContent`) and `testAppStartup.ts` tests 3-5 fail under bare Node ESM `tsx` due to `.css` imports (`CadenceArtworkFallback.css`, `ERR_UNKNOWN_FILE_EXTENSION: ".css"`).
 - NOT RUN / PENDING USER & HARDWARE QA: Live Tauri desktop UI against a running TrueNAS Dragonfish Core node, physical RS130 playback, and physical Android APK / browser PWA pairing & TLS pinning verification (paused at Mandatory User Verification Gate before any merge to `main`).
+
+### Phase 8 TDD and verification record (2026-11-15)
+
+Source: phase 8 in the independently testable phase table above. User journeys:
+durable server-side Curate drafts with optimistic revision conflict detection;
+read-only music root review retaining drafts while clearly blocking Apply;
+immutable approval bound to file SHA-256 + change set; duplicate commit and
+external file modification rejection; playback + 30s cooldown storage-bus silence
+gates; restart recovery of durable jobs without replaying verified commits;
+post-write audio payload preservation; and shared-root writer lease exclusion.
+
+- RED checkpoint: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_remote_curate_test` failed with `E0432` (`unresolved import cadence_core_lib::core_runtime::curate`).
+- GREEN implementation: `src-tauri/src/core_runtime/curate.rs`, `src-tauri/src/core_runtime/mod.rs`, `src/core/remoteCurate.ts`, `src-tauri/tests/core_remote_curate_test.rs`, and `src/test/testRemoteCurate.ts`.
+
+| Guarantee | Acceptance fixture | Type / result |
+| --- | --- | --- |
+| Durable drafts survive Core restart and reject stale `expected_revision` overwrites | `core_remote_curate_test.rs:draft_durability_and_optimistic_revision_conflict` | Integration / PASS |
+| Read-only root allows draft save & dry-run explanation while blocking Apply | `core_remote_curate_test.rs:read_only_root_allows_drafts_and_dry_run_but_blocks_apply_clearly` | Integration / PASS |
+| Immutable approval hash rejects tampered/duplicate commits and detects external file modification | `core_remote_curate_test.rs:immutable_approval_duplicate_commit_and_external_file_change_rejection` | Integration / PASS |
+| Playback & 30s cooldown gates defer disk writes (`ApprovedWaitingIdle`/`CoolingDown`), recover across restart, and preserve audio payload | `core_remote_curate_test.rs:playback_and_cooldown_gates_defer_disk_writes_and_recover_across_restart` | Integration / PASS |
+| Core writer lease (`core_writer_leases`) blocks standalone Windows worker on Core-managed roots | `core_remote_curate_test.rs:shared_root_writer_exclusion_blocks_standalone_worker_on_core_leased_root` + `testRemoteCurate.ts` | Integration + Unit / PASS |
+| Client state distinguishes `Waiting to save` (buffered) from durable `Draft saved` and execution states | `testRemoteCurate.ts` | Unit / PASS |
+
+Reproduce Phase 8 verification with:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_remote_curate_test --test core_headless_test
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
+node --import tsx --test src/test/testRemoteCurate.ts src/test/testCoreControllerUx.ts src/test/testPwaCoreController.ts src/test/testEngineSession.ts src/test/testCoreServices.ts src/test/testCoreSessionProtocol.ts
+npx tsc -b
+npx oxlint src/core/remoteCurate.ts src/test/testRemoteCurate.ts
+```
+
+- PASS: `core_remote_curate_test` (5/5), `core_headless_test` (7/7), headless `cargo check` (0 errors, 0 warnings), 65/65 TS unit tests, `npx tsc -b`, and `oxlint` (0 warnings, 0 errors).
+- NOT RUN / PENDING END-TO-END QA: Live end-to-end verification deferred until Phase 9–10 as requested.
 
 ## Platform references
 
