@@ -1565,11 +1565,16 @@ impl CoreMediaServer {
         }
     }
 
-    fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         self.stop_active_session();
         self.stop_listener.store(true, Ordering::Release);
-        let _ = StdTcpStream::connect(self.listen_addr);
         if let Some(join) = self.listener_join.take() {
+            let wake_addr = if self.listen_addr.ip().is_unspecified() {
+                SocketAddr::from(([127, 0, 0, 1], self.listen_addr.port()))
+            } else {
+                self.listen_addr
+            };
+            let _ = StdTcpStream::connect_timeout(&wake_addr, Duration::from_millis(50));
             let _ = join.join();
         }
         let deadline = Instant::now() + Duration::from_millis(500);

@@ -1,6 +1,7 @@
 //! Tauri-independent headless Core runtime, SQLite catalog projection,
 //! strict locked-RAM admission, and 30-second post-playback storage silence.
 
+pub mod dragonfish;
 pub mod platform;
 pub mod upnp_session;
 

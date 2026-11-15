@@ -296,6 +296,28 @@ approved implementation on 2026-11-15:
   string formatting across the active chunk loop (verified by `CountingAllocator`
   in `core_upnp_zero_alloc_test`).
 
+Phase 6 adds TrueNAS SCALE Dragonfish 24.04 packaging and container bootstrap
+(`src-tauri/src/core_runtime/dragonfish.rs`, `src-tauri/src/bin/cadence_headless.rs`
+CLI modes, and `deploy/truenas-dragonfish/`). User explicitly reviewed the Phase 6
+plan and Audiophile Impact Assessment and approved implementation on 2026-11-15:
+- **Disk I/O impact:** Zero during `Loading`, `Playing`, `Paused`, and the 30-second
+  cooldown. Persistent state initialization (`node-identity.json`, `tls-cert.json`,
+  `cadence.db` WAL) and `VACUUM INTO` pre-upgrade backups execute strictly at
+  startup/offline CLI boundaries while transport is `Idle`. `/music` defaults to
+  `readOnly: true` (`MusicMountReadOnly` guard).
+- **Network/NIC impact:** Validates `CADENCE_ADVERTISED_IP` via `validate_advertised_lan_ip`
+  (rejecting loopback, unspecified, link-local, multicast, and CGNAT/VPN), fails
+  readiness on control (`4040`) or media (`18890`) port conflicts without unadvertised
+  fallbacks, and uses `hostNetwork: true` in the Dragonfish Custom App recipe so
+  SSDP UDP `1900` and RS130 HTTP `18890` bypass kube-proxy/iptables NAT.
+- **Thread/CPU impact:** Windows desktop audio files remain untouched. Container
+  packaging preserves Phase 4–5 `cpuset` core isolation (`partition_truenas_cpus`)
+  and `cadence-core-pacer` thread pinning.
+- **Memory impact:** Enforces `CAP_IPC_LOCK` (`capabilities.add: ["IPC_LOCK"]`),
+  non-root `568:568` ACLs, bounded `/tmp` `emptyDir` (`128Mi` `Memory`), and
+  startup cgroup/`RLIMIT_MEMLOCK` headroom verification (`DragonfishError::InsufficientLockLimit` /
+  `InsufficientMemoryBudget`) before serving readiness.
+
 ## Independently testable phases
 
 Each phase has its own acceptance fixture and rollback boundary. Use synthetic files,
@@ -331,7 +353,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 3 | Implementation ready for user verification | `src-tauri/src/core_session/`; `queue.control` + `queue.coordinate` in `src/core/coreProtocol.ts` and `src/services/engineService.ts`; 24 native + 51 TS tests + TS-to-Rust interop fixture pass; runtime bindings remain pending |
 | 4 | Implementation ready for user verification | `src-tauri/src/core_runtime/` + `src-tauri/src/bin/cadence_headless.rs`; Cargo `desktop` feature split (`--no-default-features` excludes Tauri/GUI/local audio); TrueNAS cgroup v2 + `CAP_IPC_LOCK` + `RLIMIT_MEMLOCK` strict admission, 30s cooldown guard, `cpuset` partitioning and Linux `x86_64-unknown-linux-gnu` check pass |
 | 5 | Implementation ready for user verification | `src-tauri/src/core_runtime/upnp_session.rs`; opaque per-`RunToken` session URLs, exact `GET`/`Range`/`HEAD`/DSF probes from locked RAM, 512 KiB pre-roll cap, Linux `TCP_INFO`/`SO_SNDBUF`/`clock_nanosleep` pacer, RS130 simulator (`core_upnp_session_test`) and release 0-alloc gate (`core_upnp_zero_alloc_test`) pass; physical RS130 hardware qualification pending |
-| 6-10 | Planned | No Dragonfish container deployment or physical RS130 hardware session claimed yet |
+| 6 | Implementation ready for user verification | `src-tauri/src/core_runtime/dragonfish.rs`, `cadence-headless` (`--dragonfish`, `--healthcheck`, `--backup`, `--restore`, `--validate-dragonfish-recipe`), and `deploy/truenas-dragonfish/` (`Dockerfile`, `custom-app-24.04.yaml`, `docker-compose.yml`); 8/8 tests in `core_dragonfish_packaging_test` and `x86_64-unknown-linux-gnu` check pass; live `docker build` / TrueNAS Dragonfish host deployment pending |
+| 7-10 | Planned | No live controller UI wiring or physical RS130 hardware session claimed yet |
 
 Phase 1 command:
 
@@ -815,6 +838,94 @@ Using the agent-self-evaluation skill: overall 4.4/5; ready for user verificatio
 Priority improvements: package the headless binary and UPnP runtime into the
 versioned TrueNAS Dragonfish OCI image and Custom App recipe in Phase 6. Would the
 user agree? Expected yes for the Phase 5 simulator and release-timing milestone.
+
+### Phase 6 TrueNAS Dragonfish 24.04 packaging and bootstrap contract
+
+`src-tauri/src/core_runtime/dragonfish.rs`, `src-tauri/src/bin/cadence_headless.rs`,
+and `deploy/truenas-dragonfish/` (`Dockerfile`, `custom-app-24.04.yaml`,
+`docker-compose.yml`, `README.md`) implement the Dragonfish container runtime and
+deployment recipe:
+
+- **Persistent `/var/lib/cadence` identity, TLS cert metadata & WAL database:**
+  `DragonfishNode::bootstrap_with_platform` creates or reloads `node-identity.json`
+  (stable `engineId`, `libraryId`, label, schema version, and pinned RS130 UDN),
+  `tls-cert.json` + `tls-cert.pem` + `tls-key.pem` (SHA-256 fingerprint retained
+  across restarts; note Phase 6 exposes HTTP `/healthz`, `/readyz`, and `/v1/core`
+  on the fixed control port `4040` while persisting cert identity ahead of Phase 7
+  `rustls` HTTPS/WSS transport binding), and `cadence.db` in SQLite `WAL` mode.
+- **Explicit advertised LAN IP & fixed listener readiness (`4040` / `18890`):**
+  `CADENCE_ADVERTISED_IP` is validated via `validate_advertised_lan_ip`; any
+  port conflict on `4040` (control) or `18890` (media) returns
+  `DragonfishError::PortConflict` immediately instead of binding a random port.
+- **Mount, non-root `568:568` ACL & pre-flight `CAP_IPC_LOCK` checks:** verifies
+  separate `/var/lib/cadence` (writable), `/music` (readable, `readOnly: true`
+  enforced via `MusicMountReadOnly`), bounded `/tmp` (`128Mi` `Memory` `emptyDir`),
+  and minimum lockable container memory budget before marking `/healthz` ready.
+- **Versioned backup & rollback (`VACUUM INTO`):** `create_versioned_backup` /
+  `--backup <tag>` writes an atomic SQLite `VACUUM INTO` snapshot plus
+  `node-identity.json`, `tls-cert.*`, and `backup-manifest.json` under
+  `/var/lib/cadence/backups/<tag>/`. Booting against a newer schema version fails
+  with `IncompatibleSchemaVersion`, and `restore_versioned_backup` / `--restore <tag>`
+  clears stale WAL/SHM sidecars and restores the matching snapshot.
+
+### Phase 6 TDD and verification record (2026-11-15)
+
+Source: phase 6 in the independently testable phase table above. User journeys:
+clean test install; advertised-address reachability and port conflict rejection;
+mounts/ACLs and read-only `/music` enforcement; restart retaining identity, cert
+fingerprint and DB state; memory/`CAP_IPC_LOCK` readiness failures; versioned
+backup and rollback; CLI daemon `--dragonfish`/`--healthcheck`/`--backup`/`--restore`.
+
+- RED checkpoint `bebbbee`: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_dragonfish_packaging_test`
+  failed with `E0432` (`unresolved import cadence_core_lib::core_runtime::dragonfish`).
+- GREEN implementation: all 8 acceptance tests in `core_dragonfish_packaging_test`
+  passed (including live `cadence-headless --dragonfish` + `--healthcheck` +
+  `--backup` + `--restore` subprocess roundtrip), and `x86_64-unknown-linux-gnu`
+  target check passed with 0 errors and 0 warnings.
+
+| Guarantee | Acceptance fixture | Type / result |
+| --- | --- | --- |
+| Clean install creates `node-identity.json`, `tls-cert.*`, WAL `cadence.db`, binds control/media listeners, serves `/healthz` and `core.hello` | `core_dragonfish_packaging_test.rs:clean_install_persists_identity_cert_wal_db_and_serves_control_and_readiness` | Integration / PASS |
+| Restart retains exact `engineId`, `libraryId`, TLS SHA-256 fingerprint, pinned RS130 UDN, and DB tracks | `core_dragonfish_packaging_test.rs:restart_retains_persisted_identity_certificate_pinned_udn_and_database_state` | Integration / PASS |
+| Reject loopback/unspecified/CGNAT/link-local advertised IPs and fail readiness on fixed port conflict | `core_dragonfish_packaging_test.rs:advertised_address_and_fixed_port_conflicts_fail_readiness_clearly` | Unit + socket integration / PASS |
+| Reject overlapping/missing mounts and enforce read-only `/music` write guard | `core_dragonfish_packaging_test.rs:mount_acl_and_read_only_music_validations_prevent_misconfiguration` | Integration / PASS |
+| Actionable readiness failure on missing `CAP_IPC_LOCK` (`64 KiB` `RLIMIT_MEMLOCK`) or tiny cgroup budget | `core_dragonfish_packaging_test.rs:preflight_memory_and_cap_ipc_lock_checks_fail_readiness_with_actionable_diagnostics` | Unit + preflight / PASS |
+| Atomic `VACUUM INTO` backup, incompatible schema block (`v99 > v1`), and clean rollback restore | `core_dragonfish_packaging_test.rs:versioned_backup_blocks_incompatible_schema_and_restores_cleanly_on_rollback` | Integration / PASS |
+| OCI `Dockerfile` + TrueNAS Dragonfish 24.04 Custom App YAML invariants (`replicas: 1`, `Recreate`, `hostNetwork: true`, `568:568`, `IPC_LOCK`, `/music` `ro`, `4040`/`18890`/`1900`) | `core_dragonfish_packaging_test.rs:dragonfish_dockerfile_and_custom_app_recipe_enforce_truenas_24_04_invariants` | Recipe + CLI validator / PASS |
+| End-to-end `cadence-headless --dragonfish`, `--healthcheck`, `--backup`, and `--restore` subprocess lifecycle | `core_dragonfish_packaging_test.rs:cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtrip` | Process integration / PASS |
+
+Reproduce Phase 6 verification with:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_dragonfish_packaging_test --test core_upnp_session_test --test core_upnp_zero_alloc_test --test core_headless_test --test core_session_test
+$env:SQLITE3_LIB_DIR=(Resolve-Path src-tauri).Path; cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu --no-default-features --bins --lib --test core_dragonfish_packaging_test --test core_upnp_session_test --test core_upnp_zero_alloc_test --test core_headless_test --test core_session_test --test diagnostics_stress_test
+```
+
+- PASS: 8/8 tests in `core_dragonfish_packaging_test`, 5/5 in `core_upnp_session_test`,
+  2/2 in `core_upnp_zero_alloc_test`, 7/7 in `core_headless_test`, and 24/24 in
+  `core_session_test` (`--no-default-features --features bundled-sqlite`).
+- PASS: `x86_64-unknown-linux-gnu` headless target check across library, binary and
+  all Phase 3–6 test targets with 0 errors and 0 warnings.
+- NOT RUN / PENDING LIVE INFRASTRUCTURE: `docker build --platform linux/amd64`
+  (Docker Desktop Linux daemon was not running on this Windows host) and live
+  TrueNAS SCALE Dragonfish 24.04 Custom App + physical RS130 deployment (deferred
+  until Phase 10 hardware/infrastructure qualification).
+
+### Phase 6 self-review
+
+Using the agent-self-evaluation skill: overall 4.3/5; ready for user verification.
+
+| Axis | Score | Evidence and next improvement |
+| --- | --- | --- |
+| Accuracy | 4/5 | All 8 packaging/CLI/backup tests and `x86_64-unknown-linux-gnu` check pass; live `docker build` and TrueNAS Dragonfish host deployment are honestly recorded as unverified on this host. |
+| Completeness | 4.5/5 | Covers persistent `node-identity.json`, cert metadata/PEM files, WAL SQLite, `/healthz` + `/v1/core`, port/IP/mount/memory pre-flight failures, `VACUUM INTO` backup/rollback, `Dockerfile`, and `custom-app-24.04.yaml`. |
+| Clarity | 4.5/5 | Clearly distinguishes Phase 6 HTTP control listener + persisted cert metadata from Phase 7 `rustls` HTTPS/WSS transport wiring. |
+| Actionability | 5/5 | Exact Cargo commands and TrueNAS Dragonfish `README.md` document build, backup, rollback, and verification steps. |
+| Conciseness | 4/5 | Isolated in `dragonfish.rs`, `cadence_headless.rs`, and `deploy/truenas-dragonfish/` without modifying Windows desktop files. |
+
+Priority improvements: run `docker build --platform linux/amd64` on a Linux/Docker
+host and proceed to Phase 7 controller UX or live Dragonfish testing. Would the
+user agree? Expected yes for the Phase 6 packaging and bootstrap milestone.
 
 ## Platform references
 

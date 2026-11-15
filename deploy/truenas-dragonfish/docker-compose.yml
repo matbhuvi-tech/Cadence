@@ -1,0 +1,36 @@
+# Local Linux test harness matching TrueNAS Dragonfish 24.04 container invariants.
+# Note: Dragonfish 24.04 uses Kubernetes (see custom-app-24.04.yaml); Compose is for local testing only.
+services:
+  cadence-core:
+    build:
+      context: ../..
+      dockerfile: deploy/truenas-dragonfish/Dockerfile
+    image: cadence-core:0.1.0
+    container_name: cadence-core
+    restart: unless-stopped
+    network_mode: host
+    user: "568:568"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - IPC_LOCK
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    environment:
+      CADENCE_ADVERTISED_IP: "${CADENCE_ADVERTISED_IP:-192.168.1.50}"
+      CADENCE_APP_DATA_DIR: "/var/lib/cadence"
+      CADENCE_MUSIC_DIR: "/music"
+      CADENCE_TMP_DIR: "/tmp"
+      CADENCE_MUSIC_READ_ONLY: "true"
+      CADENCE_CONTROL_PORT: "4040"
+      CADENCE_MEDIA_PORT: "18890"
+      CADENCE_HEADROOM_MB: "64"
+      CADENCE_MIN_LOCKABLE_MB: "64"
+      CADENCE_LABEL: "${CADENCE_LABEL:-Music Room Core}"
+    volumes:
+      - "${CADENCE_HOST_DATA_DIR:-./data}:/var/lib/cadence:rw"
+      - "${CADENCE_HOST_MUSIC_DIR:-./music}:/music:ro"

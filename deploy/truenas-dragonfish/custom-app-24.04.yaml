@@ -1,0 +1,125 @@
+# TrueNAS SCALE Dragonfish 24.04 Custom App Manifest (Kubernetes YAML)
+#
+# Prerequisites on TrueNAS Dragonfish 24.04:
+# 1. Create an SSD-backed app-data dataset (e.g. /mnt/ssd-pool/apps/cadence) owned by UID:GID 568:568 (apps).
+# 2. Grant UID/GID 568 read-only ACL access on your music dataset (e.g. /mnt/tank/Music).
+# 3. Replace <TRUENAS_WIRED_LAN_IP> with the wired Ethernet interface IP reachable by your RS130.
+# 4. Never scale replicas above 1; SQLite WAL state requires single-writer Recreate upgrades.
+#
+# Before image upgrades, snapshot state inside the running pod or via host dataset snapshot:
+#   cadence-headless --backup pre-<version>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cadence-core
+  labels:
+    app.kubernetes.io/name: cadence-core
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cadence-core
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cadence-core
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 568
+        runAsGroup: 568
+        fsGroup: 568
+      containers:
+        - name: cadence-core
+          image: ghcr.io/matbhuvi/cadence-core:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["--dragonfish"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+          env:
+            - name: CADENCE_ADVERTISED_IP
+              value: "<TRUENAS_WIRED_LAN_IP>"
+            - name: CADENCE_APP_DATA_DIR
+              value: "/var/lib/cadence"
+            - name: CADENCE_MUSIC_DIR
+              value: "/music"
+            - name: CADENCE_TMP_DIR
+              value: "/tmp"
+            - name: CADENCE_MUSIC_READ_ONLY
+              value: "true"
+            - name: CADENCE_CONTROL_PORT
+              value: "4040"
+            - name: CADENCE_MEDIA_PORT
+              value: "18890"
+            - name: CADENCE_SSDP_PORT
+              value: "1900"
+            - name: CADENCE_HEADROOM_MB
+              value: "64"
+            - name: CADENCE_MIN_LOCKABLE_MB
+              value: "64"
+            - name: CADENCE_LABEL
+              value: "Music Room Core"
+          ports:
+            - name: control-https
+              containerPort: 4040
+              hostPort: 4040
+              protocol: TCP
+            - name: media-http
+              containerPort: 18890
+              hostPort: 18890
+              protocol: TCP
+            - name: ssdp-udp
+              containerPort: 1900
+              hostPort: 1900
+              protocol: UDP
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4040
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4040
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: cadence-app-data
+              mountPath: /var/lib/cadence
+            - name: music-library
+              mountPath: /music
+              readOnly: true
+            - name: bounded-tmp
+              mountPath: /tmp
+      volumes:
+        - name: cadence-app-data
+          hostPath:
+            path: /mnt/ssd-pool/apps/cadence
+            type: DirectoryOrCreate
+        - name: music-library
+          hostPath:
+            path: /mnt/tank/Music
+            type: Directory
+        - name: bounded-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi

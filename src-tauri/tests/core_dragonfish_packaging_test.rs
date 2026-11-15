@@ -29,7 +29,7 @@
 use cadence_core_lib::core_runtime::dragonfish::{
     validate_dragonfish_custom_app_yaml, validate_dragonfish_dockerfile, DragonfishConfig,
     DragonfishError, DragonfishNode, DEFAULT_CONTROL_PORT, DEFAULT_MEDIA_PORT,
-    DRAGONfish_SCHEMA_VERSION,
+    DRAGONFISH_SCHEMA_VERSION,
 };
 use cadence_core_lib::core_runtime::{
     CgroupMemoryLimits, HostMemoryLimits, MemoryLocker, PlatformLimits, PlatformProbe,
@@ -145,7 +145,7 @@ impl DragonfishTestDirs {
             headroom_bytes: 64 * 1024 * 1024,
             min_lockable_bytes: 64 * 1024 * 1024,
             app_version: "0.1.0".into(),
-            schema_version: DRAGONfish_SCHEMA_VERSION,
+            schema_version: DRAGONFISH_SCHEMA_VERSION,
         }
     }
 }
@@ -538,7 +538,7 @@ fn versioned_backup_blocks_incompatible_schema_and_restores_cleanly_on_rollback(
         err_incompat,
         DragonfishError::IncompatibleSchemaVersion {
             found_version: 99,
-            supported_version: DRAGONfish_SCHEMA_VERSION
+            supported_version: DRAGONFISH_SCHEMA_VERSION
         }
     ));
 
@@ -618,4 +618,159 @@ fn dragonfish_dockerfile_and_custom_app_recipe_enforce_truenas_24_04_invariants(
         "cadence-headless recipe validation failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn free_loopback_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtrip() {
+    let dirs = DragonfishTestDirs::create("cli_daemon_roundtrip");
+    let exe = env!("CARGO_BIN_EXE_cadence-headless");
+    let ctrl_port = free_loopback_port();
+    let media_port = free_loopback_port();
+
+    // 1. Start `cadence-headless --dragonfish` with container env vars
+    let mut child = Command::new(exe)
+        .arg("--dragonfish")
+        .env("CADENCE_APP_DATA_DIR", &dirs.app_data_dir)
+        .env("CADENCE_MUSIC_DIR", &dirs.music_dir)
+        .env("CADENCE_TMP_DIR", &dirs.tmp_dir)
+        .env("CADENCE_ADVERTISED_IP", "127.0.0.1")
+        .env("CADENCE_ALLOW_LOOPBACK", "true")
+        .env("CADENCE_CONTROL_PORT", ctrl_port.to_string())
+        .env("CADENCE_MEDIA_PORT", media_port.to_string())
+        .env("CADENCE_HEADROOM_MB", "16")
+        .env("CADENCE_MIN_LOCKABLE_MB", "16")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn cadence-headless --dragonfish");
+
+    // 2. Poll `--healthcheck` CLI probe until ready (up to 3s)
+    let mut healthy = false;
+    for _ in 0..30 {
+        let hc = Command::new(exe)
+            .arg("--healthcheck")
+            .arg("--control-port")
+            .arg(ctrl_port.to_string())
+            .output()
+            .expect("run healthcheck");
+        if hc.status.success() {
+            healthy = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(healthy, "cadence-headless --healthcheck never succeeded");
+
+    let ctrl_addr: SocketAddr = format!("127.0.0.1:{}", ctrl_port).parse().unwrap();
+    let (status_h, health_json) = http_get_json(ctrl_addr, "/healthz");
+    assert_eq!(status_h, 200);
+    let engine_id = health_json["engineId"].as_str().unwrap().to_string();
+    let library_id = health_json["libraryId"].as_str().unwrap().to_string();
+
+    let (status_hello, hello) = http_post_json(
+        ctrl_addr,
+        "/v1/core",
+        &json!({
+            "protocolVersion": 1,
+            "engineId": engine_id,
+            "libraryId": library_id,
+            "operation": "core.hello"
+        }),
+    );
+    assert_eq!(status_hello, 200);
+    assert_eq!(hello["ok"], true);
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // 3. Offline CLI `--backup` before simulated incompatible schema bump
+    let backup_out = Command::new(exe)
+        .arg("--app-data-dir")
+        .arg(&dirs.app_data_dir)
+        .arg("--backup")
+        .arg("pre-0.2.0")
+        .output()
+        .expect("run --backup");
+    assert!(
+        backup_out.status.success(),
+        "--backup failed: {}",
+        String::from_utf8_lossy(&backup_out.stderr)
+    );
+
+    DragonfishNode::write_schema_version_for_test(&dirs.app_data_dir, 99).unwrap();
+    let blocked_boot = Command::new(exe)
+        .arg("--dragonfish")
+        .env("CADENCE_APP_DATA_DIR", &dirs.app_data_dir)
+        .env("CADENCE_MUSIC_DIR", &dirs.music_dir)
+        .env("CADENCE_TMP_DIR", &dirs.tmp_dir)
+        .env("CADENCE_ADVERTISED_IP", "127.0.0.1")
+        .env("CADENCE_ALLOW_LOOPBACK", "true")
+        .env("CADENCE_CONTROL_PORT", ctrl_port.to_string())
+        .env("CADENCE_MEDIA_PORT", media_port.to_string())
+        .env("CADENCE_HEADROOM_MB", "16")
+        .env("CADENCE_MIN_LOCKABLE_MB", "16")
+        .output()
+        .expect("run incompatible boot");
+    assert!(!blocked_boot.status.success());
+    assert!(String::from_utf8_lossy(&blocked_boot.stderr).contains("schema version 99"));
+
+    // 4. Offline CLI `--restore` and restart verifying identity preservation
+    let restore_out = Command::new(exe)
+        .arg("--app-data-dir")
+        .arg(&dirs.app_data_dir)
+        .arg("--restore")
+        .arg("pre-0.2.0")
+        .output()
+        .expect("run --restore");
+    assert!(
+        restore_out.status.success(),
+        "--restore failed: {}",
+        String::from_utf8_lossy(&restore_out.stderr)
+    );
+
+    let mut restarted = Command::new(exe)
+        .arg("--dragonfish")
+        .env("CADENCE_APP_DATA_DIR", &dirs.app_data_dir)
+        .env("CADENCE_MUSIC_DIR", &dirs.music_dir)
+        .env("CADENCE_TMP_DIR", &dirs.tmp_dir)
+        .env("CADENCE_ADVERTISED_IP", "127.0.0.1")
+        .env("CADENCE_ALLOW_LOOPBACK", "true")
+        .env("CADENCE_CONTROL_PORT", ctrl_port.to_string())
+        .env("CADENCE_MEDIA_PORT", media_port.to_string())
+        .env("CADENCE_HEADROOM_MB", "16")
+        .env("CADENCE_MIN_LOCKABLE_MB", "16")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("respawn cadence-headless --dragonfish");
+
+    let mut restarted_healthy = false;
+    for _ in 0..30 {
+        let hc = Command::new(exe)
+            .arg("--healthcheck")
+            .arg("--control-port")
+            .arg(ctrl_port.to_string())
+            .output()
+            .expect("run healthcheck after restore");
+        if hc.status.success() {
+            restarted_healthy = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(restarted_healthy, "restarted node failed healthcheck");
+    let (_, restored_health) = http_get_json(ctrl_addr, "/healthz");
+    assert_eq!(restored_health["engineId"], engine_id);
+    assert_eq!(restored_health["libraryId"], library_id);
+
+    let _ = restarted.kill();
+    let _ = restarted.wait();
 }
