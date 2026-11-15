@@ -7,7 +7,6 @@ import {
   parseCoreRequest,
   parseCoreSnapshot,
   type CoreDescriptor,
-  type CoreCommand,
   type CoreRequest,
   type CoreSnapshot,
 } from '../core/coreProtocol'
@@ -286,12 +285,12 @@ test('failed preparation retains the complete old view and connection events rem
   await controller.refresh()
   const before = controller.getView()
   const switching = controller.select(createRemoteEngineService(core, f.channel), 'idle')
-  controller.setConnection(before.session.activeEpoch, local, false)
+  controller.setConnection(before.session.activeEpoch, local, false, before.connectionGeneration)
   assert.equal(await switching, 'failed')
   assert.deepEqual(controller.getView().snapshot, before.snapshot)
   assert.deepEqual(controller.getView().session.active, local)
   assert.equal(controller.getView().session.connected, false)
-  controller.setConnection(before.session.activeEpoch, local, true)
+  controller.setConnection(before.session.activeEpoch, local, true, before.connectionGeneration)
   assert.equal(controller.getView().session.connected, false)
   await controller.refresh()
   assert.equal(controller.getView().session.connected, true)
@@ -336,15 +335,16 @@ test('disconnect never falls back and reconnect requires a fresh authoritative s
   const controller = createEngineServiceController(createLocalEngineService(fixture(local).owner))
   await controller.select(service, 'idle')
   const active = controller.getView().session
-  controller.setConnection(active.activeEpoch, core, false)
+  const connectionGeneration = controller.getView().connectionGeneration
+  controller.setConnection(active.activeEpoch, core, false, connectionGeneration)
   assert.equal(controller.getView().session.connected, false)
-  controller.setConnection(active.activeEpoch, core, true)
+  controller.setConnection(active.activeEpoch, core, true, connectionGeneration)
   assert.equal(controller.getView().session.connected, false)
   f.setResponse({ ok: true, data: snapshot(core, 8) })
   assert.equal(await controller.refresh(), 'updated')
   assert.equal(controller.getView().session.connected, true)
   assert.equal(controller.getView().snapshot?.revision, 8)
-  controller.setConnection(active.activeEpoch - 1, core, false)
+  controller.setConnection(active.activeEpoch - 1, core, false, controller.getView().connectionGeneration)
   assert.equal(controller.getView().session.connected, true)
 })
 
@@ -408,7 +408,7 @@ test('refresh races reject old success/failure and disconnect invalidates in-fli
     await new Promise<void>(resolve => queueMicrotask(resolve))
     if (completion === 'disconnect') {
       const session = controller.getView().session
-      controller.setConnection(session.activeEpoch, core, false)
+      controller.setConnection(session.activeEpoch, core, false, controller.getView().connectionGeneration)
     } else {
       f.setResponse({ ok: true, data: snapshot(core, 6) })
       assert.equal(await controller.refresh(), 'updated')

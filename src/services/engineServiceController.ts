@@ -5,7 +5,12 @@ import {
 import { CoreServiceError, engineScopeKey, parseCoreDescriptor, parseCoreSnapshot, type CoreSnapshot } from '../core/coreProtocol'
 import type { EngineService } from './engineService'
 
-export interface EngineServiceView { session: EngineSession; snapshot: CoreSnapshot | null }
+export interface EngineServiceView {
+  session: EngineSession
+  snapshot: CoreSnapshot | null
+  /** Capture when attaching a connection callback; never read it inside an old callback. */
+  connectionGeneration: number
+}
 type SelectionOutcome = 'activated' | 'failed' | 'stale' | 'requires_stop' | 'unchanged'
 type RefreshOutcome = 'updated' | 'failed' | 'stale'
 
@@ -17,7 +22,7 @@ type RefreshOutcome = 'updated' | 'failed' | 'stale'
 export function createEngineServiceController(local: EngineService) {
   if (engineScopeKey(local.context) !== engineScopeKey(createEngineSession().active)) throw new CoreServiceError('invalid_payload')
   let activeService = local
-  let view: EngineServiceView = { session: createEngineSession(), snapshot: null }
+  let view: EngineServiceView = { session: createEngineSession(), snapshot: null, connectionGeneration: 0 }
   let refreshGeneration = 0
 
   function failure(error: unknown): string {
@@ -44,7 +49,7 @@ export function createEngineServiceController(local: EngineService) {
         if (engineScopeKey(prepared.context) !== engineScopeKey(target.context)) throw new CoreServiceError('identity_mismatch')
         parseCoreDescriptor(prepared.descriptor, target.context)
         const snapshot = parseCoreSnapshot(prepared.snapshot, target.context)
-        view = { session: completeEngineSwitch(view.session, epoch, { ok: true }), snapshot }
+        view = { session: completeEngineSwitch(view.session, epoch, { ok: true }), snapshot, connectionGeneration: view.connectionGeneration + 1 }
         activeService = target
         return 'activated'
       } catch (error) {
@@ -58,12 +63,22 @@ export function createEngineServiceController(local: EngineService) {
       const generation = ++refreshGeneration
       const epoch = view.session.activeEpoch
       const service = activeService
+      const reconnect = !view.session.connected
+      // Allocate before awaits so a late event from the old socket cannot cancel
+      // the replacement connection. Engine selection and refresh have other epochs.
+      if (reconnect) view = { ...view, connectionGeneration: view.connectionGeneration + 1 }
       try {
-        const response = await service.getSnapshot()
+        let response: CoreSnapshot
+        if (reconnect) {
+          const prepared = await service.prepare()
+          if (engineScopeKey(prepared.context) !== engineScopeKey(service.context)) throw new CoreServiceError('identity_mismatch')
+          parseCoreDescriptor(prepared.descriptor, service.context)
+          response = prepared.snapshot
+        } else response = await service.getSnapshot()
         if (generation !== refreshGeneration || epoch !== view.session.activeEpoch) return 'stale'
         const snapshot = parseCoreSnapshot(response, service.context)
         if (view.snapshot && snapshot.revision < view.snapshot.revision) return 'stale'
-        view = { snapshot, session: { ...view.session, connected: true, error: null } }
+        view = { ...view, snapshot, session: { ...view.session, connected: true, error: null } }
         return 'updated'
       } catch (error) {
         if (generation !== refreshGeneration || epoch !== view.session.activeEpoch) return 'stale'
@@ -72,10 +87,10 @@ export function createEngineServiceController(local: EngineService) {
       }
     },
 
-    setConnection(epoch: number, context: EngineContext, connected: boolean): void {
+    setConnection(epoch: number, context: EngineContext, connected: boolean, connectionGeneration: number): void {
       // A socket-open event alone cannot restore a disconnected authoritative view.
-      // The consumer must call refresh(), which also rechecks peer trust.
-      if (connected) return
+      // The consumer must call refresh(), which also renegotiates protocol/trust.
+      if (connected || connectionGeneration !== view.connectionGeneration) return
       const session = setEngineConnection(view.session, epoch, context, false)
       if (session !== view.session) {
         refreshGeneration++
