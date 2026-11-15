@@ -259,6 +259,47 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
           </button>
         </div>
 
+        {isCoreActive && engine ? (
+          <div className="p-6 flex flex-col gap-4">
+            <div className="p-4 rounded-xl border border-[#D4AF37]/40 bg-[#D4AF37]/[0.07] flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="p-2 rounded-lg bg-[#D4AF37]/15 text-[#D4AF37] shrink-0">
+                  <Wifi className="w-4 h-4" />
+                </div>
+                <div className="flex flex-col min-w-0">
+                  <span className="text-xs font-semibold text-white truncate">
+                    {activeCoreSnapshot?.output?.label || 'Core output'}
+                  </span>
+                  <span className="text-[11px] text-[#A1A1AA] truncate">
+                    Managed by {engine.state.view.session.active.label} ·{' '}
+                    {engine.state.view.session.connected ? 'Connected' : 'Connection lost'}
+                  </span>
+                </div>
+              </div>
+              <div className="w-5 h-5 rounded-full flex items-center justify-center bg-[#D4AF37] text-black shrink-0 shadow-sm">
+                <Check className="w-3 h-3 stroke-[3]" />
+              </div>
+            </div>
+
+            <p className="text-xs text-[#8E8E93] leading-relaxed">
+              Audio output is routed directly by Cadence Core. Windows local audio devices and local UPnP streamers are inactive while Core is selected.
+            </p>
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  void engine.requestSwitchToLocal()
+                  onClose()
+                }}
+                className="px-3 py-1.5 rounded-lg border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] text-xs font-medium text-white cursor-pointer transition-colors"
+              >
+                Switch engine to This PC
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
         {/* Master Switch: Purity Mode (Unity Gain, never equated with proven bit-perfect) */}
         <div className="p-4 px-6 bg-white/[0.02] border-b border-white/[0.08] flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
@@ -417,6 +458,8 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
             </>
           )}
         </div>
+          </>
+        )}
 
         {/* Modal Footer */}
         <div className="p-4 px-6 border-t border-white/[0.08] flex items-center justify-end bg-white/[0.01]">
