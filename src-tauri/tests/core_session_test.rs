@@ -343,6 +343,25 @@ fn renderer_loss_or_external_takeover_never_triggers_play_retries() {
 }
 
 #[test]
+fn paused_renderer_loss_and_takeover_remain_correlated_including_after_seek() {
+    for seek in [false, true] {
+        for takeover in [false, true] {
+            let (owner, fake) = fixture(); queue(&owner); let old = play(&owner, &fake);
+            mutate(&owner, "pause", json!({"operation":"playback.control","action":"pause"}));
+            let active = if seek {
+                mutate(&owner, "seek", json!({"operation":"playback.control","action":"seek","positionSeconds":30}));
+                token(&fake)
+            } else { old.clone() };
+            assert!(!owner.on_renderer_event(RendererEvent::Completed(active.clone())).unwrap());
+            let event = if takeover { RendererEvent::ExternalTakeover(active) } else { RendererEvent::Failed(active) };
+            assert!(owner.on_renderer_event(event).unwrap());
+            assert_eq!(request(&owner, json!({"operation":"core.hello"}))["data"]["ready"], false);
+            assert_eq!(mutate(&owner, "resume", json!({"operation":"playback.control","action":"resume"}))["error"]["code"], "not_ready");
+        }
+    }
+}
+
+#[test]
 fn boundary_rejects_protocol_identity_paths_unknown_fields_and_oversized_bytes() {
     let (owner, fake) = fixture();
     for (value, code) in [
