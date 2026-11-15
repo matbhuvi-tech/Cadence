@@ -291,7 +291,7 @@ impl<R: Renderer> SessionOwner<R> {
             Action::Pause => {
                 if next.activity == Activity::Paused { return Ok(None); }
                 ensure(next.activity == Activity::Playing)?;
-                next.activity = Activity::Paused; next.run = None;
+                next.activity = Activity::Paused;
                 Ok(Some(RendererAction::Pause))
             }
             Action::Resume => {
@@ -306,7 +306,8 @@ impl<R: Renderer> SessionOwner<R> {
                 ensure(*position <= self.durations[&next.entries[index].track_id])?;
                 next.position = *position;
                 let token = RunToken(uuid::Uuid::new_v4());
-                if next.activity == Activity::Playing { next.run = Some(token.clone()); next.activity = Activity::Loading; }
+                next.run = Some(token.clone());
+                if next.activity == Activity::Playing { next.activity = Activity::Loading; }
                 Ok(Some(RendererAction::Seek { position_seconds: *position, token }))
             }
             Action::Play(track) => {
