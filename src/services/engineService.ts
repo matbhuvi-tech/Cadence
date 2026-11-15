@@ -108,8 +108,9 @@ function createService(
     execute: command => guarded(async () => {
       // Validate before trust/IPC/network work and detach arguments across awaits.
       const wire = request(command)
-      if (wire.operation !== 'playback.control' && wire.operation !== 'queue.replace') throw new CoreServiceError('invalid_payload')
-      await authorize()
+      if (wire.operation !== 'playback.control' && wire.operation !== 'queue.replace' && wire.operation !== 'queue.control') throw new CoreServiceError('invalid_payload')
+      const hello = await authorize()
+      if (wire.operation === 'queue.control' && !hello.capabilities.includes('queue.coordinate')) throw new CoreServiceError('unsupported_capability')
       const snapshot = parseCoreSnapshot(await send(wire), context)
       if (snapshot.revision < wire.expectedRevision) throw new CoreServiceError('invalid_payload')
       return snapshot

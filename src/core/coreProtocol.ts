@@ -49,6 +49,9 @@ export type CoreCommand = Mutation & (
   | { operation: 'playback.control'; action: 'play'; trackId: string }
   | { operation: 'playback.control'; action: 'seek'; positionSeconds: number }
   | { operation: 'queue.replace'; entries: readonly CoreQueueEntry[] }
+  | { operation: 'queue.control'; action: 'next' | 'previous' }
+  | { operation: 'queue.control'; action: 'jump'; entryId: string }
+  | { operation: 'queue.control'; action: 'modes'; repeat: 'off' | 'one' | 'all'; shuffle: boolean }
 )
 type CoreOperation = CoreCommand
   | { operation: 'core.hello' | 'session.snapshot' }
@@ -234,6 +237,17 @@ export function parseCoreRequest(value: unknown, expected: Readonly<EngineContex
       fields(object, [...base, 'commandId', 'expectedRevision', 'entries'])
       token(object.commandId); revision(object.expectedRevision); queueEntries(object.entries)
       break
+    case 'queue.control': {
+      const extra = object.action === 'jump' ? ['entryId'] : object.action === 'modes' ? ['repeat', 'shuffle'] : []
+      fields(object, [...base, 'commandId', 'expectedRevision', 'action', ...extra])
+      token(object.commandId); revision(object.expectedRevision)
+      requireValue(['next', 'previous', 'jump', 'modes'].includes(object.action as string))
+      if (object.action === 'jump') token(object.entryId)
+      if (object.action === 'modes') {
+        requireValue(['off', 'one', 'all'].includes(object.repeat as string) && typeof object.shuffle === 'boolean')
+      }
+      break
+    }
     default: throw new CoreServiceError('invalid_payload')
   }
   return object as CoreRequest

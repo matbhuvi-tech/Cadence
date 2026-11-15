@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod commands;
+pub mod core_session;
 pub mod curation;
 pub mod db;
 pub mod diagnostics;
