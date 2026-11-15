@@ -149,13 +149,13 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
             )}
             <div className="min-w-0">
               <h2 className="text-sm font-bold text-zinc-100 truncate">
-                Connection & Diagnostics
+                Connection &amp; Engine Status
               </h2>
               <p className="text-[11px] text-zinc-400 truncate">
                 {isConnected
                   ? `Connected${probe?.latencyMs ? ` • ${probe.latencyMs} ms` : ''}`
                   : isConnecting
-                  ? 'Connecting to desktop...'
+                  ? 'Connecting...'
                   : 'Disconnected'}
               </p>
             </div>
@@ -172,6 +172,34 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
 
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+          {!isConnected && activeProfile?.engineKind === 'core' && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="rounded-2xl bg-rose-500/10 border border-rose-500/35 p-3.5 flex flex-col gap-2.5"
+            >
+              <p className="text-xs font-semibold text-rose-100">
+                Connection lost. Playback may still be continuing.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onRetryConnection}
+                  className="flex-1 min-h-[40px] rounded-xl bg-rose-500/25 border border-rose-400/40 text-rose-100 text-xs font-semibold"
+                >
+                  Reconnect
+                </button>
+                <button
+                  type="button"
+                  onClick={onSwitchDesktop}
+                  className="flex-1 min-h-[40px] rounded-xl bg-zinc-800 text-zinc-100 text-xs font-semibold"
+                >
+                  Choose engine
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Active Error / Diagnostic Guidance */}
           {activeDiag && (
             <div className="rounded-2xl bg-rose-500/10 border border-rose-500/35 p-3.5 flex flex-col gap-2">
@@ -229,9 +257,14 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <Server className="w-4 h-4 text-[#D4AF37] shrink-0" />
-                <span className="text-xs font-semibold text-zinc-100 truncate">
-                  {activeProfile?.label || 'No Desktop Selected'}
-                </span>
+                <div className="min-w-0">
+                  <span className="block text-xs font-semibold text-zinc-100 truncate">
+                    {`Playback engine: ${activeProfile?.label || 'None Selected'}`}
+                  </span>
+                  <span className="block text-[11px] text-zinc-400 truncate">
+                    {`Audio output: ${activeProfile?.outputLabel || 'Unassigned'}`}
+                  </span>
+                </div>
               </div>
               {activeProfile?.certFingerprint ? (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-mono text-emerald-300">
@@ -466,7 +499,7 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
               onClick={onSwitchDesktop}
               className="flex-1 min-h-[48px] rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-semibold"
             >
-              Switch Desktop
+              Choose engine
             </button>
             <button
               type="button"

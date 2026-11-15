@@ -24,8 +24,10 @@ import {
   ListMusic,
   Zap,
   AlertTriangle,
+  Server,
 } from 'lucide-react'
 import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath, getEndpointDisplayName } from '../../core/endpointRouting'
@@ -34,6 +36,7 @@ import { CadenceLogo } from '../common/CadenceLogo'
 interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
   onOpenRemoteModal?: () => void
+  onOpenEngineSettings?: () => void
   topMode?: 'library' | 'curate' | 'maintain'
   isArtworkDockExpanded?: boolean
   onExpandArtworkDock?: () => void
@@ -99,6 +102,7 @@ const NowPlayingTotalTime: React.FC<{ fallbackDuration: number }> = React.memo((
 export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   onOpenSanctuary,
   onOpenRemoteModal,
+  onOpenEngineSettings,
   topMode,
   isArtworkDockExpanded = false,
   onExpandArtworkDock,
@@ -140,12 +144,89 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     nextTrackTransition,
   } = useAudioPlayer()
 
+  const engine = useOptionalEngineController()
+  const isCoreActive = Boolean(engine?.isCoreActive)
+  const coreSnapshot = engine?.activeCoreSnapshot ?? null
+  const coreCurrentEntry =
+    isCoreActive && coreSnapshot?.queue.currentEntryId
+      ? coreSnapshot.queue.entries.find((e) => e.entryId === coreSnapshot.queue.currentEntryId) ?? null
+      : null
+  const coreTrack =
+    isCoreActive && coreCurrentEntry
+      ? engine?.coreCatalogTracks.find((t) => t.id === coreCurrentEntry.trackId) ?? null
+      : null
+
+  const effectiveTrack = isCoreActive ? coreTrack : currentTrack
+  const effectiveIsPlaying = isCoreActive
+    ? coreSnapshot?.playback.activity === 'playing'
+    : isPlaying
+  const effectiveRepeat = isCoreActive ? coreSnapshot?.queue.repeat ?? 'off' : repeatMode
+  const effectiveShuffle = isCoreActive ? coreSnapshot?.queue.shuffle ?? false : isShuffle
+  const corePositionSeconds = isCoreActive ? coreSnapshot?.playback.positionSeconds ?? 0 : 0
+  const engineLabel = engine?.state.view.session.active.label ?? 'This PC'
+  const engineConnected = isCoreActive ? Boolean(engine?.state.view.session.connected) : true
+  const outputLabel = isCoreActive
+    ? coreSnapshot?.output?.label || 'Core output'
+    : getEndpointDisplayName(selectedEndpoint)
+
+  const handleTogglePlayPause = () => {
+    if (isCoreActive && engine) {
+      void engine.coreTogglePlayPause()
+      return
+    }
+    togglePlayPause()
+  }
+
+  const handleNextTrack = () => {
+    if (isCoreActive && engine) {
+      void engine.coreNextTrack()
+      return
+    }
+    nextTrack()
+  }
+
+  const handlePrevTrack = () => {
+    if (isCoreActive && engine) {
+      void engine.corePrevTrack()
+      return
+    }
+    prevTrack()
+  }
+
+  const handleSeek = (seconds: number) => {
+    if (isCoreActive && engine) {
+      void engine.coreSeek(seconds)
+      return
+    }
+    seek(seconds)
+  }
+
+  const handleToggleRepeat = () => {
+    if (isCoreActive && engine) {
+      const next = effectiveRepeat === 'off' ? 'all' : effectiveRepeat === 'all' ? 'one' : 'off'
+      void engine.coreSetModes(next, effectiveShuffle)
+      return
+    }
+    toggleRepeat()
+  }
+
+  const handleToggleShuffle = () => {
+    if (isCoreActive && engine) {
+      void engine.coreSetModes(effectiveRepeat, !effectiveShuffle)
+      return
+    }
+    toggleShuffle()
+  }
+
   const [isDeviceModalOpen, setIsDeviceModalOpen] = useState(false)
   const [isSignalPopoverOpen, setIsSignalPopoverOpen] = useState(false)
 
-  const fallbackDuration = currentTrack?.durationSeconds || currentTrack?.duration || 0
-  const resolvedRelease =
-    currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
+  const fallbackDuration = effectiveTrack?.durationSeconds || effectiveTrack?.duration || 0
+  const resolvedRelease = isCoreActive
+    ? (effectiveTrack?.releaseId
+        ? engine?.coreCatalogReleases.find((r) => r.id === effectiveTrack.releaseId) ?? null
+        : null)
+    : (currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null))
   const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
 
   const [imgError, setImgError] = useState(false)
@@ -154,8 +235,14 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     setImgError(false)
   }, [coverUrl])
 
-  const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
-  const isHiRes = streamTelemetry?.isHighRes || currentTrack?.isHighRes
+  const isDsd = (
+    (isCoreActive ? effectiveTrack?.format : streamTelemetry?.format || effectiveTrack?.format) || ''
+  )
+    .toUpperCase()
+    .includes('DSD')
+  const isHiRes = isCoreActive
+    ? Boolean(effectiveTrack?.isHighRes)
+    : streamTelemetry?.isHighRes || currentTrack?.isHighRes
 
   const signalDesc = describeSignalPath({
     selectedEndpoint,
@@ -168,10 +255,12 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     isMuted,
     outputSampleRate,
   })
-  const isEndpointUnavailable = activeBackendEndpoint === null || deviceType === 'unavailable'
+  const isEndpointUnavailable = isCoreActive
+    ? !engineConnected || !coreSnapshot?.output
+    : activeBackendEndpoint === null || deviceType === 'unavailable'
   const ledColor = isEndpointUnavailable ? '#F43F5E' : isDsd ? '#818CF8' : isHiRes ? '#F59E0B' : '#10B981'
 
-  if (!currentTrack && (topMode === 'curate' || topMode === 'maintain') && !isDeviceModalOpen && !isSignalPopoverOpen) {
+  if (!effectiveTrack && !isCoreActive && (topMode === 'curate' || topMode === 'maintain') && !isDeviceModalOpen && !isSignalPopoverOpen) {
     return null
   }
 
@@ -181,16 +270,38 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
       <footer className="transport-bar-container fixed bottom-3 left-1/2 z-50 w-[calc(100%-1.5rem)] max-w-[2560px] -translate-x-1/2">
         <div className="glass-dropdown border border-white/[0.08] rounded-2xl h-[56px] px-4 grid grid-cols-[minmax(180px,0.85fr)_minmax(300px,auto)_minmax(0,1.4fr)] items-center gap-x-4 shadow-2xl relative select-none">
           {/* Subtle Top Specular Scrubber Highlight */}
-          <NowPlayingScrubber
-            fallbackDuration={fallbackDuration}
-            hasTrack={Boolean(currentTrack)}
-            onSeek={seek}
-          />
+          {isCoreActive ? (
+            <div
+              className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 ${
+                !effectiveTrack ? 'opacity-30 pointer-events-none' : ''
+              }`}
+              onClick={(e) => {
+                if (!effectiveTrack || fallbackDuration <= 0) return
+                const rect = e.currentTarget.getBoundingClientRect()
+                const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+                handleSeek(pct * fallbackDuration)
+              }}
+              title={`Seek: ${formatClockTime(corePositionSeconds)} / ${fallbackDuration > 0 ? formatClockTime(fallbackDuration) : '00:00'}`}
+            >
+              <div
+                className="w-full h-full origin-left bg-gradient-to-r from-[#D4AF37] via-[#F59E0B] to-[#10B981] transition-transform duration-150 ease-linear"
+                style={{
+                  transform: `scaleX(${fallbackDuration > 0 ? Math.max(0, Math.min(1, corePositionSeconds / fallbackDuration)) : 0})`,
+                }}
+              />
+            </div>
+          ) : (
+            <NowPlayingScrubber
+              fallbackDuration={fallbackDuration}
+              hasTrack={Boolean(effectiveTrack)}
+              onSeek={handleSeek}
+            />
+          )}
 
           {/* LEFT SECTION: TRACK CREDITS & NOW PLAYING TRIGGER */}
           <div className="transport-track flex items-center gap-2.5 min-w-0 max-w-[300px]">
             {/* Artwork Thumbnail (hidden when Left Rail artwork dock is expanded to avoid duplicate art) */}
-            {(!isArtworkDockExpanded || !currentTrack) && (
+            {(!isArtworkDockExpanded || !effectiveTrack) && (
               <div className="flex items-center gap-1 shrink-0">
                 <div
                   onClick={onOpenSanctuary}
@@ -200,16 +311,16 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                   {coverUrl && !imgError ? (
                     <img
                       src={coverUrl}
-                      alt={currentTrack?.title || 'Album Art'}
+                      alt={effectiveTrack?.title || 'Album Art'}
                       onError={() => setImgError(true)}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                     />
                   ) : (
                     <CadenceLogo variant="gold" className="w-5 h-5" />
                   )}
-                  {isPlaying && <div className="absolute inset-0 bg-white/[0.04] pointer-events-none" />}
+                  {effectiveIsPlaying && <div className="absolute inset-0 bg-white/[0.04] pointer-events-none" />}
                 </div>
-                {currentTrack && onExpandArtworkDock && (
+                {effectiveTrack && onExpandArtworkDock && (
                   <button
                     type="button"
                     onClick={onExpandArtworkDock}
@@ -228,30 +339,36 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               <span
                 onClick={onOpenSanctuary}
                 className="text-xs font-semibold text-white truncate hover:underline cursor-pointer leading-tight"
-                title={currentTrack?.title || 'No Track Selected'}
+                title={effectiveTrack?.title || 'No Track Selected'}
               >
-                {currentTrack?.title || 'No Track Selected'}
+                {effectiveTrack?.title || 'No Track Selected'}
               </span>
               <span
                 className="text-[11px] text-[#8E8E93] truncate leading-tight mt-0.5"
-                title={currentTrack?.artistCredit || 'Select a track to play'}
+                title={effectiveTrack?.artistCredit || 'Select a track to play'}
               >
-                {currentTrack?.artistCredit || 'Cadence Audiophile Player'}
+                {effectiveTrack?.artistCredit || 'Cadence Audiophile Player'}
               </span>
             </div>
           </div>
 
           {/* CENTER SECTION: TACTILE TRANSPORT CONTROLS (SINGLE-AXIS 56PX) */}
-          <div className={`transport-controls flex items-center justify-center gap-2 sm:gap-3 min-w-0 transition-opacity ${!currentTrack ? 'opacity-40 pointer-events-none' : ''}`}>
+          <div className={`transport-controls flex items-center justify-center gap-2 sm:gap-3 min-w-0 transition-opacity ${!effectiveTrack ? 'opacity-40 pointer-events-none' : ''}`}>
             {/* Elapsed Time */}
-            <NowPlayingElapsedTime />
+            {isCoreActive ? (
+              <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
+                {formatClockTime(corePositionSeconds)}
+              </span>
+            ) : (
+              <NowPlayingElapsedTime />
+            )}
 
             {/* Shuffle Button */}
             <button
-              onClick={toggleShuffle}
-              title={isShuffle ? 'Shuffle On' : 'Shuffle Off'}
+              onClick={handleToggleShuffle}
+              title={effectiveShuffle ? 'Shuffle On' : 'Shuffle Off'}
               className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-                isShuffle ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
+                effectiveShuffle ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
               }`}
             >
               <Shuffle className="w-3.5 h-3.5" />
@@ -259,7 +376,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
 
             {/* Prev Track */}
             <button
-              onClick={prevTrack}
+              onClick={handlePrevTrack}
               title="Previous Track (⌘Left)"
               className="p-1.5 rounded-md text-[#E5E5EA] hover:text-white transition-colors cursor-pointer"
             >
@@ -268,11 +385,11 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
 
             {/* Play / Pause Tactile Button */}
             <button
-              onClick={togglePlayPause}
-              title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+              onClick={handleTogglePlayPause}
+              title={effectiveIsPlaying ? 'Pause (Space)' : 'Play (Space)'}
               className="w-8 h-8 rounded-full bg-white hover:bg-white/95 active:scale-95 text-black font-bold flex items-center justify-center shadow-lg transition-transform cursor-pointer shrink-0"
             >
-              {isPlaying ? (
+              {effectiveIsPlaying ? (
                 <Pause className="w-3.5 h-3.5 fill-black stroke-black" />
               ) : (
                 <Play className="w-3.5 h-3.5 fill-black stroke-black ml-0.5" />
@@ -281,7 +398,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
 
             {/* Next Track */}
             <button
-              onClick={nextTrack}
+              onClick={handleNextTrack}
               title="Next Track (⌘Right)"
               className="p-1.5 rounded-md text-[#E5E5EA] hover:text-white transition-colors cursor-pointer"
             >
@@ -290,13 +407,13 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
 
             {/* Repeat Mode Button */}
             <button
-              onClick={toggleRepeat}
-              title={`Repeat: ${repeatMode.toUpperCase()}`}
+              onClick={handleToggleRepeat}
+              title={`Repeat: ${effectiveRepeat.toUpperCase()}`}
               className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-                repeatMode !== 'off' ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
+                effectiveRepeat !== 'off' ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
               }`}
             >
-              {repeatMode === 'one' ? (
+              {effectiveRepeat === 'one' ? (
                 <Repeat1 className="w-3.5 h-3.5" />
               ) : (
                 <Repeat className="w-3.5 h-3.5" />
@@ -304,20 +421,45 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             </button>
 
             {/* Remaining / Total Time */}
-            <NowPlayingTotalTime fallbackDuration={fallbackDuration} />
+            {isCoreActive ? (
+              <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-left select-none">
+                {fallbackDuration > 0 ? formatClockTime(fallbackDuration) : '--:--'}
+              </span>
+            ) : (
+              <NowPlayingTotalTime fallbackDuration={fallbackDuration} />
+            )}
           </div>
 
-          {/* RIGHT SECTION: AUDIOPHILE SIGNAL PATH, QUEUE & PLAYLIST TOGGLES, VOLUME */}
+          {/* RIGHT SECTION: SEPARATE ENGINE & AUDIO OUTPUT CONTROLS, SIGNAL PATH, QUEUE & PLAYLISTS */}
           <div className="transport-actions flex items-center justify-end gap-2 min-w-0 relative">
-            {/* Audio Output Device Modal Trigger */}
+            {/* Separate Playback Engine Selector */}
             <button
-              onClick={() => setIsDeviceModalOpen(true)}
-              title={`Selected Output: ${getEndpointDisplayName(selectedEndpoint)}${
-                isEndpointUnavailable ? ' (Unavailable)' : ''
+              type="button"
+              onClick={() => onOpenEngineSettings?.()}
+              aria-label={`Playback engine: ${engineLabel}${!engineConnected ? ' (Disconnected)' : ''}`}
+              title={`Playback engine: ${engineLabel}${!engineConnected ? ' — Disconnected' : ''}`}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] font-medium transition-all cursor-pointer shrink-0 ${
+                isCoreActive
+                  ? engineConnected
+                    ? 'bg-[#D4AF37]/12 border-[#D4AF37]/35 text-[#F5F5F7]'
+                    : 'bg-rose-500/12 border-rose-500/35 text-rose-200'
+                  : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
               }`}
-              className="p-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white transition-all cursor-pointer"
             >
-              <Speaker className={`w-3.5 h-3.5 ${isEndpointUnavailable ? 'text-rose-400' : 'text-[#D4AF37]'}`} />
+              <Server className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span className="hidden xl:inline max-w-[90px] truncate">{engineLabel}</span>
+            </button>
+
+            {/* Separate Audio Output Device Modal Trigger */}
+            <button
+              type="button"
+              onClick={() => setIsDeviceModalOpen(true)}
+              aria-label={`Audio output: ${outputLabel}${isEndpointUnavailable ? ' (Unavailable)' : ''}`}
+              title={`Audio output: ${outputLabel}${isEndpointUnavailable ? ' (Unavailable)' : ''}`}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-[#8E8E93] hover:text-white transition-all cursor-pointer shrink-0 text-[11px]"
+            >
+              <Speaker className={`w-3.5 h-3.5 shrink-0 ${isEndpointUnavailable ? 'text-rose-400' : 'text-[#D4AF37]'}`} aria-hidden="true" />
+              <span className="hidden 2xl:inline max-w-[96px] truncate text-[#D1D1D6]">{outputLabel}</span>
             </button>
 
             {/* Volume Control */}
@@ -368,7 +510,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             </div>
 
             {/* The Clickable Audiophile Signal Path Pill */}
-            {currentTrack && (
+            {effectiveTrack && (
               <button
                 onClick={() => setIsSignalPopoverOpen((prev) => !prev)}
                 title="Inspect Deterministic Bit-Perfect Signal Path & DAC Clock"
@@ -379,11 +521,11 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                   style={{ backgroundColor: ledColor }}
                 />
                 <span className="transport-signal-label text-[#F5F5F7] font-semibold">
-                  {streamTelemetry?.format || currentTrack?.format || 'PCM'}
+                  {(isCoreActive ? effectiveTrack?.format : streamTelemetry?.format || effectiveTrack?.format) || 'PCM'}
                 </span>
                 <span className="transport-signal-label text-[#8E8E93]">→</span>
                 <span className="transport-signal-label text-[#8E8E93] truncate max-w-[110px]">
-                  {signalDesc.pillLabel}
+                  {isCoreActive ? outputLabel : signalDesc.pillLabel}
                 </span>
               </button>
             )}

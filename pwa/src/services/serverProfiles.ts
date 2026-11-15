@@ -48,14 +48,24 @@ export function parsePairingInput(raw: string): Partial<ServerProfile> | null {
       if (!rawUrl) return null;
       const baseUrl = normalizeBaseUrl(rawUrl);
       const { host, port } = extractHostAndPort(baseUrl);
+      const engineKind = obj.kind === 'core' ? 'core' : obj.kind === 'local' ? 'local' : undefined;
       return {
         baseUrl,
         port,
-        label: typeof obj.host === 'string' && obj.host ? obj.host : host,
+        label:
+          typeof obj.label === 'string' && obj.label.trim()
+            ? obj.label.trim()
+            : typeof obj.host === 'string' && obj.host
+            ? obj.host
+            : host,
         token: typeof obj.token === 'string' ? obj.token.trim() : '',
         mDnsHost: typeof obj.mdns === 'string' ? obj.mdns.trim() : undefined,
         certFingerprint: typeof obj.fp === 'string' ? obj.fp.trim().toLowerCase() : undefined,
         fallbackIps: Array.isArray(obj.ips) ? obj.ips.map(String) : undefined,
+        engineKind,
+        engineId: typeof obj.engineId === 'string' ? obj.engineId.trim() : undefined,
+        libraryId: typeof obj.libraryId === 'string' ? obj.libraryId.trim() : undefined,
+        outputLabel: typeof obj.output === 'string' ? obj.output.trim() : undefined,
       };
     } catch {
       return null;
@@ -76,7 +86,13 @@ export function parsePairingInput(raw: string): Partial<ServerProfile> | null {
     const fallbackIps = ipsParam
       ? ipsParam.split(',').map((s) => s.trim()).filter(Boolean)
       : undefined;
-    const label = mDnsHost ? mDnsHost.replace(/\.local$/i, '') : url.hostname;
+    const kindParam = (url.searchParams.get('kind') || '').trim().toLowerCase();
+    const engineKind = kindParam === 'core' ? 'core' : kindParam === 'local' ? 'local' : undefined;
+    const engineId = (url.searchParams.get('engineId') || '').trim() || undefined;
+    const libraryId = (url.searchParams.get('libraryId') || '').trim() || undefined;
+    const customLabel = (url.searchParams.get('label') || '').trim();
+    const outputLabel = (url.searchParams.get('output') || '').trim() || undefined;
+    const label = customLabel || (mDnsHost ? mDnsHost.replace(/\.local$/i, '') : url.hostname);
 
     return {
       baseUrl,
@@ -87,14 +103,34 @@ export function parsePairingInput(raw: string): Partial<ServerProfile> | null {
       certFingerprint,
       fallbackIps,
       trustInsecure: scheme === 'http' ? true : undefined,
+      engineKind,
+      engineId,
+      libraryId,
+      outputLabel,
     };
   } catch {
     return null;
   }
 }
 
-export function buildProfileCacheKey(baseUrl: string, token: string): string {
-  return `${baseUrl || 'same-origin'}::${token}`;
+export function buildProfileCacheKey(
+  baseUrl: string,
+  token: string,
+  identity?: { kind?: 'local' | 'core'; engineId?: string; libraryId?: string }
+): string {
+  const scope = identity
+    ? `${identity.kind ?? 'local'}:${identity.engineId ?? 'local'}:${identity.libraryId ?? 'local'}`
+    : 'default';
+  return `${baseUrl || 'same-origin'}::${scope}::${token}`;
+}
+
+export function isSameProfileScope(a: ServerProfile, b: ServerProfile): boolean {
+  return (
+    a.baseUrl === b.baseUrl &&
+    (a.engineKind ?? 'local') === (b.engineKind ?? 'local') &&
+    (a.engineId ?? 'local') === (b.engineId ?? 'local') &&
+    (a.libraryId ?? 'local') === (b.libraryId ?? 'local')
+  );
 }
 
 export function loadActiveServerProfile(isNative: boolean): ServerProfile | null {
@@ -105,9 +141,11 @@ export function loadActiveServerProfile(isNative: boolean): ServerProfile | null
     if (urlToken) {
       const origin = window.location.origin;
       const { host, port } = extractHostAndPort(origin);
+      const kindParam = params.get('kind')?.trim().toLowerCase();
+      const engineKind = kindParam === 'core' ? 'core' : kindParam === 'local' ? 'local' : undefined;
       const profile: ServerProfile = {
         id: origin,
-        label: host || 'Cadence Desktop',
+        label: params.get('label')?.trim() || host || (engineKind === 'core' ? 'Cadence Core' : 'Cadence Desktop'),
         baseUrl: origin,
         mDnsHost: params.get('mdns')?.trim() || undefined,
         certFingerprint: params.get('fp')?.trim().toLowerCase() || undefined,
@@ -115,6 +153,10 @@ export function loadActiveServerProfile(isNative: boolean): ServerProfile | null
         port,
         token: urlToken,
         lastConnectedAt: Date.now(),
+        engineKind,
+        engineId: params.get('engineId')?.trim() || undefined,
+        libraryId: params.get('libraryId')?.trim() || undefined,
+        outputLabel: params.get('output')?.trim() || undefined,
       };
       saveActiveServerProfile(profile);
       return profile;
@@ -159,14 +201,14 @@ export function saveActiveServerProfile(profile: ServerProfile | null): void {
   }
   const normalized: ServerProfile = {
     ...profile,
-    id: profile.baseUrl,
+    id: `${profile.baseUrl}::${profile.engineKind ?? 'local'}::${profile.engineId ?? 'local'}::${profile.libraryId ?? 'local'}`,
     lastConnectedAt: Date.now(),
   };
   localStorage.setItem(ACTIVE_PROFILE_KEY, JSON.stringify(normalized));
   localStorage.setItem(LEGACY_TOKEN_KEY, normalized.token);
 
   const existing = loadSavedServerProfiles();
-  const filtered = existing.filter((p) => p.baseUrl !== normalized.baseUrl);
+  const filtered = existing.filter((p) => !isSameProfileScope(p, normalized));
   const updated = [normalized, ...filtered].slice(0, 6);
   localStorage.setItem(SAVED_PROFILES_KEY, JSON.stringify(updated));
 }
@@ -182,8 +224,10 @@ export function loadSavedServerProfiles(): ServerProfile[] {
   }
 }
 
-export function removeSavedServerProfile(baseUrl: string): ServerProfile[] {
-  const next = loadSavedServerProfiles().filter((p) => p.baseUrl !== baseUrl);
+export function removeSavedServerProfile(baseUrlOrId: string): ServerProfile[] {
+  const next = loadSavedServerProfiles().filter(
+    (p) => p.id !== baseUrlOrId && p.baseUrl !== baseUrlOrId
+  );
   localStorage.setItem(SAVED_PROFILES_KEY, JSON.stringify(next));
   return next;
 }

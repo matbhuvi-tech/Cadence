@@ -27,6 +27,8 @@ import type { CurationDecisionTrace, UpdateArtistEditorialPayload } from '../cor
 import type { CurateDraft } from '../core/curateDraft'
 import type { CurateEvidenceRun, CurateEvidenceSummary } from './curateEvidenceService'
 import type { CurateCommitRow } from '../core/curateCommit'
+import type { CoreHealthMetadata, DiscoveredCoreNode } from './coreControllerTransport'
+import { CoreServiceError, type CoreErrorCode } from '../core/coreProtocol'
 import type { CommitQueueSummary, CommitTelemetryPayload, EnqueueBatchPayload } from '../types/commit'
 
 export interface AudioStreamTelemetry {
@@ -883,6 +885,67 @@ class TauriBridgeService {
       }
     }
     return null
+  }
+
+  public async coreProbeEndpoint(target: {
+    baseUrl: string
+    pairingToken?: string
+    certFingerprint?: string
+    trustInsecure?: boolean
+  }): Promise<CoreHealthMetadata> {
+    try {
+      return await invoke<CoreHealthMetadata>('core_probe_endpoint', {
+        target: {
+          baseUrl: target.baseUrl,
+          pairingToken: target.pairingToken ?? null,
+          certFingerprint: target.certFingerprint ?? null,
+          trustInsecure: Boolean(target.trustInsecure),
+        },
+      })
+    } catch (err) {
+      const code = String(err) as CoreErrorCode
+      if (code === 'untrusted_peer' || code === 'unauthorized' || code === 'invalid_payload') {
+        throw new CoreServiceError(code)
+      }
+      throw new CoreServiceError('unavailable')
+    }
+  }
+
+  public async coreControlRequest(
+    target: {
+      baseUrl: string
+      pairingToken?: string
+      certFingerprint?: string
+      trustInsecure?: boolean
+    },
+    payload: unknown,
+  ): Promise<unknown> {
+    try {
+      return await invoke<unknown>('core_control_request', {
+        target: {
+          baseUrl: target.baseUrl,
+          pairingToken: target.pairingToken ?? null,
+          certFingerprint: target.certFingerprint ?? null,
+          trustInsecure: Boolean(target.trustInsecure),
+        },
+        payload,
+      })
+    } catch (err) {
+      const code = String(err) as CoreErrorCode
+      if (code === 'untrusted_peer' || code === 'unauthorized' || code === 'invalid_payload') {
+        throw new CoreServiceError(code)
+      }
+      throw new CoreServiceError('unavailable')
+    }
+  }
+
+  public async discoverCoreNodes(): Promise<DiscoveredCoreNode[]> {
+    if (!this.isTauri()) return []
+    try {
+      return await invoke<DiscoveredCoreNode[]>('discover_core_nodes')
+    } catch {
+      return []
+    }
   }
 
   public async getMaintenanceStats(): Promise<MaintenanceStats | null> {

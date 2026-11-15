@@ -14,7 +14,8 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
-import type { DiscoveredServer, ProbeResult, ServerProfile } from '../../types/remote';
+import type { DiscoveredServer, EngineKind, ProbeResult, ServerProfile } from '../../types/remote';
+import { createPwaCoreClient, CoreClientError } from '../../services/coreRemoteClient';
 import {
   extractHostAndPort,
   formatFingerprintBlocks,
@@ -34,6 +35,13 @@ import {
 interface PairingViewProps {
   onPaired: (profile: ServerProfile) => void;
   onCancel?: () => void;
+  activeEngineLabel?: string;
+  activeEngineKind?: EngineKind;
+  isActivePlaybackRunning?: boolean;
+  onSwitchWithCoreDisposition?: (
+    profile: ServerProfile,
+    disposition: 'leave_core_playing' | 'stop_before_switch'
+  ) => Promise<void> | void;
 }
 
 interface PendingCertReview {
@@ -42,7 +50,14 @@ interface PendingCertReview {
   isMismatch: boolean;
 }
 
-export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) => {
+export const PairingView: React.FC<PairingViewProps> = ({
+  onPaired,
+  onCancel,
+  activeEngineLabel,
+  activeEngineKind = 'local',
+  isActivePlaybackRunning = false,
+  onSwitchWithCoreDisposition,
+}) => {
   const nativeAndroid = isNativeAndroid();
 
   const [savedProfiles, setSavedProfiles] = useState<ServerProfile[]>(() => loadSavedServerProfiles());
@@ -53,11 +68,13 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
   const [isScanningQr, setIsScanningQr] = useState(false);
 
   const [showManual, setShowManual] = useState(!nativeAndroid);
+  const [targetEngineKind, setTargetEngineKind] = useState<EngineKind>('local');
   const [scheme, setScheme] = useState<'https' | 'http'>('https');
   const [hostInput, setHostInput] = useState('');
   const [portInput, setPortInput] = useState('4040');
   const [pinInput, setPinInput] = useState('');
   const [selectedDiscovered, setSelectedDiscovered] = useState<DiscoveredServer | null>(null);
+  const [pendingSwitchTarget, setPendingSwitchTarget] = useState<ServerProfile | null>(null);
 
   const [isConnecting, setIsConnecting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -125,6 +142,14 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
     }
   };
 
+  const completeSelectionWithLeaveGuard = (finalized: ServerProfile) => {
+    if (activeEngineKind === 'core' && isActivePlaybackRunning) {
+      setPendingSwitchTarget(finalized);
+      return;
+    }
+    onPaired(finalized);
+  };
+
   const verifyAndCompletePairing = async (candidate: ServerProfile) => {
     setFormError(null);
     setFormHint(null);
@@ -138,17 +163,48 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
         4000
       );
 
-      if (probe.reachable && probe.authenticated) {
-        const finalized: ServerProfile = {
-          ...candidate,
-          certFingerprint: probe.certFingerprint || candidate.certFingerprint,
-          lastConnectedAt: Date.now(),
-        };
-        onPaired(finalized);
+      if (!probe.reachable || !probe.authenticated) {
+        handleProbeFailure(candidate, probe);
         return;
       }
 
-      handleProbeFailure(candidate, probe);
+      if (candidate.engineKind === 'core') {
+        try {
+          const client = createPwaCoreClient({
+            ...candidate,
+            certFingerprint: probe.certFingerprint || candidate.certFingerprint,
+          });
+          const prepared = await client.prepare();
+          const finalizedCore: ServerProfile = {
+            ...candidate,
+            engineKind: 'core',
+            label: prepared.descriptor.label || candidate.label,
+            engineId: prepared.descriptor.engineId,
+            libraryId: prepared.descriptor.libraryId,
+            outputLabel: prepared.snapshot.output?.label,
+            capabilities: prepared.descriptor.capabilities,
+            certFingerprint: probe.certFingerprint || candidate.certFingerprint,
+            lastConnectedAt: Date.now(),
+          };
+          completeSelectionWithLeaveGuard(finalizedCore);
+          return;
+        } catch (err) {
+          const msg =
+            err instanceof CoreClientError
+              ? err.message
+              : 'Connected to host, but /v1/core handshake failed.';
+          setFormError(msg);
+          setFormHint('Ensure the node exposes Cadence Core v1 capabilities and matching pairing credentials.');
+          return;
+        }
+      }
+
+      const finalized: ServerProfile = {
+        ...candidate,
+        certFingerprint: probe.certFingerprint || candidate.certFingerprint,
+        lastConnectedAt: Date.now(),
+      };
+      completeSelectionWithLeaveGuard(finalized);
     } finally {
       setIsConnecting(false);
     }
@@ -193,6 +249,10 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
         token: parsed.token,
         certFingerprint: parsed.certFingerprint,
         trustInsecure: parsedScheme === 'http' ? true : parsed.trustInsecure,
+        engineKind: parsed.engineKind ?? targetEngineKind,
+        engineId: parsed.engineId,
+        libraryId: parsed.libraryId,
+        outputLabel: parsed.outputLabel,
       };
       await verifyAndCompletePairing(candidate);
     } catch (err) {
@@ -259,6 +319,7 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
         setHostInput(host);
         setPortInput(String(port));
         if (parsed.token) setPinInput(parsed.token);
+        if (parsed.engineKind) setTargetEngineKind(parsed.engineKind);
       }
     }
   };
@@ -295,6 +356,7 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
       token: trimmedPin,
       certFingerprint: selectedDiscovered?.fingerprint,
       trustInsecure: resolvedScheme === 'http' ? true : false,
+      engineKind: targetEngineKind,
     };
 
     await verifyAndCompletePairing(candidate);
@@ -351,10 +413,13 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
               <span>Bit-Perfect Wi-Fi Remote</span>
             </div>
             <h1 className="text-xl font-bold tracking-tight text-zinc-100">
-              Connect to Cadence Desktop
+              Choose Playback Engine
             </h1>
             <p className="text-xs text-zinc-400 mt-1">
-              Scan the QR code in Cadence Desktop or pick a discovered PC on your Wi-Fi network.
+              Connect directly to Cadence Desktop or Cadence Core on your Wi-Fi network without proxying.
+            </p>
+            <p className="text-[11px] text-zinc-500 mt-1.5 leading-relaxed">
+              Native Android certificate pinning verifies SPKI SHA-256 directly; Browser PWA trust uses HTTPS origin validation from this device.
             </p>
           </div>
           {onCancel && (
@@ -517,6 +582,32 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
 
           {showManual && (
             <form onSubmit={(e) => void handleManualConnect(e)} className="px-4 pb-4 pt-1 flex flex-col gap-3">
+              {/* Target Engine Role */}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTargetEngineKind('local')}
+                  className={`min-h-[42px] rounded-xl text-xs font-semibold border transition-colors ${
+                    targetEngineKind === 'local'
+                      ? 'bg-zinc-100 text-zinc-950 border-zinc-100'
+                      : 'bg-zinc-950/60 border-zinc-800 text-zinc-400'
+                  }`}
+                >
+                  Cadence Desktop
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTargetEngineKind('core')}
+                  className={`min-h-[42px] rounded-xl text-xs font-semibold border transition-colors ${
+                    targetEngineKind === 'core'
+                      ? 'bg-[#D4AF37]/20 border-[#D4AF37] text-[#D4AF37]'
+                      : 'bg-zinc-950/60 border-zinc-800 text-zinc-400'
+                  }`}
+                >
+                  Cadence Core
+                </button>
+              </div>
+
               {/* Protocol Selector */}
               <div className="grid grid-cols-2 gap-2">
                 <button
@@ -655,6 +746,60 @@ export const PairingView: React.FC<PairingViewProps> = ({ onPaired, onCancel }) 
                 className="flex-1 min-h-[48px] rounded-xl bg-[#D4AF37] text-zinc-950 text-xs font-bold"
               >
                 Trust & Pin Server
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Explicit Leave Core Modal when switching from active Core playback */}
+      {pendingSwitchTarget && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-3xl bg-[#14171D] border border-zinc-800 p-5 flex flex-col gap-3.5 shadow-2xl">
+            <h3 className="text-sm font-bold text-zinc-100">
+              {`Switch away from ${activeEngineLabel || 'Cadence Core'}?`}
+            </h3>
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Choose whether Core should keep playing before connecting this controller to{' '}
+              {pendingSwitchTarget.label}.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const next = pendingSwitchTarget;
+                  setPendingSwitchTarget(null);
+                  if (onSwitchWithCoreDisposition) {
+                    void onSwitchWithCoreDisposition(next, 'leave_core_playing');
+                  } else {
+                    onPaired(next);
+                  }
+                }}
+                className="min-h-[46px] rounded-xl bg-zinc-800 text-zinc-100 text-xs font-semibold"
+              >
+                Keep Core playing and switch
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = pendingSwitchTarget;
+                  setPendingSwitchTarget(null);
+                  if (onSwitchWithCoreDisposition) {
+                    void onSwitchWithCoreDisposition(next, 'stop_before_switch');
+                  } else {
+                    onPaired(next);
+                  }
+                }}
+                className="min-h-[46px] rounded-xl bg-[#D4AF37] text-zinc-950 text-xs font-bold"
+              >
+                Stop Core playback and switch
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingSwitchTarget(null)}
+                className="min-h-[40px] rounded-xl text-zinc-400 text-xs"
+              >
+                Cancel
               </button>
             </div>
           </div>

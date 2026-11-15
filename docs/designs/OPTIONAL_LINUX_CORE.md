@@ -354,7 +354,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 4 | Implementation ready for user verification | `src-tauri/src/core_runtime/` + `src-tauri/src/bin/cadence_headless.rs`; Cargo `desktop` feature split (`--no-default-features` excludes Tauri/GUI/local audio); TrueNAS cgroup v2 + `CAP_IPC_LOCK` + `RLIMIT_MEMLOCK` strict admission, 30s cooldown guard, `cpuset` partitioning and Linux `x86_64-unknown-linux-gnu` check pass |
 | 5 | Implementation ready for user verification | `src-tauri/src/core_runtime/upnp_session.rs`; opaque per-`RunToken` session URLs, exact `GET`/`Range`/`HEAD`/DSF probes from locked RAM, 512 KiB pre-roll cap, Linux `TCP_INFO`/`SO_SNDBUF`/`clock_nanosleep` pacer, RS130 simulator (`core_upnp_session_test`) and release 0-alloc gate (`core_upnp_zero_alloc_test`) pass; physical RS130 hardware qualification pending |
 | 6 | Implementation ready for user verification | `src-tauri/src/core_runtime/dragonfish.rs`, `cadence-headless` (`--dragonfish`, `--healthcheck`, `--backup`, `--restore`, `--validate-dragonfish-recipe`), and `deploy/truenas-dragonfish/` (`Dockerfile`, `custom-app-24.04.yaml`, `docker-compose.yml`); 8/8 tests in `core_dragonfish_packaging_test` and `x86_64-unknown-linux-gnu` check pass; live `docker build` / TrueNAS Dragonfish host deployment pending |
-| 7-10 | Planned | No live controller UI wiring or physical RS130 hardware session claimed yet |
+| 7 | Implementation ready for user verification | Windows desktop & Android/Mobile Remote PWA controller UX (`coreControllerTransport.ts`, `EngineControllerContext.tsx`, `PlaybackEnginePanel.tsx`, `EngineSwitchPromptModal.tsx`, `coreRemoteClient.ts`, `TopHeader.tsx`, `DiagnosticsSheet.tsx`, `PairingView.tsx`, and Tauri `core_probe_endpoint`/`core_control_request`/`discover_core_nodes` commands); default `This PC` startup with zero auto-discovery/onboarding, separate `Playback engine` & `Audio output` selectors, RS130 takeover & leave-Core prompts, direct PWA `/v1/core` client + pinning guidance; 61/61 controller/session/protocol unit tests, `CadenceSettingsModal` (4/4), endpoint-routing, queue-sync, Rust `cargo check` + `core_session_test` (24/24), desktop & PWA `tsc -b`, and Vite builds pass; live TrueNAS Dragonfish host + physical RS130 / physical Android APK QA pending user verification |
+| 8-10 | Planned | No live physical RS130 hardware session, TrueNAS host deployment, or automated Phase 9 QA scenarios claimed yet |
 
 Phase 1 command:
 
@@ -926,6 +927,45 @@ Using the agent-self-evaluation skill: overall 4.3/5; ready for user verificatio
 Priority improvements: run `docker build --platform linux/amd64` on a Linux/Docker
 host and proceed to Phase 7 controller UX or live Dragonfish testing. Would the
 user agree? Expected yes for the Phase 6 packaging and bootstrap milestone.
+
+### Phase 7 TDD and verification record (2026-11-15)
+
+Source: phase 7 in the independently testable phase table above. User journeys:
+standalone `This PC` default with zero Core onboarding or startup discovery I/O;
+`Settings > Playback Engine` on-demand discovery/pairing and explicit `Use this Core` activation without auto-play; separate `Playback engine` and `Audio output` controls in Windows and Android/Mobile Remote PWA; explicit leave-Core (`Keep Core playing` / `Stop Core playback`) and RS130 takeover confirmation prompts; independent Mobile Remote PWA `/v1/core` connection without Windows desktop proxying; native Android cert pinning vs Browser PWA trust guidance; disconnect banner (`Connection lost. Playback may still be continuing.` with `Reconnect` and `Choose engine`, zero auto-fallback or stale replay).
+
+- RED checkpoints: `src/test/testCoreControllerUx.ts` failed resolving `../services/coreControllerTransport.ts`, `src/test/testPwaCoreController.ts` failed resolving `../../pwa/src/services/coreRemoteClient.ts`, and `src/test/testCadenceSettingsModal.ts` expected the 3 legacy settings tabs before adding `Playback Engine`.
+- GREEN implementation:
+  - Windows desktop & Tauri IPC: `src-tauri/src/commands/remote.rs` (`core_probe_endpoint`, `core_control_request`, `discover_core_nodes`), `src-tauri/src/lib.rs`, `src/services/tauriBridge.ts`, `src/services/coreControllerTransport.ts`, `src/context/AudioPlayerContext.tsx`, `src/context/EngineControllerContext.tsx`, `src/components/Modals/PlaybackEnginePanel.tsx`, `src/components/Modals/EngineSwitchPromptModal.tsx`, `src/components/Modals/CadenceSettingsModal.tsx`, `src/components/AudioPlayer/NowPlayingBar.tsx`, `src/components/AudioPlayer/AudioDeviceSelectorModal.tsx`, and `src/App.tsx`.
+  - Android / Mobile Remote PWA: `pwa/src/types/remote.ts`, `pwa/src/services/serverProfiles.ts`, `pwa/src/services/coreRemoteClient.ts`, `pwa/src/hooks/useRemoteSocket.ts`, `pwa/src/components/Navigation/TopHeader.tsx`, `pwa/src/components/Connection/DiagnosticsSheet.tsx`, `pwa/src/components/Connection/PairingView.tsx`, and `pwa/src/App.tsx`.
+
+| Guarantee | Acceptance fixture | Type / result |
+| --- | --- | --- |
+| Standalone `This PC` default with zero startup discovery, plus explicit `Use this Core` activation without auto-play | `testCoreControllerUx.ts` | Unit + controller store / PASS |
+| Leave-Core (`Keep Core playing` / `Stop Core playback`) and local RS130 takeover prompts never kill Core silently | `testCoreControllerUx.ts` | State transition / PASS |
+| Disconnect enters recovery (`Connection lost. Playback may still be continuing.`) with zero auto-fallback and zero Stop-on-close | `testCoreControllerUx.ts` | Transport / PASS |
+| Desktop Core catalog projection (`mapCoreCatalogToUi`) preserves opaque identity without `file://` or host path leaks | `testCoreControllerUx.ts` | Projection / PASS |
+| Settings modal renders 4 tabs & panels including `Playback Engine` | `testCadenceSettingsModal.ts` (component tests 1-4) | Component / PASS |
+| PWA connects directly to Core `/v1/core` (`coreRemoteClient.ts`), isolates scoped profiles (`serverProfiles.ts`), and distinguishes native pinning vs browser PWA trust | `testPwaCoreController.ts`, `PairingView.tsx` | Unit + UI / PASS |
+
+Reproduce Phase 7 verification with:
+
+```powershell
+node --import tsx --test src/test/testCoreControllerUx.ts src/test/testPwaCoreController.ts src/test/testEngineSession.ts src/test/testCoreServices.ts src/test/testCoreSessionProtocol.ts
+npx tsc -b
+npx --prefix pwa tsc -b
+npm run test:endpoint-routing
+npm run test:queue-sync
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --test core_session_test
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
+```
+
+- PASS: 61/61 tests across `testCoreControllerUx.ts`, `testPwaCoreController.ts`, `testEngineSession.ts`, `testCoreServices.ts`, and `testCoreSessionProtocol.ts`.
+- PASS: `npx tsc -b` (desktop), `npx --prefix pwa tsc -b` (PWA), isolated desktop & PWA Vite builds, `npm run test:endpoint-routing`, `npm run test:queue-sync`, and `testCadenceSettingsModal.ts` tests 1-4.
+- PASS: `cargo check --manifest-path src-tauri/Cargo.toml`, `cargo test --manifest-path src-tauri/Cargo.toml --test core_session_test` (24/24), and headless `--no-default-features --features bundled-sqlite` check.
+- KNOWN PRE-EXISTING HARNESS LIMITATION: `testCadenceSettingsModal.ts` test 5 (`AppContent`) and `testAppStartup.ts` tests 3-5 fail under bare Node ESM `tsx` due to `.css` imports (`CadenceArtworkFallback.css`, `ERR_UNKNOWN_FILE_EXTENSION: ".css"`).
+- NOT RUN / PENDING USER & HARDWARE QA: Live Tauri desktop UI against a running TrueNAS Dragonfish Core node, physical RS130 playback, and physical Android APK / browser PWA pairing & TLS pinning verification (paused at Mandatory User Verification Gate before any merge to `main`).
 
 ## Platform references
 

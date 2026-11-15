@@ -50,9 +50,26 @@ test('CadenceSettingsModal renders native dialog, tablist, and diagnostics panel
   assert.doesNotMatch(html, /\brole="dialog"/)
   assert.doesNotMatch(html, /\baria-modal=/)
   assert.match(html, /role="tablist"/)
-  assert.equal(html.match(/role="tab"/g)?.length, 3)
-  assert.equal(html.match(/role="tabpanel"/g)?.length, 3)
+  assert.equal(html.match(/role="tab"/g)?.length, 4)
+  assert.equal(html.match(/role="tabpanel"/g)?.length, 4)
+  assert.match(html, /Playback Engine/)
   assert.match(html, /Debug Logging \(Idle Persistence\)/)
+})
+
+test('CadenceSettingsModal renders Playback Engine tab cleanly on This PC by default', () => {
+  const html = renderToStaticMarkup(
+    createElement(CadenceSettingsModal, {
+      isOpen: true,
+      onClose: () => {},
+      initialTab: 'engine',
+      prioritySettings: DEFAULT_PRIORITY_SETTINGS,
+      prioritySummary: summary,
+      onSavePrioritySettings: () => {},
+    }),
+  )
+
+  assert.match(html, /This PC/)
+  assert.match(html, /Connect to Cadence Core/)
 })
 
 test('CadenceSettingsModal renders Priority Settings tab with all 14 categories and Info · Exempt', () => {

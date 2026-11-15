@@ -386,6 +386,9 @@ pub fn run() {
             get_remote_server_info,
             regenerate_pairing_token,
             sync_desktop_queue_to_remote,
+            core_probe_endpoint,
+            core_control_request,
+            discover_core_nodes,
             // Maintenance commands
             get_maintenance_stats,
             get_portrait_sync_stats,

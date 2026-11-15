@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react'
 import { Speaker, X, Check, RefreshCw, Radio, ShieldCheck, Wifi, Loader2, AlertTriangle } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import {
   AudioEndpoint,
   AudioEndpointInfo,
@@ -46,6 +47,9 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
     togglePurityMode,
     upnpDevices,
   } = useAudioPlayer()
+  const engine = useOptionalEngineController()
+  const isCoreActive = Boolean(engine?.isCoreActive)
+  const activeCoreSnapshot = engine?.activeCoreSnapshot ?? null
 
   const [isRefreshing, setIsRefreshing] = useState(false)
 
@@ -138,8 +142,18 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
     return (
       <button
         key={ep.id}
-        onClick={() => selectEndpoint(typedEndpoint)}
-        className={`w-full p-3 rounded-xl border text-left flex items-center justify-between transition-all cursor-pointer ${
+        disabled={isCoreActive}
+        onClick={() => {
+          if (isCoreActive) return
+          if (engine) {
+            void engine.selectLocalEndpointWithCoreGuard(typedEndpoint)
+          } else {
+            void selectEndpoint(typedEndpoint)
+          }
+        }}
+        className={`w-full p-3 rounded-xl border text-left flex items-center justify-between transition-all ${
+          isCoreActive ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+        } ${
           isSelected
             ? 'bg-white/[0.08] border-[#D4AF37]/50 text-white shadow-sm'
             : 'bg-white/[0.02] hover:bg-white/[0.05] border-white/[0.06] text-[#A1A1AA]'
@@ -231,7 +245,9 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
                 Audio Output
               </h3>
               <span className="text-xs text-[#8E8E93]">
-                Playback devices and audio routing
+                {isCoreActive && engine
+                  ? `Managed by ${engine.state.view.session.active.label}: ${activeCoreSnapshot?.output?.label || 'Core output'}`
+                  : 'Playback engine: This PC · Local devices & UPnP'}
               </span>
             </div>
           </div>

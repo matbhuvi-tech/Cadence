@@ -1,11 +1,12 @@
 import React, { useEffect, useId, useRef, useState } from 'react'
-import { Activity, KeyRound, Settings, SlidersHorizontal, X } from 'lucide-react'
+import { Activity, KeyRound, Server, Settings, SlidersHorizontal, X } from 'lucide-react'
 import type { CatalogProblemSummary, PrioritySettings } from '../../core/curatePriorities'
 import { DebugDiagnosticsPanel } from '../CommandBar/DebugDiagnosticsPanel'
 import { CuratePrioritySettingsForm } from '../Curate/CuratePriorityPopover'
 import { GeminiConfigForm } from '../GeminiSetupScreen'
+import { PlaybackEnginePanel } from './PlaybackEnginePanel'
 
-export type CadenceSettingsTab = 'diagnostics' | 'priorities' | 'gemini'
+export type CadenceSettingsTab = 'diagnostics' | 'engine' | 'priorities' | 'gemini'
 
 interface CadenceSettingsModalProps {
   isOpen: boolean
@@ -20,6 +21,7 @@ interface CadenceSettingsModalProps {
 
 const TABS: Array<{ id: CadenceSettingsTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: 'diagnostics', label: 'Diagnostics & Debug Logs', icon: Activity },
+  { id: 'engine', label: 'Playback Engine', icon: Server },
   { id: 'priorities', label: 'Priority Settings', icon: SlidersHorizontal },
   { id: 'gemini', label: 'Gemini API Key', icon: KeyRound },
 ]
@@ -42,6 +44,7 @@ export const CadenceSettingsModal: React.FC<CadenceSettingsModalProps> = ({
   const dialogRef = useRef<HTMLDialogElement>(null)
   const tabRefs = useRef<Record<CadenceSettingsTab, HTMLButtonElement | null>>({
     diagnostics: null,
+    engine: null,
     priorities: null,
     gemini: null,
   })
@@ -197,6 +200,14 @@ export const CadenceSettingsModal: React.FC<CadenceSettingsModalProps> = ({
                 </p>
                 <DebugDiagnosticsPanel isActive={isOpen && activeTab === 'diagnostics'} />
               </div>
+            </div>
+
+            <div
+              role="tabpanel"
+              aria-labelledby={`${baseId}-tab-engine`}
+              hidden={activeTab !== 'engine'}
+            >
+              <PlaybackEnginePanel />
             </div>
 
             <div

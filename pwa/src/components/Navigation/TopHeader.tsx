@@ -1,12 +1,14 @@
 import React from 'react';
 import { ShieldCheck, Wifi, WifiOff } from 'lucide-react';
-import type { PlaybackStatus } from '../../types/remote';
+import type { EngineKind, PlaybackStatus } from '../../types/remote';
 
 interface TopHeaderProps {
   status: PlaybackStatus;
   isConnected: boolean;
   isConnecting: boolean;
   serverLabel?: string;
+  engineKind?: EngineKind;
+  outputLabel?: string | null;
   onOpenDiagnostics?: () => void;
 }
 
@@ -15,6 +17,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   isConnected,
   isConnecting,
   serverLabel,
+  engineKind = 'local',
+  outputLabel,
   onOpenDiagnostics,
 }) => {
   const stream = status.streamInfo;
@@ -46,33 +50,42 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#D4AF37]/30 to-amber-950/40 border border-[#D4AF37]/40 flex items-center justify-center">
           <div className="w-2.5 h-2.5 rounded-full bg-[#D4AF37] shadow-[0_0_8px_rgba(212,175,55,0.8)]" />
         </div>
-        <div className="flex flex-col">
+        <div className="flex flex-col min-w-0">
           <span className="text-sm font-semibold tracking-wider text-zinc-100 font-mono">
             CADENCE
           </span>
-          <div className="flex items-center space-x-1">
-            {isConnected ? (
-              <>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-[10px] text-emerald-400 font-medium truncate max-w-[130px]">
-                  {serverLabel ? `CONNECTED • ${serverLabel}` : 'CONNECTED'}
-                </span>
-              </>
-            ) : isConnecting ? (
-              <>
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
-                <span className="text-[10px] text-amber-400 font-medium truncate max-w-[130px]">
-                  SYNCING...
-                </span>
-              </>
-            ) : (
-              <>
-                <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                <span className="text-[10px] text-rose-400 font-medium truncate max-w-[130px]">
-                  {serverLabel ? `OFFLINE • ${serverLabel}` : 'OFFLINE'}
-                </span>
-              </>
-            )}
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-col gap-0.5 text-[10px]"
+          >
+            <div className="flex items-center space-x-1.5 min-w-0">
+              <span
+                aria-hidden="true"
+                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                  isConnected
+                    ? 'bg-emerald-500'
+                    : isConnecting
+                    ? 'bg-amber-500'
+                    : 'bg-rose-500'
+                }`}
+              />
+              <span
+                className={`font-medium truncate max-w-[180px] ${
+                  isConnected
+                    ? 'text-emerald-400'
+                    : isConnecting
+                    ? 'text-amber-400'
+                    : 'text-rose-400'
+                }`}
+              >
+                {`Playback engine: ${serverLabel || (engineKind === 'core' ? 'Cadence Core' : 'Cadence Desktop')}`}
+                {!isConnected && !isConnecting ? ' • Disconnected' : isConnecting ? ' • Syncing' : ''}
+              </span>
+            </div>
+            <span className="text-zinc-400 truncate max-w-[180px]">
+              {`Audio output: ${outputLabel || status.activeDevice || 'Unassigned'}`}
+            </span>
           </div>
         </div>
       </div>

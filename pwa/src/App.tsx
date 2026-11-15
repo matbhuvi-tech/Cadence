@@ -24,6 +24,7 @@ export function App() {
   const [isNowPlayingOpen, setIsNowPlayingOpen] = useState<boolean>(false);
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState<boolean>(false);
   const [showSwitchingPairing, setShowSwitchingPairing] = useState<boolean>(false);
+  const [showLeaveCorePrompt, setShowLeaveCorePrompt] = useState<boolean>(false);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const isNowPlayingOpenRef = useRef(isNowPlayingOpen);
@@ -43,7 +44,10 @@ export function App() {
     setToken,
     selectServerProfile,
     clearServerProfile,
+    leaveCoreAndClear,
     trustObservedCertificate,
+    coreCatalogTracks,
+    outputLabel,
     lockScreenControls,
     setLockScreenControls,
     status,
@@ -145,7 +149,7 @@ export function App() {
     });
   };
 
-  // Pairing / Desktop Discovery Screen when unpaired or switching servers
+  // Pairing / Engine Discovery Screen when unpaired or switching engines
   if (!activeProfile || showSwitchingPairing) {
     return (
       <PairingView
@@ -154,6 +158,16 @@ export function App() {
           setShowSwitchingPairing(false);
         }}
         onCancel={activeProfile ? () => setShowSwitchingPairing(false) : undefined}
+        activeEngineLabel={activeProfile?.label}
+        activeEngineKind={activeProfile?.engineKind}
+        isActivePlaybackRunning={status.isPlaying || status.isPaused}
+        onSwitchWithCoreDisposition={async (profile, disposition) => {
+          const ok = await leaveCoreAndClear(disposition);
+          if (ok) {
+            selectServerProfile(profile);
+            setShowSwitchingPairing(false);
+          }
+        }}
       />
     );
   }
@@ -166,26 +180,34 @@ export function App() {
         isConnected={isConnected}
         isConnecting={isConnecting}
         serverLabel={activeProfile.label}
+        engineKind={activeProfile.engineKind}
+        outputLabel={outputLabel}
         onOpenDiagnostics={() => setIsDiagnosticsOpen(true)}
       />
 
       {/* Network / Offline Notice Banner with Diagnostics & Retry */}
-      {error && !isConnected && (
-        <div className="bg-rose-950/45 border-b border-rose-900/60 px-3 py-1.5 flex items-center justify-between gap-2 text-xs text-rose-200 shrink-0">
+      {(error || activeProfile.engineKind === 'core') && !isConnected && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="bg-rose-950/45 border-b border-rose-900/60 px-3 py-1.5 flex items-center justify-between gap-2 text-xs text-rose-200 shrink-0"
+        >
           <button
             type="button"
             onClick={() => setIsDiagnosticsOpen(true)}
             className="min-w-0 flex-1 text-left truncate underline decoration-rose-400/40 underline-offset-2"
           >
-            {connectionDiagnostic?.title || error}
+            {activeProfile.engineKind === 'core'
+              ? 'Connection lost. Playback may still be continuing.'
+              : connectionDiagnostic?.title || error}
           </button>
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={() => setIsDiagnosticsOpen(true)}
+              onClick={() => setShowSwitchingPairing(true)}
               className="px-2.5 py-1 rounded bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200 font-medium"
             >
-              Details
+              Choose engine
             </button>
             <button
               type="button"
@@ -193,7 +215,7 @@ export function App() {
               className="flex items-center space-x-1 px-2.5 py-1 rounded bg-rose-900/70 hover:bg-rose-800 text-rose-100 font-medium"
             >
               <RefreshCw className="w-3 h-3" />
-              <span>Retry</span>
+              <span>Reconnect</span>
             </button>
           </div>
         </div>
@@ -201,7 +223,54 @@ export function App() {
 
       {/* Main Tab View (2-Tab Model: Catalog & Queue) */}
       <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {activeTab === 'catalog' && (
+        {activeTab === 'catalog' && activeProfile.engineKind === 'core' && (
+          <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-2">
+            {coreCatalogTracks.length === 0 ? (
+              <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-5 text-center text-xs text-zinc-400">
+                No tracks reported in this Cadence Core library yet. Add or rescan music roots from Cadence Desktop.
+              </div>
+            ) : (
+              coreCatalogTracks.map((trk) => {
+                const isCurrent = status.currentFile === trk.id;
+                return (
+                  <div
+                    key={trk.id}
+                    className={`rounded-2xl border px-3.5 py-3 flex items-center justify-between gap-3 ${
+                      isCurrent
+                        ? 'bg-[#D4AF37]/10 border-[#D4AF37]/40'
+                        : 'bg-zinc-900/60 border-zinc-800/80'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-zinc-100 truncate">{trk.title}</p>
+                      <p className="text-[11px] text-zinc-400 truncate">
+                        {trk.artist} · {trk.album}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void queueTrack(trk.id)}
+                        className="px-2.5 py-1.5 rounded-lg bg-zinc-800 text-zinc-200 text-[11px] font-medium"
+                      >
+                        Queue
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void playTrack(trk.id)}
+                        className="px-3 py-1.5 rounded-lg bg-[#D4AF37] text-zinc-950 text-[11px] font-bold"
+                      >
+                        Play
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {activeTab === 'catalog' && activeProfile.engineKind !== 'core' && (
           <CatalogView
             token={token}
             baseUrl={baseUrl}
@@ -317,9 +386,55 @@ export function App() {
         }}
         onDisconnectDesktop={() => {
           setIsDiagnosticsOpen(false);
+          if (activeProfile.engineKind === 'core' && (status.isPlaying || status.isPaused)) {
+            setShowLeaveCorePrompt(true);
+            return;
+          }
           clearServerProfile();
         }}
       />
+
+      {showLeaveCorePrompt && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-3xl bg-[#14171D] border border-zinc-800 p-5 flex flex-col gap-3 shadow-2xl">
+            <h3 className="text-sm font-bold text-zinc-100">
+              {`Leave ${activeProfile.label}?`}
+            </h3>
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Playback is active on Cadence Core. Choose whether to leave Core playing or stop it before disconnecting this remote.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLeaveCorePrompt(false);
+                  void leaveCoreAndClear('leave_core_playing');
+                }}
+                className="min-h-[44px] rounded-xl bg-zinc-800 text-zinc-100 text-xs font-semibold"
+              >
+                Keep Core playing
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLeaveCorePrompt(false);
+                  void leaveCoreAndClear('stop_before_switch');
+                }}
+                className="min-h-[44px] rounded-xl bg-[#D4AF37] text-zinc-950 text-xs font-bold"
+              >
+                Stop Core playback
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowLeaveCorePrompt(false)}
+                className="min-h-[40px] rounded-xl text-zinc-400 text-xs"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Hardware Device Disconnection Alert Sheet */}
       {deviceUnavailableEvent && (

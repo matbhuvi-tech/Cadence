@@ -159,6 +159,8 @@ export interface DbTrack {
   isOnline: boolean;
 }
 
+export type EngineKind = 'local' | 'core';
+
 export interface ServerProfile {
   id: string;
   label: string;
@@ -170,6 +172,11 @@ export interface ServerProfile {
   certFingerprint?: string;
   trustInsecure?: boolean;
   lastConnectedAt?: number;
+  engineKind?: EngineKind;
+  engineId?: string;
+  libraryId?: string;
+  outputLabel?: string;
+  capabilities?: string[];
 }
 
 export interface DiscoveredServer {

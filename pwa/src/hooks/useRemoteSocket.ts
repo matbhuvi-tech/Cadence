@@ -19,7 +19,16 @@ import {
   sendRemoteCommand,
 } from '../services/api';
 import {
+  CoreClientError,
+  createPwaCoreClient,
+  mapCoreSnapshotToPwa,
+  type CoreCatalogTrack,
+  type CoreClientCommand,
+  type CoreSnapshot,
+} from '../services/coreRemoteClient';
+import {
   extractHostAndPort,
+  isSameProfileScope,
   loadActiveServerProfile,
   loadLockScreenControlsPref,
   saveActiveServerProfile,
@@ -222,11 +231,14 @@ export function useRemoteSocket() {
     deviceName: string;
     availableDevices: string[];
   } | null>(null);
+  const [coreSnapshot, setCoreSnapshot] = useState<CoreSnapshot | null>(null);
 
   const token = activeProfile?.token || '';
   const baseUrl = activeProfile?.baseUrl || '';
 
   const activeProfileRef = useRef<ServerProfile | null>(activeProfile);
+  const coreSnapshotRef = useRef<CoreSnapshot | null>(coreSnapshot);
+  const coreClientRef = useRef<ReturnType<typeof createPwaCoreClient> | null>(null);
   const lockScreenControlsRef = useRef<boolean>(lockScreenControls);
   const statusRef = useRef<PlaybackStatus>(status);
   const isConnectedRef = useRef<boolean>(isConnected);
@@ -244,10 +256,27 @@ export function useRemoteSocket() {
 
   useEffect(() => {
     activeProfileRef.current = activeProfile;
+    coreSnapshotRef.current = coreSnapshot;
     lockScreenControlsRef.current = lockScreenControls;
     statusRef.current = status;
     isConnectedRef.current = isConnected;
-  }, [activeProfile, lockScreenControls, status, isConnected]);
+  }, [activeProfile, coreSnapshot, lockScreenControls, status, isConnected]);
+
+  const applyCoreSnapshot = useCallback((snap: CoreSnapshot, targetProfile?: ServerProfile) => {
+    coreSnapshotRef.current = snap;
+    setCoreSnapshot(snap);
+    const mapped = mapCoreSnapshotToPwa(snap);
+    setStatus(mapped.status);
+    setQueue(mapped.queue);
+    setOutputDevices(mapped.outputLabel ? [mapped.outputLabel] : []);
+    const current = targetProfile ?? activeProfileRef.current;
+    if (current && mapped.outputLabel && current.outputLabel !== mapped.outputLabel) {
+      const updatedProfile: ServerProfile = { ...current, outputLabel: mapped.outputLabel };
+      activeProfileRef.current = updatedProfile;
+      setActiveProfileState(updatedProfile);
+      saveActiveServerProfile(updatedProfile);
+    }
+  }, []);
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -386,8 +415,12 @@ export function useRemoteSocket() {
       reconnectAttemptRef.current = 0;
       autoFallbackAttemptedRef.current = false;
 
-      if (prevBaseUrlRef.current !== profile.baseUrl) {
+      const currentProfile = activeProfileRef.current;
+      if (!currentProfile || !isSameProfileScope(currentProfile, profile)) {
         prevBaseUrlRef.current = profile.baseUrl;
+        coreClientRef.current = null;
+        coreSnapshotRef.current = null;
+        setCoreSnapshot(null);
         setStatus(INITIAL_STATUS);
         setQueue(INITIAL_QUEUE);
         setOutputDevices([]);
@@ -399,7 +432,9 @@ export function useRemoteSocket() {
       saveActiveServerProfile(profile);
       activeProfileRef.current = profile;
       setActiveProfileState(profile);
-      void syncNativeServerProfile(profile);
+      if (profile.engineKind !== 'core') {
+        void syncNativeServerProfile(profile);
+      }
     },
     [clearReconnectTimer]
   );
@@ -460,6 +495,9 @@ export function useRemoteSocket() {
     disconnect(true);
     saveActiveServerProfile(null);
     activeProfileRef.current = null;
+    coreClientRef.current = null;
+    coreSnapshotRef.current = null;
+    setCoreSnapshot(null);
     prevBaseUrlRef.current = '';
     setActiveProfileState(null);
     setStatus(INITIAL_STATUS);
@@ -469,6 +507,36 @@ export function useRemoteSocket() {
     setConnectionDiagnostic(null);
     void syncNativeServerProfile(null);
   }, [disconnect]);
+
+  const leaveCoreAndClear = useCallback(
+    async (disposition: 'leave_core_playing' | 'stop_before_switch') => {
+      const current = activeProfileRef.current;
+      const client = coreClientRef.current;
+      const snap = coreSnapshotRef.current;
+      if (
+        disposition === 'stop_before_switch' &&
+        current?.engineKind === 'core' &&
+        client &&
+        snap
+      ) {
+        try {
+          await client.execute({
+            operation: 'playback.control',
+            action: 'stop',
+            commandId: `pwa_stop_${Date.now().toString(36)}`,
+            expectedRevision: snap.revision,
+          });
+        } catch {
+          setIsConnected(false);
+          setError('Connection lost. Playback may still be continuing.');
+          return false;
+        }
+      }
+      clearServerProfile();
+      return true;
+    },
+    [clearServerProfile]
+  );
 
   const connect = useCallback(
     async (profileOverride?: ServerProfile) => {
@@ -487,6 +555,54 @@ export function useRemoteSocket() {
       }
 
       setIsConnecting(true);
+
+      // Direct Cadence Core v1 control path (independent of Windows Desktop)
+      if (target.engineKind === 'core') {
+        try {
+          const client = createPwaCoreClient(target);
+          const prepared = await client.prepare();
+          if (
+            manualDisconnectRef.current ||
+            !activeProfileRef.current ||
+            !isSameProfileScope(activeProfileRef.current, target)
+          ) {
+            return;
+          }
+          coreClientRef.current = client;
+          const updatedProfile: ServerProfile = {
+            ...target,
+            label: prepared.descriptor.label || target.label,
+            engineId: prepared.descriptor.engineId,
+            libraryId: prepared.descriptor.libraryId,
+            capabilities: prepared.descriptor.capabilities,
+            outputLabel: prepared.snapshot.output?.label ?? target.outputLabel,
+          };
+          applyCoreSnapshot(prepared.snapshot, updatedProfile);
+          setIsConnected(true);
+          setIsConnecting(false);
+          setError(null);
+          setConnectionDiagnostic(null);
+        } catch (err) {
+          // Retain Core context cleanly on disconnect/error — never auto-fallback
+          setIsConnected(false);
+          setIsConnecting(false);
+          const message =
+            err instanceof CoreClientError && err.code !== 'unavailable'
+              ? err.message
+              : 'Connection lost. Playback may still be continuing.';
+          setError(message);
+          setConnectionDiagnostic(
+            buildConnectionDiagnostic(
+              err instanceof CoreClientError && err.code === 'untrusted_peer'
+                ? 'cert_untrusted'
+                : 'network_error',
+              message,
+              target.baseUrl
+            )
+          );
+        }
+        return;
+      }
 
       if (isNativeAndroid()) {
         try {
@@ -814,6 +930,10 @@ export function useRemoteSocket() {
 
       if (!isActive) {
         clearReconnectTimer();
+        if (profile?.engineKind === 'core') {
+          setIsConnecting(false);
+          return;
+        }
         if (isNativeAndroid()) {
           const hasPlayback = statusRef.current.isPlaying || statusRef.current.isPaused;
           const keepMediaSession = lockScreenControlsRef.current && hasPlayback;
@@ -839,6 +959,11 @@ export function useRemoteSocket() {
       autoFallbackAttemptedRef.current = false;
 
       if (!profile || manualDisconnectRef.current) {
+        return;
+      }
+
+      if (profile.engineKind === 'core') {
+        void connect(profile);
         return;
       }
 
@@ -945,6 +1070,104 @@ export function useRemoteSocket() {
   const sendCommand = useCallback(
     async (cmd: Record<string, unknown>): Promise<boolean> => {
       const profile = activeProfileRef.current;
+
+      if (profile?.engineKind === 'core') {
+        const client = coreClientRef.current ?? createPwaCoreClient(profile);
+        coreClientRef.current = client;
+        const snap = coreSnapshotRef.current;
+        if (!snap) {
+          await connect(profile);
+          return false;
+        }
+        const action = typeof cmd.action === 'string' ? cmd.action : '';
+        const commandId = `pwa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        let coreCmd: CoreClientCommand | null = null;
+        if (action === 'pause' || action === 'resume' || action === 'stop') {
+          coreCmd = {
+            operation: 'playback.control',
+            action,
+            commandId,
+            expectedRevision: snap.revision,
+          };
+        } else if (action === 'play_track' && typeof cmd.file_path === 'string') {
+          coreCmd = {
+            operation: 'playback.control',
+            action: 'play',
+            trackId: cmd.file_path,
+            commandId,
+            expectedRevision: snap.revision,
+          };
+        } else if (action === 'seek' && typeof cmd.position_secs === 'number') {
+          coreCmd = {
+            operation: 'playback.control',
+            action: 'seek',
+            positionSeconds: cmd.position_secs,
+            commandId,
+            expectedRevision: snap.revision,
+          };
+        } else if (action === 'next_track') {
+          coreCmd = {
+            operation: 'queue.control',
+            action: 'next',
+            commandId,
+            expectedRevision: snap.revision,
+          };
+        } else if (action === 'prev_track') {
+          coreCmd = {
+            operation: 'queue.control',
+            action: 'previous',
+            commandId,
+            expectedRevision: snap.revision,
+          };
+        } else if (action === 'jump_to_queue_index' && typeof cmd.index === 'number') {
+          const entry = snap.queue.entries[cmd.index];
+          if (entry) {
+            coreCmd = {
+              operation: 'queue.control',
+              action: 'jump',
+              entryId: entry.entryId,
+              commandId,
+              expectedRevision: snap.revision,
+            };
+          }
+        } else if (action === 'queue_track' && typeof cmd.file_path === 'string') {
+          const entries = [
+            ...snap.queue.entries,
+            { entryId: `qe_${Date.now().toString(36)}`, trackId: cmd.file_path },
+          ];
+          coreCmd = {
+            operation: 'queue.replace',
+            entries,
+            commandId,
+            expectedRevision: snap.revision,
+          };
+        }
+
+        if (!coreCmd) return false;
+        try {
+          const updated = await client.execute(coreCmd);
+          applyCoreSnapshot(updated, profile);
+          setIsConnected(true);
+          setError(null);
+          setConflictEvent(null);
+          return true;
+        } catch (err) {
+          if (err instanceof CoreClientError && err.code === 'stale_revision' && err.snapshot) {
+            applyCoreSnapshot(err.snapshot, profile);
+            const mapped = mapCoreSnapshotToPwa(err.snapshot);
+            setConflictEvent({
+              currentRevision: err.snapshot.revision,
+              items: mapped.queue.items,
+              currentIndex: mapped.queue.currentIndex,
+            });
+            return false;
+          }
+          setIsConnected(false);
+          setError('Connection lost. Playback may still be continuing.');
+          return false;
+        }
+      }
+
       const payload = JSON.stringify(cmd);
 
       if (isNativeAndroid()) {
@@ -1091,7 +1314,11 @@ export function useRemoteSocket() {
     setToken,
     selectServerProfile,
     clearServerProfile,
+    leaveCoreAndClear,
     trustObservedCertificate,
+    coreSnapshot,
+    coreCatalogTracks: (coreSnapshot?.catalog.tracks ?? []) as CoreCatalogTrack[],
+    outputLabel: coreSnapshot?.output?.label ?? activeProfile?.outputLabel ?? status.activeDevice ?? null,
     lockScreenControls,
     setLockScreenControls,
     status,

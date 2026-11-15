@@ -222,6 +222,13 @@ interface AudioPlayerContextType {
   isRightSidebarOpen: boolean
   setIsRightSidebarOpen: React.Dispatch<React.SetStateAction<boolean>>
   toggleRightSidebar: (tab?: RightSidebarTab) => void
+  registerExternalPlaybackDelegate: (delegate: ExternalPlaybackDelegate | null) => void
+}
+
+export interface ExternalPlaybackDelegate {
+  playTrack: (track: Track, queueContext?: Track[], release?: Release) => Promise<void>
+  addToQueue?: (tracks: Track | Track[]) => Promise<void>
+  playNext?: (tracks: Track | Track[]) => Promise<void>
 }
 
 export type RightSidebarTab = 'queue' | 'playlists'
@@ -247,6 +254,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [streamTelemetry, setStreamTelemetry] = useState<AudioStreamTelemetry | null>(null)
   const [isNativeTauri, setIsNativeTauri] = useState<boolean>(() => tauriBridge.isTauri())
   const [isPurityMode, setIsPurityMode] = useState<boolean>(false)
+  const externalPlaybackDelegateRef = useRef<ExternalPlaybackDelegate | null>(null)
+  const registerExternalPlaybackDelegate = useCallback((delegate: ExternalPlaybackDelegate | null) => {
+    externalPlaybackDelegateRef.current = delegate
+  }, [])
 
   const routingControllerRef = useRef<ReturnType<typeof createEndpointRoutingController> | null>(null)
   if (!routingControllerRef.current) {
@@ -735,6 +746,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Play track function
   const playTrack = useCallback(
     async (track: Track, queueContext?: Track[], release?: Release) => {
+      if (externalPlaybackDelegateRef.current) {
+        await externalPlaybackDelegateRef.current.playTrack(track, queueContext, release)
+        return
+      }
       try {
         if (track.isOnline === false) {
           console.warn(`[AudioPlayer] Cannot play track "${track.title}": storage mount is offline`)
@@ -1137,6 +1152,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [])
 
   const addToQueue = useCallback((tracks: Track | Track[]) => {
+    if (externalPlaybackDelegateRef.current?.addToQueue) {
+      void externalPlaybackDelegateRef.current.addToQueue(tracks)
+      return
+    }
     const newItems = Array.isArray(tracks) ? tracks : [tracks]
     if (newItems.length === 0) return
 
@@ -1148,6 +1167,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [currentTrack, queue.length, playTrack])
 
   const playNext = useCallback((tracks: Track | Track[]) => {
+    if (externalPlaybackDelegateRef.current?.playNext) {
+      void externalPlaybackDelegateRef.current.playNext(tracks)
+      return
+    }
     const newItems = Array.isArray(tracks) ? tracks : [tracks]
     if (newItems.length === 0) return
 
@@ -1356,6 +1379,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       toggleGapless,
       settlingDelayMs,
       setSettlingDelay,
+      registerExternalPlaybackDelegate,
     }),
     [
       currentTrack,
@@ -1415,6 +1439,7 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       toggleGapless,
       settlingDelayMs,
       setSettlingDelay,
+      registerExternalPlaybackDelegate,
     ]
   )
 
@@ -1425,6 +1450,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       </AudioProgressContext.Provider>
     </AudioPlayerContext.Provider>
   )
+}
+
+export const useOptionalAudioPlayer = (): AudioPlayerContextType | null => {
+  return useContext(AudioPlayerContext)
 }
 
 export const useAudioPlayer = (): AudioPlayerContextType => {
