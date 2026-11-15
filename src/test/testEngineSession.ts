@@ -120,3 +120,23 @@ test('a no-op selection retains the existing session', () => {
   assert.equal(result.outcome, 'unchanged')
   assert.equal(result.state, state)
 })
+
+test('leaving a playing Core requires an explicit choice and does not stop its session', () => {
+  const local = createEngineSession()
+  const pending = beginEngineSwitch(local, core, 'idle').state
+  const active = completeEngineSwitch(pending, pending.epoch, { ok: true })
+  assert.equal(beginEngineSwitch(active, local.active, 'playing').outcome, 'requires_stop')
+  const leaving = beginEngineSwitch(active, local.active, 'playing', 'leave_core_playing')
+  assert.equal(leaving.outcome, 'pending')
+  assert.deepEqual(leaving.state.active, core)
+  assert.equal(beginEngineSwitch(local, core, 'playing', 'leave_core_playing').outcome, 'requires_stop')
+})
+
+test('source connection remains observable during preparation and after a failed switch', () => {
+  const initial = createEngineSession()
+  const pending = beginEngineSwitch(initial, core, 'idle').state
+  const disconnected = setEngineConnection(pending, initial.epoch, initial.active, false)
+  assert.equal(disconnected.connected, false)
+  const failed = completeEngineSwitch(disconnected, pending.epoch, { ok: false, error: 'Unavailable' })
+  assert.equal(setEngineConnection(failed, initial.epoch, initial.active, true).connected, true)
+})

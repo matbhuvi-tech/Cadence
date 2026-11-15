@@ -23,6 +23,7 @@
     "test:trace": "tsx src/test/testCurationDecisionTrace.ts",
     "test:queue-sync": "tsx src/test/testRemoteQueueSync.ts",
     "test:endpoint-routing": "tsx src/test/testEndpointRouting.ts",
+    "test:engine-session": "node --import tsx --test src/test/testEngineSession.ts",
     "test:diagnostics": "tsx src/test/testDebugDiagnostics.ts",
     "test:settings": "tsx src/test/testCadenceSettingsModal.ts",
     "tauri": "tauri",

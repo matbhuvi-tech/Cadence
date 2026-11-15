@@ -1,5 +1,12 @@
 # Issue Log
 
+## Feature: Optional Linux Cadence Core
+
+- Requested: 2026-11-15. Preserve standalone Windows Cadence while optionally using a headless Linux UPnP engine on TrueNAS, controlled by Windows and Android.
+- Design and phase ledger: [Optional Linux Cadence Core](../../docs/designs/OPTIONAL_LINUX_CORE.md).
+- Branch: `feat/optional-linux-core`.
+- Status: Phase 1 engine-selection model implemented with isolated tests; runtime integration and Linux deployment remain planned. No GitHub bug issue applies to this feature request.
+
 ## GitHub #35: Enriched artist editorial profile (bioSummary, etc.) not persistent across navigation & bio text truncation
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/35
