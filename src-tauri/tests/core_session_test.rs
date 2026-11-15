@@ -414,3 +414,128 @@ fn invalid_owner_configuration_is_rejected_without_renderer_effects() {
     let mut duplicate = catalog(); duplicate.push(duplicate[0].clone());
     assert!(SessionOwner::new(config(), duplicate, FakeRenderer(fake)).is_err());
 }
+
+#[test]
+fn cross_language_typescript_adapter_interoperates_with_rust_owner() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let (owner, fake) = fixture();
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let script = r#"
+import assert from 'node:assert/strict'
+import readline from 'node:readline'
+import { CoreServiceError } from './src/core/coreProtocol.ts'
+import { createRemoteEngineService } from './src/services/engineService.ts'
+
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
+const lines = rl[Symbol.asyncIterator]()
+async function rpc(payload) {
+  process.stdout.write(JSON.stringify(payload) + '\n')
+  const next = await lines.next()
+  if (next.done) throw new Error('EOF from Rust harness')
+  return JSON.parse(next.value)
+}
+
+const core = { kind: 'core', engineId: 'room-core', libraryId: 'music-library', label: 'Room Core' }
+const service = createRemoteEngineService(core, {
+  async verifyPeer() { return { authenticated: true, engineId: core.engineId, libraryId: core.libraryId } },
+  async request(req) { return rpc({ kind: 'request', req }) },
+})
+
+const prepared = await service.prepare()
+assert.equal(prepared.descriptor.capabilities.includes('queue.coordinate'), true)
+assert.equal(prepared.snapshot.revision, 0)
+
+const page = await service.catalogPage(null, 2)
+assert.equal(page.tracks.length, 2)
+assert.equal(page.nextCursor, 'page_2')
+
+const replaced = await service.execute({
+  operation: 'queue.replace', commandId: 'ts-replace', expectedRevision: 0,
+  entries: [
+    { entryId: 'a1', trackId: 'song-a' },
+    { entryId: 'a2', trackId: 'song-a' },
+    { entryId: 'b', trackId: 'song-b' },
+  ],
+})
+assert.equal(replaced.revision, 1)
+
+const jumped = await service.execute({
+  operation: 'queue.control', action: 'jump', entryId: 'a1', commandId: 'ts-jump', expectedRevision: 1,
+})
+assert.equal(jumped.queue.currentEntryId, 'a1')
+assert.equal(jumped.playback.activity, 'loading')
+
+const started = await rpc({ kind: 'event', event: 'started' })
+assert.equal(started.ok, true)
+const completed = await rpc({ kind: 'event', event: 'completed' })
+assert.equal(completed.ok, true)
+
+await assert.rejects(
+  service.execute({
+    operation: 'queue.control', action: 'modes', repeat: 'all', shuffle: false,
+    commandId: 'ts-stale', expectedRevision: jumped.revision,
+  }),
+  err => {
+    assert.ok(err instanceof CoreServiceError)
+    assert.equal(err.code, 'stale_revision')
+    assert.equal(err.snapshot?.queue.currentEntryId, 'a2')
+    assert.equal(err.snapshot?.revision, 5)
+    return true
+  },
+)
+
+const modes = await service.execute({
+  operation: 'queue.control', action: 'modes', repeat: 'all', shuffle: false,
+  commandId: 'ts-modes', expectedRevision: 5,
+})
+assert.equal(modes.queue.repeat, 'all')
+assert.equal(modes.revision, 6)
+process.stdout.write(JSON.stringify({ kind: 'done' }) + '\n')
+"#;
+
+    let mut child = Command::new("node")
+        .args(["--import", "tsx", "--input-type=module", "-e", script])
+        .current_dir(repo_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn node tsx child");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut completed_done = false;
+    for line in stdout.lines() {
+        let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        match msg["kind"].as_str().unwrap() {
+            "request" => {
+                let bytes = serde_json::to_vec(&msg["req"]).unwrap();
+                let reply = owner.request(&bytes);
+                writeln!(stdin, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                stdin.flush().unwrap();
+            }
+            "event" => {
+                let current = token(&fake);
+                match msg["event"].as_str().unwrap() {
+                    "started" => assert!(owner.on_renderer_event(RendererEvent::Started(current)).unwrap()),
+                    "completed" => {
+                        complete(&owner, &fake, current);
+                    }
+                    other => panic!("unexpected event {other}"),
+                }
+                writeln!(stdin, "{{\"ok\":true}}").unwrap();
+                stdin.flush().unwrap();
+            }
+            "done" => {
+                completed_done = true;
+                break;
+            }
+            other => panic!("unexpected message kind {other}"),
+        }
+    }
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success() && completed_done);
+}
