@@ -49,8 +49,9 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
   (`SessionOwner<R: Renderer>`). `src-tauri/src/core_runtime/` and
   `src-tauri/src/bin/cadence_headless.rs` provide the Tauri-independent headless
   executable, SQLite WAL catalog projection, 30-second post-playback cooldown guard,
-  and TrueNAS/Linux cgroup v2 + `CAP_IPC_LOCK` + `RLIMIT_MEMLOCK` strict locked-RAM
-  admission (`LockedBytesArena`).
+  TrueNAS/Linux cgroup v2 + `CAP_IPC_LOCK` + `RLIMIT_MEMLOCK` strict locked-RAM
+  admission (`LockedBytesArena`), and the Phase 5 paced UPnP HTTP media server and
+  RS130 session coordinator (`upnp_session.rs`).
 - Plan and phase evidence: `docs/designs/OPTIONAL_LINUX_CORE.md`.
 
 ### Curation Workbench & Decision Trace Engine

@@ -269,6 +269,33 @@ approved the Phase 4 TrueNAS memory and CPU hygiene impact assessment on 2026-11
   locking (`mlock` / `VirtualLock`). Lock failures immediately free buffers with
   zero pageable fallback, and `Drop` / `shutdown()` deterministically unlock all pages.
 
+Phase 5 adds the Tauri-independent Linux/Core paced UPnP HTTP server and RS130
+session coordinator (`src-tauri/src/core_runtime/upnp_session.rs`). User explicitly
+reviewed the Phase 5 plan, testing strategy and Audiophile Impact Assessment and
+approved implementation on 2026-11-15:
+- **Disk I/O impact:** Zero during `Loading`, `Playing`, `Paused` and the 30-second
+  cooldown. `UpnpSessionRuntime` serves untouched media bytes and parses 80-byte
+  Sony `.dsf` headers (`parse_dsf_header_bytes`) exclusively from pre-faulted,
+  page-locked `Arc<Vec<u8>>` slices in `LockedBytesArena`. No windowed-read or
+  pageable fallback exists.
+- **Network/NIC impact:** Enforces `MAX_CORE_PREROLL_BYTES = 512 KiB` (resolving
+  the 512 KiB policy ceiling for Core without altering legacy Windows desktop
+  constants), `TCP_NODELAY = true`, and `16..=32 KiB` steady-state `SO_SNDBUF`
+  (normalized via `/ 2` on Linux so kernel `2x` `sk_sndbuf` doubling never exceeds
+  32 KiB). Sequential `Range` continuations (`start >= 1 MiB`) skip repeated
+  pre-roll, concurrent streams are strictly capped (`503 Service Unavailable`),
+  and external renderer takeover quarantines without SOAP retry storms.
+- **Thread/CPU impact:** Active byte pacing runs on a dedicated synchronous OS
+  thread (`cadence-core-pacer`), pinned on Linux/TrueNAS to `CpuPartition::pacer_core`
+  via `sched_setaffinity`, sleeping with monotonic absolute deadlines
+  (`clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)`), and normalizing Linux
+  `getsockopt(SOL_TCP, TCP_INFO)` segment counters by `tcpi_snd_mss`.
+- **Memory impact:** `LockedBytesArena` shares admitted buffers via `Arc<Vec<u8>>`
+  so the underlying locked heap allocation never moves or copies when starting a
+  stream. `stream_paced_slice_no_alloc` performs zero heap allocations, locks, or
+  string formatting across the active chunk loop (verified by `CountingAllocator`
+  in `core_upnp_zero_alloc_test`).
+
 ## Independently testable phases
 
 Each phase has its own acceptance fixture and rollback boundary. Use synthetic files,
@@ -303,7 +330,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 2 | User verified; merge approved | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; NSIS build passed; runtime bindings remain pending |
 | 3 | Implementation ready for user verification | `src-tauri/src/core_session/`; `queue.control` + `queue.coordinate` in `src/core/coreProtocol.ts` and `src/services/engineService.ts`; 24 native + 51 TS tests + TS-to-Rust interop fixture pass; runtime bindings remain pending |
 | 4 | Implementation ready for user verification | `src-tauri/src/core_runtime/` + `src-tauri/src/bin/cadence_headless.rs`; Cargo `desktop` feature split (`--no-default-features` excludes Tauri/GUI/local audio); TrueNAS cgroup v2 + `CAP_IPC_LOCK` + `RLIMIT_MEMLOCK` strict admission, 30s cooldown guard, `cpuset` partitioning and Linux `x86_64-unknown-linux-gnu` check pass |
-| 5-10 | Planned | No Linux UPnP transport or Dragonfish deployment claimed yet |
+| 5 | Implementation ready for user verification | `src-tauri/src/core_runtime/upnp_session.rs`; opaque per-`RunToken` session URLs, exact `GET`/`Range`/`HEAD`/DSF probes from locked RAM, 512 KiB pre-roll cap, Linux `TCP_INFO`/`SO_SNDBUF`/`clock_nanosleep` pacer, RS130 simulator (`core_upnp_session_test`) and release 0-alloc gate (`core_upnp_zero_alloc_test`) pass; physical RS130 hardware qualification pending |
+| 6-10 | Planned | No Dragonfish container deployment or physical RS130 hardware session claimed yet |
 
 Phase 1 command:
 
@@ -682,6 +710,111 @@ Using the agent-self-evaluation skill: overall 4.3/5; ready for user verificatio
 Priority improvements: wire the Linux paced UPnP HTTP server and RS130 session
 handler onto `HeadlessCoreRuntime` and `LockedBytesArena` in Phase 5. Would the user
 agree? Expected yes for the Phase 4 headless runtime and TrueNAS hygiene milestone.
+
+### Phase 5 Linux paced UPnP and RS130 session serving contract
+
+`src-tauri/src/core_runtime/upnp_session.rs` implements the Tauri-independent
+Linux/Core paced UPnP HTTP media server (`CoreMediaServer`), synchronous pacer
+(`CorePacer` + `stream_paced_slice_no_alloc`), RS130 description qualifier
+(`inspect_rs130_description`), and session coordinator (`UpnpSessionRuntime`):
+
+- **Opaque per-`RunToken` session capabilities and bounded concurrency:** every
+  `Play` mints a fresh `/media/cap_<uuid>.<ext>` capability path bound to the
+  active `RunToken` and the pre-admitted `Arc<Vec<u8>>` buffer in
+  `LockedBytesArena`. Media URLs expose no filesystem paths or track IDs. When a
+  track advances, seeks, or stops, the previous session is marked `cancelled` and
+  replaced immediately so late requests return `404 Not Found` and never serve
+  another track's bytes. Excess concurrent connections beyond
+  `max_concurrent_streams` return `503 Service Unavailable`.
+- **Bit-perfect byte serving, `HEAD`/`Range` semantics and ground-truth DSF parsing:**
+  `parse_dsf_header_bytes` parses the 80-byte Sony `.dsf` container header (`DSD ` +
+  `fmt `) directly from locked RAM (zero disk reads during playback) to recover the
+  1-bit sample clock, channel count, ground-truth duration, bitrate, and ID3v2
+  `metadata_offset`. `CoreMediaServer` serves untouched bytes for full `GET`
+  (`200 OK`), partial `Range` (`206 Partial Content` for `a-b`, `a-`, `-suffix`),
+  `416 Range Not Satisfiable`, `HEAD` (headers only, 0 body bytes), and `405 Method
+  Not Allowed`. DSF/tail metadata probes (`start >= metadata_offset`) stream unpaced
+  without advancing `audio_connections` or consuming pre-roll.
+- **512 KiB pre-roll cap, sequential continuation and Linux pacer normalization:**
+  enforces `MAX_CORE_PREROLL_BYTES = 512 KiB` and `16..=32 KiB` steady-state
+  `SO_SNDBUF` (normalized via `/ 2` on Linux so kernel `2x` `sk_sndbuf` doubling
+  never exceeds 32 KiB). Sequential `Range` continuations (`start >= 1 MiB`) skip
+  repeated pre-roll (`preroll_chunks == 0`) and enter steady `1.000x` cruise on
+  contiguous reconnects. On Linux, `cadence-core-pacer` binds to
+  `CpuPartition::pacer_core` via `sched_setaffinity`, sleeps via
+  `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)`, and normalizes kernel
+  `getsockopt(SOL_TCP, TCP_INFO)` segment counters by `tcpi_snd_mss`.
+- **RS130 qualification and AVTransport reconciliation:** `inspect_rs130_description`
+  verifies `AVTransport` support, persisted UDN identity, and PCM/DSF/DFF capability
+  support; `validate_advertised_lan_ip` rejects loopback (in production),
+  unspecified, link-local, multicast, and CGNAT/Tailscale/VPN (`100.64.0.0/10`)
+  addresses; fixed port conflicts fail readiness immediately. `reconcile_renderer`
+  never infers completion from HTTP EOF alone—only renderer `STOPPED` on the active
+  session URI after `last_audio_end_offset >= audio_payload_end` emits
+  `RendererEvent::Completed(RunToken)`. External URI changes emit
+  `RendererEvent::ExternalTakeover(RunToken)` without fighting via repeated `Play`,
+  and `reconcile_after_restart` inspects renderer state without seizing the device.
+
+### Phase 5 TDD and verification record (2026-11-15)
+
+Source: phase 5 in the independently testable phase table above. User journeys:
+serve untouched PCM and DSF streams from locked RAM over opaque session URLs with
+zero playback disk I/O; handle `HEAD`, `Range`, DSF metadata probes, seek
+continuations, late requests, disconnects, and mid-stream cancellation; reconcile
+RS130 AVTransport states accurately; verify zero heap allocations in the active
+pacing loop.
+
+- RED checkpoint `9d03936`: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_upnp_session_test --test core_upnp_zero_alloc_test`
+  failed with `E0432` (`unresolved import cadence_core_lib::core_runtime::upnp_session`).
+- GREEN checkpoint `ed8ef40`: all 5 simulator integration tests in
+  `core_upnp_session_test` and both zero-allocation / adaptive-timing tests in
+  `core_upnp_zero_alloc_test` passed in debug and `--release` modes, and
+  `cargo check --target x86_64-unknown-linux-gnu --no-default-features` passed with
+  0 errors and 0 warnings.
+
+| Guarantee | Acceptance fixture | Type / result |
+| --- | --- | --- |
+| RS130 description/UDN qualification, advertised LAN IP validation (no VPN/loopback) and port-conflict readiness failure | `core_upnp_session_test.rs:rs130_description_qualification_lan_validation_and_port_conflict_readiness` | Unit + loopback integration / PASS |
+| Exact `GET`/`Range`/`HEAD`/416/405 semantics, ground-truth 80-byte DSF header parsing from locked RAM, unpaced DSF metadata probes, and zero disk I/O after deleting files post-admission | `core_upnp_session_test.rs:renderer_simulator_serves_exact_bodies_ranges_head_dsf_probes_and_zero_disk_io` | Renderer simulator integration / PASS |
+| 512 KiB pre-roll cap, sequential `Range` continuation (`>= 1 MiB`) without repeated pre-roll, `Seek` (`REL_TIME`), and late/superseded `RunToken` rejection (`404`) | `core_upnp_session_test.rs:sequential_range_continuation_seek_late_token_rejection_and_stop_cancellation` | Renderer simulator integration / PASS |
+| Bounded concurrency (`503 Service Unavailable`), client disconnect recovery, HTTP EOF != audible completion, qualified `STOPPED` queue advance, external takeover quarantine, and post-restart probe | `core_upnp_session_test.rs:bounded_concurrency_disconnects_and_qualified_avtransport_reconciliation` | Renderer simulator integration / PASS |
+| Mid-stream `Stop` cancellation of in-flight paced delivery and bounded 3-strike SOAP failure quarantine (`RendererFailed`) | `core_upnp_session_test.rs:mid_stream_stop_cancellation_and_bounded_retry_renderer_loss_quarantine` | Renderer simulator integration / PASS |
+| Zero heap allocations (`ALLOC_CALLS == 0`, `ALLOC_BYTES == 0`) in active chunk loop and Linux `TCP_INFO` / `0.995x` receiver backpressure timing in `--release` mode | `core_upnp_zero_alloc_test.rs:active_paced_streaming_loop_performs_zero_heap_allocations`, `linux_tcp_info_normalization_and_adaptive_backpressure_timing` | Release allocator + timing gate / PASS |
+
+Reproduce Phase 5 verification with:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_upnp_session_test --test core_upnp_zero_alloc_test --test core_headless_test --test core_session_test
+cargo test --manifest-path src-tauri/Cargo.toml --release --no-default-features --features bundled-sqlite --test core_upnp_zero_alloc_test
+$env:SQLITE3_LIB_DIR=(Resolve-Path src-tauri).Path; cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu --no-default-features --bins --lib --test core_upnp_session_test --test core_upnp_zero_alloc_test --test core_headless_test --test core_session_test --test diagnostics_stress_test
+```
+
+- PASS: 5/5 tests in `core_upnp_session_test`, 2/2 in `core_upnp_zero_alloc_test`
+  (both debug and `--release`), 7/7 in `core_headless_test`, 24/24 in
+  `core_session_test`, 1/1 in `debug_off_zero_alloc` and 10/10 in
+  `remote_queue_test`.
+- PASS: `x86_64-unknown-linux-gnu` headless target check across library, binary and
+  all Phase 3–5 test targets with 0 errors and 0 warnings.
+- PENDING HARDWARE QUALIFICATION: Physical HiFi ROSE RS130 PCM/DSD hardware
+  streaming sessions over wired TrueNAS Dragonfish Ethernet remain separately
+  recorded as pending until Phase 6 container deployment and Phase 10 live hardware
+  qualification.
+
+### Phase 5 self-review
+
+Using the agent-self-evaluation skill: overall 4.4/5; ready for user verification.
+
+| Axis | Score | Evidence and next improvement |
+| --- | --- | --- |
+| Accuracy | 4/5 | Loopback RS130 simulator, release 0-alloc gate and `x86_64-unknown-linux-gnu` check pass; physical RS130 hardware qualification remains explicitly pending. |
+| Completeness | 4.5/5 | Covers opaque session URLs, `GET`/`Range`/`HEAD`/416/405, DSF RAM header parsing and metadata probes, 512 KiB pre-roll cap, Range continuation, Seek, disconnects, mid-stream cancellation, external takeover, and release 0-alloc verification. |
+| Clarity | 4.5/5 | Explicitly separates simulator verification from physical RS130 hardware qualification and documents the 512 KiB Core pre-roll resolution. |
+| Actionability | 5/5 | Exact Cargo debug, release, and Linux target check commands reproduce every Phase 5 check locally. |
+| Conciseness | 4/5 | Self-contained in `src-tauri/src/core_runtime/upnp_session.rs` without altering Windows desktop UPnP files. |
+
+Priority improvements: package the headless binary and UPnP runtime into the
+versioned TrueNAS Dragonfish OCI image and Custom App recipe in Phase 6. Would the
+user agree? Expected yes for the Phase 5 simulator and release-timing milestone.
 
 ## Platform references
 
