@@ -4,8 +4,21 @@
 
 - Requested: 2026-11-15. Preserve standalone Windows Cadence while optionally using a headless Linux UPnP engine on TrueNAS, controlled by Windows and Android.
 - Design and phase ledger: [Optional Linux Cadence Core](../../docs/designs/OPTIONAL_LINUX_CORE.md).
-- Branch: `feat/linux-core-phase-10-release-qualification` (current fix branch: `fix/37-snapshot-import-playlist-tracks-order`).
-- Status: Phases 1–10 implemented; Phase 10 live TrueNAS import uncovered [#37](https://github.com/matbhuvi-tech/Cadence/issues/37).
+- Branch: `feat/linux-core-phase-10-release-qualification` (current fix branch: `fix/38-core-format-and-play-connection`).
+- Status: Phases 1–10 implemented; `#37` verified on TrueNAS (1,886 tracks imported); [#38](https://github.com/matbhuvi-tech/Cadence/issues/38) and [#39](https://github.com/matbhuvi-tech/Cadence/issues/39) fixed and awaiting user verification.
+
+## GitHub #38 & #39: Core tracks shown as FLAC Core Stream & clicking Play on multi-track album triggers 'Connection lost'
+
+- **Links:** https://github.com/matbhuvi-tech/Cadence/issues/38, https://github.com/matbhuvi-tech/Cadence/issues/39
+- **Reported:** While testing live TrueNAS Dragonfish Core (`192.168.1.6:4040`), all 1,886 NAS tracks rendered as `FLAC · Core Stream` with global catalog index numbers (`199`, `200`, `201`) instead of `WAV 16-bit / 44.1 kHz` and album track numbers, and clicking Play on `Delhi - 6` immediately showed `Music Room Core: Connection lost. Playback may still be continuing.` while Core stayed running at `revision: 0`.
+- **Causes:**
+  1. `CatalogTrack` / `load_catalog_projection` omitted `format`, `sample_rate`, `bit_depth`, `track_number`, `disc_number`, and `release_year`, and `mapCoreCatalogToUi` hardcoded `format: 'FLAC'`, `sampleRateStr: 'Core Stream'`, and `trackNumber: index + 1`.
+  2. `dragonfish.rs` (`admit_requested_tracks_for_v1_command`) admitted only `entries[0..2]` on `queue.replace` (and skipped `queue.control` `next`/`previous`/`jump`), whereas `core_runtime/mod.rs` (`rejects_unadmitted_target`) rejected any `queue.replace` containing unadmitted entries `>= 2` with `not_ready`, and `coreControllerTransport.ts` mapped `not_ready` into `Connection lost`. Control timeouts (`5000 ms`) were also tight for larger ZFS `mlock` reads.
+- **Fix:**
+  1. Extended `CatalogTrack` and `CoreCatalogTrack` (Desktop + PWA) with optional metadata fields (`format`, `sampleRate`, `bitDepth`, `trackNumber`, `discNumber`, `releaseYear`) projected at startup/idle in `load_catalog_projection` and formatted in `mapCoreCatalogToUi` and `mapCoreSnapshotToPwa`.
+  2. Scoped `rejects_unadmitted_target` `queue.replace` idle admission checks to the initial playback entry (matching bounded `LockedBytesArena` lookahead), added `queue.control` target admission and single-track lookahead fallback in `dragonfish.rs`, preserved connected state on Core operational errors (`not_ready` / `invalid_payload` / `unsupported_capability`), and raised `/v1/core` command timeouts to `15s` (`10s` socket I/O in `dragonfish.rs`).
+- **Verification:** Passed `core_dragonfish_packaging_test` (9/9), `core_headless_test` (7/7), `core_session_test` (24/24), `core_snapshot_import_test` (5/5), `core_upnp_session_test` (5/5), `core_remote_curate_test` (5/5), `lib` unit tests (6/6), TypeScript Core suites (47/47), `npm run build`, and `npx oxlint`.
+- **Status:** Awaiting TrueNAS container rebuild + Windows installer live verification.
 
 ## GitHub #37: Snapshot import fails with 'no such column: id' on legacy playlist_tracks schema
 

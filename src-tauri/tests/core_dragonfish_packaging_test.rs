@@ -774,3 +774,152 @@ fn cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtr
     let _ = restarted.kill();
     let _ = restarted.wait();
 }
+
+#[test]
+fn dragonfish_projects_track_formats_and_plays_multi_track_queue_with_navigation() {
+    let dirs = DragonfishTestDirs::create("multi_track_queue_and_format");
+    let mut cfg = dirs.base_config();
+    cfg.headroom_bytes = 16 * 1024 * 1024;
+    cfg.min_lockable_bytes = 16 * 1024 * 1024;
+
+    let mut node = DragonfishNode::bootstrap_with_platform(
+        cfg,
+        generous_dragonfish_probe(),
+        FakeLocker::new(),
+    )
+    .expect("bootstrap node");
+    let addr = node.control_listen_addr();
+    let engine_id = node.identity().engine_id.clone();
+    let library_id = node.identity().library_id.clone();
+
+    let mut track_ids = Vec::new();
+    for idx in 1..=3u32 {
+        let tid = format!("trk-wav-{}", idx);
+        let file = dirs.music_dir.join(format!("track_{}.wav", idx));
+        std::fs::write(&file, vec![0x52u8; 64 * 1024]).expect("write wav fixture");
+        node.seed_track_for_test(&tid, &format!("Track {}", idx), &file, 210.0 + idx as f64)
+            .expect("seed track");
+        track_ids.push(tid);
+    }
+
+    // Patch track metadata directly while Idle to emulate imported WAV/2009 snapshot metadata,
+    // then seed track 4 to trigger reload_catalog().
+    {
+        let db_path = dirs.app_data_dir.join("cadence.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        conn.execute(
+            "UPDATE releases SET release_year = 2009 WHERE id = 'rel-dragonfish'",
+            [],
+        )
+        .unwrap();
+        for (idx, tid) in track_ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE tracks SET format = 'WAV', sample_rate = 44100, bit_depth = 16, track_number = ?1, disc_number = 1, release_year = 2009 WHERE id = ?2",
+                rusqlite::params![(idx + 1) as i64, tid],
+            )
+            .unwrap();
+        }
+    }
+    let tid4 = "trk-wav-4".to_string();
+    let file4 = dirs.music_dir.join("track_4.wav");
+    std::fs::write(&file4, vec![0x52u8; 64 * 1024]).expect("write wav fixture 4");
+    node.seed_track_for_test(&tid4, "Track 4", &file4, 214.0)
+        .expect("seed track 4");
+    track_ids.push(tid4);
+
+    let (status, snap) = http_post_json(
+        addr,
+        "/v1/core",
+        &json!({
+            "protocolVersion": 1,
+            "engineId": engine_id,
+            "libraryId": library_id,
+            "operation": "session.snapshot"
+        }),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(snap["ok"], true, "{snap}");
+    let cat_tracks = snap["data"]["catalog"]["tracks"].as_array().unwrap();
+    assert_eq!(cat_tracks.len(), 4);
+    assert_eq!(cat_tracks[0]["format"], "WAV");
+    assert_eq!(cat_tracks[0]["sampleRate"], 44100);
+    assert_eq!(cat_tracks[0]["bitDepth"], 16);
+    assert_eq!(cat_tracks[0]["trackNumber"], 1);
+    assert_eq!(cat_tracks[0]["discNumber"], 1);
+    assert_eq!(cat_tracks[0]["releaseYear"], 2009);
+
+    let entries: Vec<Value> = track_ids
+        .iter()
+        .enumerate()
+        .map(|(i, tid)| json!({ "entryId": format!("e-{}", i + 1), "trackId": tid }))
+        .collect();
+    let (_, replace_res) = http_post_json(
+        addr,
+        "/v1/core",
+        &json!({
+            "protocolVersion": 1,
+            "engineId": engine_id,
+            "libraryId": library_id,
+            "operation": "queue.replace",
+            "commandId": "cmd-replace-4",
+            "expectedRevision": 0,
+            "entries": entries
+        }),
+    );
+    assert_eq!(replace_res["ok"], true, "multi-track queue.replace failed: {replace_res}");
+    let rev1 = replace_res["data"]["revision"].as_u64().unwrap();
+
+    let (_, play_res) = http_post_json(
+        addr,
+        "/v1/core",
+        &json!({
+            "protocolVersion": 1,
+            "engineId": engine_id,
+            "libraryId": library_id,
+            "operation": "playback.control",
+            "action": "play",
+            "trackId": track_ids[0],
+            "commandId": "cmd-play-1",
+            "expectedRevision": rev1
+        }),
+    );
+    assert_eq!(play_res["ok"], true, "play failed: {play_res}");
+    let rev2 = play_res["data"]["revision"].as_u64().unwrap();
+
+    // Jump to entry #4 (previously unadmitted idx >= 2)
+    let (_, jump_res) = http_post_json(
+        addr,
+        "/v1/core",
+        &json!({
+            "protocolVersion": 1,
+            "engineId": engine_id,
+            "libraryId": library_id,
+            "operation": "queue.control",
+            "action": "jump",
+            "entryId": "e-4",
+            "commandId": "cmd-jump-4",
+            "expectedRevision": rev2
+        }),
+    );
+    assert_eq!(jump_res["ok"], true, "jump to 4th entry failed: {jump_res}");
+    assert_eq!(jump_res["data"]["queue"]["currentEntryId"], "e-4");
+    let rev3 = jump_res["data"]["revision"].as_u64().unwrap();
+
+    let (_, prev_res) = http_post_json(
+        addr,
+        "/v1/core",
+        &json!({
+            "protocolVersion": 1,
+            "engineId": engine_id,
+            "libraryId": library_id,
+            "operation": "queue.control",
+            "action": "previous",
+            "commandId": "cmd-prev-3",
+            "expectedRevision": rev3
+        }),
+    );
+    assert_eq!(prev_res["ok"], true, "previous failed: {prev_res}");
+    assert_eq!(prev_res["data"]["queue"]["currentEntryId"], "e-3");
+
+    node.shutdown().unwrap();
+}

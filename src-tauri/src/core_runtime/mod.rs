@@ -224,6 +224,18 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         Ok(out)
     }
 
+    pub(crate) fn current_queue_track_id(&self) -> Option<String> {
+        self.owner.current_track_id()
+    }
+
+    pub(crate) fn resolve_queue_transition_targets(
+        &self,
+        action: &str,
+        entry_id: Option<&str>,
+    ) -> Vec<String> {
+        self.owner.resolve_queue_transition_targets(action, entry_id)
+    }
+
     pub(crate) fn peek_next_queue_track_id(&self) -> Option<String> {
         let req = json!({
             "protocolVersion": 1,
@@ -400,11 +412,30 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
                 }
             }
         } else if op == "queue.replace" {
-            if let Some(entries) = parsed.get("entries").and_then(Value::as_array) {
-                for entry in entries {
-                    if let Some(track_id) = entry.get("trackId").and_then(Value::as_str) {
-                        if self.track_files.contains_key(track_id)
-                            && !self.arena.is_admitted(track_id)
+            if self.current_activity() == "idle" {
+                if let Some(first_track_id) = parsed
+                    .get("entries")
+                    .and_then(Value::as_array)
+                    .and_then(|entries| entries.first())
+                    .and_then(|entry| entry.get("trackId"))
+                    .and_then(Value::as_str)
+                {
+                    if self.track_files.contains_key(first_track_id)
+                        && !self.arena.is_admitted(first_track_id)
+                    {
+                        return true;
+                    }
+                }
+            }
+        } else if op == "queue.control" {
+            if let Some(action) = parsed.get("action").and_then(Value::as_str) {
+                if matches!(action, "next" | "previous" | "jump") {
+                    let entry_id = parsed.get("entryId").and_then(Value::as_str);
+                    if let Some(target_track_id) =
+                        self.resolve_queue_transition_targets(action, entry_id).first()
+                    {
+                        if self.track_files.contains_key(target_track_id)
+                            && !self.arena.is_admitted(target_track_id)
                         {
                             return true;
                         }
@@ -594,10 +625,13 @@ fn load_catalog_projection(
     let conn = db.conn.lock();
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, artist_credit, album_title, duration_secs, file_path
-             FROM tracks
-             WHERE is_online != 0
-             ORDER BY album_title ASC, COALESCE(track_number, 0) ASC, title ASC, id ASC",
+            "SELECT t.id, t.title, t.artist_credit, t.album_title, t.duration_secs, t.file_path,
+                    t.format, t.sample_rate, t.bit_depth, t.track_number, t.disc_number,
+                    COALESCE(t.release_year, r.release_year)
+             FROM tracks t
+             LEFT JOIN releases r ON t.release_id = r.id
+             WHERE t.is_online != 0
+             ORDER BY t.album_title ASC, COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 0) ASC, t.title ASC, t.id ASC",
         )
         .map_err(|e| RuntimeError::Database(e.to_string()))?;
 
@@ -610,6 +644,12 @@ fn load_catalog_projection(
                 row.get::<_, String>(3)?,
                 row.get::<_, f64>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, Option<i64>>(11)?,
             ))
         })
         .map_err(|e| RuntimeError::Database(e.to_string()))?;
@@ -619,20 +659,67 @@ fn load_catalog_projection(
     let mut used_ids = HashSet::new();
 
     for row in rows {
-        let (raw_id, title, artist, album, duration_secs, file_path) =
-            row.map_err(|e| RuntimeError::Database(e.to_string()))?;
+        let (
+            raw_id,
+            title,
+            artist,
+            album,
+            duration_secs,
+            file_path,
+            raw_format,
+            raw_sample_rate,
+            raw_bit_depth,
+            raw_track_number,
+            raw_disc_number,
+            raw_release_year,
+        ) = row.map_err(|e| RuntimeError::Database(e.to_string()))?;
         let token_id = sanitize_or_hash_token(&raw_id, &mut used_ids);
         let safe_duration = if duration_secs.is_finite() && (0.001..=86_400.0).contains(&duration_secs) {
             duration_secs
         } else {
             1.0
         };
+        let normalized_format = raw_format
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_uppercase())
+            .or_else(|| {
+                std::path::Path::new(&file_path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_uppercase())
+            });
+        let sample_rate = raw_sample_rate
+            .filter(|&v| v > 0 && v <= u32::MAX as i64)
+            .map(|v| v as u32);
+        let bit_depth = raw_bit_depth
+            .filter(|&v| v > 0 && v <= u16::MAX as i64)
+            .map(|v| v as u16);
+        let track_number = raw_track_number
+            .filter(|&v| v > 0 && v <= u32::MAX as i64)
+            .map(|v| v as u32);
+        let disc_number = raw_disc_number
+            .filter(|&v| v > 0 && v <= u16::MAX as i64)
+            .map(|v| v as u16);
+        let release_year = raw_release_year
+            .filter(|&v| (1..=u16::MAX as i64).contains(&v))
+            .map(|v| v as u16);
+
         catalog.push(CatalogTrack {
             id: token_id.clone(),
             title: sanitize_display_text(&title, "Untitled"),
             artist: sanitize_display_text(&artist, "Unknown Artist"),
             album: sanitize_display_text(&album, "Unknown Album"),
             duration_seconds: safe_duration,
+            format: normalized_format,
+            sample_rate,
+            bit_depth,
+            track_number,
+            disc_number,
+            release_year,
         });
         track_files.insert(token_id, PathBuf::from(file_path));
     }

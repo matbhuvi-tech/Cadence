@@ -219,7 +219,7 @@ pub async fn core_control_request(
     let url = base.join("v1/core").map_err(|_| "invalid_payload".to_string())?;
     let client = build_core_http_client(
         target.trust_insecure.unwrap_or(false),
-        Duration::from_millis(5000),
+        Duration::from_millis(15000),
     )?;
     let mut req = client
         .post(url)

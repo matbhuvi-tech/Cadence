@@ -16,3 +16,5 @@
 - [#34](https://github.com/matbhuvi-tech/Cadence/issues/34): Clicking album cover art in Listen workspace navigates to Curate instead of album drill-down.
 - [#35](https://github.com/matbhuvi-tech/Cadence/issues/35): Enriched artist editorial profile (bioSummary, etc.) not persistent across navigation & bio text truncation.
 - [#37](https://github.com/matbhuvi-tech/Cadence/issues/37): Snapshot import fails with `no such column: id` on legacy `playlist_tracks` schema.
+- [#38](https://github.com/matbhuvi-tech/Cadence/issues/38): Core mode displays all remote tracks as `FLAC Core Stream` with sequential index numbers.
+- [#39](https://github.com/matbhuvi-tech/Cadence/issues/39): Clicking Play on TrueNAS Core multi-track album immediately triggers `Connection lost`.

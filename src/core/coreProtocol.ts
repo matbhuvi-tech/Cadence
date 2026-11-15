@@ -22,6 +22,12 @@ export interface CoreCatalogTrack {
   artist: string
   album: string
   durationSeconds: number
+  format?: string
+  sampleRate?: number
+  bitDepth?: number
+  trackNumber?: number
+  discNumber?: number
+  releaseYear?: number
 }
 
 export interface CoreCatalogPage {
@@ -161,14 +167,29 @@ export function parseCoreDescriptor(value: unknown, expected: Readonly<EngineCon
   return object as unknown as CoreDescriptor
 }
 
+function optionalPositiveInt(value: unknown, max: number): void {
+  if (value === undefined) return
+  requireValue(typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= max)
+}
+
 function catalogPage(value: unknown): CoreCatalogPage {
   const page = fields(value, ['revision', 'tracks', 'nextCursor'])
   revision(page.revision)
   requireValue(Array.isArray(page.tracks) && page.tracks.length <= CORE_MAX_PAGE_TRACKS)
   const ids = new Set<string>()
   for (const value of page.tracks) {
-    const track = fields(value, ['id', 'title', 'artist', 'album', 'durationSeconds'])
+    const track = fields(
+      value,
+      ['id', 'title', 'artist', 'album', 'durationSeconds'],
+      ['format', 'sampleRate', 'bitDepth', 'trackNumber', 'discNumber', 'releaseYear'],
+    )
     token(track.id); text(track.title); text(track.artist); text(track.album); seconds(track.durationSeconds)
+    if (track.format !== undefined) text(track.format, 32)
+    optionalPositiveInt(track.sampleRate, 90_316_800)
+    optionalPositiveInt(track.bitDepth, 64)
+    optionalPositiveInt(track.trackNumber, 9999)
+    optionalPositiveInt(track.discNumber, 999)
+    optionalPositiveInt(track.releaseYear, 9999)
     requireValue(!ids.has(track.id)); ids.add(track.id)
   }
   if (page.nextCursor !== null) token(page.nextCursor)

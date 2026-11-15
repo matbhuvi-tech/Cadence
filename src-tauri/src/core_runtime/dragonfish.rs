@@ -1077,8 +1077,8 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                 }
                 let _ = stream.set_nonblocking(false);
                 let _ = stream.set_nodelay(true);
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
                 let mut buf = vec![0u8; 64 * 1024];
                 let mut total = 0usize;
@@ -1229,7 +1229,7 @@ fn admit_requested_tracks_for_v1_command<P: PlatformProbe, L: MemoryLocker>(
         if let Some(entries) = parsed.get("entries").and_then(Value::as_array) {
             for (idx, entry) in entries.iter().enumerate() {
                 if let Some(tid) = entry.get("trackId").and_then(Value::as_str) {
-                    if idx < 2 {
+                    if idx < 2 && !ids_to_admit.iter().any(|existing| existing == tid) {
                         ids_to_admit.push(tid.to_string());
                     }
                     if idx < 4 {
@@ -1237,6 +1237,28 @@ fn admit_requested_tracks_for_v1_command<P: PlatformProbe, L: MemoryLocker>(
                     }
                 }
             }
+        }
+        if let Some(current_id) = rt.current_queue_track_id() {
+            keep_ids.insert(current_id.clone());
+            if ids_to_admit.is_empty() {
+                ids_to_admit.push(current_id);
+            }
+        }
+    } else if op == "queue.control" {
+        if let Some(action) = parsed.get("action").and_then(Value::as_str) {
+            if matches!(action, "next" | "previous" | "jump") {
+                let entry_id = parsed.get("entryId").and_then(Value::as_str);
+                for tid in rt.resolve_queue_transition_targets(action, entry_id) {
+                    if !ids_to_admit.iter().any(|existing| existing == &tid) {
+                        ids_to_admit.push(tid.clone());
+                    }
+                    keep_ids.insert(tid);
+                }
+            } else {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
         }
     } else {
         return Ok(());
@@ -1246,11 +1268,28 @@ fn admit_requested_tracks_for_v1_command<P: PlatformProbe, L: MemoryLocker>(
         return Ok(());
     }
 
-    let admitted = rt
-        .admit_tracks_for_explicit_user_play(&ids_to_admit, &keep_ids)
-        .map_err(|_| json!({ "ok": false, "error": { "code": "not_ready" } }))?;
+    let (admitted, effective_keep) =
+        match rt.admit_tracks_for_explicit_user_play(&ids_to_admit, &keep_ids) {
+            Ok(bufs) => (bufs, keep_ids),
+            Err(_) if ids_to_admit.len() > 1 => {
+                // Fall back to admitting only the immediate primary track if lookahead exceeds locked-RAM headroom.
+                let primary_only = vec![ids_to_admit[0].clone()];
+                let mut primary_keep = HashSet::new();
+                primary_keep.insert(ids_to_admit[0].clone());
+                if let Some(current_id) = rt.current_queue_track_id() {
+                    primary_keep.insert(current_id);
+                }
+                let bufs = rt
+                    .admit_tracks_for_explicit_user_play(&primary_only, &primary_keep)
+                    .map_err(|_| json!({ "ok": false, "error": { "code": "not_ready" } }))?;
+                (bufs, primary_keep)
+            }
+            Err(_) => {
+                return Err(json!({ "ok": false, "error": { "code": "not_ready" } }));
+            }
+        };
     if let Ok(mut guard) = shared_buffers.lock() {
-        guard.retain(|id, _| keep_ids.contains(id) || ids_to_admit.contains(id));
+        guard.retain(|id, _| effective_keep.contains(id) || admitted.iter().any(|(a, _)| a == id));
         for (id, buf) in admitted {
             guard.insert(id, buf);
         }

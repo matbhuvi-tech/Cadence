@@ -384,4 +384,97 @@ impl<R: Renderer> SessionOwner<R> {
         self.commit(&mut session, next, effect)?;
         Ok(true)
     }
+
+    pub(crate) fn current_track_id(&self) -> Option<String> {
+        let session = self.session.lock().ok()?;
+        session
+            .state
+            .current_index()
+            .and_then(|idx| session.state.entries.get(idx))
+            .map(|entry| entry.track_id.clone())
+    }
+
+    pub(crate) fn resolve_queue_transition_targets(
+        &self,
+        action: &str,
+        entry_id: Option<&str>,
+    ) -> Vec<String> {
+        let Ok(session) = self.session.lock() else {
+            return Vec::new();
+        };
+        let state = &session.state;
+        if state.entries.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut push_entry_idx = |entry_idx: usize| {
+            if let Some(entry) = state.entries.get(entry_idx) {
+                if !out.contains(&entry.track_id) {
+                    out.push(entry.track_id.clone());
+                }
+            }
+        };
+
+        match action {
+            "jump" => {
+                if let Some(target_eid) = entry_id {
+                    if let Some(entry_idx) =
+                        state.entries.iter().position(|e| e.entry_id == target_eid)
+                    {
+                        push_entry_idx(entry_idx);
+                        if let Some(ord_pos) = state.order.iter().position(|&v| v == entry_idx) {
+                            if let Some(&next_idx) = state.order.get(ord_pos + 1) {
+                                push_entry_idx(next_idx);
+                            } else if state.repeat == Repeat::All && !state.order.is_empty() {
+                                push_entry_idx(state.order[0]);
+                            }
+                        }
+                    }
+                }
+            }
+            "next" => {
+                let cur_idx = state.current_index();
+                let ord_pos = cur_idx.and_then(|i| state.order.iter().position(|&v| v == i));
+                let next_ord_pos = ord_pos.map_or(0, |p| p + 1);
+                if let Some(&target_idx) = state.order.get(next_ord_pos) {
+                    push_entry_idx(target_idx);
+                    if let Some(&lookahead_idx) = state.order.get(next_ord_pos + 1) {
+                        push_entry_idx(lookahead_idx);
+                    }
+                } else if state.repeat == Repeat::All && !state.order.is_empty() {
+                    let target_pos = if state.shuffle && state.order.len() > 1 {
+                        1
+                    } else {
+                        0
+                    };
+                    push_entry_idx(state.order[target_pos]);
+                    if state.order.len() > target_pos + 1 {
+                        push_entry_idx(state.order[target_pos + 1]);
+                    }
+                }
+            }
+            "previous" => {
+                if state.order.is_empty() {
+                    return out;
+                }
+                let position = state
+                    .current_index()
+                    .and_then(|i| state.order.iter().position(|&v| v == i))
+                    .unwrap_or(0);
+                let prev_pos = if position == 0 && state.repeat == Repeat::All {
+                    state.order.len() - 1
+                } else {
+                    position.saturating_sub(1)
+                };
+                if let Some(&target_idx) = state.order.get(prev_pos) {
+                    push_entry_idx(target_idx);
+                    if let Some(&next_idx) = state.order.get(prev_pos + 1) {
+                        push_entry_idx(next_idx);
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
 }

@@ -29,6 +29,18 @@ pub struct CatalogTrack {
     pub artist: String,
     pub album: String,
     pub duration_seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_depth: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_number: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_year: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

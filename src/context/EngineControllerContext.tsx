@@ -98,6 +98,51 @@ function createDesktopHttpBridge(): HttpCoreTransportBridge {
   }
 }
 
+function normalizeCoreFormat(rawFormat?: string): Track['format'] {
+  const upper = (rawFormat || '').trim().toUpperCase()
+  switch (upper) {
+    case 'DSD':
+    case 'DSF':
+    case 'DFF':
+      return 'DSD'
+    case 'WAV':
+    case 'AIFF':
+    case 'AIF':
+      return 'WAV'
+    case 'ALAC':
+    case 'M4A':
+      return 'ALAC'
+    case 'AAC':
+      return 'AAC'
+    case 'MP3':
+    case 'OGG':
+      return 'MP3'
+    case 'FLAC':
+    default:
+      return 'FLAC'
+  }
+}
+
+function formatCoreSampleRateStr(
+  format: Track['format'],
+  sampleRate?: number,
+  bitDepth?: number,
+  rawFormat?: string,
+): string {
+  if (format === 'DSD') {
+    if (sampleRate && sampleRate >= 22_000_000) return 'DSD512 (22.6 MHz)'
+    if (sampleRate && sampleRate >= 11_000_000) return 'DSD256 (11.3 MHz)'
+    if (sampleRate && sampleRate >= 5_500_000) return 'DSD128 (5.6 MHz)'
+    if (sampleRate && sampleRate >= 2_700_000) return 'DSD64 (2.8 MHz)'
+    return '1-bit DSD'
+  }
+  const khz = sampleRate ? `${Number((sampleRate / 1000).toFixed(1))} kHz` : ''
+  const bits = bitDepth ? `${bitDepth}-bit` : ''
+  const combined = [bits, khz].filter(Boolean).join(' / ')
+  if (combined) return combined
+  return rawFormat ? 'Core Stream' : 'Core Stream'
+}
+
 export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
   tracks: Track[]
   releases: Release[]
@@ -106,14 +151,23 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
   const releaseMap = new Map<string, { release: Release; tracks: Track[] }>()
   const uiTracks: Track[] = []
 
-  tracks.forEach((ct, index) => {
+  tracks.forEach((ct) => {
     const releaseId = `core_rel_${ct.album.toLowerCase().replace(/[^a-z0-9]+/g, '_') || 'album'}`
+    const existing = releaseMap.get(releaseId)
+    const fallbackTrackNo = existing ? existing.tracks.length + 1 : 1
+    const format = normalizeCoreFormat(ct.format)
+    const sampleRateStr = formatCoreSampleRateStr(format, ct.sampleRate, ct.bitDepth, ct.format)
+    const isHighRes =
+      format === 'DSD' || (ct.sampleRate ?? 0) > 48_000 || (ct.bitDepth ?? 0) > 16
+    const discNumber = ct.discNumber ?? 1
+    const releaseYear = ct.releaseYear ?? 0
+
     const uiTrack: Track = {
       id: ct.id,
       releaseId,
       recordingId: ct.id,
-      trackNumber: index + 1,
-      discNumber: 1,
+      trackNumber: ct.trackNumber ?? fallbackTrackNo,
+      discNumber,
       title: ct.title,
       artistCredit: ct.artist,
       durationSeconds: ct.durationSeconds,
@@ -125,9 +179,11 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
       modifiedTimestamp: nowIso,
       checksumValid: true,
       accurateRipConfidence: 0,
-      sampleRateStr: 'Core Stream',
-      format: 'FLAC',
-      isHighRes: false,
+      sampleRateStr,
+      format,
+      sampleRate: ct.sampleRate,
+      bitDepth: ct.bitDepth,
+      isHighRes,
       credits: [],
       masterReleaseId: releaseId,
       isOnline: true,
@@ -136,10 +192,16 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
     }
     uiTracks.push(uiTrack)
 
-    const existing = releaseMap.get(releaseId)
     if (existing) {
       existing.tracks.push(uiTrack)
       existing.release.tracksCount = existing.tracks.length
+      if (discNumber > existing.release.discsCount) {
+        existing.release.discsCount = discNumber
+      }
+      if (existing.release.releaseYear === 0 && releaseYear > 0) {
+        existing.release.releaseYear = releaseYear
+        existing.release.originalYear = releaseYear
+      }
     } else {
       releaseMap.set(releaseId, {
         release: {
@@ -149,8 +211,8 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
           folderName: ct.album,
           folderPath: '',
           artistCredit: ct.artist,
-          releaseYear: 0,
-          originalYear: 0,
+          releaseYear,
+          originalYear: releaseYear,
           label: 'Cadence Core',
           catalogNumber: '',
           mediaFormat: 'Digital',
@@ -167,7 +229,7 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
             hasBookletPdf: false,
           },
           variants: [],
-          discsCount: 1,
+          discsCount: discNumber,
           tracksCount: 1,
           genreTags: [],
           storageMountId: 'core',

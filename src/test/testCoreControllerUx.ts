@@ -621,3 +621,86 @@ test('Phase 10 catalog hydration paginates beyond the initial 200-track snapshot
   assert.equal(store.getState().hydratedCatalogTracks.length, 0)
   store.dispose()
 })
+
+test('Issues #38 and #39: mapCoreCatalogToUi maps WAV/DSD formats & executeCoreCommand preserves connection on not_ready', async () => {
+  const { mapCoreCatalogToUi } = await import('../context/EngineControllerContext')
+  const { CoreServiceError } = await import('../core/coreProtocol')
+  const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
+
+  const { tracks, releases } = mapCoreCatalogToUi([
+    {
+      id: 'trk-wav-1',
+      title: 'Masakali',
+      artist: 'Mohit Chauhan',
+      album: 'Delhi - 6',
+      durationSeconds: 290,
+      format: 'WAV',
+      sampleRate: 44100,
+      bitDepth: 16,
+      trackNumber: 4,
+      discNumber: 1,
+      releaseYear: 2009,
+    },
+    {
+      id: 'trk-dsf-1',
+      title: 'Blue Rondo',
+      artist: 'Dave Brubeck',
+      album: 'Time Out',
+      durationSeconds: 400,
+      format: 'DSF',
+      sampleRate: 11289600,
+      bitDepth: 1,
+      trackNumber: 1,
+      discNumber: 1,
+      releaseYear: 1959,
+    },
+  ])
+  assert.equal(tracks[0].format, 'WAV')
+  assert.equal(tracks[0].sampleRateStr, '16-bit / 44.1 kHz')
+  assert.equal(tracks[0].trackNumber, 4)
+  assert.equal(tracks[0].isHighRes, false)
+  assert.equal(releases[0].releaseYear, 2009)
+
+  assert.equal(tracks[1].format, 'DSD')
+  assert.equal(tracks[1].sampleRateStr, 'DSD256 (11.3 MHz)')
+  assert.equal(tracks[1].isHighRes, true)
+  assert.equal(releases[1].releaseYear, 1959)
+
+  const core = createFakeCoreNode()
+  const store = createDesktopCoreControllerStore({
+    channelFactory: () => ({
+      ...core.channel,
+      async request(req) {
+        if (req.operation === 'queue.replace') {
+          throw new CoreServiceError('not_ready')
+        }
+        return core.channel.request(req)
+      },
+    }),
+    localOwner: {
+      getActivity: () => 'idle',
+      stopAndAcknowledge: async () => true,
+      request: async () => ({ ok: true, data: {} }),
+    },
+  })
+
+  await store.stageCandidate({
+    engineId: 'core_living_room',
+    libraryId: 'lib_nas_master',
+    label: 'Music Room Core',
+    baseUrl: 'https://192.168.1.50:4040',
+    musicRoots: [],
+  })
+  await store.activateStagedCore()
+  await assert.rejects(
+    () =>
+      store.executeCoreCommand({
+        operation: 'queue.replace',
+        entries: [{ entryId: 'e1', trackId: 'trk_1' }],
+      }),
+    /not ready/i,
+  )
+  assert.equal(store.getState().view.session.connected, true)
+  assert.equal(store.getState().lastError?.includes('Connection lost'), false)
+  store.dispose()
+})

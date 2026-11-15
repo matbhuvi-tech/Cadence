@@ -50,6 +50,12 @@ export interface CoreCatalogTrack {
   artist: string;
   album: string;
   durationSeconds: number;
+  format?: string;
+  sampleRate?: number;
+  bitDepth?: number;
+  trackNumber?: number;
+  discNumber?: number;
+  releaseYear?: number;
 }
 
 export interface CoreSnapshot {
@@ -248,6 +254,27 @@ export function parseCoreSnapshot(
       artist: typeof t.artist === 'string' ? t.artist : 'Unknown Artist',
       album: typeof t.album === 'string' ? t.album : 'Unknown Album',
       durationSeconds: Math.max(0, t.durationSeconds),
+      format: typeof t.format === 'string' && t.format.trim() ? t.format.trim() : undefined,
+      sampleRate:
+        typeof t.sampleRate === 'number' && Number.isInteger(t.sampleRate) && t.sampleRate > 0
+          ? t.sampleRate
+          : undefined,
+      bitDepth:
+        typeof t.bitDepth === 'number' && Number.isInteger(t.bitDepth) && t.bitDepth > 0
+          ? t.bitDepth
+          : undefined,
+      trackNumber:
+        typeof t.trackNumber === 'number' && Number.isInteger(t.trackNumber) && t.trackNumber > 0
+          ? t.trackNumber
+          : undefined,
+      discNumber:
+        typeof t.discNumber === 'number' && Number.isInteger(t.discNumber) && t.discNumber > 0
+          ? t.discNumber
+          : undefined,
+      releaseYear:
+        typeof t.releaseYear === 'number' && Number.isInteger(t.releaseYear) && t.releaseYear > 0
+          ? t.releaseYear
+          : undefined,
     };
   });
 
@@ -328,16 +355,22 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
   const trackMap = new Map(snapshot.catalog.tracks.map((t) => [t.id, t]));
   const items: RemoteTrackItem[] = snapshot.queue.entries.map((entry) => {
     const trk = trackMap.get(entry.trackId);
+    const rawFmt = (trk?.format || 'CORE').toUpperCase();
+    const isDsd = rawFmt === 'DSD' || rawFmt === 'DSF' || rawFmt === 'DFF';
+    const isHighRes =
+      isDsd || (trk?.sampleRate ?? 0) > 48000 || (trk?.bitDepth ?? 0) > 16;
     return {
       queueEntryId: entry.entryId,
       id: entry.trackId,
       title: trk?.title || entry.trackId,
       artist: trk?.artist || 'Unknown Artist',
       album: trk?.album || '',
-      format: 'CORE',
+      format: isDsd ? 'DSD' : rawFmt,
+      sampleRate: trk?.sampleRate,
+      bitDepth: trk?.bitDepth,
       durationSecs: trk?.durationSeconds ?? 0,
       filePath: entry.trackId,
-      isHighRes: false,
+      isHighRes,
     };
   });
 

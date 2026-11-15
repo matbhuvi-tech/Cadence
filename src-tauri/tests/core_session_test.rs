@@ -32,8 +32,17 @@ fn catalog() -> Vec<CatalogTrack> {
     ["song-a", "song-b", "song-c"]
         .into_iter()
         .map(|id| CatalogTrack {
-            id: id.into(), title: id.into(), artist: "Artist".into(), album: "Album".into(),
+            id: id.into(),
+            title: id.into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
             duration_seconds: 120.0,
+            format: None,
+            sample_rate: None,
+            bit_depth: None,
+            track_number: None,
+            disc_number: None,
+            release_year: None,
         })
         .collect()
 }

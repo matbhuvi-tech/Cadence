@@ -242,7 +242,7 @@ export function createFetchHttpCoreBridge(): HttpCoreTransportBridge {
     async postCoreRequest(profile, req) {
       const base = normalizeCoreBaseUrl(profile.baseUrl)
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 5000)
+      const timer = setTimeout(() => controller.abort(), 15000)
       try {
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
@@ -876,6 +876,21 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           state = {
             ...state,
             view: afterView,
+            lastError: err.message,
+            statusAnnouncement: err.message,
+          }
+          emit()
+          throw err
+        }
+        if (
+          err instanceof CoreServiceError &&
+          (err.code === 'not_ready' ||
+            err.code === 'invalid_payload' ||
+            err.code === 'unsupported_capability')
+        ) {
+          state = {
+            ...state,
+            view: beforeView,
             lastError: err.message,
             statusAnnouncement: err.message,
           }
