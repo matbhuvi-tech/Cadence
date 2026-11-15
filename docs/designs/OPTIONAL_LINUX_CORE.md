@@ -231,6 +231,17 @@ changes, timers or polling. Memory impact: bounded validation/copying in explici
 service calls, with no changes to pinned buffers or active delivery. Tier 1 applies
 to this foundation; actual IPC/network/UI bindings still require Tier 2 assessment.
 
+Phase 3 adds the native control-plane session owner (`src-tauri/src/core_session/`)
+and capability-gated v1 queue coordination (`queue.control` / `queue.coordinate`).
+Desktop startup (`src-tauri/src/lib.rs`) exports the module for acceptance testing
+without instantiating it, spawning threads, registering Tauri commands or touching
+`AudioEngine`. Disk and network/NIC impact: zero; the owner operates on an in-memory
+catalog projection and a synchronous `Renderer` mailbox trait. Thread/CPU impact:
+no background workers, timers or audio-thread changes; command/event serialization
+uses a control-plane `Mutex` never called from the pacer. Memory impact: bounded
+256-entry command receipt ring (`RECENT_COMMAND_LIMIT`), 4096-entry queue cap and
+1 MiB message ceiling. Tier 1 validation applies.
+
 ## Independently testable phases
 
 Each phase has its own acceptance fixture and rollback boundary. Use synthetic files,
@@ -263,7 +274,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 0 | Recorded | This document; direction approved in chat |
 | 1 | Implementation ready for user verification | `src/core/engineSession.ts`; test-first fixtures in `src/test/testEngineSession.ts`; runtime integration intentionally pending |
 | 2 | User verified; merge approved | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; NSIS build passed; runtime bindings remain pending |
-| 3-10 | Planned | No authoritative backend, Linux executable or deployment claimed yet |
+| 3 | Implementation ready for user verification | `src-tauri/src/core_session/`; `queue.control` + `queue.coordinate` in `src/core/coreProtocol.ts` and `src/services/engineService.ts`; 24 native + 51 TS tests + TS-to-Rust interop fixture pass; runtime bindings remain pending |
+| 4-10 | Planned | No headless executable, Linux UPnP transport or deployment claimed yet |
 
 Phase 1 command:
 
@@ -441,6 +453,104 @@ Phase 2 service foundation; no working Linux engine or changed UI is claimed.
 - Original uncommitted Android, embedded PWA and media changes were preserved.
   No application was launched, installed or deployed. Native tests, runtime trust
   and hardware qualifications remain unverified.
+
+### Phase 3 session authority and queue coordination contract
+
+`src-tauri/src/core_session/` implements the authoritative native session and queue
+coordinator (`SessionOwner<R: Renderer>`), paired with `queue.control` (`next`,
+`previous`, `jump` by `entryId`, `modes` for `repeat` and `shuffle`) and the
+`queue.coordinate` capability in `src/core/coreProtocol.ts` and
+`src/services/engineService.ts`.
+
+- **Single serialized authority:** commands and qualified renderer events (`Started`,
+  `Completed`, `Failed`, `ExternalTakeover`) serialize through the owner's session
+  mutex. Controllers never auto-advance; renderer completion advances the queue
+  exactly once with zero connected controllers.
+- **Run-token correlation:** every `Play`, repeat restart, `Seek` and `Resume`
+  mints a fresh `RunToken`. `Pause` retains the active token so paused renderer
+  loss or external takeover still quarantines readiness, while `Completed` events
+  remain ignored unless activity is `Playing`. Late or duplicate events for older
+  tokens are ignored without bumping revisions or issuing renderer actions.
+- **Bounded deduplication and quarantine:** a 256-entry (`RECENT_COMMAND_LIMIT`)
+  receipt ring deduplicates retries by `commandId` and SHA-256 canonical payload
+  fingerprint, returning the current snapshot without replaying renderer actions.
+  Reusing a `commandId` with altered parameters rejects with `invalid_payload`.
+  Even no-op mutations increment `revision` so evicted commands fail as
+  `stale_revision`. Uncertain renderer submission errors, `Failed` events and
+  `ExternalTakeover` quarantine the session (`ready = false`, `run = None`) until
+  an explicit `Stop` is acknowledged.
+
+### Phase 3 TDD and verification record (2026-11-15)
+
+Source: phase 3 in the independently testable phase table above. User journeys:
+advance duplicate tracks and repeat/shuffle deterministically at the owner with no
+controller connected; serialize concurrent controller commands and renderer events
+without duplicate playback; reject stale revisions with a fresh snapshot; quarantine
+renderer loss or takeover without retry storms.
+
+- RED checkpoint `0cf8328`: `cargo test --manifest-path src-tauri/Cargo.toml --test core_session_test`
+  failed with `E0432` (`unresolved import cadence_core_lib::core_session`), and
+  `node --import tsx --test src/test/testCoreSessionProtocol.ts` failed both
+  `queue.control` protocol and capability-gating tests.
+- GREEN checkpoint `a48582d`: 22 native acceptance tests in `core_session_test`
+  and all 51 Phase 1–3 TypeScript tests passed.
+- QA RED checkpoint `72c0211`: added `paused_renderer_loss_and_takeover_remain_correlated_including_after_seek`,
+  reproducing a gap where `Pause` cleared `run` and `Seek` while paused did not
+  refresh it (22 pass / 1 fail).
+- QA GREEN checkpoint `0ed5730` + interop fixture `cfb944b`: retained `run` across
+  `Pause`, refreshed `run` on paused `Seek`, and added
+  `cross_language_typescript_adapter_interoperates_with_rust_owner` spawning the
+  real TypeScript `createRemoteEngineService` against the Rust `SessionOwner` over
+  stdio (24/24 native tests pass).
+
+| Guarantee | Acceptance fixture | Type / result |
+| --- | --- | --- |
+| Observation and construction never claim or trigger a renderer | `core_session_test.rs:construction_and_observation_never_claim_or_play_a_renderer` | Native integration / PASS |
+| Duplicate tracks advance once with no controller; late/duplicate completions are ignored | `core_session_test.rs:duplicate_tracks_advance_once_without_any_controller`, `concurrent_completion_notifications_only_advance_one_entry`, `late_completion_is_ignored_after_stop_pause_seek_and_resume` | Native integration / PASS |
+| Concurrent duplicate commands execute once; distinct concurrent commands reject loser with fresh snapshot | `core_session_test.rs:concurrent_duplicate_commands_have_one_renderer_effect`, `concurrent_distinct_commands_reject_the_stale_loser_with_a_fresh_snapshot` | Multi-thread integration / PASS |
+| Bounded 256-command deduplication, payload fingerprint check and lost-ACK retry safety | `core_session_test.rs:command_id_reuse_with_changed_content_is_rejected_before_effects`, `deduplication_is_bounded_and_evicted_success_cannot_replay`, `retry_after_lost_ack_returns_current_state_without_replaying` | Native integration / PASS |
+| Repeat (`off`/`one`/`all`), cycle-complete shuffle, entry-ID jump and play-order previous | `core_session_test.rs:repeat_*`, `shuffle_visits_each_entry_once_*`, `jump_targets_duplicate_entry_*` | Native integration / PASS |
+| Renderer failure, loss and external takeover (playing or paused/seeked) quarantine until Stop ACK | `core_session_test.rs:renderer_failure_is_quarantined_*`, `renderer_loss_or_external_takeover_*`, `paused_renderer_loss_and_takeover_*` | Native + QA regression / PASS |
+| TypeScript `queue.control` validation, `queue.coordinate` capability gate and Rust owner wire interop | `testCoreSessionProtocol.ts` + `core_session_test.rs:cross_language_typescript_adapter_interoperates_with_rust_owner` | Unit + cross-language integration / PASS |
+
+Reproduce Phase 3 verification with:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --test core_session_test
+npm run test:core-session-protocol
+```
+
+- PASS: 24 native tests in `core_session_test` (including TS-to-Rust stdio interop)
+  and 10 existing native tests in `remote_queue_test`.
+- PASS: 51 TypeScript tests across `testEngineSession.ts`, `testCoreServices.ts` and
+  `testCoreSessionProtocol.ts`; scoped coverage across `engineSession.ts`,
+  `coreProtocol.ts`, `engineService.ts` and `engineServiceController.ts` is 99.83%
+  lines, 97.52% branches and 100% functions.
+- PASS: existing endpoint routing regression (`npm run test:endpoint-routing`),
+  remote queue sync suite (`npm run test:queue-sync`), `npx tsc -b`, PWA `tsc -b`,
+  targeted `oxlint` (0 warnings, 0 errors), and isolated temporary-directory Vite
+  production builds for both PWA and desktop.
+- NOT RUN at implementation checkpoint: NSIS installer build (gated before `main`
+  merge per `.agents/rules/Git.md`), live UI click QA (Phase 3 is an unbound
+  backend/protocol module with no UI controls yet; wired in Phase 7), and Linux /
+  Dragonfish / RS130 hardware tests (Phases 4–6 and 10).
+
+### Phase 3 self-review
+
+Using the agent-self-evaluation skill: overall 4.2/5; ready for user verification.
+
+| Axis | Score | Evidence and next improvement |
+| --- | --- | --- |
+| Accuracy | 4/5 | 24 native tests, 51 TS tests and cross-language stdio interop pass; real UPnP renderer event correlation remains Phase 5 work. |
+| Completeness | 4/5 | Covers concurrent commands/completions, duplicate tracks, repeat/shuffle, stale revisions, bounded deduplication, paused takeover and TS-Rust interop; runtime binding is deferred to Phases 4/7 by design. |
+| Clarity | 4/5 | `RunToken` and `Renderer` mailbox contracts state threading and non-reentrancy rules clearly; Phase 4/5 will document concrete UPnP event mapping. |
+| Actionability | 5/5 | Exact Cargo and npm commands reproduce all native, TS and cross-language fixtures immediately without external services. |
+| Conciseness | 4/5 | Owner and parser fit in two focused Rust files (~565 lines total) plus 19 TS lines; design ledger remains compact. |
+
+Priority improvements: bind `SessionOwner` into the Tauri-independent headless runner
+in Phase 4 and map qualified UPnP AVTransport state transitions onto `RunToken` in
+Phase 5. Would the user agree? Expected yes for the Phase 3 fake-renderer authority
+milestone.
 
 ## Platform references
 
