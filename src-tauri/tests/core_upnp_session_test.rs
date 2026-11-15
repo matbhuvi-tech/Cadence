@@ -82,7 +82,6 @@ impl PlatformProbe for GenerousProbe {
 #[derive(Clone, Debug)]
 struct RecordedSoapCall {
     action: String,
-    body: String,
 }
 
 struct FakeRs130State {
@@ -96,7 +95,6 @@ struct FakeRs130State {
 /// Loopback HTTP server simulating a HiFi ROSE RS130 UPnP MediaRenderer.
 struct FakeRs130Simulator {
     addr: std::net::SocketAddr,
-    udn: String,
     state: Arc<Mutex<FakeRs130State>>,
     stop_flag: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
@@ -193,10 +191,18 @@ impl FakeRs130Simulator {
                         let soap_action = req
                             .lines()
                             .find_map(|l| {
-                                let lower = l.to_ascii_lowercase();
-                                lower.strip_prefix("soapaction:").map(|v| {
-                                    v.trim().trim_matches('"').rsplit('#').next().unwrap_or("").to_string()
-                                })
+                                if l.to_ascii_lowercase().starts_with("soapaction:") {
+                                    l.split_once(':').map(|(_, v)| {
+                                        v.trim()
+                                            .trim_matches('"')
+                                            .rsplit('#')
+                                            .next()
+                                            .unwrap_or("")
+                                            .to_string()
+                                    })
+                                } else {
+                                    None
+                                }
                             })
                             .unwrap_or_default();
                         let body = req
@@ -218,7 +224,6 @@ impl FakeRs130Simulator {
 
                         st.soap_calls.push(RecordedSoapCall {
                             action: soap_action.clone(),
-                            body: body.clone(),
                         });
 
                         let response_xml = match soap_action.as_str() {
@@ -278,7 +283,6 @@ impl FakeRs130Simulator {
 
         Self {
             addr,
-            udn: udn.to_string(),
             state,
             stop_flag,
             join: Some(join),
@@ -850,7 +854,7 @@ fn bounded_concurrency_disconnects_and_qualified_avtransport_reconciliation() {
     let media_addr = session_rt.media_listen_addr();
 
     // 1. Open one slow connection holding the single concurrency slot (hasn't sent request yet)
-    let mut hold_stream = TcpStream::connect(media_addr).unwrap();
+    let hold_stream = TcpStream::connect(media_addr).unwrap();
     std::thread::sleep(Duration::from_millis(30));
 
     // Second concurrent connection must be rejected with 503 Service Unavailable
@@ -937,6 +941,114 @@ fn bounded_concurrency_disconnects_and_qualified_avtransport_reconciliation() {
     assert!(calls_after
         .iter()
         .all(|c| c.action == "GetTransportInfo" || c.action == "GetPositionInfo"));
+
+    session_rt.shutdown().unwrap();
+}
+
+#[test]
+fn mid_stream_stop_cancellation_and_bounded_retry_renderer_loss_quarantine() {
+    let fx = Phase5Fixture::create("mid_stream_cancel_and_loss");
+    let rs130 = FakeRs130Simulator::start("uuid:rs130-main");
+    let desc = inspect_rs130_description(&rs130.description_url(), Some("uuid:rs130-main")).unwrap();
+    let locker = FakeLocker::new();
+
+    // Use a paced config with real sleep so a 1.5 MiB stream stays in flight while Stop is issued
+    let mut paced_cfg = CorePacerConfig::default();
+    paced_cfg.initial_fill_multiplier = 2.0;
+    paced_cfg.max_overfeed_multiplier = 2.0;
+
+    let mut session_rt = UpnpSessionRuntime::open_with_platform(
+        HeadlessConfig {
+            db_path: fx.db_path.clone(),
+            engine_id: "truenas-core".into(),
+            library_id: "main-library".into(),
+            label: "TrueNAS Core".into(),
+            output: Some(Output {
+                id: "rs130-main".into(),
+                label: "HiFi ROSE RS130".into(),
+                transport: "upnp".into(),
+            }),
+            headroom_bytes: 16 * 1024 * 1024,
+        },
+        UpnpSessionConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            advertised_ip: "127.0.0.1".into(),
+            allow_loopback_advertise: true,
+            max_concurrent_streams: 2,
+            pacer_config: paced_cfg,
+            target_device: desc,
+        },
+        GenerousProbe,
+        locker,
+    )
+    .expect("open UpnpSessionRuntime");
+
+    session_rt
+        .admit_tracks(&["trk-pcm-1".to_string()])
+        .unwrap();
+
+    let play_resp = session_rt.request(&wire(json!({
+        "operation": "playback.control",
+        "action": "play",
+        "trackId": "trk-pcm-1",
+        "commandId": "cmd-play-cancel-test",
+        "expectedRevision": 0
+    })));
+    assert_eq!(play_resp["ok"], true);
+    let uri = rs130.state.lock().unwrap().current_uri.clone();
+    let path_only = format!("/media/{}", uri.rsplit("/media/").next().unwrap());
+    let media_addr = session_rt.media_listen_addr();
+
+    // Spawn a client reading the 1.5 MiB stream while paced
+    let reader = std::thread::spawn(move || {
+        let (_, body) = send_raw_http(
+            media_addr,
+            &format!("GET {} HTTP/1.1\r\nHost: localhost\r\n\r\n", path_only),
+        );
+        body.len()
+    });
+
+    // Wait briefly so pre-roll flushes and paced chunks are in flight, then issue Stop!
+    std::thread::sleep(Duration::from_millis(60));
+    let rev = play_resp["data"]["revision"].as_u64().unwrap();
+    let stop_resp = session_rt.request(&wire(json!({
+        "operation": "playback.control",
+        "action": "stop",
+        "commandId": "cmd-mid-stop",
+        "expectedRevision": rev
+    })));
+    assert_eq!(stop_resp["ok"], true);
+
+    let bytes_received_before_cancel = reader.join().unwrap();
+    assert!(
+        bytes_received_before_cancel < fx.pcm_bytes.len(),
+        "mid-stream Stop must cancel active delivery before full 1.5 MiB completes (got {} of {})",
+        bytes_received_before_cancel,
+        fx.pcm_bytes.len()
+    );
+
+    // Start again and simulate renderer loss (3 consecutive SOAP failures -> RendererFailed quarantine)
+    let rev = stop_resp["data"]["revision"].as_u64().unwrap();
+    let play_again = session_rt.request(&wire(json!({
+        "operation": "playback.control",
+        "action": "play",
+        "trackId": "trk-pcm-1",
+        "commandId": "cmd-play-loss",
+        "expectedRevision": rev
+    })));
+    assert_eq!(play_again["ok"], true);
+
+    rs130.state.lock().unwrap().fail_next_soap = true;
+    assert_eq!(session_rt.reconcile_renderer().unwrap(), TransportReport::Steady);
+    assert_eq!(session_rt.reconcile_renderer().unwrap(), TransportReport::Steady);
+    assert_eq!(
+        session_rt.reconcile_renderer().unwrap(),
+        TransportReport::RendererFailed
+    );
+    assert_eq!(
+        session_rt.request(&wire(json!({ "operation": "core.hello" })))["data"]["ready"],
+        false
+    );
 
     session_rt.shutdown().unwrap();
 }

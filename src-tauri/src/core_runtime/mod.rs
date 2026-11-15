@@ -2,6 +2,7 @@
 //! strict locked-RAM admission, and 30-second post-playback storage silence.
 
 pub mod platform;
+pub mod upnp_session;
 
 pub use platform::{
     normalize_linux_getsockopt_sndbuf, normalize_linux_setsockopt_sndbuf, parse_cgroup_limit_bytes,
@@ -156,6 +157,10 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
 
     pub fn available_budget_bytes(&self) -> u64 {
         self.arena.available_budget_bytes()
+    }
+
+    pub fn shared_track_buffer(&self, track_id: &str) -> Option<Arc<Vec<u8>>> {
+        self.arena.get_shared_buffer(track_id)
     }
 
     pub fn admit_tracks(&mut self, track_ids: &[String]) -> Result<(), RuntimeError> {

@@ -134,7 +134,7 @@ pub struct LockedBytesArena<P: PlatformProbe = SystemPlatformProbe, L: MemoryLoc
     probe: P,
     locker: L,
     headroom_bytes: u64,
-    buffers: HashMap<String, Vec<u8>>,
+    buffers: HashMap<String, std::sync::Arc<Vec<u8>>>,
     retained_bytes: u64,
 }
 
@@ -159,6 +159,12 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
 
     pub fn get_slice(&self, track_id: &str) -> Option<&[u8]> {
         self.buffers.get(track_id).map(|v| v.as_slice())
+    }
+
+    /// Returns a zero-copy reference-counted handle to the page-locked track buffer.
+    /// The underlying heap allocation address never moves when wrapped in `Arc<Vec<u8>>`.
+    pub fn get_shared_buffer(&self, track_id: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        self.buffers.get(track_id).cloned()
     }
 
     /// Computes remaining lockable RAM budget after accounting for container cgroup v2
@@ -268,7 +274,7 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
 
         for (id, data) in newly_locked {
             self.retained_bytes = self.retained_bytes.saturating_add(data.len() as u64);
-            self.buffers.insert(id, data);
+            self.buffers.insert(id, std::sync::Arc::new(data));
         }
 
         Ok(())
@@ -276,7 +282,7 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
 
     pub fn clear(&mut self) {
         for (_, buf) in self.buffers.drain() {
-            self.locker.unlock(&buf);
+            self.locker.unlock(buf.as_slice());
         }
         self.retained_bytes = 0;
     }
