@@ -2,7 +2,7 @@
 # Versioned linux/amd64 OCI image for Cadence Core on TrueNAS SCALE Dragonfish 24.04.
 # Builds only the Tauri-independent `cadence-headless` binary (--no-default-features).
 
-FROM --platform=linux/amd64 rust:1.83-bookworm AS builder
+FROM --platform=linux/amd64 rust:1-bookworm AS builder
 
 WORKDIR /build
 
