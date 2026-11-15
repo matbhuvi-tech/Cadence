@@ -212,7 +212,7 @@ test('play, seek, pause and queue replacement transmit IDs and preconditions unc
   const commands = [
     { operation: 'playback.control', action: 'play', trackId: 'track-1', commandId: 'play-1', expectedRevision: 4 },
     { operation: 'playback.control', action: 'seek', positionSeconds: 30, commandId: 'seek-1', expectedRevision: 4 },
-    ...(['pause', 'resume', 'stop'] as const).map(action => ({ operation: 'playback.control', action, commandId: `${action}-1`, expectedRevision: 4 })),
+    ...(['pause', 'resume', 'stop'] as const).map(action => ({ operation: 'playback.control', action, commandId: `${action}-1`, expectedRevision: 4 } as const)),
     { operation: 'queue.replace', entries: [{ entryId: 'entry-1', trackId: 'track-1' }, { entryId: 'entry-2', trackId: 'track-1' }], commandId: 'queue-1', expectedRevision: 4 },
   ] as const
   for (const command of commands) {
@@ -291,6 +291,8 @@ test('failed preparation retains the complete old view and connection events rem
   assert.deepEqual(controller.getView().session.active, local)
   assert.equal(controller.getView().session.connected, false)
   controller.setConnection(before.session.activeEpoch, local, true)
+  assert.equal(controller.getView().session.connected, false)
+  await controller.refresh()
   assert.equal(controller.getView().session.connected, true)
 })
 
@@ -360,4 +362,96 @@ test('refresh rejects older revisions and late responses after switching away', 
   wait.resolve({ ok: true, data: snapshot(core, 10) })
   assert.equal(await refresh, 'stale')
   assert.equal(controller.getView().snapshot?.engineId, 'local')
+})
+
+test('revoked trust blocks every subsequent operation before any request', async () => {
+  const f = fixture(); const service = createRemoteEngineService(core, f.channel)
+  await service.prepare()
+  const count = f.calls.length
+  f.setTrusted(false)
+  await assert.rejects(service.getSnapshot(), errorCode('untrusted_peer'))
+  await assert.rejects(service.catalogPage(null, 20), errorCode('untrusted_peer'))
+  await assert.rejects(service.execute({ operation: 'playback.control', action: 'stop', commandId: 'cmd-1', expectedRevision: 4 }), errorCode('untrusted_peer'))
+  assert.equal(f.calls.length, count)
+})
+
+test('standalone mutations use the in-process owner port, without channel verification', async () => {
+  const f = fixture(local); const service = createLocalEngineService(f.owner)
+  const command = { operation: 'playback.control', action: 'pause', commandId: 'local-1', expectedRevision: 4 } as const
+  assert.deepEqual(await service.execute(command), snapshot(local))
+  assert.equal(f.checks, 0)
+  assert.deepEqual(f.calls.at(-1), { ...command, protocolVersion: 1, engineId: 'local', libraryId: 'local' })
+})
+
+test('a lost mutation acknowledgement is not retried and unknown outcomes stay unavailable', async () => {
+  const f = fixture(); let applied = 0
+  const service = createRemoteEngineService(core, { ...f.channel, async request(request) {
+    if (request.operation === 'playback.control') { applied++; throw new Error('acknowledgement lost') }
+    return f.owner.request(request)
+  } })
+  await assert.rejects(service.execute({ operation: 'playback.control', action: 'pause', commandId: 'cmd-1', expectedRevision: 4 }), errorCode('unavailable'))
+  assert.equal(applied, 1)
+})
+
+test('refresh races reject old success/failure and disconnect invalidates in-flight responses', async () => {
+  for (const completion of ['success', 'failure', 'disconnect'] as const) {
+    const f = fixture(); const wait = deferred<unknown>(); let count = 0
+    const service = createRemoteEngineService(core, { ...f.channel, request: request => {
+      if (request.operation === 'session.snapshot' && ++count === 2) return wait.promise
+      return f.owner.request(request)
+    } })
+    const controller = createEngineServiceController(createLocalEngineService(fixture(local).owner))
+    await controller.select(service, 'idle')
+    const older = controller.refresh()
+    // Let authorize complete so the old snapshot request is actually in flight.
+    await new Promise<void>(resolve => queueMicrotask(resolve))
+    if (completion === 'disconnect') {
+      const session = controller.getView().session
+      controller.setConnection(session.activeEpoch, core, false)
+    } else {
+      f.setResponse({ ok: true, data: snapshot(core, 6) })
+      assert.equal(await controller.refresh(), 'updated')
+    }
+    if (completion === 'failure') wait.reject(new Error('old refresh failed'))
+    else wait.resolve({ ok: true, data: snapshot(core, 5) })
+    assert.equal(await older, 'stale')
+    assert.equal(controller.getView().session.connected, completion !== 'disconnect')
+    assert.equal(controller.getView().snapshot?.revision, completion === 'disconnect' ? 4 : 6)
+  }
+})
+
+test('refresh failure retains the selected catalog and exposes a sanitized error', async () => {
+  const f = fixture(); const service = createRemoteEngineService(core, f.channel)
+  const controller = createEngineServiceController(createLocalEngineService(fixture(local).owner))
+  await controller.select(service, 'idle')
+  f.setResponse({ ok: false, error: { code: 'unauthorized', message: 'secret' } })
+  assert.equal(await controller.refresh(), 'failed')
+  assert.equal(controller.getView().session.active.engineId, core.engineId)
+  assert.equal(controller.getView().snapshot?.revision, 4)
+  assert.equal(controller.getView().session.connected, false)
+  assert.equal(controller.getView().session.error?.includes('secret'), false)
+})
+
+test('staging rejects a service that returns a mixed-library snapshot', async () => {
+  const service = createRemoteEngineService(core, fixture().channel)
+  const controller = createEngineServiceController(createLocalEngineService(fixture(local).owner))
+  const mixed = { ...service, async prepare() { return { context: core, descriptor: descriptor(), snapshot: snapshot(local) } } }
+  assert.equal(await controller.select(mixed, 'idle'), 'failed')
+  assert.equal(controller.getView().session.active.kind, 'local')
+  assert.equal(controller.getView().snapshot, null)
+})
+
+test('malformed response envelopes, cycles, oversized pages and regression acknowledgements reject', async () => {
+  const f = fixture(); const service = createRemoteEngineService(core, f.channel)
+  const cycle: { self?: unknown } = {}; cycle.self = cycle
+  for (const response of [null, [], { ok: 'yes' }, { ok: true }, { ok: false, error: { code: 'unauthorized', snapshot: snapshot() } }, cycle]) {
+    f.setResponse(response)
+    await assert.rejects(service.getSnapshot(), errorCode('invalid_payload'))
+  }
+  const page = snapshot().catalog
+  page.tracks.push({ ...page.tracks[0], id: 'track-2' })
+  f.setResponse({ ok: true, data: page })
+  await assert.rejects(service.catalogPage(null, 1), errorCode('invalid_payload'))
+  f.setResponse({ ok: true, data: snapshot(core, 3) })
+  await assert.rejects(service.execute({ operation: 'queue.replace', entries: [], commandId: 'cmd-1', expectedRevision: 4 }), errorCode('invalid_payload'))
 })
