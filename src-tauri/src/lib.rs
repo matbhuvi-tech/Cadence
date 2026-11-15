@@ -1,35 +1,60 @@
+#[cfg(feature = "desktop")]
 pub mod audio;
+#[cfg(feature = "desktop")]
 pub mod commands;
+pub mod core_runtime;
 pub mod core_session;
+#[cfg(feature = "desktop")]
 pub mod curation;
 pub mod db;
 pub mod diagnostics;
+#[cfg(feature = "desktop")]
 pub mod maintenance;
+#[cfg(feature = "desktop")]
 pub mod remote;
+#[cfg(feature = "desktop")]
 pub mod scanner;
 
+#[cfg(feature = "desktop")]
 use audio::AudioEngine;
+#[cfg(feature = "desktop")]
 use commands::audio::*;
+#[cfg(feature = "desktop")]
 use commands::artist_portrait::*;
+#[cfg(feature = "desktop")]
 use commands::curation::*;
+#[cfg(feature = "desktop")]
 use commands::diagnostics::*;
+#[cfg(feature = "desktop")]
 use commands::gemini_config::*;
+#[cfg(feature = "desktop")]
 use commands::library::*;
+#[cfg(feature = "desktop")]
 use commands::maintenance::*;
+#[cfg(feature = "desktop")]
 use commands::metadata_providers::*;
+#[cfg(feature = "desktop")]
 use commands::remote::*;
+#[cfg(feature = "desktop")]
 use commands::scanner::*;
+#[cfg(feature = "desktop")]
 use db::AppDb;
+#[cfg(feature = "desktop")]
 use scanner::ScannerController;
+#[cfg(feature = "desktop")]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+#[cfg(feature = "desktop")]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+#[cfg(feature = "desktop")]
 use tauri::{Emitter, Manager};
 
+#[cfg(feature = "desktop")]
 struct PendingOpenFilesState {
     files: parking_lot::Mutex<Vec<String>>,
     frontend_ready: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(feature = "desktop")]
 impl PendingOpenFilesState {
     fn new() -> Self {
         Self {
@@ -39,6 +64,7 @@ impl PendingOpenFilesState {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn normalize_opened_path(path: &std::path::Path) -> String {
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let s = resolved.to_string_lossy().to_string();
@@ -51,6 +77,7 @@ fn normalize_opened_path(path: &std::path::Path) -> String {
     s
 }
 
+#[cfg(feature = "desktop")]
 fn extract_audio_file_args(args: &[String], cwd: Option<&str>) -> Vec<String> {
     let mut files = Vec::new();
     for arg in args.iter().skip(1) {
@@ -76,6 +103,7 @@ fn extract_audio_file_args(args: &[String], cwd: Option<&str>) -> Vec<String> {
     files
 }
 
+#[cfg(feature = "desktop")]
 fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -84,6 +112,7 @@ fn focus_main_window(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn take_pending_open_files(state: tauri::State<'_, PendingOpenFilesState>) -> Vec<String> {
     state
@@ -93,6 +122,7 @@ fn take_pending_open_files(state: tauri::State<'_, PendingOpenFilesState>) -> Ve
     std::mem::take(&mut *guard)
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     diagnostics::init_from_env();
@@ -448,7 +478,7 @@ pub fn run() {
         .expect("error while running Cadence Core application");
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
 

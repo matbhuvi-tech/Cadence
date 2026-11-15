@@ -52,7 +52,7 @@ impl FakeLocker {
     }
 }
 
-impl MemoryLocker for Arc<FakeLocker> {
+impl MemoryLocker for FakeLocker {
     fn lock_and_prefault(&self, data: &mut [u8]) -> bool {
         self.lock_calls.fetch_add(1, Ordering::SeqCst);
         for page in data.chunks_mut(4096) {
@@ -309,7 +309,7 @@ fn truenas_cgroup_v2_and_cap_ipc_lock_admission_enforces_container_limits() {
     };
     let locker = FakeLocker::new(true);
     let mut arena = LockedBytesArena::new(
-        unprivileged_probe,
+        unprivileged_probe.clone(),
         locker.clone(),
         DEFAULT_CONTAINER_HEADROOM_BYTES,
     );
@@ -431,7 +431,16 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
     let track_a = tracks[0]["id"].as_str().unwrap().to_string();
     let track_b = tracks[1]["id"].as_str().unwrap().to_string();
 
-    // Unadmitted track cannot be played (no on-demand disk read or windowed fallback)
+    // Unadmitted track cannot be played or queued (no on-demand disk read or windowed fallback)
+    let unadmitted_queue = runtime.request(&wire(json!({
+        "operation": "queue.replace",
+        "entries": [{ "entryId": "e-1", "trackId": track_a }],
+        "commandId": "cmd-unadmitted-queue",
+        "expectedRevision": 0
+    })));
+    assert_eq!(unadmitted_queue["ok"], false);
+    assert_eq!(unadmitted_queue["error"]["code"], "not_ready");
+
     let unadmitted_play = runtime.request(&wire(json!({
         "operation": "playback.control",
         "action": "play",
@@ -661,3 +670,45 @@ fn headless_executable_runs_stdio_session_without_gui_or_audio_output_dependenci
 
     let _ = std::fs::remove_dir_all(&ws.dir);
 }
+
+#[test]
+fn headless_dependency_tree_excludes_gui_and_local_audio_crates() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_path = manifest_dir.join("Cargo.toml");
+
+    let output = Command::new("cargo")
+        .arg("tree")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .arg("--target")
+        .arg("x86_64-unknown-linux-gnu")
+        .arg("--no-default-features")
+        .output()
+        .expect("run cargo tree for linux headless target");
+    assert!(
+        output.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tree = String::from_utf8_lossy(&output.stdout);
+    for forbidden in [
+        "tauri v",
+        "tauri-build",
+        "wry v",
+        "tao v",
+        "cpal v",
+        "rodio v",
+        "alsa-sys",
+        "symphonia v",
+        "lofty v",
+        "windows v",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "headless Linux dependency tree must not contain '{}':\n{}",
+            forbidden,
+            tree
+        );
+    }
+}
+

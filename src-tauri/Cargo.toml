@@ -4,55 +4,122 @@ version = "0.1.0"
 description = "Cadence Core - Relational Audiophile Music Engine & Native Player"
 authors = ["matbhuvi"]
 edition = "2021"
+default-run = "cadence-core"
 
 [lib]
 name = "cadence_core_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "cadence-core"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "cadence-headless"
+path = "src/bin/cadence_headless.rs"
+
+[[test]]
+name = "curate_identity"
+path = "tests/curate_identity.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "debug_off_zero_alloc"
+path = "tests/debug_off_zero_alloc.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "remote_queue_test"
+path = "tests/remote_queue_test.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop", "bundled-sqlite"]
+bundled-sqlite = ["rusqlite/bundled"]
+desktop = [
+    "bundled-sqlite",
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-shell",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-fs",
+    "dep:tauri-plugin-window-state",
+    "dep:tauri-plugin-single-instance",
+    "dep:tokio",
+    "dep:rodio",
+    "dep:cpal",
+    "dep:symphonia",
+    "dep:lofty",
+    "dep:base64",
+    "dep:walkdir",
+    "dep:chrono-tz",
+    "dep:httpdate",
+    "dep:socket2",
+    "dep:axum",
+    "dep:axum-server",
+    "dep:futures-util",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:local-ip-address",
+    "dep:image",
+    "dep:rusty-chromaprint",
+    "dep:rust-embed",
+    "dep:rcgen",
+    "dep:rustls-pemfile",
+    "dep:mime_guess",
+    "dep:reqwest",
+    "dep:mdns-sd",
+    "dep:windows",
+]
+
 [build-dependencies]
-tauri-build = { version = "~2.6.3", features = [] }
+tauri-build = { version = "~2.6.3", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "~2.11.6", features = ["protocol-asset", "tray-icon"] }
-tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
+tauri = { version = "~2.11.6", features = ["protocol-asset", "tray-icon"], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-fs = { version = "2", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
-rodio = { version = "0.19", default-features = false, features = ["symphonia-all", "flac", "wav", "mp3", "vorbis"] }
-cpal = "0.15"
-symphonia = { version = "0.5", features = ["all"] }
-lofty = "0.21"
-base64 = "0.22"
+tokio = { version = "1", features = ["full"], optional = true }
+rodio = { version = "0.19", default-features = false, features = ["symphonia-all", "flac", "wav", "mp3", "vorbis"], optional = true }
+cpal = { version = "0.15", optional = true }
+symphonia = { version = "0.5", features = ["all"], optional = true }
+lofty = { version = "0.21", optional = true }
+base64 = { version = "0.22", optional = true }
 parking_lot = "0.12"
-walkdir = "2"
-rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+walkdir = { version = "2", optional = true }
+rusqlite = { version = "0.31", features = ["blob"] }
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
-httpdate = "1"
-socket2 = "0.6"
-axum = { version = "0.7", default-features = false, features = ["ws", "tokio", "http1", "json", "query"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-futures-util = "0.3"
-tower = { version = "0.5", features = ["limit"] }
-tower-http = { version = "0.5", features = ["cors"] }
-local-ip-address = "0.6"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-rusty-chromaprint = "0.3.0"
-tauri-plugin-window-state = "~2.4.1"
-tauri-plugin-single-instance = "2"
-rust-embed = { version = "8.5", features = ["interpolate-folder-path", "compression"] }
-rcgen = "0.13"
-rustls-pemfile = "2"
-mime_guess = "2.0"
-reqwest = { version = "0.13.5", features = ["json", "query"] }
+chrono-tz = { version = "0.10", optional = true }
+httpdate = { version = "1", optional = true }
+socket2 = { version = "0.6", optional = true }
+axum = { version = "0.7", default-features = false, features = ["ws", "tokio", "http1", "json", "query"], optional = true }
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+futures-util = { version = "0.3", optional = true }
+tower = { version = "0.5", features = ["limit"], optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+local-ip-address = { version = "0.6", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
+rusty-chromaprint = { version = "0.3.0", optional = true }
+tauri-plugin-window-state = { version = "~2.4.1", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+rust-embed = { version = "8.5", features = ["interpolate-folder-path", "compression"], optional = true }
+rcgen = { version = "0.13", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+mime_guess = { version = "2.0", optional = true }
+reqwest = { version = "0.13.5", features = ["json", "query"], optional = true }
 sha2 = "0.10"
-mdns-sd = "0.13"
+mdns-sd = { version = "0.13", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.54", features = [
+windows = { version = "0.54", optional = true, features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Media_Audio",

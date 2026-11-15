@@ -119,16 +119,7 @@ pub fn db_cache_acoustid_result(
     ).map_err(|e| e.to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DbProvenanceCacheEntry {
-    pub hash_key: String,
-    pub album_id: String,
-    pub album_title: String,
-    pub input_params_json: String,
-    pub response_json: String,
-    pub model_version: String,
-    pub created_at: i64,
-}
+pub use crate::db::operations::DbProvenanceCacheEntry;
 
 #[tauri::command]
 pub fn db_get_provenance_cache(

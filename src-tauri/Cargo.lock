@@ -557,6 +557,7 @@ dependencies = [
  "futures-util",
  "httpdate",
  "image",
+ "libc",
  "local-ip-address",
  "lofty",
  "mdns-sd",

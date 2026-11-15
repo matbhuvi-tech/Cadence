@@ -3,6 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) mod curate_identity;
 pub mod curate_queue;
 pub mod operations;

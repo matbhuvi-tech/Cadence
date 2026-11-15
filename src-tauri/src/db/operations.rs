@@ -4,6 +4,17 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbProvenanceCacheEntry {
+    pub hash_key: String,
+    pub album_id: String,
+    pub album_title: String,
+    pub input_params_json: String,
+    pub response_json: String,
+    pub model_version: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbStorageMount {
     pub id: String,
@@ -381,6 +392,7 @@ pub fn check_directory_accessible_sync(path_str: &str) -> bool {
     std::fs::read_dir(p).is_ok()
 }
 
+#[cfg(feature = "desktop")]
 pub async fn is_directory_accessible(path_str: &str) -> bool {
     let p = path_str.to_string();
     let task = tokio::task::spawn_blocking(move || check_directory_accessible_sync(&p));
@@ -1293,14 +1305,14 @@ impl DbOperations {
     pub fn get_provenance_cache(
         conn: &Connection,
         hash_key: &str,
-    ) -> Result<Option<crate::commands::maintenance::DbProvenanceCacheEntry>> {
+    ) -> Result<Option<DbProvenanceCacheEntry>> {
         let mut stmt = conn.prepare(
             "SELECT hash_key, album_id, album_title, input_params_json, response_json, model_version, created_at
              FROM compilation_provenance_cache WHERE hash_key = ?1",
         )?;
         let mut rows = stmt.query(rusqlite::params![hash_key])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(crate::commands::maintenance::DbProvenanceCacheEntry {
+            Ok(Some(DbProvenanceCacheEntry {
                 hash_key: row.get(0)?,
                 album_id: row.get(1)?,
                 album_title: row.get(2)?,
