@@ -356,7 +356,8 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | 6 | Implementation ready for user verification | `src-tauri/src/core_runtime/dragonfish.rs`, `cadence-headless` (`--dragonfish`, `--healthcheck`, `--backup`, `--restore`, `--validate-dragonfish-recipe`), and `deploy/truenas-dragonfish/` (`Dockerfile`, `custom-app-24.04.yaml`, `docker-compose.yml`); 8/8 tests in `core_dragonfish_packaging_test` and `x86_64-unknown-linux-gnu` check pass; live `docker build` / TrueNAS Dragonfish host deployment pending |
 | 7 | Implementation ready for user verification | Windows desktop & Android/Mobile Remote PWA controller UX (`coreControllerTransport.ts`, `EngineControllerContext.tsx`, `PlaybackEnginePanel.tsx`, `EngineSwitchPromptModal.tsx`, `coreRemoteClient.ts`, `TopHeader.tsx`, `DiagnosticsSheet.tsx`, `PairingView.tsx`, and Tauri `core_probe_endpoint`/`core_control_request`/`discover_core_nodes` commands); default `This PC` startup with zero auto-discovery/onboarding, separate `Playback engine` & `Audio output` selectors, RS130 takeover & leave-Core prompts, direct PWA `/v1/core` client + pinning guidance; 61/61 controller/session/protocol unit tests, `CadenceSettingsModal` (4/4), endpoint-routing, queue-sync, Rust `cargo check` + `core_session_test` (24/24), desktop & PWA `tsc -b`, and Vite builds pass; live TrueNAS Dragonfish host + physical RS130 / physical Android APK QA pending user verification |
 | 8 | Implementation ready for user verification | `src-tauri/src/core_runtime/curate.rs`, `src-tauri/src/core_runtime/mod.rs` (`curate.draft.save`, `curate.dry_run`, `curate.approve`, `curate.job.status`, `core_writer_leases`), `src/core/remoteCurate.ts`, `src-tauri/tests/core_remote_curate_test.rs` (5/5 pass), and `src/test/testRemoteCurate.ts` (4/4 pass); 65/65 TS unit tests and `core_headless_test` (7/7) pass |
-| 9-10 | Planned | No Phase 9 snapshot import/catalog mapping or Phase 10 release qualification claimed yet |
+| 9 | Implementation ready for user verification | `src-tauri/src/core_runtime/migration.rs`, `src-tauri/src/bin/cadence_headless.rs` (`--export-snapshot`, `--preview-import`, `--import-snapshot`, `--rollback-import`), `src/core/snapshotImport.ts`, `src-tauri/tests/core_snapshot_import_test.rs` (4/4 pass), and `src/test/testSnapshotImport.ts` (2/2 pass); 67/67 TS unit tests, `core_remote_curate_test` (5/5), and `core_headless_test` (7/7) pass |
+| 10 | Planned | No Phase 10 release qualification or full live TrueNAS+RS130+Android E2E claim yet |
 
 Phase 1 command:
 
@@ -1002,6 +1003,42 @@ npx oxlint src/core/remoteCurate.ts src/test/testRemoteCurate.ts
 
 - PASS: `core_remote_curate_test` (5/5), `core_headless_test` (7/7), headless `cargo check` (0 errors, 0 warnings), 65/65 TS unit tests, `npx tsc -b`, and `oxlint` (0 warnings, 0 errors).
 - NOT RUN / PENDING END-TO-END QA: Live end-to-end verification deferred until Phase 9–10 as requested.
+
+### Phase 9 TDD and verification record (2026-11-15)
+
+Source: phase 9 in the independently testable phase table above. User journeys:
+onboarding choice between "Start a new library" and "Import existing Cadence library"
+with independent Core catalog ownership; live-WAL-consistent snapshot export via
+`VACUUM INTO` without mutating or checkpointing away source state; root prefix
+mapping preview with Linux component-level case-sensitivity checks, unmapped roots,
+missing files, and ambiguous normalized paths; retention of identities, playlists,
+and drafts while suppressing imported pending tag-write jobs (`cancelled` historical
+state with `imported_suppressed_no_replay`); and pre-import rollback snapshot restore.
+
+- RED checkpoint: initial `core_snapshot_import_test` failed before `cadence_core_lib::core_runtime::migration` existed, and `cadence_headless` lacked snapshot migration CLI subcommands.
+- GREEN implementation: `src-tauri/src/core_runtime/migration.rs`, `src-tauri/src/core_runtime/mod.rs`, `src-tauri/src/bin/cadence_headless.rs`, `src/core/snapshotImport.ts`, `src-tauri/tests/core_snapshot_import_test.rs`, and `src/test/testSnapshotImport.ts`.
+
+| Guarantee | Acceptance fixture | Type / result |
+| --- | --- | --- |
+| Live-WAL-consistent snapshot export via `VACUUM INTO` leaves Windows source DB untouched | `core_snapshot_import_test.rs:live_wal_consistent_snapshot_captures_committed_state_without_mutating_source` | Integration / PASS |
+| Root mapping preview detects case-sensitive mismatches, unmapped roots, missing files, and ambiguous paths | `core_snapshot_import_test.rs:preview_detects_case_sensitive_mappings_missing_roots_and_ambiguous_paths` + `testSnapshotImport.ts` | Integration + Unit / PASS |
+| Import retains tracks/playlists/drafts, suppresses pending tag-write jobs (no replay), and supports pre-import rollback | `core_snapshot_import_test.rs:import_preserves_identities_playlists_drafts_suppresses_pending_writes_and_supports_rollback` | Integration / PASS |
+| `cadence-headless` CLI `--export-snapshot`, `--preview-import`, `--import-snapshot`, `--rollback-import` roundtrip | `core_snapshot_import_test.rs:cli_snapshot_export_preview_import_and_rollback_roundtrip` | Integration / PASS |
+| Onboarding mode options distinguish fresh library vs existing snapshot import with independent Core catalog | `testSnapshotImport.ts` | Unit / PASS |
+
+Reproduce Phase 9 verification with:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_snapshot_import_test --test core_remote_curate_test --test core_headless_test
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
+node --import tsx --test src/test/testSnapshotImport.ts src/test/testRemoteCurate.ts src/test/testCoreControllerUx.ts src/test/testPwaCoreController.ts src/test/testEngineSession.ts src/test/testCoreServices.ts src/test/testCoreSessionProtocol.ts
+npx tsc -b
+npx --prefix pwa tsc -b
+npx oxlint src/core/snapshotImport.ts src/test/testSnapshotImport.ts
+```
+
+- PASS: `core_snapshot_import_test` (4/4), `core_remote_curate_test` (5/5), `core_headless_test` (7/7), headless `cargo check` (0 errors, 0 warnings), 67/67 TS unit tests, `npx tsc -b`, `npx --prefix pwa tsc -b`, and `oxlint` (0 warnings, 0 errors).
+- NOT RUN / PENDING END-TO-END QA: Live snapshot import on the TrueNAS Core container and full Phase 10 end-to-end qualification remain pending.
 
 ## Platform references
 

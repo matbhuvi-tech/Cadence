@@ -3,6 +3,7 @@
 
 pub mod curate;
 pub mod dragonfish;
+pub mod migration;
 pub mod platform;
 pub mod upnp_session;
 
