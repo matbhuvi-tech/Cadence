@@ -262,7 +262,7 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | --- | --- | --- |
 | 0 | Recorded | This document; direction approved in chat |
 | 1 | Implementation ready for user verification | `src/core/engineSession.ts`; test-first fixtures in `src/test/testEngineSession.ts`; runtime integration intentionally pending |
-| 2 | User review confirmed; merge approval pending | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; NSIS build passed; runtime bindings remain pending |
+| 2 | User verified; merge approved | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; NSIS build passed; runtime bindings remain pending |
 | 3-10 | Planned | No authoritative backend, Linux executable or deployment claimed yet |
 
 Phase 1 command:
@@ -430,8 +430,8 @@ Phase 2 service foundation; no working Linux engine or changed UI is claimed.
 
 ### Phase 2 user review and installer gate
 
-- User confirmed the review with "looks good". Separate merge/push approval remains
-  pending under `.agents/rules/Git.md`.
+- User confirmed the review with "looks good" and then explicitly approved merging
+  the Phase 2 branch and pushing to `main` under `.agents/rules/Git.md`.
 - PASS: `npm run tauri:build -- --bundles nsis` on the Phase 2 branch at `258c957`,
   in an isolated checkout with shared installed dependencies and Cargo target cache.
   The configured `npm run build` hook passed, including PWA and desktop builds.
