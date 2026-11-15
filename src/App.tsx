@@ -1094,6 +1094,9 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   // 1. Grid-scoped tracks: filter by Search, Facets (era, composer, language, format), Storage Mount, and Folder.
   // EXCLUDES activeTriageFilter so that selecting an anomaly isolates tracks in the grid without collapsing the diagnostic queue!
   const gridScopedTracks = useMemo(() => {
+    if (isCoreActive && topMode !== 'curate' && tracks.length === 0) {
+      return []
+    }
     // Self-healing: if graphEngine was reloaded or emptied by HMR while React state still has tracks
     if (!isCoreActive && tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
       graphEngine.loadCustomLibrary({
@@ -1133,7 +1136,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
       result = result.filter((t) => favoriteReleaseIds.has(t.releaseId))
     }
     return result
-  }, [searchQuery, facets, selectedMountId, selectedFolderFilter, tracks, releases, works, auditIssues, storageMounts, stagedReleaseIds])
+  }, [isCoreActive, topMode, searchQuery, facets, selectedMountId, selectedFolderFilter, tracks, releases, works, auditIssues, storageMounts, stagedReleaseIds])
 
   // 2. Dynamic hygiene diagnostics & health score scoped to the active grid slice
   const scopedAuditResult = useMemo(() => {
@@ -2268,7 +2271,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
               onAlbumDisplayModeChange={setAlbumDisplayMode}
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
-              works={works}
+              works={isCoreActive ? [] : works}
               releases={displayedReleases}
               tracks={filteredTracks}
               mountAndFolderScopedTracks={mountAndFolderScopedTracks}
