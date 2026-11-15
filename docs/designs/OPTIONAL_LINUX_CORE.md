@@ -262,7 +262,7 @@ shared-root write protocol; it must not be skipped simply because both catalogs 
 | --- | --- | --- |
 | 0 | Recorded | This document; direction approved in chat |
 | 1 | Implementation ready for user verification | `src/core/engineSession.ts`; test-first fixtures in `src/test/testEngineSession.ts`; runtime integration intentionally pending |
-| 2 | Implementation ready for user verification | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; runtime bindings remain pending |
+| 2 | User review confirmed; merge approval pending | Version 1 contracts; local/remote service adapters; atomic staging coordinator; in-process API acceptance tests; NSIS build passed; runtime bindings remain pending |
 | 3-10 | Planned | No authoritative backend, Linux executable or deployment claimed yet |
 
 Phase 1 command:
@@ -404,7 +404,7 @@ node --import tsx --test --experimental-test-coverage --test-coverage-include=sr
 - PASS: desktop Vite production build and PWA typecheck/Vite build. Both Vite output
   paths were unique temporary directories to preserve modified embedded PWA assets.
   Desktop emitted chunk-size and mixed static/dynamic import warnings.
-- NOT RUN: native tests/installer, UI QA, real trust transport, Linux/Dragonfish/RS130
+- NOT RUN at implementation checkpoint: native tests/installer, UI QA, real trust transport, Linux/Dragonfish/RS130
   validation. No native or UI code changed. The existing Curate click agent has no
   Phase 2 controls to click; the in-process fixture supplies this phase's QA surface.
 
@@ -427,6 +427,20 @@ Using the agent-self-evaluation skill: overall 4.0/5; ready for user verificatio
 Priority improvements: validate a real peer-bound transport and cross-language v1
 fixtures when their phases land. Would the user agree? Expected yes for the requested
 Phase 2 service foundation; no working Linux engine or changed UI is claimed.
+
+### Phase 2 user review and installer gate
+
+- User confirmed the review with "looks good". Separate merge/push approval remains
+  pending under `.agents/rules/Git.md`.
+- PASS: `npm run tauri:build -- --bundles nsis` on the Phase 2 branch at `258c957`,
+  in an isolated checkout with shared installed dependencies and Cargo target cache.
+  The configured `npm run build` hook passed, including PWA and desktop builds.
+- Installer: `src-tauri/target/release/bundle/nsis/Cadence Core_0.1.0-2_x64-setup.exe`.
+  Native compilation emitted an existing unused `WasapiPreloadError` import warning;
+  the desktop build retained its mixed-import and chunk-size warnings.
+- Original uncommitted Android, embedded PWA and media changes were preserved.
+  No application was launched, installed or deployed. Native tests, runtime trust
+  and hardware qualifications remain unverified.
 
 ## Platform references
 
