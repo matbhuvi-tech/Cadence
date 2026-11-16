@@ -109,6 +109,7 @@ By default, the container runs rootless (`--user 568:568`) with `--cap-drop ALL 
 sudo docker run -d --name cadence-core --restart unless-stopped \
   --network host --user 0:0 \
   --cap-add IPC_LOCK --cap-add SYS_ADMIN --cap-add DAC_READ_SEARCH \
+  --security-opt apparmor=unconfined \
   --ulimit memlock=-1:-1 --memory=4g \
   -e CADENCE_ADVERTISED_IP=<TRUENAS_WIRED_LAN_IP> \
   -e CADENCE_LABEL="Music Room Core" \
