@@ -664,32 +664,36 @@ export const ActivityCenterPopover: React.FC<ActivityCenterPopoverProps> = ({
       <div className="flex items-center justify-between pt-2 border-t border-white/[0.08]">
         {telemetry.isScanning ? (
           <>
-            <div className="flex items-center gap-2">
-              {telemetry.isPaused ? (
+            {tauriBridge.hasLocalEngine() ? (
+              <div className="flex items-center gap-2">
+                {telemetry.isPaused ? (
+                  <button
+                    onClick={() => tauriBridge.resumeLibraryScan()}
+                    className="px-3 py-1.5 rounded-lg bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 text-[#00F5FF] text-xs font-medium flex items-center gap-1.5 transition-colors"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    Resume
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => tauriBridge.pauseLibraryScan()}
+                    className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-xs font-medium flex items-center gap-1.5 transition-colors"
+                  >
+                    <Pause className="w-3.5 h-3.5" />
+                    Pause
+                  </button>
+                )}
                 <button
-                  onClick={() => tauriBridge.resumeLibraryScan()}
-                  className="px-3 py-1.5 rounded-lg bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 text-[#00F5FF] text-xs font-medium flex items-center gap-1.5 transition-colors"
+                  onClick={() => tauriBridge.cancelLibraryScan()}
+                  className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-xs font-medium flex items-center gap-1.5 transition-colors"
                 >
-                  <Play className="w-3.5 h-3.5" />
-                  Resume
+                  <StopCircle className="w-3.5 h-3.5" />
+                  Cancel
                 </button>
-              ) : (
-                <button
-                  onClick={() => tauriBridge.pauseLibraryScan()}
-                  className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-xs font-medium flex items-center gap-1.5 transition-colors"
-                >
-                  <Pause className="w-3.5 h-3.5" />
-                  Pause
-                </button>
-              )}
-              <button
-                onClick={() => tauriBridge.cancelLibraryScan()}
-                className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-xs font-medium flex items-center gap-1.5 transition-colors"
-              >
-                <StopCircle className="w-3.5 h-3.5" />
-                Cancel
-              </button>
-            </div>
+              </div>
+            ) : (
+              <span className="text-xs text-white/60">Playback Engine scanning library...</span>
+            )}
             <button
               onClick={onClose}
               className="text-xs text-white/50 hover:text-white/90 transition-colors"

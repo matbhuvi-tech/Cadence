@@ -510,6 +510,12 @@ import os, sqlite3, struct
 db_path = r"""${dbPath}"""
 music_dir = r"""${musicDir}"""
 os.makedirs(music_dir, exist_ok=True)
+os.makedirs(os.path.join(music_dir, 'e2e_browse_subdir'), exist_ok=True)
+cover_png_path = os.path.join(music_dir, 'goldberg_cover.png')
+# Minimal valid 1x1 PNG image so Core /v1/artwork/rel_goldberg serves real PNG bytes
+import base64
+with open(cover_png_path, 'wb') as cf:
+    cf.write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))
 
 def make_wav(path, sr=44100, bits=16, payload_bytes=4096):
     ch = 2
@@ -553,6 +559,11 @@ for rid, title, artist, year, is_comp in releases:
     cur.execute(
         "INSERT OR REPLACE INTO releases (id, title, folder_path, folder_name, artist_credit, release_year, is_compilation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, '2026-11-15T00:00:00Z')",
         (rid, title, music_dir, title, artist, year, is_comp)
+    )
+with open(cover_png_path, 'rb') as cf:
+    cur.execute(
+        'INSERT OR REPLACE INTO engine_artwork (release_id, etag, jpeg) VALUES (?, ?, ?)',
+        ('rel_goldberg', 'e2e_goldberg_v1', cf.read())
     )
 
 tracks = []
@@ -606,13 +617,14 @@ for i in range(1, 211):
 
 for row in tracks:
     tid, rid, fp, fn, sz, ttitle, art, alb, disc, num, dur, fmt, sr, bd = row
+    has_art = 1 if rid == 'rel_goldberg' else 0
     cur.execute(
         """INSERT OR REPLACE INTO tracks (
             id, release_id, mount_id, folder_path, folder_name, file_path, file_name,
             file_size, mtime, title, artist_credit, album_title, disc_number, track_number,
-            duration_secs, format, sample_rate, bit_depth, channels, created_at
-        ) VALUES (?, ?, 'm_e2e', ?, ?, ?, ?, ?, 1700000000, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, '2026-11-15T00:00:00Z')""",
-        (tid, rid, music_dir, alb, fp, fn, sz, ttitle, art, alb, disc, num, dur, fmt, sr, bd)
+            duration_secs, format, sample_rate, bit_depth, channels, has_embedded_art, created_at
+        ) VALUES (?, ?, 'm_e2e', ?, ?, ?, ?, ?, 1700000000, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?, '2026-11-15T00:00:00Z')""",
+        (tid, rid, music_dir, alb, fp, fn, sz, ttitle, art, alb, disc, num, dur, fmt, sr, bd, has_art)
     )
 
 conn.commit()
@@ -674,6 +686,7 @@ async function run(): Promise<void> {
   let pwaCdp: CdpSession | null = null
 
   const scenarios: ScenarioOutcome[] = []
+  const E2E_PAIRING_TOKEN = 'cadence_e2e_pairing_token_0123456789abcdef'
 
   const spawnCore = async (): Promise<ChildProcess> => {
     const proc = spawn(
@@ -703,6 +716,7 @@ async function run(): Promise<void> {
           ...process.env,
           CADENCE_ALLOW_LOOPBACK: 'true',
           CADENCE_MUSIC_READ_ONLY: 'true',
+          CADENCE_PAIRING_TOKEN: E2E_PAIRING_TOKEN,
           CADENCE_PINNED_RS130_UDN: 'uuid:cadence-e2e-isolated-rs130',
           ...(rs130Sim ? { CADENCE_RS130_DESC_URL: rs130Sim.descUrl } : {}),
         },
@@ -804,78 +818,73 @@ async function run(): Promise<void> {
 
     // Inject fetch hook helpers cleanly on initial load too
     await desktopCdp.waitFor(
-      `document.body && document.body.innerText.includes('CADENCE') && !document.querySelector('[aria-label="Loading configuration"]') && document.querySelector('button[aria-label^="Playback engine:"]')`,
+      `document.body && document.body.innerText.includes('Connect to a Cadence Playback Engine') && !document.querySelector('[aria-label="Loading configuration"]') && Boolean(document.querySelector('#gate-address-input'))`,
       25000
     )
 
-    // Scenario 1: Open Windows Cadence in This PC mode
-    activeCid = 'cid_s1_this_pc'
+    // Scenario 1: Open Windows Cadence in Phase 2 Engine-required EngineConnectionGate (zero local SQLite / This PC fallback)
+    activeCid = 'cid_s1_engine_gate'
     await desktopCdp.evaluate(`window.__cadenceActiveCid = '${activeCid}'`)
-    const engineBtnLabel = await desktopCdp.evaluate<string>(
-      `document.querySelector('button[aria-label^="Playback engine:"]')?.getAttribute('aria-label') || ''`
-    )
-    const shotS1 = path.join(RESULTS_DIR, 's1-this-pc.png')
+    const s1Text = await desktopCdp.evaluate<string>(`document.body.innerText`)
+    const shotS1 = path.join(RESULTS_DIR, 's1-engine-gate.png')
     await desktopCdp.captureScreenshot(shotS1)
     scenarios.push({
       id: 'S1',
-      name: 'Open Windows Cadence in This PC mode',
-      status: engineBtnLabel.includes('This PC') ? 'PASS' : 'FAIL',
+      name: 'Open Windows Cadence on EngineConnectionGate with zero local SQLite/This PC fallback',
+      status:
+        s1Text.includes('Connect to a Cadence Playback Engine') && !s1Text.includes('Use This PC')
+          ? 'PASS'
+          : 'FAIL',
       correlationId: activeCid,
-      details: `Engine button aria-label: "${engineBtnLabel}"`,
-      evidence: { engineBtnLabel },
+      details: `EngineConnectionGate visible; Use This PC fallback absent.`,
+      evidence: {
+        hasGateHeading: s1Text.includes('Connect to a Cadence Playback Engine'),
+        hasThisPcButton: s1Text.includes('Use This PC'),
+      },
       screenshot: shotS1,
     })
 
-    // Scenario 2: Connect to idle Linux Core via Settings -> Playback Engine UI (without auto-play)
+    // Scenario 2: Connect to idle Linux Core via EngineConnectionGate (without auto-play)
     activeCid = 'cid_s2_connect_idle_core'
     await desktopCdp.evaluate(`
-      window.__cadenceActiveCid = '${activeCid}';
-      document.querySelector('button[aria-label^="Playback engine:"]').click();
-    `)
-    await desktopCdp.waitFor(
-      `Array.from(document.querySelectorAll('button')).some(b => b.textContent?.includes('Connect to Cadence Core'))`
-    )
-    await desktopCdp.evaluate(`
-      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Connect to Cadence Core')).click();
-    `)
-    await desktopCdp.waitFor(`Boolean(document.querySelector('#core-address-input'))`)
-    await desktopCdp.evaluate(`
       (() => {
+        window.__cadenceActiveCid = '${activeCid}';
         function setVal(el, v) {
           const proto = HTMLInputElement.prototype;
           Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
         }
-        setVal(document.querySelector('#core-address-input'), 'http://127.0.0.1:${strictProxy.port}');
-        setVal(document.querySelector('#core-label-input'), 'E2E Gate Core');
-        const cb = Array.from(document.querySelectorAll('input[type="checkbox"]')).find(c => c.closest('label')?.textContent?.includes('Allow unverified'));
+        setVal(document.querySelector('#gate-address-input'), 'http://127.0.0.1:${strictProxy.port}');
+        setVal(document.querySelector('#gate-token-input'), '${E2E_PAIRING_TOKEN}');
+        setVal(document.querySelector('#gate-label-input'), 'E2E Gate Core');
+        const cb = Array.from(document.querySelectorAll('input[type="checkbox"]')).find(c => c.closest('label')?.textContent?.includes('Trust self-signed'));
         if (cb && !cb.checked) cb.click();
       })();
     `)
     await desktopCdp.evaluate(`
-      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Check & Prepare Core')).click();
+      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Verify & Pair')).click();
     `)
     await desktopCdp.waitFor(
-      `document.body.innerText.includes('Ready to Activate: E2E Gate Core')`,
+      `Array.from(document.querySelectorAll('button')).some(b => b.textContent?.includes('Open Library'))`,
       15000
     )
     await desktopCdp.evaluate(`
-      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Use this Core').click();
+      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Open Library')).click();
     `)
     await desktopCdp.waitFor(
       `document.querySelector('button[aria-label^="Playback engine:"]')?.getAttribute('aria-label')?.includes('E2E Gate Core')`,
       15000
     )
-    await desktopCdp.evaluate(`
-      document.querySelector('button[aria-label="Close Cadence Settings"]')?.click();
-    `)
     await desktopCdp.waitFor(`document.body.innerText.includes('Mega Anthology')`, 15000)
 
     const coreSnapAfterConnect = (await (
       await fetch(`http://127.0.0.1:${rawCorePort}/v1/core`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-cadence-token': E2E_PAIRING_TOKEN,
+        },
         body: JSON.stringify({
           protocolVersion: 1,
           engineId: coreEngineId,
@@ -905,6 +914,106 @@ async function run(): Promise<void> {
         paginationCalls: wireLog.filter((e) => e.operation === 'catalog.page').length,
       },
       screenshot: shotS2,
+    })
+
+    // Scenario 10 (Idle Core before playback): Phase 2 Folder Browse + Add + Artwork + Curate via Core v2 + Zero This PC fallback
+    activeCid = 'cid_s10_phase2_core_v2'
+    await desktopCdp.evaluate(`window.__cadenceActiveCid = '${activeCid}'`)
+    await desktopCdp.waitFor(
+      `Array.from(document.querySelectorAll('img')).some((img) => img.src.startsWith('blob:') && img.complete && img.naturalWidth > 0)`,
+      8000
+    )
+    const v2Probe = await desktopCdp.evaluate<{
+      browseCount: number
+      hasSubdir: boolean
+      addedOk: boolean
+      artworkStatus: number
+      artworkBytes: number
+      renderedBlobImgs: number
+      draftSaved: boolean
+      dryRunBlockedReason: string | null
+    }>(`(async () => {
+      const base = 'http://127.0.0.1:${strictProxy.port}';
+      const req = async (operation, extra = {}) => {
+        const res = await fetch(base + '/v1/core', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-cadence-token': '${E2E_PAIRING_TOKEN}',
+          },
+          body: JSON.stringify({
+            protocolVersion: 2,
+            engineId: '${coreEngineId}',
+            libraryId: '${coreLibraryId}',
+            operation,
+            ...extra,
+          }),
+        });
+        return res.json();
+      };
+      const rootsRes = await req('fs.browse');
+      const rootEntry = rootsRes?.data?.entries?.[0];
+      const browseRes = rootEntry ? await req('fs.browse', { path: rootEntry.path }) : { data: { entries: [] } };
+      const entries = browseRes?.data?.entries || [];
+      const subdir = entries.find((e) => e.name === 'e2e_browse_subdir');
+      let addedOk = false;
+      if (subdir) {
+        const addRes = await req('folders.add', { path: subdir.path });
+        addedOk = Boolean(addRes?.ok);
+      }
+      const artRes = await fetch(base + '/v1/artwork/rel_goldberg', {
+        headers: { 'x-cadence-token': '${E2E_PAIRING_TOKEN}' },
+      });
+      const artBuf = artRes.ok ? await artRes.arrayBuffer() : new ArrayBuffer(0);
+      const renderedBlobImgs = Array.from(document.querySelectorAll('img')).filter(
+        (img) => img.src.startsWith('blob:') && img.complete && img.naturalWidth > 0,
+      ).length;
+      const draftRes = await req('curate.draft.save', {
+        draft: {
+          draftId: 'draft_e2e_gb_1',
+          trackId: 'trk_gb_1',
+          changes: [
+            { field: 'album', before: 'Goldberg Variations', after: 'Goldberg Variations (E2E)' },
+          ],
+          updatedBy: 'e2e',
+        },
+      });
+      const dryRunRes = await req('curate.dry_run', {
+        draftId: 'draft_e2e_gb_1',
+      });
+      return {
+        browseCount: entries.length,
+        hasSubdir: Boolean(subdir),
+        addedOk,
+        artworkStatus: artRes.status,
+        artworkBytes: artBuf.byteLength,
+        renderedBlobImgs,
+        draftSaved: Boolean(draftRes?.ok),
+        dryRunBlockedReason: dryRunRes?.data?.blockReason || dryRunRes?.error?.code || null,
+      };
+    })()`)
+    const hasThisPcUi = await desktopCdp.evaluate<boolean>(
+      `document.body.innerText.includes('Use This PC') || document.body.innerText.includes('Switch to This PC')`
+    )
+    const shotS10 = path.join(RESULTS_DIR, 's10-phase2-core-v2.png')
+    await desktopCdp.captureScreenshot(shotS10)
+    const s10Ok =
+      v2Probe.browseCount >= 1 &&
+      v2Probe.hasSubdir &&
+      v2Probe.addedOk &&
+      v2Probe.artworkStatus === 200 &&
+      v2Probe.artworkBytes > 0 &&
+      v2Probe.renderedBlobImgs >= 1 &&
+      v2Probe.draftSaved &&
+      !hasThisPcUi
+    scenarios.push({
+      id: 'S10',
+      name: 'Core v2 folder browse/add, /v1/artwork, DOM blob cover art, curate draft & zero This PC',
+      status: s10Ok ? 'PASS' : 'FAIL',
+      correlationId: activeCid,
+      details: `fs.browse=${v2Probe.browseCount} entries, added=${v2Probe.addedOk}, artwork=${v2Probe.artworkStatus} (${v2Probe.artworkBytes}B), blobImgs=${v2Probe.renderedBlobImgs}, draft=${v2Probe.draftSaved}, dryRun=${v2Probe.dryRunBlockedReason}`,
+      evidence: { ...v2Probe, hasThisPcUi },
+      screenshot: shotS10,
     })
 
     // Scenario Bug A: Distinct editions ("Symphony No. 5" 1988 vs 2015 Remaster) stay separate cards
@@ -997,7 +1106,10 @@ async function run(): Promise<void> {
     const fetchCoreSnap = async () => {
       const r = await fetch(`http://127.0.0.1:${rawCorePort}/v1/core`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-cadence-token': E2E_PAIRING_TOKEN,
+        },
         body: JSON.stringify({
           protocolVersion: 1,
           engineId: coreEngineId,
@@ -1229,7 +1341,7 @@ async function run(): Promise<void> {
       const pinInput = document.querySelector('input[placeholder*="4829"]');
       setVal(hostInput, '127.0.0.1');
       setVal(portInput, '${strictProxy.port}');
-      setVal(pinInput, '4829');
+      setVal(pinInput, '${E2E_PAIRING_TOKEN}');
       Array.from(document.querySelectorAll('button[type="submit"]')).find(b => b.textContent?.includes('Connect')).click();
     `)
     await pwaCdp.waitFor(
@@ -1394,29 +1506,24 @@ async function run(): Promise<void> {
     await desktopCdp.evaluate(`window.__e2eReloadMarker = 1;`)
     await desktopCdp.send('Page.reload')
     await desktopCdp.waitFor(
-      `!window.__e2eReloadMarker && document.body && document.querySelector('button[aria-label^="Playback engine:"]') && !document.querySelector('[aria-label="Loading configuration"]')`,
+      `!window.__e2eReloadMarker && document.body && !document.querySelector('[aria-label="Loading configuration"]') && (Boolean(document.querySelector('button[aria-label^="Playback engine:"]')) || document.body.innerText.includes('Connect to a Cadence Playback Engine'))`,
       20000
     )
     const rsStateWhileDisconnected = rs130Sim.getState().transportState
-    // Reconnect explicitly from saved Core profile ("E2E Gate Core")
+    // Auto-reconnect on startup or reconnect from Saved Engines if on gate
     await desktopCdp.evaluate(`
-      window.__cadenceActiveCid = '${activeCid}';
-      document.querySelector('button[aria-label^="Playback engine:"]').click();
-    `)
-    await desktopCdp.waitFor(
-      `document.body.innerText.includes('E2E Gate Core') && Array.from(document.querySelectorAll('button')).some(b => b.textContent?.trim() === 'Use this Core')`,
-      10000
-    )
-    await desktopCdp.evaluate(`
-      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Use this Core').click();
+      (() => {
+        window.__cadenceActiveCid = '${activeCid}';
+        if (!document.querySelector('button[aria-label^="Playback engine:"]')) {
+          const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Connect');
+          if (btn) btn.click();
+        }
+      })();
     `)
     await desktopCdp.waitFor(
       `document.querySelector('button[aria-label^="Playback engine:"]')?.getAttribute('aria-label')?.includes('E2E Gate Core')`,
       15000
     )
-    await desktopCdp.evaluate(`
-      document.querySelector('button[aria-label="Close Cadence Settings"]')?.click();
-    `)
     await desktopCdp.evaluate(`
       const qBtn = Array.from(document.querySelectorAll('button')).find(b => (b.getAttribute('title') || '').includes('Now Playing Queue'));
       if (qBtn && !document.body.innerText.includes('UP NEXT')) qBtn.click();
@@ -1556,54 +1663,11 @@ async function run(): Promise<void> {
       screenshot: shotBugB,
     })
 
-    // Scenario 10: Switch back to This PC on Desktop & verify isolation
-    activeCid = 'cid_s10_switch_this_pc'
-    await desktopCdp.evaluate(`
-      window.__cadenceActiveCid = '${activeCid}';
-      document.querySelector('button[aria-label^="Playback engine:"]').click();
-    `)
-    await desktopCdp.waitFor(
-      `Array.from(document.querySelectorAll('button')).some(b => b.textContent?.includes('Use This PC'))`
-    )
-    await desktopCdp.evaluate(`
-      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Use This PC')).click();
-    `)
-    await sleep(300)
-    await desktopCdp.evaluate(`(() => {
-      const leaveBtn = Array.from(document.querySelectorAll('button')).find(b => /leave.*playing|keep.*playing|switch anyway/i.test(b.textContent || ''));
-      if (leaveBtn) leaveBtn.click();
-    })();`)
-    await desktopCdp.waitFor(
-      `document.querySelector('button[aria-label^="Playback engine:"]')?.getAttribute('aria-label')?.includes('This PC')`,
-      10000
-    )
-    await desktopCdp.evaluate(`
-      document.querySelector('button[aria-label="Close Cadence Settings"]')?.click();
-    `)
-    await sleep(300)
-    const s10Text = await desktopCdp.evaluate<string>(`document.body.innerText`)
-    const hasCrossEngineLeak =
-      s10Text.includes('Unknown Album') || /\bTracks\s+227\b/.test(s10Text) || /\bArtists\s+7\b/.test(s10Text)
-    const shotS10 = path.join(RESULTS_DIR, 's10-this-pc-isolation-verified.png')
-    await desktopCdp.captureScreenshot(shotS10)
-    scenarios.push({
-      id: 'S10',
-      name: 'Switch cleanly between Cadence Core and This PC without cross-engine leak',
-      status: !hasCrossEngineLeak ? 'PASS' : 'FAIL',
-      correlationId: activeCid,
-      details: hasCrossEngineLeak
-        ? 'Switching from Core back to This PC leaked Core tracks/artists into local view!'
-        : 'Switched back to This PC cleanly with zero Unknown Album or Core track/artist leaks.',
-      evidence: {
-        hasUnknownAlbumCards: s10Text.includes('Unknown Album'),
-        leakedCoreTrackCount227: /\bTracks\s+227\b/.test(s10Text),
-        leakedCoreArtistCount7: /\bArtists\s+7\b/.test(s10Text),
-      },
-      screenshot: shotS10,
-    })
-
-    // Scenario 12: Restart Core -> verify honest recovery with idle state & no mutation replay
+    // Scenario 12: Restart Core -> verify honest recovery with idle state, no mutation replay & audiophile 503 guard while paused
     activeCid = 'cid_s12_restart_core'
+    const pausedArtRes = await fetch(`http://127.0.0.1:${strictProxy.port}/v1/artwork/rel_std_1988`, {
+      headers: { 'x-cadence-token': E2E_PAIRING_TOKEN },
+    })
     const mutationsBeforeRestart = wireLog.filter((w) => w.operation && w.operation !== 'session.snapshot' && w.operation !== 'core.hello' && w.operation !== 'catalog.page').length
     killProcessTree(coreProc)
     coreProc = await spawnCore()
@@ -1613,17 +1677,19 @@ async function run(): Promise<void> {
 
     scenarios.push({
       id: 'S12',
-      name: 'Restart Core yields idle/honest recovery with zero auto-play or mutation replay',
+      name: 'Restart Core yields idle recovery without mutation replay & enforces 503 deferred artwork while paused',
       status:
+        pausedArtRes.status === 503 &&
         postRestartSnap.data?.playback?.activity === 'idle' &&
         mutationsAfterRestart === mutationsBeforeRestart
           ? 'PASS'
           : 'FAIL',
       correlationId: activeCid,
-      details: `Post-restart Core activity=${postRestartSnap.data?.playback?.activity}; mutation delta=${mutationsAfterRestart - mutationsBeforeRestart}.`,
+      details: `Post-restart Core activity=${postRestartSnap.data?.playback?.activity}; mutation delta=${mutationsAfterRestart - mutationsBeforeRestart}; paused artwork status=${pausedArtRes.status}.`,
       evidence: {
         postRestartActivity: postRestartSnap.data?.playback?.activity,
         mutationDelta: mutationsAfterRestart - mutationsBeforeRestart,
+        pausedArtworkDeferredStatus: pausedArtRes.status,
       },
     })
 

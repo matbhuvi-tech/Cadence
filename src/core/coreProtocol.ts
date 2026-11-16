@@ -1,14 +1,16 @@
 import type { EngineActivity, EngineContext } from './engineSession'
 
-/** Control-plane v1 only. Media, SQL, filesystem paths and arbitrary IPC are excluded. */
+/** Control-plane v1/v2 contracts. Media, SQL, and raw host paths stay on the Engine. */
 export const CORE_PROTOCOL_VERSION = 1 as const
+export const CORE_PROTOCOL_VERSION_V2 = 2 as const
+export const CORE_SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const
 export const CORE_MAX_MESSAGE_BYTES = 1_048_576
 export const CORE_MAX_QUEUE_ENTRIES = 4096
 export const CORE_MAX_PAGE_TRACKS = 200
 export const CORE_REQUIRED_CAPABILITIES = ['catalog.read', 'session.read', 'playback.control', 'queue.write'] as const
 
 export interface CoreDescriptor {
-  protocolVersion: typeof CORE_PROTOCOL_VERSION
+  protocolVersion: typeof CORE_PROTOCOL_VERSION | typeof CORE_PROTOCOL_VERSION_V2
   engineId: string
   libraryId: string
   label: string
@@ -32,6 +34,76 @@ export interface CoreCatalogTrack {
   trackNumber?: number
   discNumber?: number
   releaseYear?: number
+  composerName?: string | null
+  genreTags?: string[]
+  folderName?: string | null
+  language?: string | null
+  dynamicRange?: number | null
+  hasCoverArt?: boolean
+  provenanceStatus?: string | null
+  lyrics?: string | null
+  fingerprintStatus?: string | null
+}
+
+export interface EngineFsEntry {
+  name: string
+  path: string
+  isDir: boolean
+  readable: boolean
+  isWatched: boolean
+}
+
+export interface EngineFsBrowseResult {
+  entries: EngineFsEntry[]
+  cached?: boolean
+}
+
+export interface EngineFolderRecord {
+  id: string
+  path: string
+  displayName: string
+  scanMode: 'manual' | 'startup' | string
+  lastScannedAt: string | null
+  trackCount: number
+  online: boolean
+}
+
+export interface EngineScanStatus {
+  status: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | string
+  folderId?: string
+  path?: string
+  processed?: number
+  imported?: number
+  skipped?: number
+  errors?: string[]
+  forceFull?: boolean
+  deferred?: boolean
+}
+
+export interface EnginePlaylistSummary {
+  id: string
+  title: string
+  description: string | null
+}
+
+export interface EnginePlaylistDetail {
+  id: string
+  title: string
+  description: string | null
+  trackIds: string[]
+}
+
+export interface EngineCurateDraftSummary {
+  draftId: string
+  trackId: string
+  revision: number
+  status: string
+  changes: Array<{ field: string; before: string; after: string }>
+}
+
+export interface EngineEventRecord {
+  event: string
+  data?: Record<string, unknown>
 }
 
 export interface CoreCatalogPage {
@@ -94,6 +166,13 @@ const errorMessages = {
   unauthorized: 'Core authorization is required.',
   stale_revision: 'The session changed. Review the fresh snapshot before retrying.',
   unavailable: 'Core connection is unavailable. Playback may still be continuing.',
+  deferred_until_idle: 'Engine storage is paused during active playback and the 30-second cooldown.',
+  unauthorized_path: 'Requested path is outside the Engine authorized browse roots.',
+  not_found: 'Requested Engine resource was not found.',
+  read_only_root: 'Engine media root is mounted read-only; tag writes are disabled.',
+  external_file_changed: 'Target audio file changed on disk since the dry-run inspection.',
+  duplicate_approval: 'This Curate approval command was already submitted.',
+  root_leased: 'Target root is currently leased by another writer.',
 } as const
 export type CoreErrorCode = keyof typeof errorMessages
 
@@ -187,9 +266,39 @@ export function parseCoreDescriptor(value: unknown, expected: Readonly<EngineCon
   return object as unknown as CoreDescriptor
 }
 
+export function parseCoreV2Descriptor(value: unknown, expected: Readonly<EngineContext>): CoreDescriptor {
+  const object = fields(boundedCopy(value), ['protocolVersion', 'engineId', 'libraryId', 'label', 'capabilities', 'ready'])
+  requireValue(
+    object.protocolVersion === CORE_PROTOCOL_VERSION || object.protocolVersion === CORE_PROTOCOL_VERSION_V2,
+    'incompatible_protocol',
+  )
+  identity(object, expected)
+  text(object.label); requireValue(object.label.trim().length > 0)
+  const capabilities = object.capabilities
+  requireValue(Array.isArray(capabilities) && capabilities.length <= 32)
+  for (const capability of capabilities) {
+    requireValue(typeof capability === 'string' && capability.length <= 64 && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/.test(capability))
+  }
+  requireValue(new Set(capabilities).size === capabilities.length)
+  requireValue(CORE_REQUIRED_CAPABILITIES.every(capability => capabilities.includes(capability)), 'unsupported_capability')
+  requireValue(typeof object.ready === 'boolean')
+  requireValue(object.ready, 'not_ready')
+  return object as unknown as CoreDescriptor
+}
+
 function optionalPositiveInt(value: unknown, max: number): void {
   if (value === undefined) return
   requireValue(typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= max)
+}
+
+function optionalNullableText(value: unknown, max = 1024): void {
+  if (value === undefined || value === null) return
+  text(value, max)
+}
+
+function optionalNullableInt(value: unknown, min: number, max: number): void {
+  if (value === undefined || value === null) return
+  requireValue(typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max)
 }
 
 function catalogPage(value: unknown): CoreCatalogPage {
@@ -201,7 +310,11 @@ function catalogPage(value: unknown): CoreCatalogPage {
     const track = fields(
       value,
       ['id', 'title', 'artist', 'album', 'durationSeconds'],
-      ['releaseId', 'albumArtist', 'isCompilation', 'edition', 'format', 'sampleRate', 'bitDepth', 'trackNumber', 'discNumber', 'releaseYear'],
+      [
+        'releaseId', 'albumArtist', 'isCompilation', 'edition', 'format', 'sampleRate', 'bitDepth',
+        'trackNumber', 'discNumber', 'releaseYear', 'composerName', 'genreTags', 'folderName',
+        'language', 'dynamicRange', 'hasCoverArt', 'provenanceStatus', 'lyrics', 'fingerprintStatus',
+      ],
     )
     token(track.id); text(track.title); text(track.artist); text(track.album); seconds(track.durationSeconds)
     if (track.releaseId !== undefined) token(track.releaseId)
@@ -214,6 +327,18 @@ function catalogPage(value: unknown): CoreCatalogPage {
     optionalPositiveInt(track.trackNumber, 9999)
     optionalPositiveInt(track.discNumber, 999)
     optionalPositiveInt(track.releaseYear, 9999)
+    optionalNullableText(track.composerName)
+    optionalNullableText(track.folderName)
+    optionalNullableText(track.language, 64)
+    optionalNullableInt(track.dynamicRange, 0, 100)
+    if (track.hasCoverArt !== undefined) requireValue(typeof track.hasCoverArt === 'boolean')
+    optionalNullableText(track.provenanceStatus, 64)
+    optionalNullableText(track.lyrics, 262_144)
+    optionalNullableText(track.fingerprintStatus, 64)
+    if (track.genreTags !== undefined) {
+      requireValue(Array.isArray(track.genreTags) && track.genreTags.length <= 32)
+      for (const tag of track.genreTags) text(tag, 128)
+    }
     requireValue(!ids.has(track.id)); ids.add(track.id)
   }
   if (page.nextCursor !== null) token(page.nextCursor)

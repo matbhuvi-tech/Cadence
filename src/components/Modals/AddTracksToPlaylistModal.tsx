@@ -1,7 +1,12 @@
 import React, { useState, useEffect } from 'react'
-import { X, Plus, Check, ListPlus, Music, Sparkles } from 'lucide-react'
+import { X, Plus, ListPlus, Music } from 'lucide-react'
 import { Track, Playlist } from '../../core/types'
-import { sqliteLibraryService } from '../../services/sqliteLibraryService'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import {
+  addTracksToEnginePlaylist,
+  listEnginePlaylists,
+} from '../../services/enginePlaylistService'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 
 interface AddTracksToPlaylistModalProps {
   isOpen: boolean
@@ -18,20 +23,29 @@ export const AddTracksToPlaylistModal: React.FC<AddTracksToPlaylistModalProps> =
   onOpenCreateNew,
   showToast,
 }) => {
+  const engine = useOptionalEngineController()
   const [playlists, setPlaylists] = useState<Playlist[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [addingToId, setAddingToId] = useState<string | null>(null)
 
   useEffect(() => {
     if (isOpen) {
-      loadPlaylists()
+      void loadPlaylists()
     }
-  }, [isOpen])
+  }, [isOpen, engine?.engineClient])
 
   const loadPlaylists = async () => {
+    if (!engine?.engineClient) {
+      setPlaylists([])
+      return
+    }
     setIsLoading(true)
     try {
-      const data = await sqliteLibraryService.getPlaylists()
+      const data = await listEnginePlaylists(
+        engine.engineClient,
+        engine.coreCatalogTracks,
+        engine.coreCatalogReleases,
+      )
       setPlaylists(data)
     } catch (err) {
       console.error('[AddTracksToPlaylistModal] Failed to load playlists:', err)
@@ -43,11 +57,11 @@ export const AddTracksToPlaylistModal: React.FC<AddTracksToPlaylistModalProps> =
   if (!isOpen) return null
 
   const handleSelectPlaylist = async (playlist: Playlist) => {
-    if (tracksToAdd.length === 0 || addingToId) return
+    if (tracksToAdd.length === 0 || addingToId || !engine?.engineClient) return
 
     setAddingToId(playlist.id)
     try {
-      await sqliteLibraryService.addTracksToPlaylist(playlist.id, tracksToAdd)
+      await addTracksToEnginePlaylist(engine.engineClient, playlist.id, tracksToAdd)
       showToast?.(`Added ${tracksToAdd.length} track${tracksToAdd.length === 1 ? '' : 's'} to "${playlist.title}"`)
       onClose()
     } catch (err: any) {
@@ -119,7 +133,12 @@ export const AddTracksToPlaylistModal: React.FC<AddTracksToPlaylistModalProps> =
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-neutral-900 border border-white/10 text-neutral-400 group-hover:text-emerald-400 group-hover:border-emerald-500/30 transition-colors">
                     {pl.coverArtUrl ? (
-                      <img src={pl.coverArtUrl} alt="" className="h-full w-full rounded-lg object-cover" />
+                      <EngineArtworkImg
+                        src={pl.coverArtUrl}
+                        alt=""
+                        className="h-full w-full rounded-lg object-cover"
+                        fallback={<Music className="h-4 w-4" />}
+                      />
                     ) : (
                       <Music className="h-4 w-4" />
                     )}

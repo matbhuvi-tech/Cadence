@@ -1,10 +1,5 @@
-pub mod audio;
 pub mod artist_portrait;
-pub mod curation;
 pub mod diagnostics;
 pub mod gemini_config;
-pub mod library;
-pub mod maintenance;
 pub mod metadata_providers;
 pub mod remote;
-pub mod scanner;

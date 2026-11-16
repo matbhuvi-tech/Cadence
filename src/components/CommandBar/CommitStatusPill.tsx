@@ -52,8 +52,9 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisibl
   const popoverRef = useRef<HTMLDivElement>(null)
   const completedTimerRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Subscribe to live telemetry from Tauri native worker
+  // Subscribe to live telemetry from Tauri native worker (only when local engine exists)
   useEffect(() => {
+    if (!tauriBridge.hasLocalEngine()) return
     let unlisten: (() => void) | undefined
 
     const init = async () => {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import {
   X,
   HardDrive,
@@ -6,17 +6,14 @@ import {
   RotateCw,
   RefreshCw,
   Trash2,
-  Lock,
-  Unlock,
-  ShieldCheck,
-  AlertTriangle,
   Folder,
   Server,
-  Activity,
-  SlidersHorizontal,
+  Clock,
 } from 'lucide-react'
 import { StorageMount, WatchedFolder } from '../../core/types'
-import { tauriBridge } from '../../services/tauriBridge'
+import type { EngineFolderRecord, EngineScanStatus } from '../../core/coreProtocol'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import { EngineFolderBrowser } from '../Engine/EngineFolderBrowser'
 
 interface StorageManagerModalProps {
   isOpen: boolean
@@ -37,521 +34,292 @@ interface StorageManagerModalProps {
 export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
   isOpen,
   onClose,
-  mounts,
   watchedFolders,
   totalTracksCount,
-  isCoreEngineActive = false,
-  activeEngineLabel = 'This PC',
-  onSwitchToLocalEngine,
+  activeEngineLabel = 'Playback Engine',
   onRefreshLibrary,
-  onTriggerScan,
-  onToggleMountLock,
-  onToggleMountStatus,
   showToast,
 }) => {
-  const [newFolderPath, setNewFolderPath] = useState('')
+  const engine = useOptionalEngineController()
+  const engineClient = engine?.engineClient ?? null
+
+  const [engineFolders, setEngineFolders] = useState<EngineFolderRecord[]>([])
+  const [scanStatus, setScanStatus] = useState<EngineScanStatus | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
   const [isAddingFolder, setIsAddingFolder] = useState(false)
-  const [selectedMountForAdd, setSelectedMountForAdd] = useState<string>('')
+
+  const refreshEngineStorage = useCallback(async () => {
+    if (!engineClient) return
+    setIsLoading(true)
+    try {
+      const [folders, status] = await Promise.all([
+        engineClient.listFolders().catch(() => []),
+        engineClient.getScanStatus().catch(() => null),
+      ])
+      setEngineFolders(folders)
+      setScanStatus(status)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [engineClient])
+
+  useEffect(() => {
+    if (isOpen && engineClient) {
+      void refreshEngineStorage()
+    }
+  }, [isOpen, engineClient, refreshEngineStorage])
 
   if (!isOpen) return null
 
-  const handleBrowseFolder = async () => {
-    const selected = await tauriBridge.openDirectoryDialog()
-    if (selected) {
-      setNewFolderPath(selected)
-    }
-  }
-
-  const handleAddWatchedFolder = async () => {
-    if (!newFolderPath.trim()) return
-
-    const path = newFolderPath.trim()
-    const folderName = path.split(/[/\\]/).filter(Boolean).pop() || path
-
-    // Auto-create or select canonical mount
-    const winMatch = path.match(/^([A-Za-z]:)/)
-    const uncMatch = path.match(/^(\\\\[^\\]+\\[^\\]+)/)
-    const rootKey = winMatch
-      ? winMatch[1]
-      : uncMatch
-      ? uncMatch[1]
-      : path.startsWith('/')
-      ? '/' + path.split('/').filter(Boolean)[0]
-      : 'Local Audio'
-    const expectedMountId = `mount-${rootKey.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
-
-    const normPath = path.replace(/\//g, '\\').toLowerCase()
-    let matchedMount = mounts.find((m) => {
-      const normMount = m.mountPath.replace(/\//g, '\\').toLowerCase().trim()
-      return (
-        normPath.startsWith(normMount) ||
-        m.id.toLowerCase() === expectedMountId.toLowerCase()
-      )
-    })
-
-    if (!matchedMount) {
-      const isWin = Boolean(winMatch)
-      const isUnc = Boolean(uncMatch)
-      const newMount: StorageMount = {
-        id: expectedMountId,
-        name: isUnc
-          ? `TrueNAS Network Storage (${rootKey})`
-          : isWin
-          ? `Drive ${rootKey} (Local Audio Disk)`
-          : `Storage Volume (${rootKey})`,
-        mountPath: isWin ? `${rootKey}\\` : rootKey,
-        type: isUnc ? 'nas_array' : 'local_disk',
-        fileSystem: isUnc ? 'ZFS' : isWin ? 'NTFS' : 'APFS',
-        totalBytes: 1000000000000,
-        usedBytes: 450000000000,
-        isReadOnlyLocked: false,
-        healthScore: 'healthy',
-        smartOk: true,
-        tempCelsius: 34,
-        status: 'online',
-        lastSeenTimestamp: new Date().toISOString(),
-      }
-      try {
-        await tauriBridge.dbSaveStorageMount(newMount)
-        matchedMount = newMount
-      } catch (e) {
-        console.warn('Auto-save mount fallback:', e)
-      }
-    }
-
-    const mountId = matchedMount?.id || expectedMountId
-
-    const newFolder: WatchedFolder = {
-      id: `watch-${Date.now()}`,
-      mountId,
-      folderPath: path,
-      displayName: folderName,
-      scanMode: 'realtime',
-      isEnabled: true,
-      lastScannedTimestamp: new Date().toISOString(),
-    }
-
+  const handleScanFolder = async (folderId?: string, forceFull = false) => {
+    if (!engineClient) return
     try {
-      await tauriBridge.dbSaveWatchedFolder(newFolder)
-      showToast(`Added watched folder "${folderName}". Starting background index...`)
-      setNewFolderPath('')
-      setIsAddingFolder(false)
+      const next = await engineClient.scanFolders({ folderId, forceFull })
+      setScanStatus(next)
+      showToast(forceFull ? 'Full rescan queued on Engine.' : 'Quick rescan queued on Engine.')
       onRefreshLibrary()
-      onTriggerScan(path, false)
     } catch (err: any) {
-      showToast(`Failed to add watched folder: ${err.message || err}`)
+      showToast(err?.message || 'Could not queue Engine scan.')
     }
   }
 
   const handleRemoveFolder = async (folderId: string, displayName: string) => {
-    if (confirm(`Remove watched folder "${displayName}" from library monitoring?`)) {
-      await tauriBridge.dbRemoveWatchedFolder(folderId)
+    if (!engineClient) return
+    if (!confirm(`Remove watched folder "${displayName}" from Engine monitoring?`)) return
+    try {
+      await engineClient.removeFolder(folderId)
       showToast(`Removed watched folder "${displayName}"`)
+      await refreshEngineStorage()
       onRefreshLibrary()
+    } catch (err: any) {
+      showToast(err?.message || 'Could not remove folder.')
     }
   }
 
-  const handleRemoveMount = async (mountId: string, mountName: string) => {
-    if (confirm(`Remove storage mount "${mountName}" and purge its indexed tracks from SQLite?`)) {
-      await tauriBridge.dbRemoveStorageMount(mountId)
-      showToast(`Removed storage volume "${mountName}"`)
-      onRefreshLibrary()
-    }
-  }
+  const displayedFolders: EngineFolderRecord[] =
+    engineFolders.length > 0
+      ? engineFolders
+      : watchedFolders.map((wf) => ({
+          id: wf.id,
+          path: wf.folderPath,
+          displayName: wf.displayName,
+          scanMode: wf.scanMode,
+          lastScannedAt: wf.lastScannedTimestamp ?? null,
+          trackCount: wf.trackCount ?? 0,
+          online: true,
+        }))
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
       <div className="w-full max-w-4xl max-h-[85vh] rounded-2xl border border-white/[0.12] bg-[#0E1017] shadow-2xl flex flex-col text-white overflow-hidden">
         {/* Header */}
         <div className="px-6 py-4 border-b border-white/[0.08] flex items-center justify-between bg-[#12151E]">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#00F5FF]/15 border border-[#00F5FF]/30 flex items-center justify-center text-[#00F5FF]">
+            <div className="w-9 h-9 rounded-xl bg-[#D4AF37]/15 border border-[#D4AF37]/30 flex items-center justify-center text-[#D4AF37]">
               <HardDrive className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-semibold tracking-wide">
-                {isCoreEngineActive ? 'This PC Storage & Library Folders' : 'Storage & Library Folders'}
+                Engine Storage & Library Folders
               </h2>
-              <p className="text-xs text-white/50">
-                {isCoreEngineActive
-                  ? `Local desktop watched roots (inactive while browsing ${activeEngineLabel}).`
-                  : 'Manage watched roots, network shares, and storage drives.'}
+              <p className="text-xs text-white/55">
+                Active Engine: <strong className="text-white">{activeEngineLabel}</strong>
+                {engine?.state.musicReadOnly === true ? ' · Read-Only Media Mount' : ''}
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-white/40 hover:text-white hover:bg-white/[0.06] transition-colors"
+            className="p-1.5 rounded-lg text-white/40 hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Global Catalog Telemetry Bar */}
-        <div className="px-6 py-3 bg-white/[0.02] border-b border-white/[0.06] flex items-center justify-between text-xs text-white/70">
+        {/* Telemetry Bar */}
+        <div className="px-6 py-3 bg-white/[0.02] border-b border-white/[0.06] flex flex-wrap items-center justify-between gap-3 text-xs text-white/70">
           <div className="flex items-center gap-6">
             <div>
               <span className="text-white/40 mr-1.5">Indexed Tracks:</span>
-              <span className="font-mono font-semibold text-[#00F5FF]">
+              <span className="font-mono font-semibold text-[#D4AF37]">
                 {totalTracksCount.toLocaleString()}
               </span>
             </div>
             <div>
               <span className="text-white/40 mr-1.5">Watched Roots:</span>
               <span className="font-mono font-semibold text-white">
-                {watchedFolders.length}
+                {displayedFolders.length}
               </span>
             </div>
-            <div>
-              <span className="text-white/40 mr-1.5">Storage Mounts:</span>
-              <span className="font-mono font-semibold text-white">
-                {mounts.length}
-              </span>
-            </div>
+            {scanStatus && (
+              <div className="flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-white/40" />
+                <span className="text-white/40">Scan:</span>
+                <span className="font-mono text-white">
+                  {scanStatus.status}
+                  {typeof scanStatus.processed === 'number' && scanStatus.processed > 0
+                    ? ` (${scanStatus.processed})`
+                    : ''}
+                  {scanStatus.deferred ? ' · paused during playback/cooldown' : ''}
+                </span>
+              </div>
+            )}
           </div>
+
           <div className="flex items-center gap-2">
             <button
-              onClick={async () => {
-                onRefreshLibrary()
-                showToast('Checked connectivity for all storage mounts.')
-              }}
-              className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/80 font-medium text-xs flex items-center gap-1.5 transition-colors border border-white/[0.08]"
-              title="Test connection to network storage and local disks"
+              type="button"
+              onClick={() => void refreshEngineStorage()}
+              disabled={isLoading || !engineClient}
+              className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/80 font-medium text-xs flex items-center gap-1.5 transition-colors border border-white/[0.08] cursor-pointer disabled:opacity-40"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
-              Check Status
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+              <span>Refresh</span>
             </button>
             <button
-              onClick={() => setIsAddingFolder(true)}
-              disabled={isCoreEngineActive}
-              title={
-                isCoreEngineActive
-                  ? `Switch to This PC first — ${activeEngineLabel} cannot index folders from the desktop app`
-                  : 'Add a local directory or UNC network share to This PC'
-              }
-              className="px-3 py-1.5 rounded-lg bg-[#00F5FF] hover:bg-[#00F5FF]/90 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs flex items-center gap-1.5 transition-all shadow-[0_0_12px_rgba(0,245,255,0.3)]"
+              type="button"
+              onClick={() => void handleScanFolder(undefined, false)}
+              disabled={!engineClient || displayedFolders.length === 0}
+              className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/80 font-medium text-xs flex items-center gap-1.5 transition-colors border border-white/[0.08] cursor-pointer disabled:opacity-40"
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+              <span>Scan All</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsAddingFolder((prev) => !prev)}
+              disabled={!engineClient}
+              className="px-3 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#E0BE52] disabled:opacity-40 text-black font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
             >
               <FolderPlus className="w-3.5 h-3.5" />
-              Add Watched Folder
+              <span>{isAddingFolder ? 'Hide Browser' : 'Browse & Add Folder'}</span>
             </button>
           </div>
         </div>
 
-        {isCoreEngineActive && (
-          <div className="px-6 py-3 bg-amber-500/10 border-b border-amber-500/25 flex items-center justify-between gap-4 text-xs text-amber-200">
-            <div className="space-y-1">
-              <div className="font-medium text-amber-100">
-                Browsing remote <strong className="text-white">{activeEngineLabel}</strong> (read-only NAS catalog)
-              </div>
-              <p className="text-[11px] text-amber-200/80 leading-relaxed">
-                Folders added here are indexed into <strong className="text-white">This PC</strong> ({totalTracksCount.toLocaleString()} local tracks) and do <strong className="text-white">not</strong> load into {activeEngineLabel}. To add DSD albums to {activeEngineLabel}, mount the folder into its container (<code className="px-1 py-0.5 rounded bg-black/30">/music</code>) and sync its database via <code className="px-1 py-0.5 rounded bg-black/30">cadence-headless --import-snapshot</code>.
-              </p>
-            </div>
-            {onSwitchToLocalEngine && (
-              <button
-                onClick={() => {
-                  onSwitchToLocalEngine()
-                  onClose()
-                }}
-                className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-100 font-medium shrink-0 cursor-pointer transition-colors"
-              >
-                Switch to This PC
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Modal Body */}
+        {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Add Folder Inline Panel */}
-          {isAddingFolder && (
-            <div className="p-4 rounded-xl bg-white/[0.03] border border-[#00F5FF]/40 space-y-3 animate-in slide-in-from-top-2 duration-150">
+          {isAddingFolder && engineClient && (
+            <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <h4 className="text-xs font-semibold text-[#00F5FF] uppercase tracking-wider">
-                  Add Storage Location or Watched Folder
-                </h4>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-[#D4AF37]">
+                  Browse Engine Storage
+                </h3>
                 <button
+                  type="button"
                   onClick={() => setIsAddingFolder(false)}
-                  className="text-white/40 hover:text-white text-xs"
+                  className="text-xs text-white/50 hover:text-white cursor-pointer"
                 >
-                  Cancel
+                  Close browser
                 </button>
               </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newFolderPath}
-                  onChange={(e) => setNewFolderPath(e.target.value)}
-                  placeholder="Local directory (e.g. E:\Music) or Network Share (\\NAS\Music)"
-                  className="flex-1 px-3 py-2 rounded-lg bg-black/40 border border-white/[0.12] text-xs text-white placeholder-white/30 focus:outline-none focus:border-[#00F5FF]"
-                />
-                <button
-                  onClick={handleBrowseFolder}
-                  className="px-3 py-2 rounded-lg bg-white/[0.08] hover:bg-white/[0.12] text-xs font-medium text-white transition-colors"
-                >
-                  Browse...
-                </button>
-                <button
-                  onClick={handleAddWatchedFolder}
-                  disabled={!newFolderPath.trim()}
-                  className="px-4 py-2 rounded-lg bg-[#00F5FF] hover:bg-[#00F5FF]/90 disabled:opacity-50 text-black font-semibold text-xs transition-colors"
-                >
-                  Confirm & Scan
-                </button>
-              </div>
+              <EngineFolderBrowser
+                engineClient={engineClient}
+                showToast={showToast}
+                onFolderAdded={() => {
+                  void refreshEngineStorage()
+                  onRefreshLibrary()
+                }}
+              />
             </div>
           )}
 
-          {/* 1. Watched Folders Section */}
           <div>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-white/50 flex items-center gap-2">
-                <Folder className="w-3.5 h-3.5" />
-                {isCoreEngineActive
-                  ? `This PC Watched Roots (${watchedFolders.length}) — Not Synced to ${activeEngineLabel}`
-                  : `Monitored Storage Roots (${watchedFolders.length})`}
-              </h3>
-            </div>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-white/50 flex items-center gap-2 mb-3">
+              <Folder className="w-3.5 h-3.5" />
+              <span>Engine Watched Roots ({displayedFolders.length})</span>
+            </h3>
 
-            {watchedFolders.length === 0 ? (
-              <div className="p-6 rounded-xl border border-dashed border-white/[0.1] text-center text-white/40 text-xs">
-                No watched folders configured. Click "+ Add Watched Folder" to start importing your library.
+            {displayedFolders.length === 0 ? (
+              <div className="p-6 rounded-xl border border-dashed border-white/[0.1] text-center text-white/45 text-xs">
+                No Engine library folders added yet. Click &ldquo;Browse &amp; Add Folder&rdquo; to select music roots on {activeEngineLabel}.
               </div>
             ) : (
               <div className="space-y-2">
-                {watchedFolders.map((f) => {
-                  const associatedMount = mounts.find((m) => m.id === f.mountId)
-                  const isOffline = associatedMount?.status === 'offline'
-
-                  return (
-                    <div
-                      key={f.id}
-                      className={`p-3.5 rounded-xl border transition-all flex items-center justify-between gap-4 ${
-                        isOffline
-                          ? 'bg-amber-500/[0.03] border-amber-500/20 text-white/60'
-                          : 'bg-white/[0.02] border-white/[0.06] hover:border-white/[0.15]'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div
-                          className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                            isOffline
-                              ? 'bg-amber-500/10 text-amber-400'
-                              : 'bg-white/[0.05] text-white/70'
-                          }`}
-                        >
-                          {f.folderPath.startsWith('\\\\') || f.folderPath.startsWith('//') ? (
-                            <Server className="w-4 h-4" />
-                          ) : (
-                            <Folder className="w-4 h-4" />
-                          )}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-semibold text-xs text-white truncate">
-                              {f.displayName}
-                            </span>
-                            {isOffline ? (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 font-medium">
-                                Drive Offline
-                              </span>
-                            ) : isCoreEngineActive ? (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-white/[0.08] text-white/60 font-medium">
-                                This PC Only
-                              </span>
-                            ) : (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-300 font-medium">
-                                Watching
-                              </span>
-                            )}
-                            <span className="text-[10px] text-white/40">
-                              Mode: {f.scanMode}
-                            </span>
-                          </div>
-                          <div className="text-[11px] font-mono text-white/40 truncate">
-                            {f.folderPath}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Folder Action Buttons */}
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          onClick={() => onTriggerScan(f.folderPath, false)}
-                          disabled={isOffline || isCoreEngineActive}
-                          title={
-                            isCoreEngineActive
-                              ? 'Switch to This PC to scan local or UNC watched folders'
-                              : 'Quick Rescan: Check timestamps and ingest modified or newly added tracks in <1 sec'
-                          }
-                          className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-[#00F5FF]/15 hover:text-[#00F5FF] disabled:opacity-30 text-xs font-medium text-white/70 transition-colors flex items-center gap-1.5"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                          Quick Rescan
-                        </button>
-                        <button
-                          onClick={() => onTriggerScan(f.folderPath, true)}
-                          disabled={isOffline || isCoreEngineActive}
-                          title={
-                            isCoreEngineActive
-                              ? 'Switch to This PC to scan local or UNC watched folders'
-                              : 'Force Full Rescan: Re-read all audio metadata tags and sidecars from disk'
-                          }
-                          className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-30 text-xs font-medium text-white/50 hover:text-white transition-colors flex items-center gap-1"
-                        >
-                          <RotateCw className="w-3.5 h-3.5" />
-                          Full Rescan
-                        </button>
-                        <button
-                          onClick={() => handleRemoveFolder(f.id, f.displayName)}
-                          title="Remove folder from monitoring"
-                          className="p-1.5 rounded-lg bg-white/[0.03] hover:bg-rose-500/20 hover:text-rose-300 text-white/40 transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* 2. Physical Storage Mounts & NAS Topology */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-white/50 flex items-center gap-2">
-                <HardDrive className="w-3.5 h-3.5" />
-                Physical Volumes & Storage Mounts ({mounts.length})
-              </h3>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              {mounts.map((m) => {
-                const usedGb = (m.usedBytes / 1_000_000_000).toFixed(1)
-                const totalGb = (m.totalBytes / 1_000_000_000).toFixed(1)
-                const usagePercent =
-                  m.totalBytes > 0
-                    ? Math.round((m.usedBytes / m.totalBytes) * 100)
-                    : 0
-                const isOnline = m.status !== 'offline'
-
-                return (
+                {displayedFolders.map((f) => (
                   <div
-                    key={m.id}
-                    className={`p-4 rounded-xl border transition-all ${
-                      isOnline
-                        ? 'bg-white/[0.02] border-white/[0.08]'
-                        : 'bg-amber-500/[0.02] border-amber-500/20 opacity-75'
+                    key={f.id}
+                    className={`p-3.5 rounded-xl border transition-all flex items-center justify-between gap-4 ${
+                      !f.online
+                        ? 'bg-amber-500/[0.03] border-amber-500/20 text-white/60'
+                        : 'bg-white/[0.02] border-white/[0.06] hover:border-white/[0.15]'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span
-                          className={`w-2 h-2 rounded-full shrink-0 ${
-                            isOnline ? 'bg-emerald-400' : 'bg-amber-400'
-                          }`}
-                        />
-                        <span className="font-semibold text-xs text-white truncate">
-                          {m.name}
-                        </span>
-                        <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-white/[0.06] text-white/60">
-                          {m.fileSystem}
-                        </span>
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-white/[0.05] text-white/75">
+                        {f.path.startsWith('\\\\') || f.path.startsWith('//') ? (
+                          <Server className="w-4 h-4" />
+                        ) : (
+                          <Folder className="w-4 h-4" />
+                        )}
                       </div>
-
-                      {/* Mount Status Toggle (Online/Offline simulator for testing ghost-track protection) */}
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => onToggleMountLock(m.id)}
-                          title={
-                            m.isReadOnlyLocked
-                              ? 'Volume is Read-Only Locked'
-                              : 'Volume is Read-Write Enabled'
-                          }
-                          className={`p-1 rounded text-xs transition-colors ${
-                            m.isReadOnlyLocked
-                              ? 'text-amber-400 bg-amber-500/10'
-                              : 'text-white/40 hover:text-white'
-                          }`}
-                        >
-                          {m.isReadOnlyLocked ? (
-                            <Lock className="w-3.5 h-3.5" />
-                          ) : (
-                            <Unlock className="w-3.5 h-3.5" />
-                          )}
-                        </button>
-                        <button
-                          onClick={() => onToggleMountStatus(m.id, m.status || 'online')}
-                          title={
-                            isOnline
-                              ? 'Click to simulate drive unmount (test ghost track protection)'
-                              : 'Click to reconnect drive'
-                          }
-                          className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                            isOnline
-                              ? 'bg-emerald-500/15 text-emerald-300 hover:bg-amber-500/20 hover:text-amber-300'
-                              : 'bg-amber-500/20 text-amber-300 hover:bg-emerald-500/20 hover:text-emerald-300'
-                          }`}
-                        >
-                          {isOnline ? 'Online' : 'Offline'}
-                        </button>
-                        <button
-                          onClick={() => handleRemoveMount(m.id, m.name)}
-                          title="Remove storage volume and purge its tracks from library"
-                          className="p-1 rounded text-white/30 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-xs text-white truncate">
+                            {f.displayName}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              f.online
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-amber-500/20 text-amber-300'
+                            }`}
+                          >
+                            {f.online ? 'Online' : 'Offline'}
+                          </span>
+                          <span className="text-[10px] text-white/45 font-mono">
+                            {f.trackCount.toLocaleString()} tracks · {f.scanMode}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-white/40 truncate">
+                          {f.path}
+                        </div>
                       </div>
                     </div>
 
-                    <div className="text-[10px] font-mono text-white/40 truncate mb-3">
-                      {m.mountPath}
-                    </div>
-
-                    {/* Capacity meter */}
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-[11px] text-white/50">
-                        <span>Capacity</span>
-                        <span className="font-mono">
-                          {usedGb} GB / {totalGb} GB ({usagePercent}%)
-                        </span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-white/[0.08] overflow-hidden">
-                        <div
-                          className={`h-full ${
-                            usagePercent > 90
-                              ? 'bg-rose-500'
-                              : usagePercent > 75
-                              ? 'bg-amber-400'
-                              : 'bg-[#00F5FF]'
-                          }`}
-                          style={{ width: `${usagePercent}%` }}
-                        />
-                      </div>
-                    </div>
-
-                    {/* SMART health & temp */}
-                    <div className="mt-3 pt-2 border-t border-white/[0.05] flex items-center justify-between text-[10px] text-white/40">
-                      <div className="flex items-center gap-1 text-emerald-400">
-                        <ShieldCheck className="w-3 h-3" />
-                        <span>SMART: {m.healthScore}</span>
-                      </div>
-                      <div>Temp: {m.tempCelsius}°C</div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void handleScanFolder(f.id, false)}
+                        disabled={!f.online || !engineClient}
+                        className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-[#D4AF37]/15 hover:text-[#D4AF37] disabled:opacity-30 text-xs font-medium text-white/75 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Quick Rescan</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleScanFolder(f.id, true)}
+                        disabled={!f.online || !engineClient}
+                        className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-30 text-xs font-medium text-white/60 hover:text-white transition-colors flex items-center gap-1 cursor-pointer"
+                      >
+                        <RotateCw className="w-3.5 h-3.5" />
+                        <span>Full Rescan</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRemoveFolder(f.id, f.displayName)}
+                        disabled={!engineClient}
+                        title="Remove folder from monitoring"
+                        className="p-1.5 rounded-lg bg-white/[0.03] hover:bg-rose-500/20 hover:text-rose-300 text-white/40 transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-                )
-              })}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
         {/* Footer */}
         <div className="px-6 py-4 bg-[#12151E] border-t border-white/[0.08] flex items-center justify-end text-xs">
           <button
+            type="button"
             onClick={onClose}
-            className="px-4 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium transition-colors"
+            className="px-4 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.12] text-white font-medium transition-colors cursor-pointer"
           >
             Close
           </button>

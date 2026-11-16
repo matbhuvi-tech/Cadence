@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { X, Edit3, Tag, FileText, Trash2, Check } from 'lucide-react'
 import { Playlist } from '../../core/types'
-import { sqliteLibraryService } from '../../services/sqliteLibraryService'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
 
 interface EditPlaylistModalProps {
   isOpen: boolean
@@ -20,6 +20,7 @@ export const EditPlaylistModal: React.FC<EditPlaylistModalProps> = ({
   onPlaylistDeleted,
   showToast,
 }) => {
+  const engine = useOptionalEngineController()
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [tagsInput, setTagsInput] = useState('')
@@ -41,7 +42,7 @@ export const EditPlaylistModal: React.FC<EditPlaylistModalProps> = ({
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!title.trim() || isSubmitting) return
+    if (!title.trim() || isSubmitting || !engine?.engineClient) return
 
     setIsSubmitting(true)
     try {
@@ -57,7 +58,7 @@ export const EditPlaylistModal: React.FC<EditPlaylistModalProps> = ({
         listeningNotes: listeningNotes.trim() || undefined,
       }
 
-      await sqliteLibraryService.updatePlaylist(playlist.id, updates)
+      await engine.engineClient.updatePlaylist(playlist.id, updates.title!, updates.description)
       showToast?.(`Updated playlist "${title.trim()}"`)
       onPlaylistUpdated?.({ ...playlist, ...updates })
       onClose()
@@ -74,9 +75,10 @@ export const EditPlaylistModal: React.FC<EditPlaylistModalProps> = ({
       setIsConfirmingDelete(true)
       return
     }
+    if (!engine?.engineClient) return
 
     try {
-      await sqliteLibraryService.deletePlaylist(playlist.id)
+      await engine.engineClient.deletePlaylist(playlist.id)
       showToast?.(`Deleted playlist "${playlist.title}"`)
       onPlaylistDeleted?.(playlist.id)
       onClose()

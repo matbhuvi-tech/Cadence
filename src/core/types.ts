@@ -309,6 +309,10 @@ export interface Track {
   musicbrainzRecordingId?: string
   releaseTitle?: string
   albumTitle?: string
+  lyrics?: string
+  hasEmbeddedArt?: boolean
+  fingerprintStatus?: string
+  provenanceStatus?: string
   // Curation fields (DB-only)
   rating?: number
   isFavorite?: boolean

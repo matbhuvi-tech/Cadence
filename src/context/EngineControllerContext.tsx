@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { Track, Release } from '../core/types'
 import { useAudioPlayer } from './AudioPlayerContext'
 import { tauriBridge } from '../services/tauriBridge'
@@ -15,7 +15,21 @@ import {
   type SavedCoreProfile,
   type StorageLike,
 } from '../services/coreControllerTransport'
-import { CoreServiceError, type CoreCatalogTrack, type CoreRequest, type CoreSnapshot } from '../core/coreProtocol'
+import {
+  createBrowserArtworkFetch,
+  createEngineArtworkCache,
+  createEngineClient,
+  stripCoreReleasePrefix,
+  type EngineArtworkCache,
+  type EngineClient,
+} from '../services/engineClient'
+import {
+  CoreServiceError,
+  type CoreCatalogTrack,
+  type CoreRequest,
+  type CoreSnapshot,
+  type EngineEventRecord,
+} from '../core/coreProtocol'
 import type { EngineActivity } from '../core/engineSession'
 import type { AudioEndpoint } from '../core/endpointRouting'
 
@@ -27,7 +41,9 @@ export interface CoreQueueEntryProjection {
 export interface EngineControllerContextValue {
   state: CoreControllerState
   isCoreActive: boolean
+  isBootstrapping: boolean
   activeCoreSnapshot: CoreSnapshot | null
+  engineClient: EngineClient | null
   coreCatalogTracks: Track[]
   coreCatalogReleases: Release[]
   coreNowPlayingTrack: Track | null
@@ -66,6 +82,10 @@ export interface EngineControllerContextValue {
   coreReorderQueueEntry: (fromIndex: number, toIndex: number) => Promise<void>
   coreSetModes: (repeat: 'off' | 'one' | 'all', shuffle: boolean) => Promise<void>
   coreRefreshSnapshot: () => Promise<void>
+  coreRefreshCatalog: () => Promise<void>
+  resolveCoreArtworkUrl: (rawReleaseId: string) => Promise<string | null>
+  getCachedCoreArtworkUrl: (rawReleaseId: string) => string | null
+  subscribeEngineEvents: (listener: (event: EngineEventRecord) => void) => () => void
   selectLocalEndpointWithCoreGuard: (endpoint: AudioEndpoint) => Promise<void>
   confirmRs130Takeover: () => Promise<void>
 }
@@ -193,6 +213,17 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
       discNumber,
       title: ct.title,
       artistCredit: ct.artist,
+      albumArtist: ct.albumArtist,
+      composerName: ct.composerName ?? undefined,
+      genre: ct.genreTags?.[0],
+      folderName: ct.folderName ?? undefined,
+      language: ct.language ?? undefined,
+      drScore: ct.dynamicRange ?? undefined,
+      lyrics: ct.lyrics ?? undefined,
+      hasEmbeddedArt: ct.hasCoverArt,
+      fingerprintStatus: ct.fingerprintStatus ?? undefined,
+      provenanceStatus: ct.provenanceStatus ?? undefined,
+      canonicalReleaseYear: ct.releaseYear,
       durationSeconds: ct.durationSeconds,
       duration: ct.durationSeconds,
       filePath: ct.id,
@@ -215,6 +246,9 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
     }
     uiTracks.push(uiTrack)
 
+    const coreArtworkSentinel =
+      ct.hasCoverArt && ct.releaseId ? `cadence-art://${ct.releaseId}` : ''
+
     if (existing) {
       existing.tracks.push(uiTrack)
       existing.release.tracksCount = existing.tracks.length
@@ -224,6 +258,16 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
       if (existing.release.releaseYear === 0 && releaseYear > 0) {
         existing.release.releaseYear = releaseYear
         existing.release.originalYear = releaseYear
+      }
+      if (!existing.release.composerName && ct.composerName) {
+        existing.release.composerName = ct.composerName
+      }
+      if ((!existing.release.genreTags || existing.release.genreTags.length === 0) && ct.genreTags?.length) {
+        existing.release.genreTags = ct.genreTags
+      }
+      if (!existing.release.artwork.frontCoverUrl && coreArtworkSentinel) {
+        existing.release.artwork.frontCoverUrl = coreArtworkSentinel
+        existing.release.coverArtUrl = coreArtworkSentinel
       }
       if (ct.isCompilation) {
         existing.release.isCompilation = true
@@ -235,9 +279,10 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
           id: releaseId,
           masterReleaseId: releaseId,
           title: displayAlbumTitle,
-          folderName: editionLabel || ct.album,
+          folderName: ct.folderName?.trim() || editionLabel || ct.album,
           folderPath: '',
           artistCredit: displayAlbumArtist,
+          composerName: ct.composerName ?? undefined,
           releaseYear,
           originalYear: releaseYear,
           label: 'Cadence Core',
@@ -245,9 +290,10 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
           mediaFormat: 'Digital',
           country: '',
           matrixRunout: '',
+          coverArtUrl: coreArtworkSentinel || undefined,
           artwork: {
-            frontCoverUrl: '',
-            resolution: '0x0',
+            frontCoverUrl: coreArtworkSentinel,
+            resolution: coreArtworkSentinel ? 'Engine Artwork' : '0x0',
             width: 0,
             height: 0,
             dpi: 72,
@@ -258,7 +304,7 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
           variants: [],
           discsCount: discNumber,
           tracksCount: 1,
-          genreTags: [],
+          genreTags: ct.genreTags ?? [],
           storageMountId: 'core',
           isCompilation: Boolean(ct.isCompilation),
         },
@@ -302,13 +348,6 @@ export const EngineControllerProvider: React.FC<{
         getActivity: () => activityRef.current,
         stopAndAcknowledge: async () => {
           await stopRef.current()
-          // Confirm authoritative backend idle state when inside Tauri, or local state in tests/browser
-          if (tauriBridge.isTauri()) {
-            const st = await tauriBridge.getPlaybackStatus()
-            if (st && (st.isPlaying || st.isPaused)) {
-              return false
-            }
-          }
           activityRef.current = 'idle'
           return true
         },
@@ -319,6 +358,19 @@ export const EngineControllerProvider: React.FC<{
 
   const store = storeRef.current
   const [state, setState] = useState<CoreControllerState>(() => store.getState())
+  const [isBootstrapping, setIsBootstrapping] = useState<boolean>(() => !storeOverride)
+  const eventListenersRef = useRef(new Set<(event: EngineEventRecord) => void>())
+  const artworkCacheRef = useRef<EngineArtworkCache | null>(null)
+  if (!artworkCacheRef.current) {
+    artworkCacheRef.current = createEngineArtworkCache({
+      fetchArtwork: tauriBridge.isTauri()
+        ? (target, releaseId, ifNoneMatch) =>
+            tauriBridge.coreFetchArtwork(target, releaseId, ifNoneMatch)
+        : createBrowserArtworkFetch(),
+      maxEntries: 256,
+      maxConcurrent: 2,
+    })
+  }
 
   useEffect(() => {
     setState(store.getState())
@@ -328,8 +380,81 @@ export const EngineControllerProvider: React.FC<{
     }
   }, [store])
 
+  useEffect(() => {
+    if (storeOverride) {
+      setIsBootstrapping(false)
+      return
+    }
+    let mounted = true
+    void store
+      .bootstrapStartupConnection()
+      .catch(() => {})
+      .finally(() => {
+        if (mounted) setIsBootstrapping(false)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [store, storeOverride])
+
   const isCoreActive = state.view.session.active.kind === 'core'
   const activeCoreSnapshot = isCoreActive ? state.view.snapshot : null
+  const activeProfile = isCoreActive ? state.activeProfile : null
+  const catalogRevision = activeCoreSnapshot?.catalog.revision ?? 0
+
+  const engineClient = useMemo(() => {
+    if (!isCoreActive || !activeProfile || !bridgeRef.current) return null
+    const bridge = bridgeRef.current
+    return createEngineClient(activeProfile, (target, body) =>
+      bridge.postCoreRequest(target, body),
+    )
+  }, [isCoreActive, activeProfile])
+
+  useEffect(() => {
+    if (!isCoreActive || !activeProfile) {
+      artworkCacheRef.current?.clear()
+      void tauriBridge.coreDisconnectEvents()
+      return
+    }
+    if (!tauriBridge.isTauri()) return
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    void tauriBridge
+      .listenCoreEvents((ev) => {
+        if (cancelled || ev.engineId !== activeProfile.engineId) return
+        const payload = ev.payload as EngineEventRecord | null
+        if (!payload || typeof payload.event !== 'string') return
+        if (payload.event === 'catalog.changed') {
+          void store.refreshCatalog().catch(() => {})
+        }
+        for (const fn of eventListenersRef.current) {
+          try {
+            fn(payload)
+          } catch {
+            // ignore subscriber error
+          }
+        }
+      })
+      .then((fn) => {
+        if (cancelled) fn()
+        else unlisten = fn
+      })
+
+    void tauriBridge.coreConnectEvents(activeProfile, activeProfile.engineId).catch(() => {})
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+      void tauriBridge.coreDisconnectEvents()
+    }
+  }, [isCoreActive, activeProfile, store])
+
+  useEffect(() => {
+    return () => {
+      artworkCacheRef.current?.clear()
+    }
+  }, [])
 
   const playIntentRef = useRef(0)
 
@@ -495,6 +620,40 @@ export const EngineControllerProvider: React.FC<{
     }
   }, [isCoreActive, activeCoreSnapshot?.queue.entries, activeCoreSnapshot?.queue.currentEntryId, coreCatalogTracks])
 
+  const resolveCoreArtworkUrl = useCallback(
+    async (rawReleaseId: string): Promise<string | null> => {
+      if (!isCoreActive || !activeProfile || !artworkCacheRef.current) return null
+      return artworkCacheRef.current.getOrFetch(
+        activeProfile,
+        stripCoreReleasePrefix(rawReleaseId),
+        catalogRevision,
+      )
+    },
+    [isCoreActive, activeProfile, catalogRevision],
+  )
+
+  const getCachedCoreArtworkUrl = useCallback(
+    (rawReleaseId: string): string | null => {
+      if (!isCoreActive || !activeProfile || !artworkCacheRef.current) return null
+      return artworkCacheRef.current.getCached(
+        activeProfile.engineId,
+        stripCoreReleasePrefix(rawReleaseId),
+        catalogRevision,
+      )
+    },
+    [isCoreActive, activeProfile, catalogRevision],
+  )
+
+  const subscribeEngineEvents = useCallback(
+    (listener: (event: EngineEventRecord) => void) => {
+      eventListenersRef.current.add(listener)
+      return () => {
+        eventListenersRef.current.delete(listener)
+      }
+    },
+    [],
+  )
+
   const value = useMemo<EngineControllerContextValue>(() => {
     const exec = async (cmd: CoreCommandInput) => {
       await store.executeCoreCommand(cmd)
@@ -503,7 +662,9 @@ export const EngineControllerProvider: React.FC<{
     return {
       state,
       isCoreActive,
+      isBootstrapping,
       activeCoreSnapshot,
+      engineClient,
       coreCatalogTracks,
       coreCatalogReleases,
       coreNowPlayingTrack,
@@ -616,6 +777,12 @@ export const EngineControllerProvider: React.FC<{
       coreRefreshSnapshot: async () => {
         await store.refreshSnapshot()
       },
+      coreRefreshCatalog: async () => {
+        await store.refreshCatalog()
+      },
+      resolveCoreArtworkUrl,
+      getCachedCoreArtworkUrl,
+      subscribeEngineEvents,
       selectLocalEndpointWithCoreGuard: async (endpoint) => {
         const intercepted = store.requestRs130TakeoverIfControlledByCore(endpoint, () =>
           selectEndpoint(endpoint),
@@ -629,7 +796,9 @@ export const EngineControllerProvider: React.FC<{
   }, [
     state,
     isCoreActive,
+    isBootstrapping,
     activeCoreSnapshot,
+    engineClient,
     coreCatalogTracks,
     coreCatalogReleases,
     coreNowPlayingTrack,
@@ -638,6 +807,9 @@ export const EngineControllerProvider: React.FC<{
     coreUpcomingEntries,
     store,
     selectEndpoint,
+    resolveCoreArtworkUrl,
+    getCachedCoreArtworkUrl,
+    subscribeEngineEvents,
   ])
 
   return <EngineControllerContext.Provider value={value}>{children}</EngineControllerContext.Provider>

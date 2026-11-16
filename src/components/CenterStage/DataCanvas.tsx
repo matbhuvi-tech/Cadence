@@ -32,7 +32,7 @@ import { FolderTreeExplorer } from './FolderTreeExplorer'
 import { FacetSelections } from '../LeftRail/FacetedFilters'
 import { splitMultiArtistCredits, detectLanguage, extractAlbumComposers } from '../../core/taxonomyUtils'
 import { groupAlbumReleases } from '../../services/albumGroupingService'
-import { sqliteLibraryService } from '../../services/sqliteLibraryService'
+import { deriveCanonicalArtistsFromCatalog } from '../../core/libraryProjection'
 
 export type { CanvasViewMode }
 
@@ -172,7 +172,7 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   }, [releases, splitReleaseIds])
 
   const artistCount = useMemo(() => {
-    return sqliteLibraryService.deriveCanonicalArtistsFromState(releases, tracks, splitReleaseIds).length
+    return deriveCanonicalArtistsFromCatalog(releases, tracks, splitReleaseIds).length
   }, [releases, tracks, splitReleaseIds])
 
   const composerCount = useMemo(() => {
@@ -685,7 +685,11 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
           <div className="flex items-center gap-2 min-w-0 text-amber-100/90">
             <Server className="w-3.5 h-3.5 text-[#D4AF37] shrink-0" />
             <span className="truncate">
-              Browsing <strong className="text-white">{activeEngineLabel}</strong> ({totalLibraryTracksCount.toLocaleString()} tracks &bull; {totalLibraryReleasesCount ?? releases.length} albums) &mdash; folders added on <strong className="text-white">This PC</strong> do not sync automatically to the Core host.
+              Browsing <strong className="text-white">{activeEngineLabel}</strong> ({totalLibraryTracksCount.toLocaleString()} tracks &bull; {totalLibraryReleasesCount ?? releases.length} albums){onSwitchToLocalEngine ? (
+                <> &mdash; folders added on <strong className="text-white">This PC</strong> do not sync automatically to the Core host.</>
+              ) : (
+                <> &mdash; served directly from the Playback Engine.</>
+              )}
             </span>
           </div>
           {onSwitchToLocalEngine && (
@@ -770,7 +774,11 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
 
                   {isCoreEngineActive && (
                     <div className="mb-6 max-w-md w-full rounded-xl bg-amber-500/10 border border-amber-500/25 px-3.5 py-2.5 text-[11px] text-amber-200/90 leading-relaxed">
-                      Listen is browsing <span className="font-semibold text-white">{activeEngineLabel}</span>. Folders added via Storage Manager belong to <span className="font-semibold text-white">This PC</span>.
+                      {onSwitchToLocalEngine ? (
+                        <>Listen is browsing <span className="font-semibold text-white">{activeEngineLabel}</span>. Folders added via Storage Manager belong to <span className="font-semibold text-white">This PC</span>.</>
+                      ) : (
+                        <>Listen is browsing <span className="font-semibold text-white">{activeEngineLabel}</span> directly from the Playback Engine.</>
+                      )}
                     </div>
                   )}
 

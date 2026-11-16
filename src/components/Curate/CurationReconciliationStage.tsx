@@ -43,7 +43,7 @@ import {
 } from '../../services/federatedResolvers'
 import { isDefectiveArtistTag, isPlaceholderTag, cleanRipNoise, extractMeaningfulFolderName } from '../../core/taxonomyUtils'
 import { creditInferenceService } from '../../services/creditInferenceService'
-import { sqliteLibraryService } from '../../services/sqliteLibraryService'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { tauriBridge } from '../../services/tauriBridge'
 import { CompilationProvenanceModal } from '../Modals/CompilationProvenanceModal'
 
@@ -105,10 +105,12 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
     return creditInferenceService.inferReleaseAuthority(release, tracks)
   }, [release, tracks, release?.metadataAuthorityOverride])
 
+  const engine = useOptionalEngineController()
+
   const handleToggleAuthority = async () => {
     if (!release) return
     const nextAuth = authorityInference.authority === 'composer' ? 'performer' : 'composer'
-    await sqliteLibraryService.updateReleaseAuthorityOverride(release.id, nextAuth)
+    release.metadataAuthorityOverride = nextAuth
     showToast(`Locked authority to ${nextAuth === 'composer' ? 'Composer (Soundtrack mode)' : 'Performer (Solo/Classical mode)'}`)
   }
 
@@ -265,14 +267,14 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
   // Stacking: Unstack
   const handleUnstack = async () => {
     if (!release) return
-    await sqliteLibraryService.unlinkMasterRelease(release.id)
+    release.masterReleaseId = release.id
     showToast(`Unstacked "${release.title}" into a standalone master.`)
   }
 
   // Stacking: Link to target master
   const handleStackWith = async (targetMasterId: string) => {
     if (!release) return
-    await sqliteLibraryService.setMasterReleaseLink(release.id, targetMasterId)
+    release.masterReleaseId = targetMasterId
     setIsStackPickerOpen(false)
     showToast(`Stacked edition under master release.`)
   }
@@ -356,8 +358,8 @@ export const CurationReconciliationStage: React.FC<CurationReconciliationStagePr
 
       try {
         if (!forceEvenIfPlaying) {
-          const status = await tauriBridge.getPlaybackStatus().catch(() => null)
-          if (status && (status.isPlaying || status.isPaused || status.playbackState === 'Loading')) {
+          const activity = engine?.activeCoreSnapshot?.playback.activity ?? 'idle'
+          if (activity === 'playing' || activity === 'paused' || activity === 'loading') {
             setIsPlaybackQuietNotice(true)
             setIsLoadingCandidates(false)
             return

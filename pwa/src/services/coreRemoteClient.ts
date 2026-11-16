@@ -61,6 +61,12 @@ export interface CoreCatalogTrack {
   albumArtist?: string;
   isCompilation?: boolean;
   edition?: string;
+  composerName?: string;
+  genreTags?: string[];
+  folderName?: string;
+  language?: string;
+  hasCoverArt?: boolean;
+  fingerprintStatus?: string;
 }
 
 export interface CoreExternalPlaybackInfo {
@@ -203,7 +209,7 @@ export function parseCoreDescriptor(
   profile: Pick<ServerProfile, 'engineId' | 'libraryId'>
 ): CoreDescriptor {
   const obj = assertRecord(raw);
-  if (obj.protocolVersion !== CORE_PROTOCOL_VERSION) {
+  if (obj.protocolVersion !== CORE_PROTOCOL_VERSION && obj.protocolVersion !== 2) {
     throw new CoreClientError('incompatible_protocol');
   }
   const engineId = nonEmptyString(obj.engineId);
@@ -274,6 +280,22 @@ function parseCoreCatalogTrack(item: unknown): CoreCatalogTrack {
       typeof t.albumArtist === 'string' && t.albumArtist.trim() ? t.albumArtist.trim() : undefined,
     isCompilation: typeof t.isCompilation === 'boolean' ? t.isCompilation : undefined,
     edition: typeof t.edition === 'string' && t.edition.trim() ? t.edition.trim() : undefined,
+    composerName:
+      typeof t.composerName === 'string' && t.composerName.trim()
+        ? t.composerName.trim()
+        : undefined,
+    genreTags: Array.isArray(t.genreTags)
+      ? t.genreTags.filter((g): g is string => typeof g === 'string' && g.trim().length > 0)
+      : undefined,
+    folderName:
+      typeof t.folderName === 'string' && t.folderName.trim() ? t.folderName.trim() : undefined,
+    language:
+      typeof t.language === 'string' && t.language.trim() ? t.language.trim() : undefined,
+    hasCoverArt: typeof t.hasCoverArt === 'boolean' ? t.hasCoverArt : undefined,
+    fingerprintStatus:
+      typeof t.fingerprintStatus === 'string' && t.fingerprintStatus.trim()
+        ? t.fingerprintStatus.trim()
+        : undefined,
   };
 }
 
@@ -487,7 +509,6 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
         'Content-Type': 'application/json',
       };
       if (profile.token) {
-        headers.Authorization = `Bearer ${profile.token}`;
         headers['x-cadence-token'] = profile.token;
       }
       return nativeOrFetchHttp(url, {

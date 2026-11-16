@@ -31,7 +31,8 @@ import {
   matchesSearchText,
 } from '../../core/taxonomyUtils'
 import { resolveMediaUrl } from '../../services/tauriBridge'
-import { sqliteLibraryService } from '../../services/sqliteLibraryService'
+import { deriveCanonicalArtistsFromCatalog } from '../../core/libraryProjection'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { IntegrityScanner } from '../../services/integrityScanner'
 import { ArtistsView } from './ArtistsView'
@@ -143,14 +144,11 @@ const AlbumCardItem: React.FC<AlbumCardItemProps> = React.memo(({
         </div>
 
         {album.coverArtUrl ? (
-          <img
-            src={resolveMediaUrl(album.coverArtUrl)}
+          <EngineArtworkImg
+            src={album.coverArtUrl}
             alt={album.title}
             className="absolute inset-0 w-full h-full object-cover rounded-lg group-hover/card:scale-[1.03] transition-transform duration-500 z-[1]"
             loading="lazy"
-            onError={(e) => {
-              ;(e.target as HTMLElement).style.display = 'none'
-            }}
           />
         ) : null}
 
@@ -344,24 +342,16 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
   }, [selectedAlbumId])
 
   // Map of canonical artist/composer name (lowercase) -> portraitUrl
-  const [composerPortraits, setComposerPortraits] = useState<Map<string, string>>(new Map())
-
-  useEffect(() => {
-    sqliteLibraryService
-      .getCanonicalArtists(releases, tracks)
-      .then((artists) => {
-        const map = new Map<string, string>()
-        artists.forEach((a) => {
-          if (a.portraitUrl) {
-            map.set(a.name.toLowerCase().trim(), a.portraitUrl)
-          }
-        })
-        setComposerPortraits(map)
-      })
-      .catch((err) => {
-        console.warn('[AlbumCoverGrid] Failed to load composer portraits:', err)
-      })
-  }, [releases, tracks])
+  const composerPortraits = useMemo(() => {
+    const map = new Map<string, string>()
+    const artists = deriveCanonicalArtistsFromCatalog(releases, tracks, splitReleaseIds)
+    artists.forEach((a) => {
+      if (a.portraitUrl) {
+        map.set(a.name.toLowerCase().trim(), a.portraitUrl)
+      }
+    })
+    return map
+  }, [releases, tracks, splitReleaseIds])
 
   // 0. Group multi-disc releases
   const groupedReleaseList = useMemo(() => {
@@ -832,13 +822,16 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
           {/* Large Album Artwork */}
           <div className="relative w-48 h-48 sm:w-56 sm:h-56 shrink-0 rounded-2xl overflow-hidden bg-black/80 border border-white/[0.15] shadow-2xl group">
             {album.coverArtUrl ? (
-              <img
-                src={resolveMediaUrl(album.coverArtUrl)}
+              <EngineArtworkImg
+                src={album.coverArtUrl}
                 alt={album.title}
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                onError={(e) => {
-                  ;(e.target as HTMLElement).style.display = 'none'
-                }}
+                fallback={
+                  <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-[#1E2536] to-[#0A0D14] text-slate-500 p-4 text-center">
+                    <Disc3 className="w-16 h-16 text-[#38BDF8]/40 mb-2" />
+                    <span className="text-xs font-mono">{album.title}</span>
+                  </div>
+                }
               />
             ) : (
               <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-[#1E2536] to-[#0A0D14] text-slate-500 p-4 text-center">
@@ -1365,10 +1358,11 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
           <div className="flex items-center gap-5">
             <div className="w-20 h-20 rounded-full overflow-hidden bg-black/60 border-2 border-[#00F5FF]/60 shadow-lg shrink-0 flex items-center justify-center">
               {albums[0]?.coverArtUrl ? (
-                <img
-                  src={resolveMediaUrl(albums[0].coverArtUrl)}
+                <EngineArtworkImg
+                  src={albums[0].coverArtUrl}
                   alt={artistName}
                   className="w-full h-full object-cover"
+                  fallback={<User className="w-10 h-10 text-[#00F5FF]" />}
                 />
               ) : (
                 <User className="w-10 h-10 text-[#00F5FF]" />

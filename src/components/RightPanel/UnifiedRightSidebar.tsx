@@ -18,9 +18,13 @@ import {
 } from 'lucide-react'
 import { Track, Playlist, Release } from '../../core/types'
 import { useAudioProgress } from '../../context/AudioPlayerContext'
-import { useEffectiveQueueControl } from '../../context/EngineControllerContext'
+import { useEffectiveQueueControl, useOptionalEngineController } from '../../context/EngineControllerContext'
 import { useCorePlaybackClock } from '../../hooks/useCorePlaybackClock'
-import { sqliteLibraryService } from '../../services/sqliteLibraryService'
+import {
+  getEnginePlaylistDetails,
+  listEnginePlaylists,
+} from '../../services/enginePlaylistService'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 
 interface UnifiedRightSidebarProps {
   allReleases?: Release[]
@@ -197,17 +201,27 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
     return () => document.removeEventListener('click', handleDocClick)
   }, [activeMenuIndex, isNowPlayingMenuOpen])
 
+  const engine = useOptionalEngineController()
+
   // Load playlists on mount or tab switch
   useEffect(() => {
     if (rightSidebarTab === 'playlists') {
-      loadPlaylists()
+      void loadPlaylists()
     }
-  }, [rightSidebarTab])
+  }, [rightSidebarTab, engine?.engineClient])
 
   const loadPlaylists = async () => {
+    if (!engine?.engineClient) {
+      setPlaylists([])
+      return
+    }
     setIsLoadingPlaylists(true)
     try {
-      const data = await sqliteLibraryService.getPlaylists()
+      const data = await listEnginePlaylists(
+        engine.engineClient,
+        engine.coreCatalogTracks,
+        allReleases.length > 0 ? allReleases : engine.coreCatalogReleases,
+      )
       setPlaylists(data)
     } catch (err) {
       console.error('[UnifiedRightSidebar] Failed to load playlists:', err)
@@ -314,8 +328,14 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
 
   // Play playlist
   const handlePlayPlaylist = async (pl: Playlist, shuffle: boolean = false) => {
+    if (!engine?.engineClient) return
     try {
-      const details = await sqliteLibraryService.getPlaylistDetails(pl.id)
+      const details = await getEnginePlaylistDetails(
+        engine.engineClient,
+        pl.id,
+        engine.coreCatalogTracks,
+        allReleases.length > 0 ? allReleases : engine.coreCatalogReleases,
+      )
       const tracks = details?.tracks || []
       if (tracks.length === 0) {
         showToast?.('Playlist is empty')
@@ -891,7 +911,12 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                     {/* 4-Grid Thumbnail or Fallback Icon */}
                     <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-lg bg-neutral-900 border border-white/10 text-neutral-400 group-hover:text-[#D4AF37] group-hover:border-[#D4AF37]/30 transition-colors overflow-hidden">
                       {pl.coverArtUrl ? (
-                        <img src={pl.coverArtUrl} alt="" className="h-full w-full object-cover" />
+                        <EngineArtworkImg
+                          src={pl.coverArtUrl}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          fallback={<Disc3 className="h-5 w-5" />}
+                        />
                       ) : (
                         <Disc3 className="h-5 w-5" />
                       )}

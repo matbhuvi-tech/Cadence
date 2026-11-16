@@ -61,7 +61,15 @@ import {
 import { federatedResolversService, type ProviderResult } from '../../services/federatedResolvers'
 import { compilationCanonicalizerService } from '../../services/compilationCanonicalizerService'
 import { behavioralLearningService } from '../../services/behavioralLearningService'
-import { tauriBridge } from '../../services/tauriBridge'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import {
+  getUiCurationEvidence,
+  listUiCurateDrafts,
+  listUiCurationEvidence,
+  loadUiCurateDraft,
+  saveUiCurateDraft,
+  submitCurateItemsToEngine,
+} from '../../services/engineCurateBridge'
 import { useCurationTrace } from '../../hooks/useCurationTrace'
 import { CURATE_REFRESH_PROVIDER_BUDGET, captureTrackDecisions, curateMatchingContext, restoreAppleTrackCandidates, sourceCandidatesFromGrouping, type CurateSourceCandidate } from '../../services/curateEvidenceService'
 import { SteerProgressBar } from './SteerProgressBar'
@@ -88,7 +96,7 @@ export interface UnifiedCurateCockpitProps {
   showToast: (msg: string) => void
   commitRows?: CurateCommitRow[]
   commitQueueHostRef?: React.Ref<HTMLDivElement>
-  onCommitQueued?: () => Promise<void>
+  onCommitQueued?: (submittedJobs?: Array<{ jobId: string; draftId: string; trackId: string; payloadJson: string; status: string }>) => Promise<void>
   onDraftSaved?: (draft: CurateDraft) => void
   supersededCommitIds?: ReadonlySet<string>
   isPlaying?: boolean
@@ -412,6 +420,11 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
   supersededCommitIds,
   isPlaying = false,
 }) => {
+  const engine = useOptionalEngineController()
+  const engineClient = engine?.engineClient ?? null
+  const activeEngineId = engine?.state.activeProfile?.engineId
+  const activeLibraryId = engine?.state.activeProfile?.libraryId
+  const isEngineReadOnly = engine?.state.musicReadOnly === true
   const [localSettings] = useState(loadPrioritySettings)
   const [localDismissals, setDismissedProblems] = useState(loadDismissedProblems)
   const prioritySettings = settingsProp ?? localSettings
@@ -694,7 +707,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       return
     }
     let cancelled = false
-    tauriBridge.curationGetDraft(activeItemId).then(draft => {
+    Promise.resolve(loadUiCurateDraft(activeItemId, activeEngineId, activeLibraryId)).then(draft => {
       if (cancelled) return
       const initial = captureCurateDraft(activeItem)
       // Completed confirmations supersede their saved draft.
@@ -787,7 +800,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     const prior = state.pending
     // Serialize writes per album. An older save cannot overwrite a newer edit.
     const write = (prior?.catch(() => undefined) ?? Promise.resolve())
-      .then(() => tauriBridge.curationSaveDraft(album.id, draft))
+      .then(() => {
+        saveUiCurateDraft(album.id, draft, activeEngineId, activeLibraryId)
+      })
     Object.assign(state, { draft, serialized, pending: write, saved: false })
     try {
       await write
@@ -802,7 +817,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
       if (state.pending === write) state.pending = undefined
     }
     return draft
-  }, [])
+  }, [activeEngineId, activeLibraryId])
 
   // Also save edits from a provider operation that finishes after the user selects another album.
   useEffect(() => {
@@ -844,21 +859,22 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     const albumId = selectedAlbum?.id
     setSavedAppleEvidence(null)
     if (!albumId) return
-    let cancelled = false
-    void tauriBridge.curationListEvidence(albumId).then(async runs => {
-      const current = runs.find(run => run.current)
-      if (!current) return
-      const run = await tauriBridge.curationGetEvidence(albumId, current.id)
-      const candidate = run?.attempts.find(attempt => attempt.provider === 'apple' && attempt.outcome === 'success')?.candidate
-      const telemetry = run?.decision?.candidateTelemetry?.find(item => item.provider === 'apple')
-      if (!cancelled && candidate && run) setSavedAppleEvidence({
-        ...candidate, albumId, releaseId: candidate.releaseId ?? telemetry?.releaseId,
+    const runs = listUiCurationEvidence(albumId, activeEngineId, activeLibraryId)
+    const current = runs.find(run => run.current)
+    if (!current) return
+    const run = getUiCurationEvidence(albumId, current.id, activeEngineId, activeLibraryId)
+    const candidate = run?.attempts.find(attempt => attempt.provider === 'apple' && attempt.outcome === 'success')?.candidate
+    const telemetry = run?.decision?.candidateTelemetry?.find(item => item.provider === 'apple')
+    if (candidate && run) {
+      setSavedAppleEvidence({
+        ...candidate,
+        albumId,
+        releaseId: candidate.releaseId ?? telemetry?.releaseId,
         rejectionReason: telemetry?.rejectionReason,
         trackRows: restoreAppleTrackCandidates({ ...run, applicability: current.applicability }),
       })
-    }).catch(err => console.warn('[Curate] Evidence restore failed:', err))
-    return () => { cancelled = true }
-  }, [selectedAlbum?.id, lastEvidenceId])
+    }
+  }, [selectedAlbum?.id, lastEvidenceId, activeEngineId, activeLibraryId])
 
   useEffect(() => {
     if (selectedAlbum) {
@@ -1390,25 +1406,37 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     })
   }
 
-  // Freeze the selection in the same transaction that enqueues the writes.
+  // Freeze the selection in the same transaction that enqueues the writes on the Engine.
   const handleCommitAlbum = async () => {
     if (!selectedAlbum || selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitConfirmed || batchAbort.current) return
     setQueuingAlbumId(selectedAlbum.id)
     try {
-      if (!tauriBridge.isTauri()) throw new Error('Open the desktop app to queue tag writes.')
+      if (!engineClient) throw new Error('Connect to a Playback Engine to queue tag writes.')
+      if (isEngineReadOnly) throw new Error('Read-Only Media Root — Tag writes disabled on this Engine.')
       const draft = await saveAlbumDraft(selectedAlbum, true, selectedCommitRows.some(row => row.lineageChanged))
       const items = makeCurateCommitItems(draft, selectedAlbum.rawTracks, selectedAlbum.rawRelease)
       if (!items.length) throw new Error('There are no tracks to commit.')
-      const drafts = [{ albumId: selectedAlbum.id, draft: { ...draft, staged: false } }]
-      await tauriBridge.commitEnqueueBatch({
-        description: `Curate: ${selectedAlbum.albumTitle.selected}`,
-        destination: 'embedded',
-        curateDrafts: drafts,
+      const { submittedJobs, blockedReasons } = await submitCurateItemsToEngine({
+        engineClient,
         items,
+        tracks: selectedAlbum.rawTracks,
+        releases: selectedAlbum.rawRelease ? [selectedAlbum.rawRelease] : rawReleases,
       })
+      if (submittedJobs.length === 0 && blockedReasons.length > 0) {
+        throw new Error(blockedReasons[0])
+      }
+      if (submittedJobs.length === 0) {
+        throw new Error('No supported embedded tag field changes to write for this album.')
+      }
+      const drafts = [{ albumId: selectedAlbum.id, draft: { ...draft, staged: false } }]
+      saveUiCurateDraft(selectedAlbum.id, drafts[0].draft, activeEngineId, activeLibraryId)
       markDraftsQueued(drafts)
-      showToast(`Queued "${selectedAlbum.albumTitle.selected}" for tag writing.`)
-      await onCommitQueued?.()
+      showToast(
+        blockedReasons.length > 0
+          ? `Queued ${submittedJobs.length} track(s) on Engine (${blockedReasons.length} skipped: ${blockedReasons[0]}).`
+          : `Queued ${submittedJobs.length} track(s) for tag writing on Engine.`,
+      )
+      await onCommitQueued?.(submittedJobs)
     } catch (err) {
       showToast(`Could not queue album: ${String(err)}`)
     } finally {
@@ -1416,18 +1444,12 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     }
   }
 
-  // The native draft-list command enforces the idle cooldown. Refresh the
-  // staged badges when entering Curate or returning to idle.
+  // Refresh staged badges when entering Curate or returning to idle.
   useEffect(() => {
     if (isPlaying) return
-    let cancelled = false
-    void tauriBridge.listCurationDrafts().then(drafts => {
-      if (!cancelled) setStagedIds(new Set(resolveStagedAlbumIds(drafts)))
-    }).catch(() => {
-      // The transport may still be in cooldown. Commit All can retry on demand.
-    })
-    return () => { cancelled = true }
-  }, [isPlaying])
+    const drafts = listUiCurateDrafts(activeEngineId, activeLibraryId)
+    setStagedIds(new Set(resolveStagedAlbumIds(drafts)))
+  }, [isPlaying, activeEngineId, activeLibraryId])
 
   const openCommitPreview = async () => {
     if (stagingAlbumId || queuingAlbumId || isPlaying || batchAbort.current) return
@@ -1436,7 +1458,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     setIsBatchCommitting(true)
     try {
       await Promise.all([...loadedDrafts.current.values()].map(state => state.pending))
-      const drafts = await tauriBridge.listCurationDrafts()
+      const drafts = listUiCurateDrafts(activeEngineId, activeLibraryId)
       controller.signal.throwIfAborted()
       const ids = resolveStagedAlbumIds(drafts)
       setStagedIds(new Set(ids))
@@ -1466,7 +1488,8 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
     batchAbort.current = new AbortController()
     setIsBatchCommitting(true)
     try {
-      if (!tauriBridge.isTauri()) throw new Error('Open the desktop app to queue tag writes.')
+      if (!engineClient) throw new Error('Connect to a Playback Engine to queue tag writes.')
+      if (isEngineReadOnly) throw new Error('Read-Only Media Root — Tag writes disabled on this Engine.')
       const items: EnqueueBatchPayload['items'] = []
       const drafts: NonNullable<EnqueueBatchPayload['curateDrafts']> = []
       for (const entry of preview) {
@@ -1487,16 +1510,26 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         items.push(...changed)
       }
       if (!items.length) throw new Error('There are no tracks to commit.')
-      await tauriBridge.commitEnqueueBatch({
-        description: `Curate · ${drafts.length} staged albums`,
-        destination: 'embedded',
-        curateDrafts: drafts,
+      const { submittedJobs, blockedReasons } = await submitCurateItemsToEngine({
+        engineClient,
         items,
+        tracks: rawTracks,
+        releases: rawReleases,
       })
+      if (submittedJobs.length === 0 && blockedReasons.length > 0) {
+        throw new Error(blockedReasons[0])
+      }
+      for (const d of drafts) {
+        saveUiCurateDraft(d.albumId, d.draft, activeEngineId, activeLibraryId)
+      }
       markDraftsQueued(drafts)
       setPreview(null)
-      showToast(`Queued ${drafts.length} staged album(s) for tag writing.`)
-      await onCommitQueued?.()
+      showToast(
+        blockedReasons.length > 0
+          ? `Queued ${submittedJobs.length} track(s) (${blockedReasons.length} skipped: ${blockedReasons[0]}).`
+          : `Queued ${drafts.length} staged album(s) for tag writing on Engine.`,
+      )
+      await onCommitQueued?.(submittedJobs)
     } catch (err) {
       setPreview(null)
       showToast(`Could not queue staged albums: ${String(err)}`)
@@ -2140,10 +2173,14 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
                 {/* Queue writes for this album */}
                 <button
                   onClick={handleCommitAlbum}
-                  disabled={Boolean(selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitConfirmed || isBatchCommitting)}
+                  disabled={Boolean(isEngineReadOnly || selectedAlbum.draftBasedOn || stagingAlbumId || queuingAlbumId || selectedCommitConfirmed || isBatchCommitting)}
                   data-testid="btn-commit-album"
                   className="px-4 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#c29e2f] text-black font-semibold text-xs transition-colors cursor-pointer shadow-md flex items-center gap-1.5 disabled:opacity-50"
-                  title="Queue the selected metadata for background tag writing"
+                  title={
+                    isEngineReadOnly
+                      ? 'Read-Only Media Root — Tag writes disabled on this Engine'
+                      : 'Queue the selected metadata for Engine tag writing'
+                  }
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" />
                   <span>{queuingAlbumId ? 'Queuing…' : 'Commit Album'}</span>
@@ -2151,19 +2188,17 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
               </div>
             </div>
 
+            {isEngineReadOnly && (
+              <div role="status" className="mx-4 rounded-xl border border-amber-500/30 bg-amber-950/30 px-4 py-2.5 text-xs text-amber-200">
+                Read-Only Media Root — Tag writes disabled on this Engine. You can still stage drafts and inspect dry-run diffs; grant write access on the Engine host to write embedded tags.
+              </div>
+            )}
+
             {selectedCommitStatuses.has('failed') && (
               <div role="status" className="flex flex-wrap gap-2 px-4 text-xs text-amber-200">
                 <span>{selectedCommitError || 'Tag writing failed.'}</span>
                 <button className="underline" onClick={async () => {
-                  try {
-                    const count = await tauriBridge.commitRetryCurateItems(
-                      selectedCommitRows.filter(row => row.status === 'failed').map(row => row.id),
-                    )
-                    await onCommitQueued?.()
-                    showToast(count ? `Queued ${count} failed track(s) for retry.` : 'No failed tracks remain to retry.')
-                  } catch (err) {
-                    showToast(`Could not retry failed tracks: ${String(err)}`)
-                  }
+                  await handleCommitAlbum()
                 }}>Retry failed tracks</button>
               </div>
             )}

@@ -19,7 +19,13 @@ import {
 } from 'lucide-react'
 import { Playlist, Track, Release } from '../../core/types'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
-import { sqliteLibraryService, generatePlaylist4GridArtwork } from '../../services/sqliteLibraryService'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import { generatePlaylist4GridArtwork } from '../../core/libraryProjection'
+import {
+  getEnginePlaylistDetails,
+  removeTrackFromEnginePlaylist,
+} from '../../services/enginePlaylistService'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 
 interface PlaylistDetailViewProps {
   playlist: Playlist
@@ -41,6 +47,7 @@ export const PlaylistDetailView: React.FC<PlaylistDetailViewProps> = ({
   showToast,
 }) => {
   const { currentTrack, isPlaying, isPaused, playTrack, addToQueue, playNext } = useAudioPlayer()
+  const engine = useOptionalEngineController()
 
   const [tracks, setTracks] = useState<Track[]>(playlist.tracks || [])
   const [isLoading, setIsLoading] = useState(false)
@@ -48,13 +55,19 @@ export const PlaylistDetailView: React.FC<PlaylistDetailViewProps> = ({
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
 
   useEffect(() => {
-    loadPlaylistTracks()
-  }, [playlist.id])
+    void loadPlaylistTracks()
+  }, [playlist.id, engine?.engineClient])
 
   const loadPlaylistTracks = async () => {
+    if (!engine?.engineClient) return
     setIsLoading(true)
     try {
-      const details = await sqliteLibraryService.getPlaylistDetails(playlist.id)
+      const details = await getEnginePlaylistDetails(
+        engine.engineClient,
+        playlist.id,
+        allTracks.length > 0 ? allTracks : engine.coreCatalogTracks,
+        allReleases.length > 0 ? allReleases : engine.coreCatalogReleases,
+      )
       if (details?.tracks) {
         setTracks(details.tracks)
       }
@@ -94,8 +107,9 @@ export const PlaylistDetailView: React.FC<PlaylistDetailViewProps> = ({
   }
 
   const handleRemoveTrack = async (position: number, trkTitle: string) => {
+    if (!engine?.engineClient) return
     try {
-      await sqliteLibraryService.removeTrackFromPlaylist(playlist.id, position)
+      await removeTrackFromEnginePlaylist(engine.engineClient, playlist.id, position)
       setTracks((prev) => prev.filter((_, idx) => idx !== position))
       showToast?.(`Removed "${trkTitle}" from playlist`)
     } catch (err: any) {
@@ -127,14 +141,16 @@ export const PlaylistDetailView: React.FC<PlaylistDetailViewProps> = ({
       updated.splice(targetIndex, 0, moved)
       setTracks(updated)
 
-      try {
-        await sqliteLibraryService.reorderPlaylistTracks(
-          playlist.id,
-          updated.map((t) => t.id)
-        )
-        showToast?.('Updated track sequence')
-      } catch (err) {
-        console.error('[PlaylistDetailView] Reorder failed:', err)
+      if (engine?.engineClient) {
+        try {
+          await engine.engineClient.setPlaylistTracks(
+            playlist.id,
+            updated.map((t) => t.id),
+          )
+          showToast?.('Updated track sequence')
+        } catch (err) {
+          console.error('[PlaylistDetailView] Reorder failed:', err)
+        }
       }
     }
     setDraggedIndex(null)
@@ -176,10 +192,19 @@ export const PlaylistDetailView: React.FC<PlaylistDetailViewProps> = ({
           <div className="h-44 w-44 flex-shrink-0 overflow-hidden rounded-2xl bg-neutral-900 border border-white/10 shadow-2xl grid grid-cols-2 grid-rows-2">
             {gridArtwork.length >= 4 ? (
               gridArtwork.slice(0, 4).map((art, idx) => (
-                <img key={idx} src={art} alt="" className="h-full w-full object-cover" />
+                <EngineArtworkImg key={idx} src={art} alt="" className="h-full w-full object-cover" />
               ))
             ) : gridArtwork.length > 0 ? (
-              <img src={gridArtwork[0]} alt="" className="col-span-2 row-span-2 h-full w-full object-cover" />
+              <EngineArtworkImg
+                src={gridArtwork[0]}
+                alt=""
+                className="col-span-2 row-span-2 h-full w-full object-cover"
+                fallback={
+                  <div className="col-span-2 row-span-2 flex items-center justify-center text-neutral-600">
+                    <Disc3 className="h-12 w-12" />
+                  </div>
+                }
+              />
             ) : (
               <div className="col-span-2 row-span-2 flex items-center justify-center text-neutral-600">
                 <Disc3 className="h-12 w-12" />

@@ -22,7 +22,7 @@ import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { getCuratedAlbumArtwork } from '../../core/taxonomyUtils'
-import { resolveMediaUrl } from '../../services/tauriBridge'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 import { backdropAnalyzer } from '../../services/backdropAnalyzer'
 import { FEATURES } from '../../config/features'
 
@@ -389,13 +389,10 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                         title="Click to inspect/curate album (Hover for large preview)"
                       >
                         {group.coverArtUrl ? (
-                          <img
-                            src={resolveMediaUrl(group.coverArtUrl)}
+                          <EngineArtworkImg
+                            src={group.coverArtUrl}
                             alt={group.title}
                             className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform"
-                            onError={(e) => {
-                              ;(e.target as HTMLElement).style.display = 'none'
-                            }}
                           />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-[#64748B]">

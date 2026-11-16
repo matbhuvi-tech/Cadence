@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Track, Release, Playlist, SampleRateTransition, AudioFormat } from '../core/types'
 import { tauriBridge, AudioStreamTelemetry, ScannedAudioFileInfo } from '../services/tauriBridge'
-import { sqliteLibraryService } from '../services/sqliteLibraryService'
 import { graphEngine } from '../core/graphEngine'
 import { emitDiag, setFrontendCaptureMode } from '../core/diagnostics'
 import {
@@ -444,12 +443,15 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Detect environment on mount & load audio devices & purity mode & listen to Remote Controller events
   useEffect(() => {
     const tauri = tauriBridge.isTauri()
+    const hasLocal = tauriBridge.hasLocalEngine()
     setIsNativeTauri(tauri)
     tauriBridge.getDebugLogState().then((s) => setFrontendCaptureMode(s.mode)).catch(() => {})
-    tauriBridge.getPurityMode().then((p) => setIsPurityMode(p))
-    const controller = routingControllerRef.current!
-    controller.initializeStartup().catch(() => {})
-    controller.refreshInventory().catch(() => {})
+    if (hasLocal) {
+      tauriBridge.getPurityMode().then((p) => setIsPurityMode(p))
+      const controller = routingControllerRef.current!
+      controller.initializeStartup().catch(() => {})
+      controller.refreshInventory().catch(() => {})
+    }
 
     if (tauri) {
       import('@tauri-apps/api/event').then(({ listen }) => {
@@ -486,7 +488,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
               setStreamTelemetry((prev) => (isSameStreamTelemetry(prev, streamInfoVal) ? prev : streamInfoVal))
             }
             if (currentFileVal) reconcileActiveTrack(currentFileVal)
-            controller.syncFromBackendPoll().catch(() => {})
+            if (hasLocal) {
+              routingControllerRef.current?.syncFromBackendPoll().catch(() => {})
+            }
           }
         }).catch(() => {})
 
@@ -609,9 +613,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [currentTrack?.releaseId])
 
-  // Poll position and status strictly during active playback (zero background polling while paused or stopped)
+  // Poll position and status strictly during active local playback (no-op in thin Engine-required frontend)
   useEffect(() => {
-    const isTauri = isNativeTauri || tauriBridge.isTauri()
+    const isTauri = (isNativeTauri || tauriBridge.isTauri()) && tauriBridge.hasLocalEngine()
     if (isPlaying && !isPaused && isTauri) {
       pollIntervalRef.current = setInterval(async () => {
         try {
@@ -1284,31 +1288,18 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [playTrack])
 
-  const saveQueueAsPlaylist = useCallback(async (name: string, description?: string): Promise<Playlist | null> => {
+  const saveQueueAsPlaylist = useCallback(async (name: string, _description?: string): Promise<Playlist | null> => {
     if (!name.trim()) return null
     const tracksToSave = queue.length > 0 ? queue : currentTrack ? [currentTrack] : []
     if (tracksToSave.length === 0) return null
-
-    try {
-      const created = await sqliteLibraryService.createPlaylist({
-        title: name.trim(),
-        description: description?.trim() || undefined,
-        trackIds: tracksToSave.map((t) => t.id),
-        tracks: tracksToSave,
-      })
-
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(
-          new CustomEvent('cadence:toast', {
-            detail: `Saved ${tracksToSave.length} tracks to playlist "${name}"`,
-          })
-        )
-      }
-      return created
-    } catch (err) {
-      console.error('[AudioPlayerContext] saveQueueAsPlaylist error:', err)
-      return null
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('cadence:open-create-playlist', {
+          detail: { title: name.trim(), tracks: tracksToSave },
+        }),
+      )
     }
+    return null
   }, [queue, currentTrack])
 
   const progressContextValue = useMemo<AudioProgressContextType>(

@@ -28,7 +28,7 @@ import {
 } from 'lucide-react'
 import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
-import { resolveMediaUrl } from '../../services/tauriBridge'
+import { useResolvedMediaUrl } from '../common/EngineArtworkImg'
 import { useCorePlaybackClock } from '../../hooks/useCorePlaybackClock'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
@@ -226,7 +226,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   const effectiveRepeat = isCoreActive ? coreSnapshot?.queue.repeat ?? 'off' : repeatMode
   const effectiveShuffle = isCoreActive ? coreSnapshot?.queue.shuffle ?? false : isShuffle
   const corePositionSeconds = isCoreActive ? coreSnapshot?.playback.positionSeconds ?? 0 : 0
-  const engineLabel = engine?.state.view.session.active.label ?? 'This PC'
+  const engineLabel = isCoreActive ? engine?.state.view.session.active.label ?? 'Playback Engine' : 'Connect Engine'
   const engineConnected = isCoreActive ? Boolean(engine?.state.view.session.connected) : true
   const outputLabel = isCoreActive
     ? coreSnapshot?.output?.label || 'Core output'
@@ -290,7 +290,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
         ? engine?.coreCatalogReleases.find((r) => r.id === effectiveTrack.releaseId) ?? null
         : null)
     : (currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null))
-  const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+  const rawCoverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+  const coverUrl = useResolvedMediaUrl(rawCoverUrl)
 
   const [imgError, setImgError] = useState(false)
 
@@ -363,7 +364,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 >
                   {coverUrl && !imgError ? (
                     <img
-                      src={resolveMediaUrl(coverUrl)}
+                      src={coverUrl}
                       alt={effectiveTrack?.title || 'Album Art'}
                       onError={() => setImgError(true)}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform"

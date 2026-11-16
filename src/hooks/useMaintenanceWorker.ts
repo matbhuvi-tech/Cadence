@@ -34,7 +34,7 @@ export function useMaintenanceWorker(enabled: boolean = true) {
   }, [])
 
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled || !tauriBridge.hasLocalEngine()) return
 
     let isMounted = true
     let unlistenProgress: UnlistenFn | null = null

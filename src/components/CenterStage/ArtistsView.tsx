@@ -25,7 +25,12 @@ import {
   PlaybackStatePayload,
 } from '../../core/types'
 import { generateMonogramAvatar } from '../../core/taxonomyUtils'
-import { sqliteLibraryService } from '../../services/sqliteLibraryService'
+import {
+  deriveCanonicalArtistDetailFromCatalog,
+  deriveCanonicalArtistsFromCatalog,
+  saveClientArtistPreference,
+} from '../../core/libraryProjection'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 import { federatedResolversService, ArtistPortraitCandidate } from '../../services/federatedResolvers'
 import { ambientCurationService } from '../../services/ambientCurationService'
 import { tauriBridge } from '../../services/tauriBridge'
@@ -148,15 +153,11 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
   }, [])
 
   // Load canonical artists
-  const loadArtists = useCallback(async () => {
+  const loadArtists = useCallback(() => {
     setIsLoading(true)
     try {
-      const data = await sqliteLibraryService.getCanonicalArtists(releases, tracks, splitReleaseIds)
+      const data = deriveCanonicalArtistsFromCatalog(releases, tracks, splitReleaseIds)
       setArtists(data)
-    } catch (err) {
-      console.error('[ArtistsView] Error loading canonical artists:', err)
-      const fallback = sqliteLibraryService.deriveCanonicalArtistsFromState(releases, tracks, splitReleaseIds)
-      setArtists(fallback)
     } finally {
       setIsLoading(false)
     }
@@ -174,27 +175,16 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
       return
     }
 
-    let isMounted = true
-    setIsLoadingDetail(true)
     setIsBioExpanded(false)
     setDetailRoleTab('all')
-
-    sqliteLibraryService
-      .getCanonicalArtistDetail(selectedArtistId, releases, tracks, splitReleaseIds)
-      .then((detail) => {
-        if (isMounted) {
-          setArtistDetail(detail)
-          setIsLoadingDetail(false)
-        }
-      })
-      .catch((err) => {
-        console.error('[ArtistsView] Error loading artist detail:', err)
-        if (isMounted) setIsLoadingDetail(false)
-      })
-
-    return () => {
-      isMounted = false
-    }
+    const detail = deriveCanonicalArtistDetailFromCatalog(
+      selectedArtistId,
+      releases,
+      tracks,
+      splitReleaseIds,
+    )
+    setArtistDetail(detail)
+    setIsLoadingDetail(false)
   }, [selectedArtistId, releases, tracks, splitReleaseIds])
 
   // Zero-match drilldown guard: auto-reset selectedArtistId if 0 tracks match under active filter
@@ -275,23 +265,21 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
     )
 
     if (isAudioPlaying) {
-      // Audiophile Invariant: Queue SQLite/disk write for idle transport to prevent PHY/bus jitter
-      setQueuedPortraitNotification('● Queued for Idle Transport (Playback Active)')
+      // Audiophile Invariant: Persist client preference only when transport is idle
+      saveClientArtistPreference(artistDetail.artist.id, artistDetail.artist.name, {
+        portraitUrl: url,
+        portraitStatus: 'enriched',
+      })
+      setQueuedPortraitNotification('● Saved to client artist cache (Playback Active)')
       setTimeout(() => {
         setIsPortraitModalOpen(false)
         setQueuedPortraitNotification(null)
       }, 1400)
     } else {
-      try {
-        await sqliteLibraryService.setArtistPortrait(
-          artistDetail.artist.id,
-          url,
-          'enriched',
-          artistDetail.artist.name
-        )
-      } catch (err) {
-        console.warn('[ArtistsView] Failed to persist portrait to SQLite:', err)
-      }
+      saveClientArtistPreference(artistDetail.artist.id, artistDetail.artist.name, {
+        portraitUrl: url,
+        portraitStatus: 'enriched',
+      })
       setIsPortraitModalOpen(false)
     }
   }
@@ -316,21 +304,11 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
           portraitUrl: profile.portraitUrl,
         }
 
-        const isAudioPlaying = Boolean(playbackState?.isPlaying)
-        if (!isAudioPlaying) {
-          await sqliteLibraryService.updateArtistEditorialProfile(
-            artistDetail.artist.id,
-            editorialPayload,
-            artistDetail.artist.name
-          )
-        } else {
-          // Playback is active: update the in-memory cache immediately so navigation doesn't drop it
-          await sqliteLibraryService.updateArtistEditorialProfile(
-            artistDetail.artist.id,
-            editorialPayload,
-            artistDetail.artist.name
-          ).catch((e) => console.warn('[ArtistsView] Deferred editorial write warning:', e))
-        }
+        saveClientArtistPreference(
+          artistDetail.artist.id,
+          artistDetail.artist.name,
+          editorialPayload,
+        )
 
         setArtistDetail((prev) =>
           prev
@@ -617,10 +595,6 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
         {filteredDiscography.length > 0 ? (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-5 mb-12">
             {filteredDiscography.map((rel) => {
-              const coverArt =
-                resolveMediaUrl(rel.artwork?.frontCoverUrl) ||
-                'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" fill="%23222"><rect width="200" height="200"/></svg>'
-
               return (
                 <div
                   key={rel.id}
@@ -634,11 +608,16 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
                   className="group flex flex-col text-left cursor-pointer transition-all"
                 >
                   <div className="relative aspect-square w-full rounded-xl overflow-hidden bg-[#161B22] mb-3 shadow-[0_8px_20px_rgba(0,0,0,0.5)] ring-1 ring-inset ring-white/[0.08]">
-                    <img
-                      src={coverArt}
+                    <EngineArtworkImg
+                      src={rel.artwork?.frontCoverUrl}
                       alt={rel.title}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                       loading="lazy"
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                      fallback={
+                        <div className="w-full h-full flex items-center justify-center bg-[#222] text-white/25">
+                          <Disc className="w-10 h-10" />
+                        </div>
+                      }
                     />
                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                       <div className="w-10 h-10 rounded-full bg-white text-black flex items-center justify-center shadow-lg hover:scale-105 transition-transform">

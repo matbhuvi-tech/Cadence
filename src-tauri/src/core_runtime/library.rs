@@ -923,8 +923,21 @@ pub fn open_authorized(roots: &[PathBuf], path: &Path) -> Result<File> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let mut current = PathBuf::new();
-        for part in path.components() {
+        let root = roots
+            .iter()
+            .filter(|r| path.starts_with(r))
+            .max_by_key(|r| r.components().count())
+            .ok_or("Unauthorized root")?;
+        let relative = path.strip_prefix(root).map_err(|e| e.to_string())?;
+        let mut current = root.to_path_buf();
+        if std::fs::symlink_metadata(&current)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("Symlinks are not authorized".into());
+        }
+        for part in relative.components() {
             current.push(part.as_os_str());
             if std::fs::symlink_metadata(&current)
                 .map_err(|e| e.to_string())?
@@ -934,7 +947,20 @@ pub fn open_authorized(roots: &[PathBuf], path: &Path) -> Result<File> {
                 return Err("Symlinks are not authorized".into());
             }
         }
-        File::open(path).map_err(|e| e.to_string())
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&current)
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            File::open(&current).map_err(|e| e.to_string())
+        }
     }
 }
 

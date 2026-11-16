@@ -25,8 +25,12 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import { Track, Playlist, Release, SampleRateTransition } from '../../core/types'
-import { useEffectiveQueueControl } from '../../context/EngineControllerContext'
-import { sqliteLibraryService, generatePlaylist4GridArtwork } from '../../services/sqliteLibraryService'
+import { useEffectiveQueueControl, useOptionalEngineController } from '../../context/EngineControllerContext'
+import {
+  getEnginePlaylistDetails,
+  listEnginePlaylists,
+} from '../../services/enginePlaylistService'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 import { graphEngine } from '../../core/graphEngine'
 
 interface QueuePlaylistDrawerProps {
@@ -82,17 +86,27 @@ export const QueuePlaylistDrawer: React.FC<QueuePlaylistDrawerProps> = ({
   const dragSourceIndexRef = useRef<number | null>(null)
   const [showSettingsPopover, setShowSettingsPopover] = useState(false)
 
+  const engine = useOptionalEngineController()
+
   // Load playlists when switching to playlists tab or when drawer opens
   useEffect(() => {
     if (isOpen && queueDrawerTab === 'playlists') {
-      loadPlaylists()
+      void loadPlaylists()
     }
-  }, [isOpen, queueDrawerTab])
+  }, [isOpen, queueDrawerTab, engine?.engineClient])
 
   const loadPlaylists = async () => {
+    if (!engine?.engineClient) {
+      setPlaylists([])
+      return
+    }
     setIsLoadingPlaylists(true)
     try {
-      const data = await sqliteLibraryService.getPlaylists()
+      const data = await listEnginePlaylists(
+        engine.engineClient,
+        engine.coreCatalogTracks,
+        allReleases.length > 0 ? allReleases : engine.coreCatalogReleases,
+      )
       setPlaylists(data)
     } catch (err) {
       console.error('[QueuePlaylistDrawer] Failed to load playlists:', err)
@@ -175,8 +189,14 @@ export const QueuePlaylistDrawer: React.FC<QueuePlaylistDrawerProps> = ({
 
   // Play entire playlist
   const handlePlayPlaylist = async (pl: Playlist, shuffle: boolean = false) => {
+    if (!engine?.engineClient) return
     try {
-      const details = await sqliteLibraryService.getPlaylistDetails(pl.id)
+      const details = await getEnginePlaylistDetails(
+        engine.engineClient,
+        pl.id,
+        engine.coreCatalogTracks,
+        allReleases.length > 0 ? allReleases : engine.coreCatalogReleases,
+      )
       const tracks = details?.tracks || []
       if (tracks.length === 0) {
         showToast?.('Playlist is empty')
@@ -565,7 +585,12 @@ export const QueuePlaylistDrawer: React.FC<QueuePlaylistDrawerProps> = ({
                         {/* 4-Grid Thumbnail or Icon */}
                         <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-neutral-900 border border-white/10 text-neutral-400 group-hover:text-emerald-400 group-hover:border-emerald-500/30 transition-colors overflow-hidden">
                           {pl.coverArtUrl ? (
-                            <img src={pl.coverArtUrl} alt="" className="h-full w-full object-cover" />
+                            <EngineArtworkImg
+                              src={pl.coverArtUrl}
+                              alt=""
+                              className="h-full w-full object-cover"
+                              fallback={<Disc3 className="h-5 w-5" />}
+                            />
                           ) : (
                             <Disc3 className="h-5 w-5" />
                           )}

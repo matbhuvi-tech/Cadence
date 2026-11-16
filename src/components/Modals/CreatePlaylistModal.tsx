@@ -1,11 +1,18 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { X, ListMusic, Tag, FileText, Music, Sparkles } from 'lucide-react'
 import { Track, Playlist, Release } from '../../core/types'
-import { sqliteLibraryService, generatePlaylist4GridArtwork, computePlaylistFormatBreakdown } from '../../services/sqliteLibraryService'
+import {
+  computePlaylistFormatBreakdown,
+  generatePlaylist4GridArtwork,
+} from '../../core/libraryProjection'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import { createEnginePlaylist } from '../../services/enginePlaylistService'
+import { EngineArtworkImg } from '../common/EngineArtworkImg'
 
 interface CreatePlaylistModalProps {
   isOpen: boolean
   onClose: () => void
+  initialTitle?: string
   initialTracks?: Track[]
   allReleases?: Release[]
   onPlaylistCreated?: (playlist: Playlist) => void
@@ -15,16 +22,24 @@ interface CreatePlaylistModalProps {
 export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
   isOpen,
   onClose,
+  initialTitle = '',
   initialTracks = [],
   allReleases = [],
   onPlaylistCreated,
   showToast,
 }) => {
-  const [title, setTitle] = useState('')
+  const engine = useOptionalEngineController()
+  const [title, setTitle] = useState(initialTitle)
   const [description, setDescription] = useState('')
   const [tagsInput, setTagsInput] = useState('')
   const [listeningNotes, setListeningNotes] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+
+  useEffect(() => {
+    if (isOpen && initialTitle) {
+      setTitle(initialTitle)
+    }
+  }, [isOpen, initialTitle])
 
   if (!isOpen) return null
 
@@ -33,26 +48,18 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!title.trim() || isSubmitting) return
+    if (!title.trim() || isSubmitting || !engine?.engineClient) return
 
     setIsSubmitting(true)
     try {
-      const parsedTags = tagsInput
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean)
-
       const trackIds = initialTracks.map((t) => t.id)
-      const coverArtUrl = gridArtwork.length > 0 ? gridArtwork[0] : undefined
 
-      const newPlaylist = await sqliteLibraryService.createPlaylist({
+      const newPlaylist = await createEnginePlaylist(engine.engineClient, {
         title: title.trim(),
         description: description.trim() || undefined,
-        coverArtUrl,
-        tags: parsedTags,
-        listeningNotes: listeningNotes.trim() || undefined,
         trackIds,
         tracks: initialTracks,
+        allReleases,
       })
 
       showToast?.(`Created playlist "${newPlaylist.title}" with ${initialTracks.length} tracks`)
@@ -104,10 +111,19 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
               <div className="h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg bg-neutral-900 border border-white/10 grid grid-cols-2 grid-rows-2">
                 {gridArtwork.length >= 4 ? (
                   gridArtwork.slice(0, 4).map((art, idx) => (
-                    <img key={idx} src={art} alt="" className="h-full w-full object-cover" />
+                    <EngineArtworkImg key={idx} src={art} alt="" className="h-full w-full object-cover" />
                   ))
                 ) : gridArtwork.length > 0 ? (
-                  <img src={gridArtwork[0]} alt="" className="col-span-2 row-span-2 h-full w-full object-cover" />
+                  <EngineArtworkImg
+                    src={gridArtwork[0]}
+                    alt=""
+                    className="col-span-2 row-span-2 h-full w-full object-cover"
+                    fallback={
+                      <div className="col-span-2 row-span-2 flex items-center justify-center text-neutral-600">
+                        <Music className="h-6 w-6" />
+                      </div>
+                    }
+                  />
                 ) : (
                   <div className="col-span-2 row-span-2 flex items-center justify-center text-neutral-600">
                     <Music className="h-6 w-6" />

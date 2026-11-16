@@ -52,7 +52,10 @@ import { TutorialActions } from './tutorial/tutorialSteps'
 import { AudioPlayerProvider, useAudioPlayer } from './context/AudioPlayerContext'
 import { EngineControllerProvider, useEngineController } from './context/EngineControllerContext'
 import { NowPlayingBar } from './components/AudioPlayer/NowPlayingBar'
-import { sqliteLibraryService } from './services/sqliteLibraryService'
+import { EngineConnectionGate } from './components/Engine/EngineConnectionGate'
+import { listEnginePlaylists } from './services/enginePlaylistService'
+import { mapEngineJobStatusToCommitStatus } from './services/engineCurateBridge'
+import { stripCoreReleasePrefix } from './services/engineClient'
 import { tauriBridge, type CaptureMode } from './services/tauriBridge'
 import { ActivityPill } from './components/CommandBar/ActivityPill'
 import { CommitStatusPill } from './components/CommandBar/CommitStatusPill'
@@ -124,35 +127,76 @@ export function AppContent({ onGeminiRemoved }: { onGeminiRemoved?: () => void }
 }
 
 function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
-  // Primary Graph State
-  const [catalogTracks, setTracks] = useState<Track[]>(() => graphEngine.getAllTracks())
-  const [catalogReleases, setReleases] = useState<Release[]>(() => graphEngine.getAllReleases())
+  const {
+    state: engineState,
+    isCoreActive,
+    isBootstrapping,
+    activeCoreSnapshot,
+    engineClient,
+    coreCatalogTracks,
+    coreCatalogReleases,
+    requestSwitchToLocal,
+    reconnectCore,
+    coreRefreshSnapshot,
+    coreRefreshCatalog,
+    subscribeEngineEvents,
+  } = useEngineController()
+
+  // Primary Graph State (pure in-memory projection fed by the active Playback Engine)
+  const [catalogTracks, setTracks] = useState<Track[]>([])
+  const [catalogReleases, setReleases] = useState<Release[]>([])
   const [curateCommits, setCurateCommits] = useState<CurateCommitRow[]>([])
-  const commitReadVersion = useRef(0)
+  const activeEngineJobsRef = useRef<
+    Map<string, { jobId: string; draftId: string; trackId: string; payloadJson: string; status: string }>
+  >(new Map())
   const draftSaveVersion = useRef(0)
-  const refreshCurateCommits = useCallback(async () => {
-    const version = ++commitReadVersion.current
-    const draftVersion = draftSaveVersion.current
-    try {
-      const rows = await tauriBridge.commitGetCurateProjection()
-      if (version === commitReadVersion.current) {
-        setCurateCommits(current => {
-          // A read started before a draft save can still report useful write
-          // outcomes, but must not clear the newer draft marker for that item.
-          const local = draftVersion === draftSaveVersion.current ? null : new Map(current.map(row => [row.id, row]))
-          const next = local ? rows.map(row => {
-            const saved = local.get(row.id)
-            return saved?.hasNewerDraft
-              ? { ...row, hasNewerDraft: true, hasHeldEdits: saved.hasHeldEdits }
-              : row
-          }) : rows
-          return areCurateCommitRowsEqual(current, next) ? current : next
-        })
-      }
-    } catch (err) {
-      console.warn('[Curate] Could not read commit queue:', err)
-    }
+
+  const syncCurateRowsFromActiveJobs = useCallback(() => {
+    const rows: CurateCommitRow[] = Array.from(activeEngineJobsRef.current.values()).map((j) => ({
+      id: j.jobId,
+      trackId: j.trackId,
+      status: mapEngineJobStatusToCommitStatus(j.status),
+      payloadJson: j.payloadJson,
+    }))
+    setCurateCommits((current) => (areCurateCommitRowsEqual(current, rows) ? current : rows))
   }, [])
+
+  const refreshCurateCommits = useCallback(
+    async (
+      submittedJobs?: Array<{
+        jobId: string
+        draftId: string
+        trackId: string
+        payloadJson: string
+        status: string
+      }>,
+    ) => {
+      if (submittedJobs?.length) {
+        for (const job of submittedJobs) {
+          activeEngineJobsRef.current.set(job.jobId, job)
+        }
+        syncCurateRowsFromActiveJobs()
+      }
+      if (!engineClient || activeEngineJobsRef.current.size === 0) return
+      let anyVerified = false
+      for (const [jobId, existing] of activeEngineJobsRef.current.entries()) {
+        if (existing.status === 'verified' || existing.status === 'failed') continue
+        try {
+          const next = await engineClient.getCurateJobStatus(jobId)
+          activeEngineJobsRef.current.set(jobId, { ...existing, status: next.status })
+          if (next.status === 'verified') anyVerified = true
+        } catch {
+          // keep last known status
+        }
+      }
+      syncCurateRowsFromActiveJobs()
+      if (anyVerified) {
+        void coreRefreshCatalog().catch(() => {})
+      }
+    },
+    [engineClient, coreRefreshCatalog, syncCurateRowsFromActiveJobs],
+  )
+
   const noteCurateDraftSaved = useCallback((draft: CurateDraft) => {
     draftSaveVersion.current++
     const ids = new Set(draft.tracks.map(track => track.trackId))
@@ -163,35 +207,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
       return { ...row, hasNewerDraft: true, hasHeldEdits: Boolean(draft.heldTrackEdits?.length) }
     }))
   }, [])
-  useEffect(() => {
-    if (!tauriBridge.isTauri()) return
-    let disposed = false
-    let unsubscribe: (() => void) | undefined
-    let lastTelemetrySig: string | null = null
-    void refreshCurateCommits()
-    void tauriBridge.listenCommitTelemetry((payload) => {
-      if (disposed) return
-      const sig = `${payload.state}|${payload.activeBatchId ?? ''}|${payload.pendingItems}|${payload.inflightItems}|${payload.completedItems}|${payload.failedItems}|${payload.currentTrackId ?? ''}`
-      if (sig === lastTelemetrySig) return
-      const isInitialEmptyIdle =
-        lastTelemetrySig === null &&
-        payload.state === 'idle' &&
-        payload.totalItems === 0 &&
-        !payload.activeBatchId
-      lastTelemetrySig = sig
-      if (!isInitialEmptyIdle) {
-        void refreshCurateCommits()
-      }
-    }).then(unlisten => {
-      if (disposed) unlisten()
-      else unsubscribe = unlisten
-    })
-    return () => {
-      disposed = true
-      commitReadVersion.current++
-      unsubscribe?.()
-    }
-  }, [refreshCurateCommits])
+
   const [prioritySettings, setPrioritySettings] = useState(loadPrioritySettings)
   const [dismissedProblems, setDismissedProblems] = useState(loadDismissedProblems)
   const curateCatalog = useMemo(
@@ -199,16 +215,6 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
     [catalogTracks, catalogReleases, curateCommits, prioritySettings, dismissedProblems],
   )
   const [topMode, setTopMode] = useState<'library' | 'curate' | 'maintain'>('library')
-  const {
-    state: engineState,
-    isCoreActive,
-    activeCoreSnapshot,
-    coreCatalogTracks,
-    coreCatalogReleases,
-    requestSwitchToLocal,
-    reconnectCore,
-    coreRefreshSnapshot,
-  } = useEngineController()
   const tracks = useMemo(
     () => (isCoreActive && topMode !== 'curate' ? coreCatalogTracks : curateCatalog.tracks),
     [isCoreActive, topMode, coreCatalogTracks, curateCatalog.tracks],
@@ -217,48 +223,61 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
     () => (isCoreActive && topMode !== 'curate' ? coreCatalogReleases : curateCatalog.releases),
     [isCoreActive, topMode, coreCatalogReleases, curateCatalog.releases],
   )
-  const [works, setWorks] = useState<Work[]>(() => graphEngine.getAllWorks())
-  const [storageMounts, setStorageMounts] = useState<StorageMount[]>(() => graphEngine.getAllStorageMounts())
-  const [auditIssues, setAuditIssues] = useState<AuditIssue[]>(() => graphEngine.getAllAuditIssues())
+  const [works, setWorks] = useState<Work[]>([])
+  const [storageMounts, setStorageMounts] = useState<StorageMount[]>([])
+  const [auditIssues, setAuditIssues] = useState<AuditIssue[]>([])
   const [isCustomLibraryActive, setIsCustomLibraryActive] = useState<boolean>(false)
   const [offlineMounts, setOfflineMounts] = useState<StorageMount[]>([])
   const [offlineStats, setOfflineStats] = useState<{ tracks: number; releases: number }>({ tracks: 0, releases: 0 })
   const [isCheckingConnectivity, setIsCheckingConnectivity] = useState<boolean>(false)
-  const [isDbInitializing, setIsDbInitializing] = useState<boolean>(true)
-  const [dbInitStatus, setDbInitStatus] = useState<string>('Warming up the listening room...')
-  const [dbInitProgress, setDbInitProgress] = useState<number>(15)
   const [showStartupSplash, setShowStartupSplash] = useState<boolean>(true)
+  const isDbInitializing = isBootstrapping
+  const dbInitStatus = isBootstrapping
+    ? 'Discovering & connecting to Playback Engine...'
+    : isCoreActive
+      ? `Connected to ${engineState.view.session.active.label}`
+      : 'Select a Playback Engine'
+  const dbInitProgress = isBootstrapping ? 45 : 100
 
-  // Split releases persisted from SQLite
+  // Split releases persisted on the Engine
   const [splitReleaseIds, setSplitReleaseIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
-    tauriBridge.dbGetSplitReleases().then((ids) => {
-      setSplitReleaseIds(new Set(ids))
-    }).catch((err) => {
-      console.warn('[App] Failed to load split release IDs:', err)
-    })
-  }, [])
+    if (!engineClient) {
+      setSplitReleaseIds(new Set())
+      return
+    }
+    let cancelled = false
+    engineClient
+      .listSplitReleases()
+      .then((ids) => {
+        if (cancelled) return
+        setSplitReleaseIds(new Set(ids.map((id) => `core_rel_${stripCoreReleasePrefix(id)}`)))
+      })
+      .catch((err) => {
+        console.warn('[App] Failed to load split release IDs from Engine:', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [engineClient])
 
   const handleToggleReleaseSplit = async (releaseId: string) => {
+    if (!engineClient) return
     try {
-      if (splitReleaseIds.has(releaseId)) {
-        await tauriBridge.dbRemoveReleaseSplit(releaseId)
-        setSplitReleaseIds((prev) => {
-          const next = new Set(prev)
-          next.delete(releaseId)
-          return next
-        })
-        showToast('Multi-disc release recombined.')
-      } else {
-        await tauriBridge.dbSetReleaseSplit(releaseId)
-        setSplitReleaseIds((prev) => {
-          const next = new Set(prev)
-          next.add(releaseId)
-          return next
-        })
-        showToast('Multi-disc release split into individual discs.')
-      }
+      const res = await engineClient.toggleSplitRelease(releaseId)
+      const uiId = `core_rel_${stripCoreReleasePrefix(releaseId)}`
+      setSplitReleaseIds((prev) => {
+        const next = new Set(prev)
+        if (res.split) next.add(uiId)
+        else next.delete(uiId)
+        return next
+      })
+      showToast(
+        res.split
+          ? 'Multi-disc release split into individual discs.'
+          : 'Multi-disc release recombined.',
+      )
     } catch (err) {
       console.error('[App] Failed to toggle release split:', err)
       showToast('Failed to update release split setting.')
@@ -414,7 +433,19 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   const [editingPlaylist, setEditingPlaylist] = useState<Playlist | null>(null)
   const [isAddTracksModalOpen, setIsAddTracksModalOpen] = useState(false)
   const [tracksToAdd, setTracksToAdd] = useState<Track[]>([])
+  const [initialPlaylistTitle, setInitialPlaylistTitle] = useState('')
   const [initialPlaylistTracks, setInitialPlaylistTracks] = useState<Track[]>([])
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ title?: string; tracks?: Track[] }>).detail
+      setInitialPlaylistTitle(detail?.title ?? '')
+      setInitialPlaylistTracks(detail?.tracks ?? [])
+      setIsCreatePlaylistOpen(true)
+    }
+    window.addEventListener('cadence:open-create-playlist', handler)
+    return () => window.removeEventListener('cadence:open-create-playlist', handler)
+  }, [])
 
   const {
     isPlaying,
@@ -446,22 +477,23 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
     })
   }, [])
 
-  const refreshPlaylists = async () => {
-    try {
-      const data = await sqliteLibraryService.getPlaylists()
-      setPlaylists(data)
-      if (selectedPlaylist) {
-        const updated = data.find((p) => p.id === selectedPlaylist.id)
-        if (updated) setSelectedPlaylist(updated)
-      }
-    } catch (err) {
-      console.warn('[App] Failed to load playlists:', err)
+  const refreshPlaylists = useCallback(async () => {
+    if (!engineClient) {
+      setPlaylists([])
+      return
     }
-  }
+    try {
+      const data = await listEnginePlaylists(engineClient, coreCatalogTracks, coreCatalogReleases)
+      setPlaylists(data)
+      setSelectedPlaylist((prev) => (prev ? data.find((p) => p.id === prev.id) ?? prev : null))
+    } catch (err) {
+      console.warn('[App] Failed to load Engine playlists:', err)
+    }
+  }, [engineClient, coreCatalogTracks, coreCatalogReleases])
 
   useEffect(() => {
-    refreshPlaylists()
-  }, [])
+    void refreshPlaylists()
+  }, [refreshPlaylists])
 
   const showToast = (msg: string) => {
     setToastMessage(msg)
@@ -635,42 +667,17 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
     const res = graphEngine.updateReleaseDetails(releaseId, updates)
     if (res) {
       refreshFromEngine()
-      persistCurrentLibrary()
-      if (updates.coverArtUrl !== undefined || updates.backdropUrl !== undefined) {
-        sqliteLibraryService.persistReleaseArtworkToDb(releaseId, {
-          frontCoverUrl: updates.coverArtUrl,
-          backdropUrl: updates.backdropUrl,
-        })
-      }
       showToast(`Customized "${res.release.title}" • ${res.affectedTracksCount} tracks staged in sidecar`)
     }
   }
 
-  // Persist current active library to IndexedDB local database and native SQLite
+  // Pure in-memory catalog projection (Zero local SQLite / IndexedDB persistence)
   const persistCurrentLibrary = async () => {
-    try {
-      const allTracks = graphEngine.getAllTracks()
-      const allReleases = graphEngine.getAllReleases()
-
-      await storagePersistence.saveLibrary({
-        tracks: allTracks,
-        releases: allReleases,
-        works: graphEngine.getAllWorks(),
-        storageMounts: graphEngine.getAllStorageMounts(),
-        auditIssues: graphEngine.getAllAuditIssues(),
-        isCustomLibrary: graphEngine.isUsingCustomLibrary(),
-        lastImportedTimestamp: new Date().toISOString(),
-      })
-
-      // Immediately synchronize tracks and releases into native SQLite database
-      await sqliteLibraryService.persistLibraryToDb(allTracks, allReleases)
-    } catch (err) {
-      console.warn('Failed to persist library to local database:', err)
-    }
+    // Engine owns cadence.db; frontend maintains pure in-memory projections.
   }
 
   // Refresh entire data graph from engine and synchronously recompute dynamic catalog hygiene
-  const refreshFromEngine = () => {
+  const refreshFromEngine = useCallback(() => {
     auditService.runFullCatalogAudit()
     setTracks([...graphEngine.getAllTracks()])
     setReleases([...graphEngine.getAllReleases()])
@@ -678,401 +685,160 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
     setStorageMounts([...graphEngine.getAllStorageMounts()])
     setAuditIssues([...graphEngine.getAllAuditIssues()])
     setIsCustomLibraryActive(graphEngine.isUsingCustomLibrary())
-  }
-
-  // On initial mount: initialize SQLite, check migration from IndexedDB, and subscribe to native scanner telemetry
-  useEffect(() => {
-    let mounted = true
-
-    async function initSqliteAndLibrary() {
-      try {
-        if (mounted) {
-          setDbInitStatus('Preparing your personal music sanctuary...')
-          setDbInitProgress(25)
-        }
-        // 1. Check & migrate legacy IndexedDB scans into SQLite
-        const migration = await sqliteLibraryService.checkAndMigrateFromIndexedDB()
-        if (migration.migrated && mounted) {
-          showToast(
-            `Migrated ${migration.tracksCount} tracks from previous scan cache into native SQLite database`
-          )
-        }
-
-        if (mounted) {
-          setDbInitStatus('Gathering your albums & master recordings...')
-          setDbInitProgress(55)
-        }
-        // 2. Load from SQLite
-        const dbData = await sqliteLibraryService.loadLibraryFromDb()
-        if (dbData && mounted) {
-          setDbInitStatus('Tuning the audiophile stage...')
-          setDbInitProgress(85)
-          setStorageMounts(dbData.storageMounts)
-          setWatchedFolders(dbData.watchedFolders)
-          setSkippedFiles(dbData.skippedFiles)
-          setScanTelemetry((prev) => ({
-            ...prev,
-            skippedCount: dbData.skippedFiles.length,
-          }))
-
-          if (dbData.offlineMounts.length > 0) {
-            setOfflineMounts(dbData.offlineMounts)
-            setOfflineStats({
-              tracks: dbData.offlineTracksCount,
-              releases: dbData.offlineReleasesCount,
-            })
-          } else {
-            setOfflineMounts([])
-            setOfflineStats({ tracks: 0, releases: 0 })
-          }
-
-          if (dbData.tracks.length > 0) {
-            graphEngine.loadCustomLibrary({
-              tracks: dbData.tracks,
-              releases: dbData.releases,
-              works: [],
-              auditIssues: [],
-              storageMounts: dbData.storageMounts,
-            })
-            refreshFromEngine()
-            if (dbData.tracks.length > 0) {
-              setSelectedTrackId(dbData.tracks[0].id)
-            }
-            if (dbData.offlineMounts.length > 0) {
-              showToast(
-                `Loaded ${dbData.tracks.length} active tracks. Notice: "${dbData.offlineMounts[0].name}" is offline (${dbData.offlineReleasesCount} albums withheld).`
-              )
-            } else {
-              showToast(`Loaded ${dbData.tracks.length} tracks from SQLite database (WAL active)`)
-            }
-          } else if (dbData.offlineMounts.length > 0) {
-            // All tracks are on offline network storage!
-            // Withhold all album data as requested by user to prevent unplayable playback and failed commits
-            graphEngine.clearLibrary()
-            refreshFromEngine()
-            showToast(
-              `Network folder not accessible (${dbData.offlineMounts[0].mountPath}). Albums withheld from display.`
-            )
-          } else if (tauriBridge.isTauri()) {
-            // In desktop environment with empty library: do not load stale legacy IndexedDB cache
-            graphEngine.clearLibrary()
-            refreshFromEngine()
-          } else {
-            // Fallback to legacy IndexedDB if SQLite has no data and not in Tauri
-            const saved = await storagePersistence.loadLibrary()
-            if (saved && saved.tracks && saved.tracks.length > 0 && mounted) {
-              graphEngine.loadCustomLibrary({
-                tracks: saved.tracks,
-                releases: saved.releases,
-                works: saved.works,
-                auditIssues: saved.auditIssues,
-                storageMounts: saved.storageMounts,
-              })
-              refreshFromEngine()
-              if (saved.tracks.length > 0) {
-                setSelectedTrackId(saved.tracks[0].id)
-              }
-              showToast(`Loaded personal library (${saved.tracks.length} tracks) from storage cache`)
-            }
-          }
-        }
-
-        // Sync user's scan playback policy to Rust backend
-        const savedScanPolicy = (localStorage.getItem('cadence_scan_playback_policy') || 'purist') as
-          | 'purist'
-          | 'paced'
-          | 'unthrottled'
-        tauriBridge.setScannerPlaybackPolicy(savedScanPolicy).catch(() => { })
-
-        // 3. Subscribe to real-time native scanner events
-        await sqliteLibraryService.subscribeToScannerEvents({
-          onProgress: (payload) => {
-            if (mounted) {
-              setScanTelemetry(payload)
-            }
-          },
-          onChunk: (chunk) => {
-            if (mounted && chunk.tracks.length > 0) {
-              chunk.tracks.forEach((t) => graphEngine.addOrUpdateTrack(t))
-              chunk.releases.forEach((r) => graphEngine.addOrUpdateRelease(r))
-              refreshFromEngine()
-            }
-          },
-          onComplete: async (result) => {
-            if (mounted) {
-              showToast(
-                `Indexing complete: ${result.importedCount} imported, ${result.skippedCount} skipped (${result.durationSecs}s)`
-              )
-              const refreshed = await sqliteLibraryService.loadLibraryFromDb()
-              if (refreshed) {
-                setWatchedFolders(refreshed.watchedFolders)
-                setSkippedFiles(refreshed.skippedFiles)
-                setScanTelemetry((prev) => ({
-                  ...prev,
-                  skippedCount: refreshed.skippedFiles.length,
-                }))
-                setStorageMounts(refreshed.storageMounts)
-                setOfflineMounts(refreshed.offlineMounts)
-                if (refreshed.tracks.length > 0) {
-                  graphEngine.loadCustomLibrary({
-                    tracks: refreshed.tracks,
-                    releases: refreshed.releases,
-                    works: [],
-                    auditIssues: [],
-                    storageMounts: refreshed.storageMounts,
-                  })
-                }
-                refreshFromEngine()
-              }
-            }
-          },
-        })
-
-        if (mounted) {
-          setDbInitStatus('Welcome to your Audiophile World')
-          setDbInitProgress(100)
-        }
-      } catch (err) {
-        console.error('[App] Failed to initialize SQLite library:', err)
-      } finally {
-        if (mounted) {
-          setIsDbInitializing(false)
-        }
-      }
-    }
-
-    initSqliteAndLibrary()
-
-    return () => {
-      mounted = false
-      sqliteLibraryService.cleanupListeners()
-    }
   }, [])
 
-  const handleTriggerScan = async (folderPath: string, forceFull: boolean = false) => {
+  // Project connected Engine catalog into graphEngine for Browse, Curate, Search, and Facets
+  useEffect(() => {
+    if (!isCoreActive) {
+      graphEngine.clearLibrary()
+      refreshFromEngine()
+      setWatchedFolders([])
+      return
+    }
+    graphEngine.loadCustomLibrary({
+      tracks: coreCatalogTracks,
+      releases: coreCatalogReleases,
+      works: [],
+      auditIssues: [],
+      storageMounts: [],
+    })
+    refreshFromEngine()
+    if (coreCatalogTracks.length > 0) {
+      setSelectedTrackId((prev) =>
+        coreCatalogTracks.some((t) => t.id === prev) ? prev : coreCatalogTracks[0].id,
+      )
+    }
+  }, [isCoreActive, coreCatalogTracks, coreCatalogReleases, refreshFromEngine])
+
+  const refreshEngineFolders = useCallback(async () => {
+    if (!engineClient) {
+      setWatchedFolders([])
+      return
+    }
     try {
-      await tauriBridge.startLibraryScan(folderPath, undefined, forceFull)
-      showToast(`Started scan of "${folderPath}"...`)
+      const folders = await engineClient.listFolders()
+      setWatchedFolders(
+        folders.map((f) => ({
+          id: f.id,
+          mountId: 'core',
+          folderPath: f.path,
+          displayName: f.displayName,
+          scanMode: f.scanMode === 'manual' ? 'manual' : 'realtime',
+          isEnabled: true,
+          lastScannedTimestamp: f.lastScannedAt ?? undefined,
+          trackCount: f.trackCount,
+        })),
+      )
+    } catch {
+      // ignore if engine busy/offline
+    }
+  }, [engineClient])
+
+  useEffect(() => {
+    void refreshEngineFolders()
+  }, [refreshEngineFolders])
+
+  useEffect(() => {
+    if (!isCoreActive) return
+    return subscribeEngineEvents((ev) => {
+      if (ev.event === 'catalog.changed') {
+        void refreshEngineFolders()
+        void refreshPlaylists()
+        void refreshCurateCommits()
+      } else if (ev.event.startsWith('scan.')) {
+        const data = (ev.data ?? {}) as Record<string, unknown>
+        const processed = typeof data.processed === 'number' ? data.processed : 0
+        setScanTelemetry((prev) => ({
+          ...prev,
+          status: ev.event === 'scan.complete' ? 'completed' : 'scanning',
+          importedCount: typeof data.imported === 'number' ? data.imported : processed,
+          currentFile: typeof data.path === 'string' ? data.path : prev.currentFile,
+        }))
+        if (ev.event === 'scan.complete') {
+          void coreRefreshCatalog().catch(() => {})
+          void refreshEngineFolders()
+        }
+      } else if (ev.event.startsWith('curate.')) {
+        void refreshCurateCommits()
+      }
+    })
+  }, [
+    isCoreActive,
+    subscribeEngineEvents,
+    refreshEngineFolders,
+    refreshPlaylists,
+    refreshCurateCommits,
+    coreRefreshCatalog,
+  ])
+
+  const handleTriggerScan = async (folderPath?: string, forceFull: boolean = false) => {
+    if (!engineClient) return
+    try {
+      const matched = folderPath
+        ? watchedFolders.find((f) => f.folderPath === folderPath)
+        : undefined
+      await engineClient.scanFolders({ folderId: matched?.id, forceFull })
+      showToast(
+        folderPath
+          ? `Queued Engine scan of "${folderPath}"...`
+          : 'Queued Engine library scan...',
+      )
     } catch (err: any) {
-      showToast(`Scan error: ${err.message || err}`)
+      showToast(`Scan error: ${err?.message || err}`)
     }
   }
 
-  const handleToggleMountStatus = async (mountId: string, currentStatus: string) => {
-    const newStatus = currentStatus === 'offline' ? 'online' : 'offline'
-    await tauriBridge.dbSetMountStatus(mountId, newStatus)
-    graphEngine.setMountOnlineStatus(mountId, newStatus === 'online')
-    refreshFromEngine()
-    showToast(`Mount marked ${newStatus}. Ghost-track protection active.`)
+  const handleToggleMountStatus = async (_mountId: string, _currentStatus: string) => {
+    showToast('Storage mounts are managed directly by the Playback Engine.')
   }
 
-  const handleToggleMountLock = async (mountId: string) => {
-    const newLock = await tauriBridge.dbToggleMountLock(mountId)
-    setStorageMounts((prev) =>
-      prev.map((m) => (m.id === mountId ? { ...m, isReadOnlyLocked: newLock } : m))
-    )
-    showToast(newLock ? 'Storage mount Read-Only locked' : 'Storage mount Read-Write unlocked')
+  const handleToggleMountLock = async (_mountId: string) => {
+    showToast('Read-only locks are enforced by the Playback Engine.')
   }
 
   const handleRefreshLibrary = async () => {
-    const data = await sqliteLibraryService.loadLibraryFromDb()
-    if (data) {
-      setWatchedFolders(data.watchedFolders)
-      setSkippedFiles(data.skippedFiles)
-      setScanTelemetry((prev) => ({
-        ...prev,
-        skippedCount: data.skippedFiles.length,
-      }))
-      setStorageMounts(data.storageMounts)
-
-      if (data.offlineMounts.length > 0) {
-        setOfflineMounts(data.offlineMounts)
-        setOfflineStats({
-          tracks: data.offlineTracksCount,
-          releases: data.offlineReleasesCount,
-        })
-      } else {
-        setOfflineMounts([])
-        setOfflineStats({ tracks: 0, releases: 0 })
-      }
-
-      if (data.tracks.length > 0) {
-        graphEngine.loadCustomLibrary({
-          tracks: data.tracks,
-          releases: data.releases,
-          works: [],
-          auditIssues: [],
-          storageMounts: data.storageMounts,
-        })
-        refreshFromEngine()
-        showToast(
-          data.offlineMounts.length > 0
-            ? `Storage refreshed: ${data.tracks.length} active tracks (${data.offlineReleasesCount} albums withheld).`
-            : `Storage refreshed: ${data.tracks.length} tracks loaded.`
-        )
-      } else if (data.offlineMounts.length > 0) {
-        graphEngine.clearLibrary()
-        refreshFromEngine()
-        showToast(`Network folder still inaccessible (${data.offlineMounts[0].mountPath}). Albums withheld.`)
-      }
-    }
+    if (!isCoreActive) return
+    await Promise.all([coreRefreshCatalog(), refreshEngineFolders(), refreshPlaylists()])
+    showToast('Refreshed library catalog from Playback Engine.')
   }
 
   const handleIgnoreSkippedFile = async (id: string) => {
-    try {
-      await tauriBridge.dbIgnoreSkippedFile(id)
-      setSkippedFiles((prev) => prev.filter((s) => s.id !== id))
-      setScanTelemetry((prev) => ({
-        ...prev,
-        skippedCount: Math.max(0, prev.skippedCount - 1),
-      }))
-      showToast('Ignored unparseable file from future scans')
-    } catch (err: any) {
-      showToast(`Error ignoring file: ${err.message || err}`)
-    }
+    setSkippedFiles((prev) => prev.filter((s) => s.id !== id))
+    setScanTelemetry((prev) => ({
+      ...prev,
+      skippedCount: Math.max(0, prev.skippedCount - 1),
+    }))
   }
 
   const handleIgnoreAllSkippedFiles = async () => {
-    try {
-      await tauriBridge.dbIgnoreAllSkippedFiles()
-      setSkippedFiles([])
-      setScanTelemetry((prev) => ({
-        ...prev,
-        skippedCount: 0,
-      }))
-      showToast('Dismissed and permanently ignored all skipped files')
-    } catch (err: any) {
-      showToast(`Error dismissing skipped files: ${err.message || err}`)
-    }
+    setSkippedFiles([])
+    setScanTelemetry((prev) => ({
+      ...prev,
+      skippedCount: 0,
+    }))
   }
 
   const handleRetryConnection = async () => {
     setIsCheckingConnectivity(true)
     try {
-      const data = await sqliteLibraryService.loadLibraryFromDb()
-      if (data) {
-        setWatchedFolders(data.watchedFolders)
-        setSkippedFiles(data.skippedFiles)
-        setStorageMounts(data.storageMounts)
-
-        if (data.offlineMounts.length > 0) {
-          setOfflineMounts(data.offlineMounts)
-          setOfflineStats({
-            tracks: data.offlineTracksCount,
-            releases: data.offlineReleasesCount,
-          })
-        } else {
-          setOfflineMounts([])
-          setOfflineStats({ tracks: 0, releases: 0 })
-        }
-
-        if (data.tracks.length > 0) {
-          graphEngine.loadCustomLibrary({
-            tracks: data.tracks,
-            releases: data.releases,
-            works: [],
-            auditIssues: [],
-            storageMounts: data.storageMounts,
-          })
-          refreshFromEngine()
-          setSelectedTrackId(data.tracks[0].id)
-          showToast(
-            `Network storage reconnected! Loaded ${data.releases.length} albums (${data.tracks.length} tracks).`
-          )
-        } else if (data.offlineMounts.length > 0) {
-          graphEngine.clearLibrary()
-          refreshFromEngine()
-          showToast(`Network storage is still unreachable (${data.offlineMounts[0].mountPath}).`)
-        } else {
-          showToast('No music tracks found in storage.')
-        }
-      }
-    } catch (err: any) {
-      showToast(`Connection check failed: ${err.message || err}`)
+      await reconnectCore()
     } finally {
       setIsCheckingConnectivity(false)
     }
   }
 
   const handleAddWatchedFolder = async () => {
-    try {
-      const selected = await tauriBridge.openDirectoryDialog()
-      if (selected) {
-        const folderName = selected.split(/[/\\]/).filter(Boolean).pop() || selected
-
-        const winMatch = selected.match(/^([A-Za-z]:)/)
-        const uncMatch = selected.match(/^(\\\\[^\\]+\\[^\\]+)/)
-        const rootKey = winMatch
-          ? winMatch[1]
-          : uncMatch
-            ? uncMatch[1]
-            : selected.startsWith('/')
-              ? '/' + selected.split('/').filter(Boolean)[0]
-              : 'Local Audio'
-        const expectedMountId = `mount-${rootKey.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
-
-        const normSelected = selected.replace(/\//g, '\\').toLowerCase()
-        let matchedMount = storageMounts.find((m) => {
-          const normMount = m.mountPath.replace(/\//g, '\\').toLowerCase().trim()
-          return (
-            normSelected.startsWith(normMount) ||
-            m.id.toLowerCase() === expectedMountId.toLowerCase()
-          )
-        })
-
-        if (!matchedMount) {
-          const isWin = Boolean(winMatch)
-          const isUnc = Boolean(uncMatch)
-          const newMount: StorageMount = {
-            id: expectedMountId,
-            name: isUnc
-              ? `TrueNAS Network Storage (${rootKey})`
-              : isWin
-                ? `Drive ${rootKey} (Local Audio Disk)`
-                : `Storage Volume (${rootKey})`,
-            mountPath: isWin ? `${rootKey}\\` : rootKey,
-            type: isUnc ? 'nas_array' : 'local_disk',
-            fileSystem: isUnc ? 'ZFS' : isWin ? 'NTFS' : 'APFS',
-            totalBytes: 1000000000000,
-            usedBytes: 450000000000,
-            isReadOnlyLocked: false,
-            healthScore: 'healthy',
-            smartOk: true,
-            tempCelsius: 34,
-            status: 'online',
-            lastSeenTimestamp: new Date().toISOString(),
-          }
-          await tauriBridge.dbSaveStorageMount(newMount)
-          matchedMount = newMount
-          setStorageMounts((prev) => [...prev.filter((m) => m.id !== newMount.id), newMount])
-        }
-
-        const newFolder: WatchedFolder = {
-          id: `wf-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          mountId: matchedMount.id,
-          folderPath: selected,
-          displayName: folderName,
-          scanMode: 'realtime',
-          isEnabled: true,
-          lastScannedTimestamp: new Date().toISOString(),
-        }
-        await tauriBridge.dbSaveWatchedFolder(newFolder)
-        await handleRefreshLibrary()
-        handleTriggerScan(selected)
-        showToast(`Added watched folder: "${folderName}" and started indexing.`)
-      }
-    } catch (err: any) {
-      showToast(`Could not add folder: ${err.message || err}`)
-    }
+    setIsImportModalOpen(true)
   }
 
   const handleRemoveWatchedFolder = async (folderId: string) => {
+    if (!engineClient) return
     try {
-      await tauriBridge.dbRemoveWatchedFolder(folderId)
-      await handleRefreshLibrary()
-      showToast('Removed watched folder from monitoring.')
+      await engineClient.removeFolder(folderId)
+      await refreshEngineFolders()
+      showToast('Removed watched folder from Engine monitoring.')
     } catch (err: any) {
-      showToast(`Could not remove folder: ${err.message || err}`)
+      showToast(`Could not remove folder: ${err?.message || err}`)
     }
   }
 
@@ -1474,17 +1240,9 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
     const res = graphEngine.updateReleaseDetails(releaseId, updates)
     if (res) {
       refreshFromEngine()
-      persistCurrentLibrary()
-      if (updates.coverArtUrl !== undefined || updates.backdropUrl !== undefined) {
-        sqliteLibraryService.persistReleaseArtworkToDb(releaseId, {
-          frontCoverUrl: updates.coverArtUrl,
-          backdropUrl: updates.backdropUrl,
-        })
-      }
       if (updates.rating !== undefined) {
         showToast(updates.rating > 0 ? `Rated "${res.release.title}" ${updates.rating}★` : `Cleared rating for "${res.release.title}"`)
       } else if (updates.isFavorite !== undefined) {
-        sqliteLibraryService.persistReleaseFavoriteToDb(releaseId, updates.isFavorite)
         showToast(updates.isFavorite ? `Added "${res.release.title}" to Favorites` : `Removed "${res.release.title}" from Favorites`)
       } else if (res.affectedTracksCount > 0) {
         showToast(`Updated "${res.release.title}" & staged edits across ${res.affectedTracksCount} tracks`)
@@ -1896,7 +1654,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
           >
             <Server className="w-3.5 h-3.5" aria-hidden="true" />
             <span className={isCoreActive ? 'inline max-w-[130px] truncate' : 'hidden xl:inline max-w-[110px] truncate'}>
-              {engineState.view.session.active.label}
+              {isCoreActive ? engineState.view.session.active.label : 'Connect Engine'}
             </span>
           </button>
 
@@ -1940,6 +1698,10 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
 
       {/* Main Workspace Stage */}
       <div className="flex-1 flex overflow-hidden">
+        {!isCoreActive ? (
+          <EngineConnectionGate />
+        ) : (
+          <>
         {/* 1. Left Rail: Normalized Navigation (Persistent Shell) */}
         <LeftRail
           auditIssues={scopedAuditIssues}
@@ -2341,7 +2103,9 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
               totalLibraryReleasesCount={releases.length}
               activeEngineLabel={engineState.view.session.active.label}
               isCoreEngineActive={isCoreActive}
-              onSwitchToLocalEngine={() => void requestSwitchToLocal()}
+              onSwitchToLocalEngine={
+                tauriBridge.hasLocalEngine() ? () => void requestSwitchToLocal() : undefined
+              }
               stagedAlbumsCount={stagedAlbumsCount}
               splitReleaseIds={splitReleaseIds}
               onToggleReleaseSplit={handleToggleReleaseSplit}
@@ -2400,6 +2164,8 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             showToast={showToast}
           />
         )}
+          </>
+        )}
       </div>
 
       {/* Guided Tutorial Interactive Tour & Headless Agent Protocol */}
@@ -2431,6 +2197,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
           setIsImportModalOpen(false)
           setIsStorageManagerOpen(true)
         }}
+        showToast={showToast}
       />
 
       {/* Omni Command Bar Modal */}
@@ -2602,20 +2369,8 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
         allTracks={tracks}
         allReleases={releases}
         onSuccess={async () => {
-          const refreshed = await sqliteLibraryService.loadLibraryFromDb()
-          if (refreshed && refreshed.tracks.length > 0) {
-            graphEngine.loadCustomLibrary({
-              tracks: refreshed.tracks,
-              releases: refreshed.releases,
-              works: [],
-              auditIssues: [],
-              storageMounts: refreshed.storageMounts,
-            })
-            refreshFromEngine()
-          } else {
-            refreshFromEngine()
-            persistCurrentLibrary()
-          }
+          await coreRefreshCatalog()
+          refreshFromEngine()
         }}
         showToast={showToast}
       />
@@ -2696,7 +2451,11 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
       {/* Create Playlist Modal */}
       <CreatePlaylistModal
         isOpen={isCreatePlaylistOpen}
-        onClose={() => setIsCreatePlaylistOpen(false)}
+        onClose={() => {
+          setIsCreatePlaylistOpen(false)
+          setInitialPlaylistTitle('')
+        }}
+        initialTitle={initialPlaylistTitle}
         initialTracks={initialPlaylistTracks}
         allReleases={releases}
         onPlaylistCreated={(newPl) => {

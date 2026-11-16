@@ -1,11 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { CurationDecisionTrace, ExecutionProgressEvent, OutcomeStatus, ExecutionPhase } from '../core/types'
-import { tauriBridge } from '../services/tauriBridge'
+import type { CurationDecisionTrace, ExecutionProgressEvent, ExecutionPhase, OutcomeStatus } from '../core/types'
 import type { CurateEvidenceRun, RecordCurateAttempt } from '../services/curateEvidenceService'
+import { useOptionalEngineController } from '../context/EngineControllerContext'
+import {
+  loadUiCurationTrace,
+  saveUiCurationEvidence,
+} from '../services/engineCurateBridge'
 
 export type CurationTraceStatus = 'idle' | 'fetching' | 'completed' | 'cancelled' | 'paused' | 'error' | 'save_error'
 
 export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
+  const engine = useOptionalEngineController()
+  const engineId = engine?.state.activeProfile?.engineId
+  const libraryId = engine?.state.activeProfile?.libraryId
 
   const [status, setStatus] = useState<CurationTraceStatus>('idle')
   const [currentPhase, setCurrentPhase] = useState<ExecutionPhase>('idle')
@@ -32,27 +39,20 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
       return
     }
 
-    tauriBridge.curationGetTrace(albumId).then((persistedTrace) => {
-      if (!isMounted || (abortControllerRef.current && !abortControllerRef.current.signal.aborted)) return
-      if (persistedTrace) {
-        setTrace(persistedTrace)
-        setStatus('completed')
-      } else {
-        setTrace(null)
-        setStatus('idle')
-      }
-    }).catch(() => {
-      if (isMounted && (!abortControllerRef.current || abortControllerRef.current.signal.aborted)) {
-        setTrace(null)
-        setStatus('idle')
-      }
-    })
+    const persistedTrace = loadUiCurationTrace(albumId, engineId, libraryId)
+    if (persistedTrace) {
+      setTrace(persistedTrace)
+      setStatus('completed')
+    } else {
+      setTrace(null)
+      setStatus('idle')
+    }
 
     return () => {
       isMounted = false
       abortControllerRef.current?.abort('AlbumChanged')
     }
-  }, [albumId])
+  }, [albumId, engineId, libraryId])
 
   // Global Windows keyboard shortcut listener: Ctrl+I to toggle, Esc to close
   useEffect(() => {
@@ -97,7 +97,16 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     let result: T | null = null
     let failureMessage = 'Could not load album identity.'
     try {
-      run.identity = await tauriBridge.curationGetIdentity(input.context.tracks.map(track => track.id))
+      run.identity = input.context.tracks.map((track) => ({
+        localTrackId: track.id,
+        editionId: targetAlbumId,
+        editionRev: 1,
+        discId: `${targetAlbumId}_d1`,
+        discRev: 1,
+        trackOrderRev: track.number ?? 1,
+        sourceGroupId: null,
+        sourceGroupRev: null,
+      }))
       controller.signal.throwIfAborted()
       failureMessage = 'Candidate resolution failed.'
       const response = await fetchFn(controller.signal, event => {
@@ -122,7 +131,7 @@ export function useCurationTrace({ albumId }: { albumId?: string } = {}) {
     if (active()) setRefreshAlbumId(undefined)
     run.completedAt = new Date().toISOString()
     try {
-      const applicable = await tauriBridge.curationSaveEvidence(targetAlbumId, run)
+      const applicable = saveUiCurationEvidence(targetAlbumId, run, engineId, libraryId)
       if (active()) {
         setLastEvidenceId(id)
         if (run.decision && applicable) setTrace(run.decision)

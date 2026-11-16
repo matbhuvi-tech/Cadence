@@ -146,11 +146,13 @@ export function createRemoteCurateController(options: {
       const res = await options.transport.request('curate.draft.save', {
         engineId: options.engineId,
         libraryId: options.libraryId,
-        draftId: buffered.draftId,
-        trackId: buffered.trackId,
-        expectedRevision: buffered.revision > 0 ? buffered.revision : null,
-        changes: buffered.changes,
-        updatedBy,
+        draft: {
+          draftId: buffered.draftId,
+          trackId: buffered.trackId,
+          expectedRevision: buffered.revision > 0 ? buffered.revision : null,
+          changes: buffered.changes,
+          updatedBy,
+        },
       })
       if (!res.ok || !res.data || typeof res.data !== 'object') {
         throw new Error(res.error?.code ?? 'curate_save_failed')

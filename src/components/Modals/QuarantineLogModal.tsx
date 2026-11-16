@@ -37,6 +37,10 @@ export const QuarantineLogModal: React.FC<QuarantineLogModalProps> = ({
       : skippedFiles.filter((s) => s.category === filterCategory)
 
   const handleLocate = async (filePath: string) => {
+    if (!tauriBridge.hasLocalEngine()) {
+      showToast(`Engine file path: ${filePath}`)
+      return
+    }
     try {
       await tauriBridge.showItemInFolder(filePath)
       showToast('Opened file in system explorer')
@@ -46,6 +50,11 @@ export const QuarantineLogModal: React.FC<QuarantineLogModalProps> = ({
   }
 
   const handleIgnore = async (id: string, fileName: string) => {
+    if (!tauriBridge.hasLocalEngine()) {
+      showToast(`Dismissed "${fileName}"`)
+      onRefresh()
+      return
+    }
     try {
       await tauriBridge.dbIgnoreSkippedFile(id)
       showToast(`Ignored "${fileName}"`)

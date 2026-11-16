@@ -154,6 +154,18 @@ class TauriBridgeService {
   }
 
   /**
+   * Phase 2 thin desktop frontend: local AudioEngine, SQLite DB, scanner,
+   * maintenance worker, and local commit queue were removed from src-tauri.
+   */
+  public hasLocalEngine(): boolean {
+    return false
+  }
+
+  private hasNativeLocalEngine(): boolean {
+    return this.hasLocalEngine() && this.isTauri()
+  }
+
+  /**
    * Play audio track (via native Rust audio engine or HTML5 audio fallback)
    */
   public async playTrack(
@@ -165,7 +177,7 @@ class TauriBridgeService {
     this.onPositionUpdateCallback = onPositionUpdate || null
     this.onEndedCallback = onEnded || null
 
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         const raw: any = await invoke('play_track', { filePath })
         if (!raw) return null
@@ -254,7 +266,7 @@ class TauriBridgeService {
    */
   public async pause(): Promise<void> {
     this.notifyPlaybackState('Paused')
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('pause_audio')
     } else if (this.browserAudio) {
       this.browserAudio.pause()
@@ -266,7 +278,7 @@ class TauriBridgeService {
    */
   public async resume(): Promise<void> {
     this.notifyPlaybackState('Playing')
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('resume_audio')
     } else if (this.browserAudio) {
       await this.browserAudio.play()
@@ -278,7 +290,7 @@ class TauriBridgeService {
    */
   public async stop(): Promise<void> {
     this.notifyPlaybackState('Stopped')
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('stop_audio')
     } else if (this.browserAudio) {
       this.browserAudio.pause()
@@ -293,7 +305,7 @@ class TauriBridgeService {
    * Seek to position in seconds
    */
   public async seek(positionSecs: number): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('seek_audio', { positionSecs })
     } else if (this.browserAudio) {
       this.browserAudio.currentTime = positionSecs
@@ -310,7 +322,7 @@ class TauriBridgeService {
   public async setVolume(volume: number): Promise<void> {
     const clamped = Math.max(0, Math.min(1, volume))
     this.currentVolume = clamped
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('set_audio_volume', { volume: clamped })
     } else if (this.browserAudio) {
       this.browserAudio.volume = clamped
@@ -321,7 +333,7 @@ class TauriBridgeService {
    * Get current playback status
    */
   public async getPlaybackStatus(): Promise<PlaybackStatePayload> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       const raw: any = await invoke('get_playback_status')
       const sInfo = raw.streamInfo ?? raw.stream_info
       return {
@@ -385,7 +397,7 @@ class TauriBridgeService {
    * Set Bit-Perfect Purity Mode (WASAPI Exclusive Clock Matching & Unity Gain)
    */
   public async setPurityMode(enabled: boolean): Promise<boolean> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<boolean>('set_purity_mode', { enabled })
     }
     return enabled
@@ -395,7 +407,7 @@ class TauriBridgeService {
    * Get current Bit-Perfect Purity Mode state
    */
   public async getPurityMode(): Promise<boolean> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<boolean>('get_purity_mode')
     }
     return false
@@ -405,7 +417,7 @@ class TauriBridgeService {
    * Discover network UPnP / DLNA media renderers (e.g. PS Audio AirLens, WiiM, Volumio)
    */
   public async discoverUpnpDevices(): Promise<UpnpDevice[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<UpnpDevice[]>('discover_upnp_devices')
       } catch (err) {
@@ -420,7 +432,7 @@ class TauriBridgeService {
    * Get low-noise stream RAM buffer and allocation telemetry
    */
   public async getStreamBufferInfo(): Promise<StreamBufferInfo | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<StreamBufferInfo>('get_stream_buffer_info')
       } catch (err) {
@@ -435,7 +447,7 @@ class TauriBridgeService {
    * Set low-noise stream RAM buffer limit (0 = Auto)
    */
   public async setStreamBufferLimit(limitMb: number): Promise<StreamBufferInfo | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<StreamBufferInfo>('set_stream_buffer_limit', { limitMb })
       } catch (err) {
@@ -451,7 +463,7 @@ class TauriBridgeService {
    * List available audio output devices (WASAPI / DirectSound in Tauri or Audio Output Devices in Web)
    */
   public async listAudioDevices(): Promise<string[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<string[]>('list_audio_devices')
       } catch (err) {
@@ -490,7 +502,7 @@ class TauriBridgeService {
    * List typed audio endpoints (SystemDefault, WASAPI, and UPnP)
    */
   public async listAudioEndpoints(): Promise<AudioEndpointInfo[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<AudioEndpointInfo[]>('list_audio_endpoints')
       } catch (err) {
@@ -507,7 +519,7 @@ class TauriBridgeService {
    * Set active audio output endpoint using typed identity
    */
   public async setAudioEndpoint(endpoint: AudioEndpoint): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('set_audio_endpoint', { endpoint })
     } else {
       await this.setAudioDevice(getEndpointDisplayName(endpoint))
@@ -518,7 +530,7 @@ class TauriBridgeService {
    * Set active audio output device
    */
   public async setAudioDevice(deviceName: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('set_audio_device', { deviceName })
     } else {
       // Find matching device ID
@@ -534,7 +546,7 @@ class TauriBridgeService {
    * Fetch base64 cover art from audio file directly
    */
   public async getCoverArt(filePath: string): Promise<string | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<string | null>('read_cover_art_base64', { filePath })
     }
     return null
@@ -544,7 +556,7 @@ class TauriBridgeService {
    * Open native OS folder picker dialog to select library directory
    */
   public async openDirectoryDialog(defaultPath?: string): Promise<string | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         const selected = await openDialog({
           directory: true,
@@ -567,7 +579,7 @@ class TauriBridgeService {
    * Open file location in OS File Explorer / Finder
    */
   public async showItemInFolder(path: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('show_item_in_folder', { path })
       } catch (err) {
@@ -579,130 +591,130 @@ class TauriBridgeService {
   // --- SQLite Database IPC Methods ---
 
   public async checkStorageMountsAccessibility(): Promise<StorageAccessibilityReport[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<StorageAccessibilityReport[]>('check_storage_mounts_accessibility')
     }
     return []
   }
 
   public async checkPathAccessible(path: string): Promise<boolean> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<boolean>('check_path_accessible', { path })
     }
     return true
   }
 
   public async dbGetOfflineCounts(): Promise<[number, number]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<[number, number]>('db_get_offline_counts')
     }
     return [0, 0]
   }
 
   public async dbGetStorageMounts(): Promise<any[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any[]>('db_get_storage_mounts')
     }
     return []
   }
 
   public async dbSaveStorageMount(mount: any): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_save_storage_mount', { mount })
     }
   }
 
   public async dbRemoveStorageMount(mountId: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_remove_storage_mount', { mountId })
     }
   }
 
   public async dbSetMountStatus(mountId: string, status: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_set_mount_status', { mountId, status })
     }
   }
 
   public async dbToggleMountLock(mountId: string): Promise<boolean> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<boolean>('db_toggle_mount_lock', { mountId })
     }
     return false
   }
 
   public async dbGetWatchedFolders(): Promise<any[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any[]>('db_get_watched_folders')
     }
     return []
   }
 
   public async dbSaveWatchedFolder(folder: any): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_save_watched_folder', { folder })
     }
   }
 
   public async dbRemoveWatchedFolder(folderId: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_remove_watched_folder', { folderId })
     }
   }
 
   public async dbGetTracks(limit?: number, offset?: number, onlyOnline?: boolean): Promise<any[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any[]>('db_get_tracks', { limit, offset, onlyOnline })
     }
     return []
   }
 
   public async dbGetReleases(onlyOnline?: boolean): Promise<any[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any[]>('db_get_releases', { onlyOnline })
     }
     return []
   }
 
   public async dbSetReleaseFavorite(releaseId: string, isFavorite: boolean): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_set_release_favorite', { releaseId, isFavorite })
     }
   }
 
   public async dbSaveTracksBatch(tracks: any[], releases: any[]): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_save_tracks_batch', { tracks, releases })
     }
   }
 
   public async dbGetSkippedFiles(): Promise<any[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any[]>('db_get_skipped_files')
     }
     return []
   }
 
   public async dbIgnoreSkippedFile(id: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_ignore_skipped_file', { id })
     }
   }
 
   public async dbIgnoreAllSkippedFiles(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_ignore_all_skipped_files')
     }
   }
 
   public async dbDeleteSkippedFile(id: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_delete_skipped_file', { id })
     }
   }
 
   public async dbGetLibraryStats(): Promise<[number, number, number, number]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<[number, number, number, number]>('db_get_library_stats')
     }
     return [0, 0, 0, 0]
@@ -711,14 +723,14 @@ class TauriBridgeService {
   // --- Canonical Relational Artists ---
 
   public async dbGetCanonicalArtists(): Promise<any[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any[]>('db_get_canonical_artists')
     }
     return []
   }
 
   public async dbGetCanonicalArtistDetail(artistId: string): Promise<any | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any | null>('db_get_canonical_artist_detail', { artistId })
     }
     return null
@@ -729,7 +741,7 @@ class TauriBridgeService {
     portraitUrl: string,
     status?: string
   ): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_set_artist_portrait', { artistId, portraitUrl, status })
     }
   }
@@ -738,13 +750,13 @@ class TauriBridgeService {
     artistId: string,
     payload: UpdateArtistEditorialPayload
   ): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_update_canonical_artist_editorial', { artistId, payload })
     }
   }
 
   public async dbBackfillArtistCredits(): Promise<number> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<number>('db_backfill_artist_credits')
     }
     return 0
@@ -754,7 +766,7 @@ class TauriBridgeService {
     query: string,
     limit?: number
   ): Promise<{ albums: any[]; tracks: any[]; artists: any[] }> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<{ albums: any[]; tracks: any[]; artists: any[] }>('db_search_catalog', {
         query,
         limit,
@@ -772,7 +784,7 @@ class TauriBridgeService {
     forceFull: boolean = false,
     playbackPolicy?: 'purist' | 'paced' | 'unthrottled'
   ): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('start_library_scan', {
         folderPath,
         mountId,
@@ -783,38 +795,38 @@ class TauriBridgeService {
   }
 
   public async setScannerPlaybackPolicy(policy: 'purist' | 'paced' | 'unthrottled'): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('set_scan_playback_policy', { policy })
     }
   }
 
   public async getScannerPlaybackPolicy(): Promise<'purist' | 'paced' | 'unthrottled'> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<'purist' | 'paced' | 'unthrottled'>('get_scan_playback_policy')
     }
     return 'purist'
   }
 
   public async pauseLibraryScan(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('pause_library_scan')
     }
   }
 
   public async resumeLibraryScan(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('resume_library_scan')
     }
   }
 
   public async cancelLibraryScan(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('cancel_library_scan')
     }
   }
 
   public async getScanStatus(): Promise<any> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke('get_scan_status')
     }
     return null
@@ -823,7 +835,7 @@ class TauriBridgeService {
   // --- Remote Mobile Controller IPC ---
 
   public async getRemoteServerInfo(): Promise<RemoteServerStatus | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<RemoteServerStatus>('get_remote_server_info')
       } catch (err) {
@@ -847,7 +859,7 @@ class TauriBridgeService {
   }
 
   public async regeneratePairingToken(): Promise<string | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<string>('regenerate_pairing_token')
       } catch (err) {
@@ -859,7 +871,7 @@ class TauriBridgeService {
   }
 
   public async syncDesktopQueueToRemote(items: any[], currentIndex: number, expectedRevision?: number): Promise<number | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         const payload = items.map((t) => ({
           queueEntryId: t.queueEntryId || '',
@@ -948,8 +960,87 @@ class TauriBridgeService {
     }
   }
 
+  public async coreFetchArtwork(
+    target: {
+      baseUrl: string
+      pairingToken?: string
+      certFingerprint?: string
+      trustInsecure?: boolean
+    },
+    releaseId: string,
+    ifNoneMatch?: string,
+  ): Promise<{ status: number; etag: string | null; contentType: string; base64: string | null }> {
+    try {
+      return await invoke('core_fetch_artwork', {
+        target: {
+          baseUrl: target.baseUrl,
+          pairingToken: target.pairingToken ?? null,
+          certFingerprint: target.certFingerprint ?? null,
+          trustInsecure: Boolean(target.trustInsecure),
+        },
+        releaseId,
+        ifNoneMatch: ifNoneMatch ?? null,
+      })
+    } catch (err) {
+      const code = String(err) as CoreErrorCode
+      if (code === 'untrusted_peer' || code === 'unauthorized' || code === 'invalid_payload') {
+        throw new CoreServiceError(code)
+      }
+      throw new CoreServiceError('unavailable')
+    }
+  }
+
+  public async coreConnectEvents(
+    target: {
+      baseUrl: string
+      pairingToken?: string
+      certFingerprint?: string
+      trustInsecure?: boolean
+    },
+    engineId: string,
+  ): Promise<void> {
+    if (!this.isTauri()) return
+    try {
+      await invoke('core_connect_events', {
+        target: {
+          baseUrl: target.baseUrl,
+          pairingToken: target.pairingToken ?? null,
+          certFingerprint: target.certFingerprint ?? null,
+          trustInsecure: Boolean(target.trustInsecure),
+        },
+        engineId,
+      })
+    } catch (err) {
+      const code = String(err) as CoreErrorCode
+      if (code === 'untrusted_peer' || code === 'unauthorized' || code === 'invalid_payload') {
+        throw new CoreServiceError(code)
+      }
+      throw new CoreServiceError('unavailable')
+    }
+  }
+
+  public async coreDisconnectEvents(): Promise<void> {
+    if (!this.isTauri()) return
+    try {
+      await invoke('core_disconnect_events')
+    } catch {
+      // ignore disconnect teardown errors
+    }
+  }
+
+  public async listenCoreEvents(
+    handler: (event: { engineId: string; sseEvent: string; payload: unknown }) => void,
+  ): Promise<() => void> {
+    if (!this.isTauri()) return () => {}
+    const { listen } = await import('@tauri-apps/api/event')
+    return await listen<{ engineId: string; sseEvent: string; payload: unknown }>(
+      'cadence:core-event',
+      (ev) => handler(ev.payload),
+    )
+  }
+
   public async getMaintenanceStats(): Promise<MaintenanceStats | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<MaintenanceStats>('get_maintenance_stats')
       } catch (err) {
@@ -970,7 +1061,7 @@ class TauriBridgeService {
   }
 
   public async getPortraitSyncStats(): Promise<PortraitSyncProgressPayload | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<PortraitSyncProgressPayload>('get_portrait_sync_stats')
       } catch (err) {
@@ -988,7 +1079,7 @@ class TauriBridgeService {
   }
 
   public async toggleMaintenancePause(): Promise<boolean> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<boolean>('toggle_maintenance_pause')
       } catch (err) {
@@ -1000,7 +1091,7 @@ class TauriBridgeService {
   }
 
   public async forceEnrichNow(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('force_enrich_now')
       } catch (err) {
@@ -1015,7 +1106,7 @@ class TauriBridgeService {
     portraitUrl: string,
     providerInfo: string
   ): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('notify_artist_portrait_resolved', {
           artistId,
@@ -1032,7 +1123,7 @@ class TauriBridgeService {
   public async onPortraitSyncProgress(
     callback: (payload: PortraitSyncProgressPayload) => void
   ): Promise<() => void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         const { listen } = await import('@tauri-apps/api/event')
         const unlisten = await listen<PortraitSyncProgressPayload>(
@@ -1052,7 +1143,7 @@ class TauriBridgeService {
   public async onPortraitEnriched(
     callback: (payload: { artistId: string; artistName: string; portraitUrl: string; provider?: string }) => void
   ): Promise<() => void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         const { listen } = await import('@tauri-apps/api/event')
         const unlisten = await listen<{ artistId: string; artistName: string; portraitUrl: string; provider?: string }>(
@@ -1070,7 +1161,7 @@ class TauriBridgeService {
   }
 
   public async getTrackFingerprint(trackId: string): Promise<[string, number] | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<[string, number]>('get_track_fingerprint', { trackId })
       } catch (err) {
@@ -1087,7 +1178,7 @@ class TauriBridgeService {
     originalAlbum?: string,
     originalYear?: number
   ): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('db_update_track_provenance', {
           trackId,
@@ -1104,7 +1195,7 @@ class TauriBridgeService {
   public async dbGetCachedAcoustid(
     fingerprint: string
   ): Promise<[string | null, string | null, number | null, number | null] | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke('db_get_cached_acoustid', { fingerprint })
       } catch (err) {
@@ -1123,7 +1214,7 @@ class TauriBridgeService {
     canonicalYear?: number,
     score?: number
   ): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('db_cache_acoustid_result', {
           fingerprint,
@@ -1142,7 +1233,7 @@ class TauriBridgeService {
   public async onTrackFingerprinted(
     callback: (payload: { trackId: string; fingerprint: string; duration: number }) => void
   ): Promise<() => void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         const { listen } = await import('@tauri-apps/api/event')
         const unlisten = await listen<{ trackId: string; fingerprint: string; duration: number }>(
@@ -1164,7 +1255,7 @@ class TauriBridgeService {
   // ==========================================
 
   public async prepareNextTrack(filePath: string): Promise<boolean> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<boolean>('prepare_next_track', { filePath })
       } catch (err) {
@@ -1176,7 +1267,7 @@ class TauriBridgeService {
   }
 
   public async invalidateNextTrack(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('invalidate_next_track')
       } catch (err) {
@@ -1186,7 +1277,7 @@ class TauriBridgeService {
   }
 
   public async setSettlingDelayMs(delayMs: number): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('set_settling_delay_ms', { delayMs })
       } catch (err) {
@@ -1200,7 +1291,7 @@ class TauriBridgeService {
   // ==========================================
 
   public async dbGetPlaylists(): Promise<any[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<any[]>('db_get_playlists')
       } catch (err) {
@@ -1212,7 +1303,7 @@ class TauriBridgeService {
   }
 
   public async dbGetPlaylistDetails(playlistId: string): Promise<any | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<any | null>('db_get_playlist_details', { playlistId })
       } catch (err) {
@@ -1232,7 +1323,7 @@ class TauriBridgeService {
     listeningNotes?: string
     trackIds: string[]
   }): Promise<any> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<any>('db_create_playlist', {
         id: params.id,
         title: params.title,
@@ -1266,7 +1357,7 @@ class TauriBridgeService {
     tags?: string
     listeningNotes?: string
   }): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_update_playlist', {
         id: params.id,
         title: params.title,
@@ -1279,43 +1370,43 @@ class TauriBridgeService {
   }
 
   public async dbDeletePlaylist(id: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_delete_playlist', { id })
     }
   }
 
   public async dbAddTracksToPlaylist(playlistId: string, trackIds: string[]): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_add_tracks_to_playlist', { playlistId, trackIds })
     }
   }
 
   public async dbRemoveTrackFromPlaylist(playlistId: string, position: number): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_remove_track_from_playlist', { playlistId, position })
     }
   }
 
   public async dbReorderPlaylistTracks(playlistId: string, trackIds: string[]): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_reorder_playlist_tracks', { playlistId, trackIds })
     }
   }
 
   public async dbSetReleaseSplit(releaseId: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_set_release_split', { releaseId })
     }
   }
 
   public async dbRemoveReleaseSplit(releaseId: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_remove_release_split', { releaseId })
     }
   }
 
   public async dbGetSplitReleases(): Promise<string[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<string[]>('db_get_split_releases')
     }
     return []
@@ -1323,14 +1414,14 @@ class TauriBridgeService {
 
   // Asynchronous Background Commit Queue IPC
   public async commitEnqueueBatch(request: EnqueueBatchPayload): Promise<string> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<string>('commit_enqueue_batch', { request })
     }
     return `mock-batch-${Date.now()}`
   }
 
   public async commitGetCurateProjection(): Promise<CurateCommitRow[]> {
-    return this.isTauri() ? invoke<CurateCommitRow[]>('commit_get_curate_projection') : []
+    return this.hasNativeLocalEngine() ? invoke<CurateCommitRow[]>('commit_get_curate_projection') : []
   }
 
   public async commitRetryCurateItems(itemIds: string[]): Promise<number> {
@@ -1338,7 +1429,7 @@ class TauriBridgeService {
   }
 
   public async commitGetQueueSummary(): Promise<CommitQueueSummary> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<CommitQueueSummary>('commit_get_queue_summary')
     }
     return {
@@ -1354,7 +1445,7 @@ class TauriBridgeService {
   }
 
   public async commitGetTelemetry(): Promise<CommitTelemetryPayload> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<CommitTelemetryPayload>('commit_get_telemetry')
     }
     return {
@@ -1371,40 +1462,40 @@ class TauriBridgeService {
   }
 
   public async commitSetOverride(batchId: string, allow: boolean): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('commit_set_override', { batchId, allow })
     }
   }
 
   public async commitTogglePause(): Promise<boolean> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<boolean>('commit_toggle_pause')
     }
     return false
   }
 
   public async commitRetryOfflineMounts(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('commit_retry_offline_mounts')
     }
   }
 
   public async commitCancelBatch(batchId: string): Promise<number> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<number>('commit_cancel_batch', { batchId })
     }
     return 0
   }
 
   public async commitUndoBatch(batchId: string): Promise<string> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<string>('commit_undo_batch', { batchId })
     }
     return `mock-undo-${Date.now()}`
   }
 
   public async commitStagedSidecars(): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('commit_staged_sidecars')
       } catch (err) {
@@ -1414,7 +1505,7 @@ class TauriBridgeService {
   }
 
   public async commitGetQueuedTrackIds(): Promise<string[]> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       return await invoke<string[]>('commit_get_queued_track_ids')
     }
     return []
@@ -1423,7 +1514,7 @@ class TauriBridgeService {
   public async listenCommitTelemetry(
     callback: (payload: CommitTelemetryPayload) => void
   ): Promise<() => void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         const { listen } = await import('@tauri-apps/api/event')
         const unlisten = await listen<CommitTelemetryPayload>(
@@ -1442,7 +1533,7 @@ class TauriBridgeService {
 
   public async curationGetDraft(albumId: string): Promise<CurateDraft | null> {
     await this.curateDraftWrites.get(albumId)
-    const draft = this.isTauri()
+    const draft = this.hasNativeLocalEngine()
       ? await invoke<CurateDraft | null>('curation_get_draft', { albumId })
       : JSON.parse(localStorage.getItem(`cadence:curate-draft:${albumId}`) ?? 'null') as CurateDraft | null
     if (draft && draft.version !== 1) throw new Error('Unsupported Curate draft version')
@@ -1451,7 +1542,7 @@ class TauriBridgeService {
 
   public async curationListDrafts(): Promise<Record<string, CurateDraft>> {
     const prefix = 'cadence:curate-draft:'
-    const drafts: Record<string, CurateDraft> = this.isTauri()
+    const drafts: Record<string, CurateDraft> = this.hasNativeLocalEngine()
       ? await invoke<Record<string, CurateDraft>>('curation_list_drafts')
       : Object.fromEntries(Array.from({ length: localStorage.length }, (_, index) => {
         const key = localStorage.key(index)
@@ -1471,7 +1562,7 @@ class TauriBridgeService {
 
   public async curationSaveDraft(albumId: string, draft: CurateDraft): Promise<void> {
     const write = (this.curateDraftWrites.get(albumId) ?? Promise.resolve()).catch(() => {}).then(async () => {
-      if (this.isTauri()) {
+      if (this.hasNativeLocalEngine()) {
         await invoke('curation_save_draft', { albumId, draft })
       } else {
         localStorage.setItem(`cadence:curate-draft:${albumId}`, JSON.stringify(draft))
@@ -1486,28 +1577,28 @@ class TauriBridgeService {
   }
 
   public async curationGetIdentity(trackIds: string[]): Promise<import('./curateEvidenceService').CurateIdentityTrack[]> {
-    return this.isTauri() ? invoke('curation_get_identity', { trackIds }) : []
+    return this.hasNativeLocalEngine() ? invoke('curation_get_identity', { trackIds }) : []
   }
 
   public async curationSaveEvidence(albumId: string, run: CurateEvidenceRun): Promise<boolean> {
-    return this.isTauri() ? invoke<boolean>('curation_save_evidence', { albumId, run }) : true
+    return this.hasNativeLocalEngine() ? invoke<boolean>('curation_save_evidence', { albumId, run }) : true
   }
 
   public async curationExportSnapshot(snapshot: string): Promise<string> {
-    if (!this.isTauri()) throw new Error('Snapshot export requires the desktop app')
+    if (!this.hasNativeLocalEngine()) throw new Error('Snapshot export requires the desktop app')
     return invoke('curation_export_snapshot', { snapshot })
   }
 
   public async curationListEvidence(albumId: string): Promise<CurateEvidenceSummary[]> {
-    return this.isTauri() ? invoke('curation_list_evidence', { albumId }) : []
+    return this.hasNativeLocalEngine() ? invoke('curation_list_evidence', { albumId }) : []
   }
 
   public async curationGetEvidence(albumId: string, id: string): Promise<CurateEvidenceRun | null> {
-    return this.isTauri() ? invoke('curation_get_evidence', { albumId, id }) : null
+    return this.hasNativeLocalEngine() ? invoke('curation_get_evidence', { albumId, id }) : null
   }
 
   public async curationSaveTrace(albumId: string, trace: CurationDecisionTrace): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('curation_save_trace', { albumId, trace })
       } catch (err) {
@@ -1517,7 +1608,7 @@ class TauriBridgeService {
   }
 
   public async curationGetTrace(albumId: string): Promise<CurationDecisionTrace | null> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         return await invoke<CurationDecisionTrace | null>('curation_get_trace', { albumId })
       } catch (err) {
@@ -1529,7 +1620,7 @@ class TauriBridgeService {
   }
 
   public async curationClearTrace(albumId: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       try {
         await invoke('curation_clear_trace', { albumId })
       } catch (err) {
@@ -1540,15 +1631,15 @@ class TauriBridgeService {
 
   // Master Albums & Versions Model
   public async getMasterAlbums(): Promise<DbMasterAlbum[]> {
-    return this.isTauri() ? invoke<DbMasterAlbum[]>('db_get_master_albums') : []
+    return this.hasNativeLocalEngine() ? invoke<DbMasterAlbum[]>('db_get_master_albums') : []
   }
 
   public async getAlbumVersions(masterAlbumId: string): Promise<AlbumVersionSummary[]> {
-    return this.isTauri() ? invoke<AlbumVersionSummary[]>('db_get_album_versions', { masterAlbumId }) : []
+    return this.hasNativeLocalEngine() ? invoke<AlbumVersionSummary[]>('db_get_album_versions', { masterAlbumId }) : []
   }
 
   public async setDefaultReleaseVersion(masterAlbumId: string, releaseId: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_set_default_release_version', { masterAlbumId, releaseId })
     }
   }
@@ -1560,7 +1651,7 @@ class TauriBridgeService {
     defaultReleaseId?: string,
     masterAlbumId?: string,
   ): Promise<string> {
-    if (!this.isTauri()) return masterAlbumId || 'local-master'
+    if (!this.hasNativeLocalEngine()) return masterAlbumId || 'local-master'
     return invoke<string>('db_group_releases_into_master', {
       masterAlbumId: masterAlbumId || null,
       canonicalTitle,
@@ -1571,7 +1662,7 @@ class TauriBridgeService {
   }
 
   public async ungroupReleaseFromMaster(releaseId: string): Promise<void> {
-    if (this.isTauri()) {
+    if (this.hasNativeLocalEngine()) {
       await invoke('db_ungroup_release_from_master', { releaseId })
     }
   }
@@ -1647,7 +1738,7 @@ class TauriBridgeService {
   }
 
   public async inspectAudioFiles(filePaths: string[]): Promise<ScannedAudioFileInfo[]> {
-    if (this.isTauri() && filePaths.length > 0) {
+    if (this.hasNativeLocalEngine() && filePaths.length > 0) {
       return await invoke<ScannedAudioFileInfo[]>('inspect_audio_files', { filePaths })
     }
     return []

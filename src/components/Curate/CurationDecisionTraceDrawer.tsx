@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import type { CurationDecisionTrace, OutcomeStatus } from '../../core/types'
 import type { CurateEvidenceRun, CurateEvidenceSummary } from '../../services/curateEvidenceService'
-import { tauriBridge } from '../../services/tauriBridge'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import { getUiCurationEvidence, listUiCurationEvidence } from '../../services/engineCurateBridge'
 import { CurateEvidenceAttempt } from './CurateEvidenceAttempt'
 
 interface CurationDecisionTraceDrawerProps {
@@ -16,36 +17,36 @@ interface CurationDecisionTraceDrawerProps {
 }
 
 function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: string }) {
+  const engine = useOptionalEngineController()
+  const engineId = engine?.state.activeProfile?.engineId
+  const libraryId = engine?.state.activeDescriptor?.libraryId
   const [runs, setRuns] = useState<CurateEvidenceSummary[]>([])
   const [selectedId, setSelectedId] = useState<string>()
   const [detail, setDetail] = useState<CurateEvidenceRun | null>(null)
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
   useEffect(() => {
-    let active = true
     setSelectedId(undefined)
     setDetail(null)
-    setLoaded(false)
-    setRuns([])
     setError('')
-    void tauriBridge.curationListEvidence(albumId).then(rows => {
-      if (!active) return
+    try {
+      const rows = listUiCurationEvidence(albumId, engineId, libraryId)
       setRuns(rows)
       setLoaded(true)
-      setError('')
-    }).catch(() => { if (active) setError('Could not load evidence history.') })
-    return () => { active = false }
-  }, [albumId, revision])
+    } catch {
+      setError('Could not load evidence history.')
+    }
+  }, [albumId, revision, engineId, libraryId])
   const latestId = runs.find(row => row.id === revision)?.id
   const activeId = selectedId ?? latestId ?? runs.find(row => row.current)?.id ?? runs[0]?.id
   useEffect(() => {
     if (!activeId) return
-    let active = true
-    void tauriBridge.curationGetEvidence(albumId, activeId).then(run => {
-      if (active) setDetail(run)
-    }).catch(() => { if (active) setError('Could not load this evidence run.') })
-    return () => { active = false }
-  }, [albumId, activeId])
+    try {
+      setDetail(getUiCurationEvidence(albumId, activeId, engineId, libraryId))
+    } catch {
+      setError('Could not load this evidence run.')
+    }
+  }, [albumId, activeId, engineId, libraryId])
   const selected = detail?.id === activeId ? detail : null
   return (
     <section className="space-y-2 rounded border border-zinc-800 p-3 text-xs">

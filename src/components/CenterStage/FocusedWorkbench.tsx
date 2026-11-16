@@ -11,7 +11,8 @@ import {
   ZoomIn,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
-import { tauriBridge } from '../../services/tauriBridge'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import { stripCoreReleasePrefix } from '../../services/engineClient'
 import { useInspectorPersistence } from '../../hooks/useInspectorPersistence'
 
 interface FocusedWorkbenchProps {
@@ -52,28 +53,32 @@ export const FocusedWorkbench: React.FC<FocusedWorkbenchProps> = ({
     }
   }, [setIsCollapsed])
 
+  const engine = useOptionalEngineController()
+
   // Check split state for current release
   useEffect(() => {
-    if (release?.id) {
-      tauriBridge.dbGetSplitReleases().then((splits) => {
-        setIsSplit(splits.includes(release.id))
-      }).catch(() => {})
+    if (release?.id && engine?.engineClient) {
+      const rawId = stripCoreReleasePrefix(release.id)
+      engine.engineClient
+        .listSplitReleases()
+        .then((splits) => {
+          setIsSplit(splits.includes(rawId) || splits.includes(release.id))
+        })
+        .catch(() => {})
     }
-  }, [release?.id])
+  }, [release?.id, engine?.engineClient])
 
   const handleToggleSplit = async () => {
-    if (!release?.id) return
+    if (!release?.id || !engine?.engineClient) return
     setIsSplitting(true)
     try {
-      if (isSplit) {
-        await tauriBridge.dbRemoveReleaseSplit(release.id)
-        setIsSplit(false)
-        showToast(`Re-merged multi-disc release "${release.title}".`)
-      } else {
-        await tauriBridge.dbSetReleaseSplit(release.id)
-        setIsSplit(true)
-        showToast(`Split multi-disc release "${release.title}" into individual discs.`)
-      }
+      const res = await engine.engineClient.toggleSplitRelease(release.id)
+      setIsSplit(res.split)
+      showToast(
+        res.split
+          ? `Split multi-disc release "${release.title}" into individual discs.`
+          : `Re-merged multi-disc release "${release.title}".`,
+      )
     } catch (err: any) {
       showToast(`Failed to update release split: ${err?.message || err}`)
     } finally {

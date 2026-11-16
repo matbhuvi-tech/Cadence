@@ -11,6 +11,7 @@ import {
   type CoreRequest,
   type CoreSnapshot,
 } from '../core/coreProtocol'
+import { createEngineClient } from './engineClient'
 import type { EngineActivity, EngineContext } from '../core/engineSession'
 import type { AudioEndpoint } from '../core/endpointRouting'
 import {
@@ -93,6 +94,9 @@ export interface CoreControllerState {
   discoveredCores: DiscoveredCoreNode[]
   isDiscovering: boolean
   isBusy: boolean
+  activeProfile: SavedCoreProfile | null
+  activeDescriptor: CoreDescriptor | null
+  musicReadOnly: boolean | null
   stagedCandidate: StagedCoreCandidate | null
   stagingError: string | null
   switchPrompt: CoreSwitchPrompt | null
@@ -182,7 +186,7 @@ export interface HttpCoreTransportBridge {
   probeHealth: (profile: Pick<SavedCoreProfile, 'baseUrl' | 'certFingerprint' | 'pairingToken' | 'trustInsecure'>) => Promise<CoreHealthMetadata>
   postCoreRequest: (
     profile: Pick<SavedCoreProfile, 'baseUrl' | 'certFingerprint' | 'pairingToken' | 'trustInsecure'>,
-    request: CoreRequest,
+    request: CoreRequest | Record<string, unknown>,
   ) => Promise<unknown>
 }
 
@@ -513,6 +517,19 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
             if (changed) {
               state = { ...state, view: nextView, lastError: null }
               emit()
+              if (prevSnap && nextSnap && prevSnap.catalog.revision !== nextSnap.catalog.revision && activeCoreService) {
+                void hydrateCatalogTracks(activeCoreService, nextSnap, activeCoreProfile)
+                  .then((hydrated) => {
+                    if (disposed) return
+                    state = {
+                      ...state,
+                      hydratedCatalogTracks: hydrated.tracks,
+                      activeDescriptor: hydrated.descriptor ?? state.activeDescriptor,
+                    }
+                    emit()
+                  })
+                  .catch(() => {})
+              }
             }
           } else if (outcome === 'failed' && currentView.session.connected) {
             state = {
@@ -538,10 +555,13 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     discoveredCores: [],
     isDiscovering: false,
     isBusy: false,
+    activeProfile: null,
+    activeDescriptor: null,
+    musicReadOnly: null,
     stagedCandidate: null,
     stagingError: null,
     switchPrompt: null,
-    statusAnnouncement: 'Playback engine: This PC.',
+    statusAnnouncement: 'No Playback Engine connected.',
     lastError: null,
   }
 
@@ -630,8 +650,23 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
   async function hydrateCatalogTracks(
     service: EngineService,
     snapshot: CoreSnapshot | null,
-  ): Promise<CoreCatalogTrack[]> {
-    if (!snapshot) return []
+    profile?: SavedCoreProfile | null,
+  ): Promise<{ tracks: CoreCatalogTrack[]; descriptor: CoreDescriptor | null }> {
+    if (!snapshot) return { tracks: [], descriptor: null }
+    if (profile && options.httpBridge) {
+      try {
+        const client = createEngineClient(profile, (target, body) =>
+          httpBridge.postCoreRequest(target, body),
+        )
+        const hello = await client.hello()
+        if (hello.protocolVersion === 2) {
+          const enriched = await client.fetchEnrichedCatalog()
+          return { tracks: enriched.tracks, descriptor: hello }
+        }
+      } catch {
+        // Fallback cleanly to v1 catalog pagination if peer is v1-only
+      }
+    }
     const merged: CoreCatalogTrack[] = [...snapshot.catalog.tracks]
     const seen = new Set(merged.map((t) => t.id))
     let cursor = snapshot.catalog.nextCursor
@@ -650,7 +685,16 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       }
       cursor = page.nextCursor
     }
-    return merged
+    return { tracks: merged, descriptor: null }
+  }
+
+  async function probeProfileHealthSafe(profile: SavedCoreProfile): Promise<CoreHealthMetadata | null> {
+    if (!options.httpBridge) return null
+    try {
+      return await httpBridge.probeHealth(profile)
+    } catch {
+      return null
+    }
   }
 
   async function activateProfileInternal(
@@ -683,19 +727,21 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       activeCoreService = remoteService
       activeCoreProfile = profile
       upsertSavedProfile(profile, view.snapshot)
-      let hydratedCatalogTracks = view.snapshot?.catalog.tracks ?? []
-      if (view.snapshot?.catalog.nextCursor) {
-        try {
-          hydratedCatalogTracks = await hydrateCatalogTracks(remoteService, view.snapshot)
-        } catch {
-          // Keep first page if pagination transiently fails during switch
-        }
-      }
+      const [hydrated, health] = await Promise.all([
+        hydrateCatalogTracks(remoteService, view.snapshot, profile).catch(() => ({
+          tracks: view.snapshot?.catalog.tracks ?? [],
+          descriptor: null,
+        })),
+        probeProfileHealthSafe(profile),
+      ])
       const outLabel = view.snapshot?.output?.label ?? 'Unassigned'
       state = {
         ...state,
         view,
-        hydratedCatalogTracks,
+        hydratedCatalogTracks: hydrated.tracks,
+        activeProfile: profile,
+        activeDescriptor: hydrated.descriptor,
+        musicReadOnly: typeof health?.musicReadOnly === 'boolean' ? health.musicReadOnly : state.musicReadOnly,
         isBusy: false,
         stagedCandidate: null,
         stagingError: null,
@@ -978,6 +1024,9 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           ...state,
           view: controller.getView(),
           hydratedCatalogTracks: [],
+          activeProfile: null,
+          activeDescriptor: null,
+          musicReadOnly: null,
           switchPrompt: null,
           lastError: null,
           statusAnnouncement: 'Playback engine: This PC. Local playback remains stopped.',
@@ -1037,6 +1086,9 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           ...state,
           view: controller.getView(),
           hydratedCatalogTracks: [],
+          activeProfile: null,
+          activeDescriptor: null,
+          musicReadOnly: null,
           isBusy: false,
           switchPrompt: null,
           lastError: null,
@@ -1062,19 +1114,23 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       const nextView = controller.getView()
       if (outcome === 'updated') {
         let hydratedCatalogTracks = state.hydratedCatalogTracks
-        if (nextView.snapshot?.catalog.nextCursor && activeCoreService) {
+        let activeDescriptor = state.activeDescriptor
+        if (activeCoreService) {
           try {
-            hydratedCatalogTracks = await hydrateCatalogTracks(activeCoreService, nextView.snapshot)
+            const hydrated = await hydrateCatalogTracks(activeCoreService, nextView.snapshot, activeCoreProfile)
+            hydratedCatalogTracks = hydrated.tracks
+            if (hydrated.descriptor) activeDescriptor = hydrated.descriptor
           } catch {
             // Preserve previously hydrated catalog on transient failure
           }
-        } else if (nextView.snapshot && !nextView.snapshot.catalog.nextCursor) {
-          hydratedCatalogTracks = nextView.snapshot.catalog.tracks
         }
+        const health = activeCoreProfile ? await probeProfileHealthSafe(activeCoreProfile) : null
         state = {
           ...state,
           view: nextView,
           hydratedCatalogTracks,
+          activeDescriptor,
+          musicReadOnly: typeof health?.musicReadOnly === 'boolean' ? health.musicReadOnly : state.musicReadOnly,
           isBusy: false,
           lastError: null,
           statusAnnouncement: `Reconnected to ${nextView.session.active.label}.`,
@@ -1204,6 +1260,53 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       state = { ...state, savedCores: next }
       saveCoreProfiles(storage, next)
       emit()
+    },
+
+    async refreshCatalog(): Promise<CoreCatalogTrack[]> {
+      const currentView = controller.getView()
+      if (currentView.session.active.kind !== 'core' || !activeCoreService) {
+        return state.hydratedCatalogTracks
+      }
+      await controller.refresh().catch(() => {})
+      const latestView = controller.getView()
+      const hydrated = await hydrateCatalogTracks(
+        activeCoreService,
+        latestView.snapshot ?? currentView.snapshot,
+        activeCoreProfile,
+      )
+      state = {
+        ...state,
+        view: latestView,
+        hydratedCatalogTracks: hydrated.tracks,
+        activeDescriptor: hydrated.descriptor ?? state.activeDescriptor,
+      }
+      emit()
+      return hydrated.tracks
+    },
+
+    async bootstrapStartupConnection(): Promise<void> {
+      if (disposed) return
+      if (controller.getView().session.active.kind === 'core') return
+      if (state.savedCores.length > 0) {
+        for (const profile of state.savedCores) {
+          const outcome = await activateProfileInternal(profile, 'idle')
+          if (outcome === 'activated') {
+            return
+          }
+        }
+      }
+      if (options.discoverNodes) {
+        state = { ...state, isDiscovering: true }
+        emit()
+        try {
+          const nodes = await options.discoverNodes()
+          state = { ...state, isDiscovering: false, discoveredCores: nodes }
+          emit()
+        } catch {
+          state = { ...state, isDiscovering: false }
+          emit()
+        }
+      }
     },
 
     /** Closing the controller never sends Stop to Core; the Core session continues independently. */
