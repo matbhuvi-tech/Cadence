@@ -191,7 +191,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
       }
       syncCurateRowsFromActiveJobs()
       if (anyVerified) {
-        void coreRefreshCatalog().catch(() => {})
+        void coreRefreshCatalog().catch(() => { })
       }
     },
     [engineClient, coreRefreshCatalog, syncCurateRowsFromActiveJobs],
@@ -755,7 +755,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
           currentFile: typeof data.path === 'string' ? data.path : prev.currentFile,
         }))
         if (ev.event === 'scan.complete') {
-          void coreRefreshCatalog().catch(() => {})
+          void coreRefreshCatalog().catch(() => { })
           void refreshEngineFolders()
         }
       } else if (ev.event.startsWith('curate.')) {
@@ -1563,8 +1563,8 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             }}
             title="Listening Room & Album Library (⌘1)"
             className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${topMode === 'library' && !focusedWorkbenchTrack
-                ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
-                : 'text-[#8E8E93] hover:text-[#EDEDED]'
+              ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
+              : 'text-[#8E8E93] hover:text-[#EDEDED]'
               }`}
           >
             <span>Listen</span>
@@ -1578,8 +1578,8 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             }}
             title="Unified Precision Metadata Workbench & Catalog Hygiene (⌘2)"
             className={`px-3.5 py-1 rounded-[7px] text-[12px] font-medium transition-all flex items-center gap-1.5 cursor-pointer ${topMode === 'curate'
-                ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
-                : 'text-[#8E8E93] hover:text-[#EDEDED]'
+              ? 'bg-white/[0.12] text-white shadow-sm border border-white/[0.08]'
+              : 'text-[#8E8E93] hover:text-[#EDEDED]'
               }`}
           >
             <span>Curate</span>
@@ -1640,17 +1640,15 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
           <button
             type="button"
             onClick={() => openSettings('engine')}
-            aria-label={`Playback engine: ${engineState.view.session.active.label}${
-              isCoreActive && !engineState.view.session.connected ? ' (Disconnected)' : ''
-            }`}
+            aria-label={`Playback engine: ${engineState.view.session.active.label}${isCoreActive && !engineState.view.session.connected ? ' (Disconnected)' : ''
+              }`}
             title={`Playback engine: ${engineState.view.session.active.label}`}
-            className={`px-2 py-1.5 rounded-[7px] border transition-all cursor-pointer flex items-center gap-1.5 text-[11px] font-medium ${
-              isCoreActive
-                ? engineState.view.session.connected
-                  ? 'bg-[#D4AF37]/12 border-[#D4AF37]/35 text-[#EDEDED] hover:bg-[#D4AF37]/20'
-                  : 'bg-rose-500/12 border-rose-500/35 text-rose-200 hover:bg-rose-500/20'
-                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED]'
-            }`}
+            className={`px-2 py-1.5 rounded-[7px] border transition-all cursor-pointer flex items-center gap-1.5 text-[11px] font-medium ${isCoreActive
+              ? engineState.view.session.connected
+                ? 'bg-[#D4AF37]/12 border-[#D4AF37]/35 text-[#EDEDED] hover:bg-[#D4AF37]/20'
+                : 'bg-rose-500/12 border-rose-500/35 text-rose-200 hover:bg-rose-500/20'
+              : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED]'
+              }`}
           >
             <Server className="w-3.5 h-3.5" aria-hidden="true" />
             <span className={isCoreActive ? 'inline max-w-[130px] truncate' : 'hidden xl:inline max-w-[110px] truncate'}>
@@ -1665,10 +1663,10 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             aria-label="Open Cadence Settings"
             title="Cadence Settings (⌘⇧,)"
             className={`relative p-1.5 rounded-[7px] border transition-all cursor-pointer flex items-center gap-1.5 ${isSettingsOpen
-                ? 'bg-white/[0.15] border-[#D4AF37]/50 text-[#D4AF37]'
-                : debugMode !== 'off'
-                  ? 'bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 border-[#D4AF37]/30 text-[#EDEDED]'
-                  : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED]'
+              ? 'bg-white/[0.15] border-[#D4AF37]/50 text-[#D4AF37]'
+              : debugMode !== 'off'
+                ? 'bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 border-[#D4AF37]/30 text-[#EDEDED]'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-[#EDEDED]'
               }`}
           >
             <Settings className="w-3.5 h-3.5" />
@@ -1687,8 +1685,8 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             onClick={() => toggleRightSidebar()}
             title={isRightSidebarOpen ? 'Hide Right Panel' : 'Show Right Panel (Queue & Playlists)'}
             className={`p-1.5 rounded-[7px] border transition-all cursor-pointer ${isRightSidebarOpen
-                ? 'bg-white/[0.15] border-white/[0.15] text-white'
-                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
+              ? 'bg-white/[0.15] border-white/[0.15] text-white'
+              : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
               }`}
           >
             <PanelRight className="w-3.5 h-3.5" />
@@ -1702,468 +1700,468 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
           <EngineConnectionGate />
         ) : (
           <>
-        {/* 1. Left Rail: Normalized Navigation (Persistent Shell) */}
-        <LeftRail
-          auditIssues={scopedAuditIssues}
-          activeTriageFilter={activeTriageFilter}
-          onSelectTriageFilter={setActiveTriageFilter}
-          onRemediateAudit={handleRemediateAudit}
-          healthScore={scopedHealthScore}
-          isFilteredScope={isGridFilterActive}
-          scopeTrackCount={gridScopedTracks.length}
-          totalTrackCount={tracks.length}
-          onRefreshAudit={() => {
-            auditService.runFullCatalogAudit()
-            refreshFromEngine()
-            showToast('Catalog hygiene diagnostic scan updated.')
-          }}
-          onOpenNormalizationRules={() => setIsNormalizationRulesModalOpen(true)}
-          facets={facets}
-          onFacetChange={setFacets}
-          onResetFacets={() => setFacets({})}
-          storageMounts={storageMounts}
-          onToggleReadOnly={handleToggleReadOnly}
-          selectedMountId={selectedMountId}
-          onSelectMount={setSelectedMountId}
-          selectedFolderFilter={selectedFolderFilter}
-          onSelectFolderFilter={setSelectedFolderFilter}
-          onOpenStorageManager={() => {
-            setIsStorageManagerOpen(true)
-          }}
-          onOpenImportModal={() => setIsImportModalOpen(true)}
-          watchedFolders={watchedFolders}
-          tracks={tracks}
-          releases={releases}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          topMode={topMode}
-          onTopModeChange={setTopMode}
-          onOpenCommitModal={() => setIsCommitModalOpen(true)}
-          playlists={playlists}
-          selectedPlaylistId={selectedPlaylist?.id}
-          onSelectPlaylist={(pl) => {
-            setSelectedPlaylist(pl)
-            setViewMode('playlist_detail')
-          }}
-          onOpenCreatePlaylist={() => {
-            setInitialPlaylistTracks([])
-            setIsCreatePlaylistOpen(true)
-          }}
-          isIconOnly={topMode === 'curate'}
-          onOpenSanctuary={() => setIsSanctuaryOpen(true)}
-          isArtworkDockExpanded={isArtworkDockExpanded}
-          onCollapseArtworkDock={() => setIsArtworkDockExpanded(false)}
-        />
-
-        {/* 2. Center Stage: MaintainCockpit OR CurationWorkbench OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
-        {topMode === 'maintain' ? (
-          <MaintainCockpit
-            tracks={tracks}
-            releases={releases}
-            auditIssues={auditIssues}
-            storageMounts={storageMounts}
-            watchedFolders={watchedFolders}
-            skippedFiles={skippedFiles}
-            uncommittedCount={uncommittedCount}
-            activeSubTab={maintainSubTab}
-            onSubTabChange={setMaintainSubTab}
-            onAddWatchedFolder={handleAddWatchedFolder}
-            onRemoveWatchedFolder={handleRemoveWatchedFolder}
-            onRemediateAudit={handleRemediateAudit}
-            onIgnoreSkippedFile={handleIgnoreSkippedFile}
-            onIgnoreAllSkippedFiles={handleIgnoreAllSkippedFiles}
-            onRefreshAudit={() => {
-              auditService.runFullCatalogAudit()
-              refreshFromEngine()
-              showToast('Catalog hygiene diagnostic scan updated.')
-            }}
-            onDiscardTrackEdits={(trackIds: string[]) => {
-              trackIds.forEach((id) => graphEngine.discardTrackEdits(id))
-              refreshFromEngine()
-              persistCurrentLibrary()
-              auditService.runFullCatalogAudit()
-              showToast(`Discarded staged edits for ${trackIds.length} track(s).`)
-            }}
-            onApplyPathRestructure={(pattern: string) => {
-              const previews = tracks.map((t) => {
-                const rel = releases.find((r) => r.id === t.releaseId)
-                const proposed = pattern
-                  .replace('{Artist}', t.artistCredit || 'Unknown Artist')
-                  .replace('{Year}', String(rel?.releaseYear || 'Unknown Year'))
-                  .replace('{Album}', rel?.title || 'Unknown Album')
-                  .replace('{TrackNum}', String(t.trackNumber || 1).padStart(2, '0'))
-                  .replace('{Title}', t.title)
-                return {
-                  trackId: t.id,
-                  proposedPath: proposed + '.' + (t.format || 'flac').toLowerCase(),
-                }
-              })
-              handleApplyPathRestructure(previews)
-            }}
-            onCommitTwoPhase={() => {
-              if (isPlaying) {
-                showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
-              }
-              setIsCommitModalOpen(true)
-            }}
-            onToggleMountLock={handleToggleMountLock}
-            onToggleMountStatus={(mountId: string) => {
-              const mount = storageMounts.find((m) => m.id === mountId)
-              handleToggleMountStatus(mountId, mount?.status || 'online')
-            }}
-            onTriggerScan={(folderPath?: string) => {
-              if (folderPath) {
-                handleTriggerScan(folderPath)
-              } else if (storageMounts.length > 0) {
-                handleTriggerScan(storageMounts[0].mountPath)
-              }
-            }}
-            onRefreshLibrary={handleRefreshLibrary}
-            onSelectRelease={(releaseId: string) => handleInspectRelease(releaseId)}
-            showToast={showToast}
-            onSwitchToLibrary={() => setTopMode('library')}
-            activeEntityScope={activeEntityScope}
-            onClearEntityScope={() => {
-              setSelectedAlbumId(null)
-              setSelectedArtist(null)
-              setSelectedComposer(null)
-            }}
-          />
-        ) : topMode === 'curate' ? (
-          <UnifiedCurateCockpit
-            {...curateCatalog}
-            prioritySettings={prioritySettings}
-            onPrioritySettingsChange={setPrioritySettings}
-            dismissedProblems={dismissedProblems}
-            onDismissedProblemsChange={setDismissedProblems}
-            commitRows={curateCommits}
-            commitQueueHostRef={setCurateQueueHost}
-            onCommitQueued={refreshCurateCommits}
-            onDraftSaved={noteCurateDraftSaved}
-            initialSelectedAlbumId={navigationAnchor?.selectedAlbumId}
-            onReturnToAnchor={() => {
-              if (navigationAnchor) {
-                setSelectedAlbumId(navigationAnchor.selectedAlbumId)
-                const scrollPos = navigationAnchor.scrollPosition
-                setNavigationAnchor(null)
-                setTopMode('library')
-                requestAnimationFrame(() => {
-                  window.scrollTo({ top: scrollPos, behavior: 'instant' })
-                })
-              } else {
-                setTopMode('library')
-              }
-            }}
-            onBackToLibrary={() => {
-              setNavigationAnchor(null)
-              setTopMode('library')
-            }}
-            showToast={showToast}
-            isPlaying={isPlaying || isPaused}
-          />
-        ) : focusedWorkbenchTrack ? (
-          <FocusedWorkbench
-            track={focusedWorkbenchTrack}
-            release={releases.find((r) => r.id === focusedWorkbenchTrack.releaseId)}
-            allTracks={tracks}
-            onClose={() => setFocusedWorkbenchTrack(null)}
-            onApplyEdits={(edits) => {
-              graphEngine.updateTrackSidecar(focusedWorkbenchTrack.id, edits)
-              refreshFromEngine()
-              persistCurrentLibrary()
-
-              // Edge Case 1: Reactive Renaming Refinement
-              if (selectedComposer && edits.composerName && edits.composerName !== selectedComposer) {
-                const remaining = graphEngine.getAllTracks().filter((t) => {
-                  const rel = graphEngine.getAllReleases().find((r) => r.id === t.releaseId)
-                  return (
-                    (t.composerName || '').toLowerCase().trim() === selectedComposer.toLowerCase().trim() ||
-                    (rel?.composerName || '').toLowerCase().trim() === selectedComposer.toLowerCase().trim()
-                  )
-                })
-                if (remaining.length === 0) {
-                  setSelectedComposer(edits.composerName)
-                }
-              }
-
-              if (selectedArtist && edits.artistCredit && edits.artistCredit !== selectedArtist) {
-                const remaining = graphEngine.getAllTracks().filter((t) => {
-                  const rel = graphEngine.getAllReleases().find((r) => r.id === t.releaseId)
-                  return (
-                    (t.artistCredit || '').toLowerCase().trim() === selectedArtist.toLowerCase().trim() ||
-                    (rel?.artistCredit || '').toLowerCase().trim() === selectedArtist.toLowerCase().trim()
-                  )
-                })
-                if (remaining.length === 0) {
-                  setSelectedArtist(edits.artistCredit)
-                }
-              }
-            }}
-            showToast={showToast}
-          />
-        ) : viewMode === 'playlist_detail' && selectedPlaylist ? (
-          <PlaylistDetailView
-            playlist={selectedPlaylist}
-            allTracks={tracks}
-            allReleases={releases}
-            onBackToLibrary={() => setViewMode('cover_grid')}
-            onOpenEditPlaylist={(pl) => {
-              setEditingPlaylist(pl)
-              setIsEditPlaylistOpen(true)
-            }}
-            onOpenAddTracksModal={(trks) => {
-              setTracksToAdd(trks)
-              setIsAddTracksModalOpen(true)
-            }}
-            showToast={showToast}
-          />
-        ) : !isCoreActive && tracks.length === 0 && offlineMounts.length > 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0D13] relative overflow-hidden text-center">
-            {/* Ambient background glow */}
-            <div className="absolute w-96 h-96 rounded-full bg-amber-500/10 blur-[120px] pointer-events-none" />
-
-            <div className="relative z-10 max-w-lg flex flex-col items-center">
-              <div className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-6 shadow-xl shadow-amber-500/10">
-                <WifiOff className="w-8 h-8" />
-              </div>
-
-              <div className="flex items-center gap-2 mb-2">
-                <span className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-[11px] font-mono font-semibold border border-amber-500/30 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-amber-400" />
-                  Network Folder Offline
-                </span>
-              </div>
-
-              <h2 className="text-xl font-bold text-white mb-2">
-                Storage Location Inaccessible
-              </h2>
-
-              <p className="text-xs text-white/60 mb-4 leading-relaxed">
-                Cadence Core detected that your network folder is currently unreachable.
-                To protect playback integrity and prevent uncommittable metadata edits,
-                album data from this storage location is withheld from display.
-              </p>
-
-              {/* Storage Path Card */}
-              <div className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl p-4 mb-6 text-left">
-                <div className="text-[11px] font-medium text-white/50 mb-1">Target Storage Path:</div>
-                <div className="font-mono text-xs text-[#00F5FF] break-all bg-black/40 px-3 py-2 rounded-lg border border-white/[0.05] flex items-center gap-2">
-                  <Server className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>{offlineMounts[0]?.mountPath}</span>
-                </div>
-                {offlineStats.releases > 0 && (
-                  <div className="mt-3 flex items-center justify-between text-[11px] text-white/40 pt-2 border-t border-white/[0.05]">
-                    <span>Preserved in SQLite Database:</span>
-                    <span className="text-amber-300 font-mono">
-                      {offlineStats.releases} albums • {offlineStats.tracks} tracks
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Actions */}
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleRetryConnection}
-                  disabled={isCheckingConnectivity}
-                  className="px-5 py-2.5 rounded-xl bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 text-[#00F5FF] border border-[#00F5FF]/50 text-xs font-semibold transition-all flex items-center gap-2 shadow-lg shadow-[#00F5FF]/10 disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-4 h-4 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
-                  {isCheckingConnectivity ? 'Checking Connection...' : 'Retry Connection'}
-                </button>
-
-                <button
-                  onClick={() => {
-                    setIsStorageManagerOpen(true)
-                  }}
-                  className="px-4 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white/80 border border-white/[0.1] text-xs font-medium transition-colors"
-                >
-                  Manage Storage Roots
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-            {isCoreActive && !engineState.view.session.connected && (
-              <div
-                role="status"
-                aria-live="polite"
-                className="px-4 py-2 bg-rose-500/10 border-b border-rose-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <WifiOff className="w-4 h-4 text-rose-400 shrink-0" aria-hidden="true" />
-                  <span className="text-rose-200 truncate">
-                    {engineState.view.session.active.label}: Connection lost. Playback may still be continuing.
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => void reconnectCore()}
-                    className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-100 border border-rose-500/40 text-[11px] font-medium cursor-pointer"
-                  >
-                    Reconnect
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => openSettings('engine')}
-                    className="px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-white/85 border border-white/[0.1] text-[11px] cursor-pointer"
-                  >
-                    Choose engine
-                  </button>
-                </div>
-              </div>
-            )}
-            {isCoreActive &&
-              engineState.view.session.connected &&
-              activeCoreSnapshot?.playback.takeoverRequired && (
-                <div
-                  role="status"
-                  aria-live="polite"
-                  className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
-                    <span className="text-amber-200 truncate">
-                      {engineState.view.session.active.label}: RS130 is currently playing via HiFi ROSE (
-                      {activeCoreSnapshot.playback.externalPlayback?.transportState || 'PLAYING'}
-                      ). External playback remains undisturbed until you confirm takeover.
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void coreRefreshSnapshot()}
-                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border border-amber-500/40 text-[11px] font-medium cursor-pointer shrink-0"
-                  >
-                    Refresh status
-                  </button>
-                </div>
-              )}
-            {/* If some mounts are offline, render top alert banner */}
-            {offlineMounts.length > 0 && (
-              <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0 animate-in fade-in duration-200">
-                <div className="flex items-center gap-2 min-w-0">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span className="text-amber-300 truncate">
-                    Network Storage Offline: <span className="font-mono">{offlineMounts[0].name}</span> ({offlineMounts[0].mountPath}) is unreachable.
-                    {offlineStats.releases > 0 && ` ${offlineStats.releases} albums from this folder are withheld.`}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={handleRetryConnection}
-                    disabled={isCheckingConnectivity}
-                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-[11px] font-mono transition-colors flex items-center gap-1.5"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
-                    {isCheckingConnectivity ? 'Checking...' : 'Retry'}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsStorageManagerOpen(true)
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 text-[11px] transition-colors"
-                  >
-                    Manage
-                  </button>
-                </div>
-              </div>
-            )}
-            <DataCanvas
-              viewMode={viewMode}
-              onViewModeChange={setViewMode}
-              albumDisplayMode={albumDisplayMode}
-              onAlbumDisplayModeChange={setAlbumDisplayMode}
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              works={isCoreActive ? [] : works}
-              releases={displayedReleases}
-              tracks={filteredTracks}
-              mountAndFolderScopedTracks={mountAndFolderScopedTracks}
+            {/* 1. Left Rail: Normalized Navigation (Persistent Shell) */}
+            <LeftRail
+              auditIssues={scopedAuditIssues}
+              activeTriageFilter={activeTriageFilter}
+              onSelectTriageFilter={setActiveTriageFilter}
+              onRemediateAudit={handleRemediateAudit}
+              healthScore={scopedHealthScore}
+              isFilteredScope={isGridFilterActive}
+              scopeTrackCount={gridScopedTracks.length}
+              totalTrackCount={tracks.length}
+              onRefreshAudit={() => {
+                auditService.runFullCatalogAudit()
+                refreshFromEngine()
+                showToast('Catalog hygiene diagnostic scan updated.')
+              }}
+              onOpenNormalizationRules={() => setIsNormalizationRulesModalOpen(true)}
               facets={facets}
               onFacetChange={setFacets}
-              selectedTrackId={selectedTrackId}
-              onSelectTrack={setSelectedTrackId}
-              selectedTrackIds={selectedTrackIds}
-              onToggleTrackSelection={handleToggleTrackSelection}
-              onSelectAllTracks={handleSelectAllTracks}
-              onSelectVariant={handleSelectVariant}
-              onInspectRelease={handleInspectRelease}
-              onCustomizeRelease={rel => handleInspectRelease(rel.id)}
-              onUpdateReleaseDetails={handleUpdateReleaseDetails}
-              onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
-              onApplyBatchEdits={handleApplyBatchEdits}
-              onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
-              onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
-              onOpenImportModal={() => setIsImportModalOpen(true)}
-              onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
-              onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
-              totalLibraryTracksCount={tracks.length}
-              totalLibraryReleasesCount={releases.length}
-              activeEngineLabel={engineState.view.session.active.label}
-              isCoreEngineActive={isCoreActive}
-              onSwitchToLocalEngine={
-                tauriBridge.hasLocalEngine() ? () => void requestSwitchToLocal() : undefined
-              }
-              stagedAlbumsCount={stagedAlbumsCount}
-              splitReleaseIds={splitReleaseIds}
-              onToggleReleaseSplit={handleToggleReleaseSplit}
-              onResetFilters={() => {
-                setFacets({})
-                setActiveTriageFilter(undefined)
-                setSelectedMountId(undefined)
-                setSelectedFolderFilter(undefined)
-                setSearchQuery('')
-                if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
-                  graphEngine.loadCustomLibrary({
-                    tracks: catalogTracks,
-                    releases: catalogReleases,
-                    works,
-                    auditIssues,
-                    storageMounts,
-                  })
-                }
+              onResetFacets={() => setFacets({})}
+              storageMounts={storageMounts}
+              onToggleReadOnly={handleToggleReadOnly}
+              selectedMountId={selectedMountId}
+              onSelectMount={setSelectedMountId}
+              selectedFolderFilter={selectedFolderFilter}
+              onSelectFolderFilter={setSelectedFolderFilter}
+              onOpenStorageManager={() => {
+                setIsStorageManagerOpen(true)
               }}
-              activeTriageIssue={activeTriageIssue}
-              onClearTriageFilter={() => setActiveTriageFilter(undefined)}
-              onRemediateTriageIssue={handleRemediateAudit}
-              activeCoverTab={activeCoverTab}
-              onActiveCoverTabChange={setActiveCoverTab}
-              selectedAlbumId={selectedAlbumId}
-              onSelectAlbumId={setSelectedAlbumId}
-              selectedArtist={selectedArtist}
-              onSelectArtist={setSelectedArtist}
-              selectedComposer={selectedComposer}
-              onSelectComposer={setSelectedComposer}
+              onOpenImportModal={() => setIsImportModalOpen(true)}
+              watchedFolders={watchedFolders}
+              tracks={tracks}
+              releases={releases}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              topMode={topMode}
+              onTopModeChange={setTopMode}
+              onOpenCommitModal={() => setIsCommitModalOpen(true)}
+              playlists={playlists}
+              selectedPlaylistId={selectedPlaylist?.id}
+              onSelectPlaylist={(pl) => {
+                setSelectedPlaylist(pl)
+                setViewMode('playlist_detail')
+              }}
+              onOpenCreatePlaylist={() => {
+                setInitialPlaylistTracks([])
+                setIsCreatePlaylistOpen(true)
+              }}
+              isIconOnly={topMode === 'curate'}
+              onOpenSanctuary={() => setIsSanctuaryOpen(true)}
+              isArtworkDockExpanded={isArtworkDockExpanded}
+              onCollapseArtworkDock={() => setIsArtworkDockExpanded(false)}
             />
-          </div>
-        )}
 
-        {/* 3. Unified Right Sidebar: Queue & Playlists */}
-        {isRightSidebarOpen && (
-          <UnifiedRightSidebar
-            allReleases={releases}
-            onOpenCreatePlaylist={(trks) => {
-              setInitialPlaylistTracks(trks || [])
-              setIsCreatePlaylistOpen(true)
-            }}
-            onOpenEditPlaylist={(pl) => {
-              setEditingPlaylist(pl)
-              setIsEditPlaylistOpen(true)
-            }}
-            onOpenAddTracksModal={(trks) => {
-              setTracksToAdd(trks)
-              setIsAddTracksModalOpen(true)
-            }}
-            onSelectPlaylistDetail={(pl) => {
-              setSelectedPlaylist(pl)
-              setViewMode('playlist_detail')
-            }}
-            onClose={() => setIsRightSidebarOpen(false)}
-            showToast={showToast}
-          />
-        )}
+            {/* 2. Center Stage: MaintainCockpit OR CurationWorkbench OR Focused Workbench OR Playlist Detail OR Storage Offline View */}
+            {topMode === 'maintain' ? (
+              <MaintainCockpit
+                tracks={tracks}
+                releases={releases}
+                auditIssues={auditIssues}
+                storageMounts={storageMounts}
+                watchedFolders={watchedFolders}
+                skippedFiles={skippedFiles}
+                uncommittedCount={uncommittedCount}
+                activeSubTab={maintainSubTab}
+                onSubTabChange={setMaintainSubTab}
+                onAddWatchedFolder={handleAddWatchedFolder}
+                onRemoveWatchedFolder={handleRemoveWatchedFolder}
+                onRemediateAudit={handleRemediateAudit}
+                onIgnoreSkippedFile={handleIgnoreSkippedFile}
+                onIgnoreAllSkippedFiles={handleIgnoreAllSkippedFiles}
+                onRefreshAudit={() => {
+                  auditService.runFullCatalogAudit()
+                  refreshFromEngine()
+                  showToast('Catalog hygiene diagnostic scan updated.')
+                }}
+                onDiscardTrackEdits={(trackIds: string[]) => {
+                  trackIds.forEach((id) => graphEngine.discardTrackEdits(id))
+                  refreshFromEngine()
+                  persistCurrentLibrary()
+                  auditService.runFullCatalogAudit()
+                  showToast(`Discarded staged edits for ${trackIds.length} track(s).`)
+                }}
+                onApplyPathRestructure={(pattern: string) => {
+                  const previews = tracks.map((t) => {
+                    const rel = releases.find((r) => r.id === t.releaseId)
+                    const proposed = pattern
+                      .replace('{Artist}', t.artistCredit || 'Unknown Artist')
+                      .replace('{Year}', String(rel?.releaseYear || 'Unknown Year'))
+                      .replace('{Album}', rel?.title || 'Unknown Album')
+                      .replace('{TrackNum}', String(t.trackNumber || 1).padStart(2, '0'))
+                      .replace('{Title}', t.title)
+                    return {
+                      trackId: t.id,
+                      proposedPath: proposed + '.' + (t.format || 'flac').toLowerCase(),
+                    }
+                  })
+                  handleApplyPathRestructure(previews)
+                }}
+                onCommitTwoPhase={() => {
+                  if (isPlaying) {
+                    showToast('⚠️ Transport Purity Notice: Playback is active. Physical disk writes are locked until playback pauses/stops.')
+                  }
+                  setIsCommitModalOpen(true)
+                }}
+                onToggleMountLock={handleToggleMountLock}
+                onToggleMountStatus={(mountId: string) => {
+                  const mount = storageMounts.find((m) => m.id === mountId)
+                  handleToggleMountStatus(mountId, mount?.status || 'online')
+                }}
+                onTriggerScan={(folderPath?: string) => {
+                  if (folderPath) {
+                    handleTriggerScan(folderPath)
+                  } else if (storageMounts.length > 0) {
+                    handleTriggerScan(storageMounts[0].mountPath)
+                  }
+                }}
+                onRefreshLibrary={handleRefreshLibrary}
+                onSelectRelease={(releaseId: string) => handleInspectRelease(releaseId)}
+                showToast={showToast}
+                onSwitchToLibrary={() => setTopMode('library')}
+                activeEntityScope={activeEntityScope}
+                onClearEntityScope={() => {
+                  setSelectedAlbumId(null)
+                  setSelectedArtist(null)
+                  setSelectedComposer(null)
+                }}
+              />
+            ) : topMode === 'curate' ? (
+              <UnifiedCurateCockpit
+                {...curateCatalog}
+                prioritySettings={prioritySettings}
+                onPrioritySettingsChange={setPrioritySettings}
+                dismissedProblems={dismissedProblems}
+                onDismissedProblemsChange={setDismissedProblems}
+                commitRows={curateCommits}
+                commitQueueHostRef={setCurateQueueHost}
+                onCommitQueued={refreshCurateCommits}
+                onDraftSaved={noteCurateDraftSaved}
+                initialSelectedAlbumId={navigationAnchor?.selectedAlbumId}
+                onReturnToAnchor={() => {
+                  if (navigationAnchor) {
+                    setSelectedAlbumId(navigationAnchor.selectedAlbumId)
+                    const scrollPos = navigationAnchor.scrollPosition
+                    setNavigationAnchor(null)
+                    setTopMode('library')
+                    requestAnimationFrame(() => {
+                      window.scrollTo({ top: scrollPos, behavior: 'instant' })
+                    })
+                  } else {
+                    setTopMode('library')
+                  }
+                }}
+                onBackToLibrary={() => {
+                  setNavigationAnchor(null)
+                  setTopMode('library')
+                }}
+                showToast={showToast}
+                isPlaying={isPlaying || isPaused}
+              />
+            ) : focusedWorkbenchTrack ? (
+              <FocusedWorkbench
+                track={focusedWorkbenchTrack}
+                release={releases.find((r) => r.id === focusedWorkbenchTrack.releaseId)}
+                allTracks={tracks}
+                onClose={() => setFocusedWorkbenchTrack(null)}
+                onApplyEdits={(edits) => {
+                  graphEngine.updateTrackSidecar(focusedWorkbenchTrack.id, edits)
+                  refreshFromEngine()
+                  persistCurrentLibrary()
+
+                  // Edge Case 1: Reactive Renaming Refinement
+                  if (selectedComposer && edits.composerName && edits.composerName !== selectedComposer) {
+                    const remaining = graphEngine.getAllTracks().filter((t) => {
+                      const rel = graphEngine.getAllReleases().find((r) => r.id === t.releaseId)
+                      return (
+                        (t.composerName || '').toLowerCase().trim() === selectedComposer.toLowerCase().trim() ||
+                        (rel?.composerName || '').toLowerCase().trim() === selectedComposer.toLowerCase().trim()
+                      )
+                    })
+                    if (remaining.length === 0) {
+                      setSelectedComposer(edits.composerName)
+                    }
+                  }
+
+                  if (selectedArtist && edits.artistCredit && edits.artistCredit !== selectedArtist) {
+                    const remaining = graphEngine.getAllTracks().filter((t) => {
+                      const rel = graphEngine.getAllReleases().find((r) => r.id === t.releaseId)
+                      return (
+                        (t.artistCredit || '').toLowerCase().trim() === selectedArtist.toLowerCase().trim() ||
+                        (rel?.artistCredit || '').toLowerCase().trim() === selectedArtist.toLowerCase().trim()
+                      )
+                    })
+                    if (remaining.length === 0) {
+                      setSelectedArtist(edits.artistCredit)
+                    }
+                  }
+                }}
+                showToast={showToast}
+              />
+            ) : viewMode === 'playlist_detail' && selectedPlaylist ? (
+              <PlaylistDetailView
+                playlist={selectedPlaylist}
+                allTracks={tracks}
+                allReleases={releases}
+                onBackToLibrary={() => setViewMode('cover_grid')}
+                onOpenEditPlaylist={(pl) => {
+                  setEditingPlaylist(pl)
+                  setIsEditPlaylistOpen(true)
+                }}
+                onOpenAddTracksModal={(trks) => {
+                  setTracksToAdd(trks)
+                  setIsAddTracksModalOpen(true)
+                }}
+                showToast={showToast}
+              />
+            ) : !isCoreActive && tracks.length === 0 && offlineMounts.length > 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0B0D13] relative overflow-hidden text-center">
+                {/* Ambient background glow */}
+                <div className="absolute w-96 h-96 rounded-full bg-amber-500/10 blur-[120px] pointer-events-none" />
+
+                <div className="relative z-10 max-w-lg flex flex-col items-center">
+                  <div className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-6 shadow-xl shadow-amber-500/10">
+                    <WifiOff className="w-8 h-8" />
+                  </div>
+
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 text-[11px] font-mono font-semibold border border-amber-500/30 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-amber-400" />
+                      Network Folder Offline
+                    </span>
+                  </div>
+
+                  <h2 className="text-xl font-bold text-white mb-2">
+                    Storage Location Inaccessible
+                  </h2>
+
+                  <p className="text-xs text-white/60 mb-4 leading-relaxed">
+                    Cadence Core detected that your network folder is currently unreachable.
+                    To protect playback integrity and prevent uncommittable metadata edits,
+                    album data from this storage location is withheld from display.
+                  </p>
+
+                  {/* Storage Path Card */}
+                  <div className="w-full bg-white/[0.03] border border-white/[0.08] rounded-xl p-4 mb-6 text-left">
+                    <div className="text-[11px] font-medium text-white/50 mb-1">Target Storage Path:</div>
+                    <div className="font-mono text-xs text-[#00F5FF] break-all bg-black/40 px-3 py-2 rounded-lg border border-white/[0.05] flex items-center gap-2">
+                      <Server className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>{offlineMounts[0]?.mountPath}</span>
+                    </div>
+                    {offlineStats.releases > 0 && (
+                      <div className="mt-3 flex items-center justify-between text-[11px] text-white/40 pt-2 border-t border-white/[0.05]">
+                        <span>Preserved in SQLite Database:</span>
+                        <span className="text-amber-300 font-mono">
+                          {offlineStats.releases} albums • {offlineStats.tracks} tracks
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={handleRetryConnection}
+                      disabled={isCheckingConnectivity}
+                      className="px-5 py-2.5 rounded-xl bg-[#00F5FF]/20 hover:bg-[#00F5FF]/30 text-[#00F5FF] border border-[#00F5FF]/50 text-xs font-semibold transition-all flex items-center gap-2 shadow-lg shadow-[#00F5FF]/10 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
+                      {isCheckingConnectivity ? 'Checking Connection...' : 'Retry Connection'}
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setIsStorageManagerOpen(true)
+                      }}
+                      className="px-4 py-2.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-white/80 border border-white/[0.1] text-xs font-medium transition-colors"
+                    >
+                      Manage Storage Roots
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+                {isCoreActive && !engineState.view.session.connected && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="px-4 py-2 bg-rose-500/10 border-b border-rose-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <WifiOff className="w-4 h-4 text-rose-400 shrink-0" aria-hidden="true" />
+                      <span className="text-rose-200 truncate">
+                        {engineState.view.session.active.label}: Connection lost. Playback may still be continuing.
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void reconnectCore()}
+                        className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-100 border border-rose-500/40 text-[11px] font-medium cursor-pointer"
+                      >
+                        Reconnect
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openSettings('engine')}
+                        className="px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-white/85 border border-white/[0.1] text-[11px] cursor-pointer"
+                      >
+                        Choose engine
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {isCoreActive &&
+                  engineState.view.session.connected &&
+                  activeCoreSnapshot?.playback.takeoverRequired && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+                        <span className="text-amber-200 truncate">
+                          {engineState.view.session.active.label}: RS130 is currently playing via HiFi ROSE (
+                          {activeCoreSnapshot.playback.externalPlayback?.transportState || 'PLAYING'}
+                          ). External playback remains undisturbed until you confirm takeover.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void coreRefreshSnapshot()}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border border-amber-500/40 text-[11px] font-medium cursor-pointer shrink-0"
+                      >
+                        Refresh status
+                      </button>
+                    </div>
+                  )}
+                {/* If some mounts are offline, render top alert banner */}
+                {offlineMounts.length > 0 && (
+                  <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0 animate-in fade-in duration-200">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span className="text-amber-300 truncate">
+                        Network Storage Offline: <span className="font-mono">{offlineMounts[0].name}</span> ({offlineMounts[0].mountPath}) is unreachable.
+                        {offlineStats.releases > 0 && ` ${offlineStats.releases} albums from this folder are withheld.`}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={handleRetryConnection}
+                        disabled={isCheckingConnectivity}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-[11px] font-mono transition-colors flex items-center gap-1.5"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isCheckingConnectivity ? 'animate-spin' : ''}`} />
+                        {isCheckingConnectivity ? 'Checking...' : 'Retry'}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsStorageManagerOpen(true)
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 text-[11px] transition-colors"
+                      >
+                        Manage
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <DataCanvas
+                  viewMode={viewMode}
+                  onViewModeChange={setViewMode}
+                  albumDisplayMode={albumDisplayMode}
+                  onAlbumDisplayModeChange={setAlbumDisplayMode}
+                  searchQuery={searchQuery}
+                  onSearchChange={setSearchQuery}
+                  works={isCoreActive ? [] : works}
+                  releases={displayedReleases}
+                  tracks={filteredTracks}
+                  mountAndFolderScopedTracks={mountAndFolderScopedTracks}
+                  facets={facets}
+                  onFacetChange={setFacets}
+                  selectedTrackId={selectedTrackId}
+                  onSelectTrack={setSelectedTrackId}
+                  selectedTrackIds={selectedTrackIds}
+                  onToggleTrackSelection={handleToggleTrackSelection}
+                  onSelectAllTracks={handleSelectAllTracks}
+                  onSelectVariant={handleSelectVariant}
+                  onInspectRelease={handleInspectRelease}
+                  onCustomizeRelease={rel => handleInspectRelease(rel.id)}
+                  onUpdateReleaseDetails={handleUpdateReleaseDetails}
+                  onOpenSidecar={(trackId) => setSidecarTrackId(trackId)}
+                  onApplyBatchEdits={handleApplyBatchEdits}
+                  onTriggerTwoPhaseCommit={() => setIsCommitModalOpen(true)}
+                  onOpenBatchRuleModal={() => setIsPathRuleModalOpen(true)}
+                  onOpenImportModal={() => setIsImportModalOpen(true)}
+                  onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
+                  onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
+                  totalLibraryTracksCount={tracks.length}
+                  totalLibraryReleasesCount={releases.length}
+                  activeEngineLabel={engineState.view.session.active.label}
+                  isCoreEngineActive={isCoreActive}
+                  onSwitchToLocalEngine={
+                    tauriBridge.hasLocalEngine() ? () => void requestSwitchToLocal() : undefined
+                  }
+                  stagedAlbumsCount={stagedAlbumsCount}
+                  splitReleaseIds={splitReleaseIds}
+                  onToggleReleaseSplit={handleToggleReleaseSplit}
+                  onResetFilters={() => {
+                    setFacets({})
+                    setActiveTriageFilter(undefined)
+                    setSelectedMountId(undefined)
+                    setSelectedFolderFilter(undefined)
+                    setSearchQuery('')
+                    if (tracks.length > 0 && graphEngine.getAllTracks().length === 0) {
+                      graphEngine.loadCustomLibrary({
+                        tracks: catalogTracks,
+                        releases: catalogReleases,
+                        works,
+                        auditIssues,
+                        storageMounts,
+                      })
+                    }
+                  }}
+                  activeTriageIssue={activeTriageIssue}
+                  onClearTriageFilter={() => setActiveTriageFilter(undefined)}
+                  onRemediateTriageIssue={handleRemediateAudit}
+                  activeCoverTab={activeCoverTab}
+                  onActiveCoverTabChange={setActiveCoverTab}
+                  selectedAlbumId={selectedAlbumId}
+                  onSelectAlbumId={setSelectedAlbumId}
+                  selectedArtist={selectedArtist}
+                  onSelectArtist={setSelectedArtist}
+                  selectedComposer={selectedComposer}
+                  onSelectComposer={setSelectedComposer}
+                />
+              </div>
+            )}
+
+            {/* 3. Unified Right Sidebar: Queue & Playlists */}
+            {isRightSidebarOpen && (
+              <UnifiedRightSidebar
+                allReleases={releases}
+                onOpenCreatePlaylist={(trks) => {
+                  setInitialPlaylistTracks(trks || [])
+                  setIsCreatePlaylistOpen(true)
+                }}
+                onOpenEditPlaylist={(pl) => {
+                  setEditingPlaylist(pl)
+                  setIsEditPlaylistOpen(true)
+                }}
+                onOpenAddTracksModal={(trks) => {
+                  setTracksToAdd(trks)
+                  setIsAddTracksModalOpen(true)
+                }}
+                onSelectPlaylistDetail={(pl) => {
+                  setSelectedPlaylist(pl)
+                  setViewMode('playlist_detail')
+                }}
+                onClose={() => setIsRightSidebarOpen(false)}
+                showToast={showToast}
+              />
+            )}
           </>
         )}
       </div>
@@ -2177,7 +2175,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
 
       {/* Global Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-xl bg-[#12151D] border border-[#00F5FF]/40 text-xs font-mono text-[#00F5FF] shadow-2xl flex items-center gap-2 glow-cyan animate-in fade-in slide-in-from-bottom-3 duration-200">
+        <div className="fixed bottom-6 right-6 z-[100] px-4 py-2.5 rounded-xl bg-[#12151D] border border-[#00F5FF]/40 text-xs font-mono text-[#00F5FF] shadow-2xl flex items-center gap-2 glow-cyan animate-in fade-in slide-in-from-bottom-3 duration-200">
           <Sparkles className="w-4 h-4 text-[#ADFF2F]" />
           <span>{toastMessage}</span>
         </div>

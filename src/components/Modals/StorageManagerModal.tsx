@@ -63,6 +63,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
   const [smbVersion, setSmbVersion] = useState('auto')
   const [smbReadOnly, setSmbReadOnly] = useState(true)
   const [smbDisplayName, setSmbDisplayName] = useState('')
+  const [smbError, setSmbError] = useState<string | null>(null)
 
   const refreshEngineStorage = useCallback(async () => {
     if (!engineClient) return
@@ -120,6 +121,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
     e.preventDefault()
     if (!engineClient || !smbServer.trim() || !smbShare.trim()) return
     setIsMountingSmb(true)
+    setSmbError(null)
     try {
       const mounted = await engineClient.addSmbShare({
         server: smbServer.trim(),
@@ -136,11 +138,14 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
       setSmbUsername('')
       setSmbPassword('')
       setSmbDisplayName('')
+      setSmbError(null)
       setIsAddingSmb(false)
       setIsAddingFolder(true)
       await refreshEngineStorage()
     } catch (err: any) {
-      showToast(err?.message || 'Failed to mount SMB share.')
+      const msg = err?.message || 'Failed to mount SMB share.'
+      setSmbError(msg)
+      showToast(msg)
     } finally {
       setIsMountingSmb(false)
     }
@@ -368,6 +373,11 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                   </label>
                 </div>
               </div>
+              {smbError && (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-mono text-red-300 break-words">
+                  {smbError}
+                </div>
+              )}
               <div className="flex justify-end">
                 <button
                   type="submit"
