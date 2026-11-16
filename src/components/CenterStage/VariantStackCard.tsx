@@ -32,6 +32,7 @@ import { graphEngine } from '../../core/graphEngine'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { FEATURES } from '../../config/features'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 
 interface VariantStackCardProps {
   release: Release
@@ -210,7 +211,7 @@ export const VariantStackCard: React.FC<VariantStackCardProps> = ({
     ? release.title
     : (release.folderName || release.title)
 
-  const coverUrl = release.artwork?.frontCoverUrl || release.coverArtUrl || ''
+  const coverUrl = resolveMediaUrl(release.artwork?.frontCoverUrl || release.coverArtUrl || '')
 
   // Get tracks for this release
   const relTracks = graphEngine.getAllTracks().filter((t) => t.releaseId === release.id)

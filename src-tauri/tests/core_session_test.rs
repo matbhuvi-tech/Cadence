@@ -37,12 +37,7 @@ fn catalog() -> Vec<CatalogTrack> {
             artist: "Artist".into(),
             album: "Album".into(),
             duration_seconds: 120.0,
-            format: None,
-            sample_rate: None,
-            bit_depth: None,
-            track_number: None,
-            disc_number: None,
-            release_year: None,
+            ..Default::default()
         })
         .collect()
 }

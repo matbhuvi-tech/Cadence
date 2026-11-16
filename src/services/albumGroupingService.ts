@@ -192,7 +192,10 @@ export function groupAlbumReleases(
 
   for (const rel of releases) {
     const key = computeGroupingKey(rel)
-    const isSplit = splitReleaseIds.has(rel.id) || splitReleaseIds.has(key)
+    const isSplit =
+      splitReleaseIds.has(rel.id) ||
+      splitReleaseIds.has(key) ||
+      rel.id.startsWith('core_rel_')
 
     if (isSplit) {
       groups.set(`split:${rel.id}`, [rel])
@@ -280,9 +283,16 @@ export function groupAlbumReleases(
     const primary = sorted[0]
     const totalTracks = constituent.reduce((sum, r) => sum + (r.tracksCount || 0), 0)
 
+    const hasDiscIndicator = constituent.some((r) => extractDiscInfo(r.title || '').hasDiscIndicator)
     const maxDiscNum = Math.max(...constituent.map((r) => extractDiscInfo(r.title || '').discNumber))
     const totalDiscsFromMetadata = Math.max(...constituent.map((r) => extractDiscInfo(r.title || '').totalDiscs || r.discsCount || 1))
-    const discCount = Math.max(constituent.length, maxDiscNum, totalDiscsFromMetadata)
+    const isEditionStackOnly =
+      !hasDiscIndicator &&
+      maxDiscNum <= 1 &&
+      constituent.some((r) => (r.variants?.length || 0) > 1)
+    const discCount = isEditionStackOnly
+      ? Math.max(maxDiscNum, totalDiscsFromMetadata)
+      : Math.max(constituent.length, maxDiscNum, totalDiscsFromMetadata)
 
     const canonicalTitle = constituent.length > 1
       ? extractDiscInfo(primary.title || '').baseTitle

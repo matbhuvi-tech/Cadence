@@ -98,19 +98,31 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
     }
     positionAnchor.current = { position: status.positionSecs, at: performance.now() };
     setDisplayPosition(status.positionSecs);
-  }, [status.positionSecs, isScrubbing]);
+  }, [status.positionSecs, status.isPlaying, status.isPaused, status.currentFile, isScrubbing]);
 
+  // 1 Hz monotonic playback timer anchored on last authoritative server position
   useEffect(() => {
     if (!status.isPlaying || status.isPaused || isScrubbing) return;
-    let frame = 0;
-    const updatePosition = (now: number) => {
-      const elapsed = (now - positionAnchor.current.at) / 1000;
-      const next = Math.min(status.durationSecs || Number.POSITIVE_INFINITY, positionAnchor.current.position + elapsed);
+    positionAnchor.current = { position: status.positionSecs, at: performance.now() };
+    const tick = () => {
+      const elapsed = Math.max(0, (performance.now() - positionAnchor.current.at) / 1000);
+      const next = Math.min(
+        status.durationSecs || Number.POSITIVE_INFINITY,
+        positionAnchor.current.position + elapsed
+      );
       setDisplayPosition(next);
-      if (next < status.durationSecs) frame = requestAnimationFrame(updatePosition);
     };
-    frame = requestAnimationFrame(updatePosition);
-    return () => cancelAnimationFrame(frame);
+    const interval = window.setInterval(tick, 1000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        tick();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [status.isPlaying, status.isPaused, status.durationSecs, status.currentFile, isScrubbing]);
 
   const stream = status.streamInfo;

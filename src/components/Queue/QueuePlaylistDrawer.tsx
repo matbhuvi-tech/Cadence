@@ -25,7 +25,7 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import { Track, Playlist, Release, SampleRateTransition } from '../../core/types'
-import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useEffectiveQueueControl } from '../../context/EngineControllerContext'
 import { sqliteLibraryService, generatePlaylist4GridArtwork } from '../../services/sqliteLibraryService'
 import { graphEngine } from '../../core/graphEngine'
 
@@ -74,7 +74,7 @@ export const QueuePlaylistDrawer: React.FC<QueuePlaylistDrawerProps> = ({
     settlingDelayMs,
     setSettlingDelay,
     isBitPerfect,
-  } = useAudioPlayer()
+  } = useEffectiveQueueControl()
 
   const [playlists, setPlaylists] = useState<Playlist[]>([])
   const [isLoadingPlaylists, setIsLoadingPlaylists] = useState(false)

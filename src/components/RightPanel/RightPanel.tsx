@@ -9,6 +9,7 @@ import {
   X,
 } from 'lucide-react'
 import { Track, Release, Credit } from '../../core/types'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 import { GranularCreditMatrix } from './GranularCreditMatrix'
 import { SideBySideDiff } from './SideBySideDiff'
 import { ArtworkMediaTray } from './ArtworkMediaTray'
@@ -102,7 +103,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
         <div className="flex items-center gap-2.5 truncate min-w-0">
           <div className="w-8 h-8 rounded-md bg-black/40 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
             {release?.coverArtUrl ? (
-              <img src={release.coverArtUrl} alt={release.title} className="w-full h-full object-cover" />
+              <img src={resolveMediaUrl(release.coverArtUrl)} alt={release.title} className="w-full h-full object-cover" />
             ) : (
               <Disc3 className="w-4 h-4 text-[#8E8E93]" />
             )}

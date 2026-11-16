@@ -16,6 +16,7 @@ import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath } from '../../core/endpointRouting'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { CadenceArtworkFallback } from '../common/CadenceArtworkFallback'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 
 interface SanctuaryListeningLoungeProps {
   isOpen: boolean
@@ -233,7 +234,7 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
           <div className="w-72 h-72 sm:w-88 sm:h-88 md:w-[400px] md:h-[400px] rounded-2xl bg-[#131418] border border-white/15 shadow-[0_28px_70px_rgba(0,0,0,0.65)] overflow-hidden flex items-center justify-center relative">
             {showCoverImage ? (
               <img
-                src={coverUrl}
+                src={resolveMediaUrl(coverUrl)}
                 alt={`${resolvedRelease?.title || currentTrack?.title || 'Album'} cover art`}
                 onError={() => setImgError(true)}
                 className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.015]"

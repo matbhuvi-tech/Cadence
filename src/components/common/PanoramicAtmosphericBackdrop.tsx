@@ -1,6 +1,7 @@
 import React from 'react'
 import { usePanoramicBackdrop } from '../../services/panoramicBackdropGenerator'
 import { INLAY_SCAN_PATTERNS } from '../../services/backdropAnalyzer'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 
 interface PanoramicAtmosphericBackdropProps {
   coverArtUrl?: string
@@ -77,7 +78,7 @@ export const PanoramicAtmosphericBackdrop: React.FC<PanoramicAtmosphericBackdrop
       <div
         className="absolute inset-0 bg-cover bg-top pointer-events-none transition-all duration-700"
         style={{
-          backgroundImage: `url(${activeBackdrop})`,
+          backgroundImage: `url(${resolveMediaUrl(activeBackdrop)})`,
           opacity: isSuspectedInlayOrRaw ? 0.70 : 0.85,
           filter: isSuspectedInlayOrRaw ? 'blur(20px)' : 'blur(8px)',
           transform: 'scale(1.10)', // Scale up slightly to prevent blur edge vignettes

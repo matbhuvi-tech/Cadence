@@ -1229,6 +1229,10 @@ impl DbOperations {
             "SELECT id, file_path FROM tracks 
              WHERE (acoustid_fingerprint IS NULL OR acoustid_fingerprint = '')
                AND is_online = 1
+               AND UPPER(COALESCE(format, '')) NOT IN ('DSF', 'DFF', 'DSDIFF')
+               AND LOWER(file_path) NOT LIKE '%.dsf'
+               AND LOWER(file_path) NOT LIKE '%.dff'
+               AND LOWER(file_path) NOT LIKE '%.dsdiff'
              LIMIT ?1"
         )?;
         let rows = stmt.query_map(params![limit as i64], |r| {
@@ -1359,7 +1363,16 @@ impl DbOperations {
     pub fn get_file_mtimes(conn: &Connection, folder_path: &str) -> Result<Vec<FileMtimeCheck>> {
         let pattern = format!("{}%", folder_path);
         let mut stmt = conn.prepare(
-            "SELECT file_path, mtime, file_size FROM tracks WHERE file_path LIKE ?1",
+            "SELECT file_path, mtime, file_size FROM tracks
+             WHERE file_path LIKE ?1
+               AND NOT (
+                   UPPER(COALESCE(format, '')) IN ('DSF', 'DFF', 'DSDIFF')
+                   AND artist_credit = 'Unknown Artist'
+                   AND release_year IS NULL
+                   AND COALESCE(album_artist, '') = ''
+                   AND COALESCE(composer, '') = ''
+                   AND has_embedded_art = 0
+               )",
         )?;
 
         let rows = stmt.query_map(params![pattern], |row| {
@@ -1375,6 +1388,21 @@ impl DbOperations {
             list.push(r?);
         }
         Ok(list)
+    }
+
+    pub fn prune_empty_releases_in_folder(conn: &Connection, root_folder: &str) -> Result<usize> {
+        let trimmed = root_folder.trim_end_matches(['\\', '/']);
+        let win_sub = format!("{}\\%", trimmed);
+        let unix_sub = format!("{}/%", trimmed);
+        conn.execute(
+            "DELETE FROM releases
+             WHERE (folder_path = ?1 OR folder_path = ?2 OR folder_path LIKE ?3 OR folder_path LIKE ?4)
+               AND id NOT IN (
+                   SELECT DISTINCT release_id FROM tracks
+                   WHERE release_id IS NOT NULL AND release_id != ''
+               )",
+            params![root_folder, trimmed, win_sub, unix_sub],
+        )
     }
 
     // Skipped / Quarantine Files
@@ -3603,5 +3631,151 @@ mod tests {
         DbOperations::requeue_inflight_commit_items_sweep(&conn).unwrap();
         let (next, _) = DbOperations::claim_next_commit_item(&conn, &[]).unwrap().unwrap();
         assert_eq!(next.payload_json, r#"{"title":"Newest intent"}"#);
+    }
+
+    #[test]
+    fn dsd_fingerprint_exclusion_mtime_backfill_and_orphan_prune() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+
+        let root = r"\\192.168.1.6\rajafans\Master\Tamil\A.R.Rahman";
+        let rel_i_untagged = DbRelease {
+            id: "rel-old-i".into(),
+            title: "I".into(),
+            folder_path: format!(r"{}\I", root),
+            folder_name: "I".into(),
+            artist_credit: "Unknown Artist".into(),
+            composer_name: None,
+            release_year: None,
+            genre_tags: None,
+            front_cover_url: None,
+            backdrop_url: None,
+            target_folder_path: None,
+            is_compilation: false,
+            physical_combo_title: None,
+            created_at: "2026-01-01".into(),
+            master_album_id: None,
+            is_favorite: false,
+        };
+        let rel_i_tagged = DbRelease {
+            id: "rel-new-i".into(),
+            title: "I (Sony)".into(),
+            folder_path: format!(r"{}\I", root),
+            folder_name: "I".into(),
+            artist_credit: "A. R. Rahman".into(),
+            composer_name: Some("A. R. Rahman".into()),
+            release_year: Some(2014),
+            genre_tags: None,
+            front_cover_url: None,
+            backdrop_url: None,
+            target_folder_path: None,
+            is_compilation: false,
+            physical_combo_title: None,
+            created_at: "2026-01-01".into(),
+            master_album_id: None,
+            is_favorite: false,
+        };
+        let rel_external_empty = DbRelease {
+            id: "rel-ext-empty".into(),
+            title: "Other Folder".into(),
+            folder_path: r"D:\Music\Other".into(),
+            folder_name: "Other".into(),
+            artist_credit: "Someone".into(),
+            composer_name: None,
+            release_year: Some(2020),
+            genre_tags: None,
+            front_cover_url: None,
+            backdrop_url: None,
+            target_folder_path: None,
+            is_compilation: false,
+            physical_combo_title: None,
+            created_at: "2026-01-01".into(),
+            master_album_id: None,
+            is_favorite: false,
+        };
+        DbOperations::upsert_releases_batch(&mut conn, &[rel_i_untagged, rel_i_tagged, rel_external_empty]).unwrap();
+
+        let untagged_dsf = DbTrack {
+            id: "trk-dsf-untagged".into(),
+            release_id: "rel-new-i".into(),
+            mount_id: "mount-local".into(),
+            folder_path: format!(r"{}\I", root),
+            folder_name: "I".into(),
+            file_path: format!(r"{}\I\05.dsf", root),
+            file_name: "05.dsf".into(),
+            file_size: 1000,
+            mtime: 10,
+            title: "05".into(),
+            artist_credit: "Unknown Artist".into(),
+            album_title: "I".into(),
+            release_year: None,
+            track_number: None,
+            disc_number: None,
+            genre: None,
+            composer: None,
+            duration_secs: 200.0,
+            format: "DSF".into(),
+            sample_rate: Some(11_289_600),
+            bit_depth: Some(1),
+            channels: Some(2),
+            dr_score: None,
+            has_embedded_art: false,
+            sidecar_status: "in_sync".into(),
+            sidecar_edits_json: None,
+            is_online: true,
+            work_title: None,
+            movement_number: None,
+            movement_title: None,
+            is_compilation: false,
+            album_artist: None,
+            original_album: None,
+            original_year: None,
+            acoustid_fingerprint: None,
+            musicbrainz_recording_id: None,
+            created_at: "2026-01-01".into(),
+        };
+        let tagged_dff = DbTrack {
+            id: "trk-dff-tagged".into(),
+            file_path: format!(r"{}\I\06.dff", root),
+            file_name: "06.dff".into(),
+            format: "DFF".into(),
+            artist_credit: "A. R. Rahman".into(),
+            release_year: Some(2014),
+            ..untagged_dsf.clone()
+        };
+        let online_flac = DbTrack {
+            id: "trk-flac".into(),
+            file_path: format!(r"{}\I\07.flac", root),
+            file_name: "07.flac".into(),
+            format: "FLAC".into(),
+            sample_rate: Some(44100),
+            bit_depth: Some(16),
+            ..tagged_dff.clone()
+        };
+        DbOperations::upsert_tracks_batch(&mut conn, &[untagged_dsf, tagged_dff, online_flac]).unwrap();
+
+        // 1. Fingerprinting queue skips .dsf and .dff, selecting only .flac.
+        let pending_fp = DbOperations::get_unfingerprinted_tracks(&conn, 10).unwrap();
+        assert_eq!(pending_fp.len(), 1);
+        assert_eq!(pending_fp[0].0, "trk-flac");
+
+        // 2. Quick-rescan mtimes omit untagged DSD row so it gets re-probed automatically, while keeping tagged DSD + FLAC.
+        let mtimes = DbOperations::get_file_mtimes(&conn, root).unwrap();
+        let mtime_paths: Vec<&str> = mtimes.iter().map(|m| m.file_path.as_str()).collect();
+        assert!(!mtime_paths.iter().any(|p| p.ends_with("05.dsf")));
+        assert!(mtime_paths.iter().any(|p| p.ends_with("06.dff")));
+        assert!(mtime_paths.iter().any(|p| p.ends_with("07.flac")));
+
+        // 3. Pruning empty releases cleans orphaned rel-old-i under scanned root without touching external release.
+        let pruned = DbOperations::prune_empty_releases_in_folder(&conn, root).unwrap();
+        assert_eq!(pruned, 1);
+        let remaining_ids: Vec<String> = conn
+            .prepare("SELECT id FROM releases ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(remaining_ids, vec!["rel-ext-empty".to_string(), "rel-new-i".to_string()]);
     }
 }

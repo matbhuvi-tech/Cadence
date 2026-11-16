@@ -22,6 +22,7 @@ import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { ArtworkHoverPreview } from '../common/ArtworkHoverPreview'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { getCuratedAlbumArtwork } from '../../core/taxonomyUtils'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 import { backdropAnalyzer } from '../../services/backdropAnalyzer'
 import { FEATURES } from '../../config/features'
 
@@ -389,7 +390,7 @@ export const VirtualDataTable: React.FC<VirtualDataTableProps> = ({
                       >
                         {group.coverArtUrl ? (
                           <img
-                            src={group.coverArtUrl}
+                            src={resolveMediaUrl(group.coverArtUrl)}
                             alt={group.title}
                             className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform"
                             onError={(e) => {

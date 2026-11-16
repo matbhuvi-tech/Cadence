@@ -210,6 +210,9 @@ export interface ProbeResult {
   httpStatus: number;
   port?: number;
   service?: string;
+  label?: string;
+  engineId?: string;
+  libraryId?: string;
   certFingerprint?: string;
   fingerprintMatches?: boolean | null;
   errorKind: DiagnosticErrorKind;

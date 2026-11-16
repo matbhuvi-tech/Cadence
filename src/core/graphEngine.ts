@@ -21,6 +21,8 @@ import {
   matchesComposer,
   matchesEra,
   matchesFormat,
+  matchesSearchText,
+  resolveKnownComposer,
   detectLanguage,
   KNOWN_COMPOSERS,
 } from './taxonomyUtils'
@@ -989,36 +991,37 @@ export class RelationalGraphEngine {
 
   // Filter & Query
   public filterTracks(filters: FacetFilterState, sourceTracks?: Track[], sourceReleases?: Release[]): Track[] {
-    // If source tracks/releases provided and internal map is empty or stale, rehydrate internal maps
-    if (sourceTracks && sourceTracks.length > 0) {
-      if (this.tracks.size === 0) {
-        sourceTracks.forEach((t) => this.tracks.set(t.id, t))
-      }
-    }
-    if (sourceReleases && sourceReleases.length > 0) {
-      if (this.releases.size === 0) {
-        sourceReleases.forEach((r) => this.releases.set(r.id, r))
-      }
-    }
+    // Pure read-only filtering: explicit source arrays (including Core catalogs or an empty local library [])
+    // must never leak into or fall back to graphEngine's internal maps across engine switches.
+    const releaseMap =
+      sourceReleases !== undefined
+        ? new Map(sourceReleases.map((r) => [r.id, r]))
+        : this.releases
 
-    let result = sourceTracks && sourceTracks.length > 0 ? [...sourceTracks] : Array.from(this.tracks.values())
+    let result = sourceTracks !== undefined ? [...sourceTracks] : Array.from(this.tracks.values())
 
-    // Search query
+    // Search query (punctuation- & whitespace-tolerant, including canonical composer fallback)
     if (filters.searchQuery && filters.searchQuery.trim()) {
-      const q = filters.searchQuery.toLowerCase()
+      const q = filters.searchQuery.trim()
       result = result.filter((t) => {
-        const rel = this.releases.get(t.releaseId)
+        const rel = releaseMap.get(t.releaseId)
+        const inferredComposer =
+          !t.composerName && !rel?.composerName
+            ? resolveKnownComposer(t.albumArtist || t.artistCredit || rel?.artistCredit)?.canonicalName
+            : undefined
         return (
-          t.title.toLowerCase().includes(q) ||
-          t.artistCredit.toLowerCase().includes(q) ||
-          (t.composerName && t.composerName.toLowerCase().includes(q)) ||
-          (t.workTitle && t.workTitle.toLowerCase().includes(q)) ||
-          (t.movementTitle && t.movementTitle.toLowerCase().includes(q)) ||
-          (t.folderName && t.folderName.toLowerCase().includes(q)) ||
-          (rel && rel.title.toLowerCase().includes(q)) ||
-          (rel && rel.artistCredit && rel.artistCredit.toLowerCase().includes(q)) ||
-          (rel && rel.composerName && rel.composerName.toLowerCase().includes(q)) ||
-          (rel && rel.folderName && rel.folderName.toLowerCase().includes(q))
+          matchesSearchText(t.title, q) ||
+          matchesSearchText(t.artistCredit, q) ||
+          matchesSearchText(t.albumArtist, q) ||
+          matchesSearchText(t.composerName, q) ||
+          matchesSearchText(inferredComposer, q) ||
+          matchesSearchText(t.workTitle, q) ||
+          matchesSearchText(t.movementTitle, q) ||
+          matchesSearchText(t.folderName, q) ||
+          matchesSearchText(rel?.title, q) ||
+          matchesSearchText(rel?.artistCredit, q) ||
+          matchesSearchText(rel?.composerName, q) ||
+          matchesSearchText(rel?.folderName, q)
         )
       })
     }
@@ -1031,7 +1034,7 @@ export class RelationalGraphEngine {
     // Recording Era Filter
     if (filters.eraFilter) {
       result = result.filter((t) => {
-        const rel = this.releases.get(t.releaseId)
+        const rel = releaseMap.get(t.releaseId)
         const y = t.pendingSidecarEdits?.year || rel?.releaseYear || rel?.originalYear
         return matchesEra(y, filters.eraFilter!)
       })
@@ -1046,7 +1049,7 @@ export class RelationalGraphEngine {
     if (filters.languageFilter) {
       const targetLang = filters.languageFilter.toLowerCase()
       result = result.filter((t) => {
-        const rel = this.releases.get(t.releaseId)
+        const rel = releaseMap.get(t.releaseId)
         const lang = (
           t.language ||
           detectLanguage({
@@ -1068,7 +1071,7 @@ export class RelationalGraphEngine {
     if (filters.genreFilter) {
       const targetGenre = filters.genreFilter.toLowerCase()
       result = result.filter((t) => {
-        const rel = this.releases.get(t.releaseId)
+        const rel = releaseMap.get(t.releaseId)
         const tags = Array.isArray(rel?.genreTags) ? rel.genreTags : []
         return tags.some((g) => g.toLowerCase().includes(targetGenre)) || (t.movementTitle && t.movementTitle.toLowerCase().includes(targetGenre))
       })
@@ -1133,7 +1136,7 @@ export class RelationalGraphEngine {
             break
           case 'low_res_art':
             result = result.filter((t) => {
-              const rel = this.releases.get(t.releaseId)
+              const rel = releaseMap.get(t.releaseId)
               return rel?.artwork.isLowRes || !rel?.artwork.width || rel.artwork.width < 800
             })
             break
@@ -1148,7 +1151,7 @@ export class RelationalGraphEngine {
             break
           case 'missing_metadata':
             result = result.filter((t) => {
-              const rel = this.releases.get(t.releaseId)
+              const rel = releaseMap.get(t.releaseId)
               return !rel?.releaseYear && !rel?.originalYear
             })
             break

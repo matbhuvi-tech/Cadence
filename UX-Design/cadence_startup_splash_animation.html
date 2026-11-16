@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cadence Startup Screen - Luxury Gold Reveal</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: Inter and Cinzel / Montserrat for luxury typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@300;400;500;600&family=Montserrat:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    /* CSS Variables for precise timing orchestration across animation phases */
+    :root {
+      --speed-factor: 1;
+      --bg-dark: #0a0a0c;
+      --gold-primary: #f5cf6d;
+      --gold-deep: #b2882a;
+      --gold-light: #fff3c4;
+      --gold-glow: rgba(245, 207, 109, 0.45);
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+
+    /* Luxury brand typography */
+    .brand-font {
+      font-family: 'Montserrat', sans-serif;
+      letter-spacing: 0.38em;
+    }
+
+    /* Radial vignette spotlight for background atmosphere */
+    .ambient-spotlight {
+      background: radial-gradient(circle at 50% 48%, rgba(42, 34, 18, 0.4) 0%, rgba(18, 16, 13, 0.7) 45%, rgba(10, 10, 12, 1) 85%);
+    }
+
+    /* Ambient Tile Backing with subtle brushed metal border */
+    .logo-badge {
+      background: radial-gradient(130% 130% at 30% 20%, #1e1d1f 0%, #121214 70%, #0c0c0e 100%);
+      box-shadow: 
+        0 30px 60px -15px rgba(0, 0, 0, 0.9),
+        0 0 40px -10px rgba(212, 175, 55, 0.12),
+        inset 0 1px 1px rgba(255, 230, 150, 0.18),
+        inset 0 -2px 4px rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(220, 180, 80, 0.22);
+      transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* =========================================================
+       ANIMATION TIMELINE DEFINITIONS
+       ========================================================= */
+
+    /* Concentric C Ring Path Drawing via stroke-dashoffset */
+    .c-ring {
+      stroke-dasharray: 400;
+      stroke-dashoffset: 400;
+      transition: stroke 0.4s ease;
+    }
+
+    /* When playback active, orchestrate the draw with staggered timing */
+    .animating .ring-outer {
+      animation: drawRingOuter calc(1.4s / var(--speed-factor)) cubic-bezier(0.25, 1, 0.35, 1) forwards calc(0.15s / var(--speed-factor));
+    }
+    .animating .ring-mid {
+      animation: drawRingMid calc(1.3s / var(--speed-factor)) cubic-bezier(0.25, 1, 0.35, 1) forwards calc(0.3s / var(--speed-factor));
+    }
+    .animating .ring-inner {
+      animation: drawRingInner calc(1.2s / var(--speed-factor)) cubic-bezier(0.25, 1, 0.35, 1) forwards calc(0.45s / var(--speed-factor));
+    }
+
+    @keyframes drawRingOuter {
+      0% { stroke-dashoffset: 400; filter: drop-shadow(0 0 12px rgba(255, 215, 100, 0.9)); }
+      60% { filter: drop-shadow(0 0 16px rgba(255, 215, 100, 0.8)); }
+      100% { stroke-dashoffset: 0; filter: drop-shadow(0 0 4px rgba(212, 175, 55, 0.4)); }
+    }
+    @keyframes drawRingMid {
+      0% { stroke-dashoffset: 400; filter: drop-shadow(0 0 12px rgba(255, 215, 100, 0.9)); }
+      60% { filter: drop-shadow(0 0 14px rgba(255, 215, 100, 0.8)); }
+      100% { stroke-dashoffset: 0; filter: drop-shadow(0 0 4px rgba(212, 175, 55, 0.4)); }
+    }
+    @keyframes drawRingInner {
+      0% { stroke-dashoffset: 400; filter: drop-shadow(0 0 12px rgba(255, 215, 100, 0.9)); }
+      60% { filter: drop-shadow(0 0 12px rgba(255, 215, 100, 0.8)); }
+      100% { stroke-dashoffset: 0; filter: drop-shadow(0 0 4px rgba(212, 175, 55, 0.4)); }
+    }
+
+    /* Hot Spark Particles that lead the head of the drawing stroke */
+    .spark-head {
+      opacity: 0;
+      mix-blend-mode: screen;
+      pointer-events: none;
+    }
+    .animating .spark-outer {
+      animation: travelSparkOuter calc(1.4s / var(--speed-factor)) cubic-bezier(0.25, 1, 0.35, 1) forwards calc(0.15s / var(--speed-factor));
+    }
+    .animating .spark-mid {
+      animation: travelSparkMid calc(1.3s / var(--speed-factor)) cubic-bezier(0.25, 1, 0.35, 1) forwards calc(0.3s / var(--speed-factor));
+    }
+    .animating .spark-inner {
+      animation: travelSparkInner calc(1.2s / var(--speed-factor)) cubic-bezier(0.25, 1, 0.35, 1) forwards calc(0.45s / var(--speed-factor));
+    }
+
+    /* Motion path keyframes matching the exact C geometry */
+    @keyframes travelSparkOuter {
+      0% { offset-distance: 0%; opacity: 0; transform: scale(0.6); }
+      5% { opacity: 1; transform: scale(1.4); }
+      85% { opacity: 1; transform: scale(1.1); }
+      98% { opacity: 0.8; transform: scale(0.8); }
+      100% { offset-distance: 100%; opacity: 0; transform: scale(0.2); }
+    }
+    @keyframes travelSparkMid {
+      0% { offset-distance: 0%; opacity: 0; transform: scale(0.6); }
+      5% { opacity: 1; transform: scale(1.3); }
+      85% { opacity: 1; transform: scale(1); }
+      98% { opacity: 0.8; transform: scale(0.7); }
+      100% { offset-distance: 100%; opacity: 0; transform: scale(0.2); }
+    }
+    @keyframes travelSparkInner {
+      0% { offset-distance: 0%; opacity: 0; transform: scale(0.6); }
+      5% { opacity: 1; transform: scale(1.2); }
+      85% { opacity: 1; transform: scale(0.9); }
+      98% { opacity: 0.7; transform: scale(0.6); }
+      100% { offset-distance: 100%; opacity: 0; transform: scale(0.2); }
+    }
+
+    /* Specular diagonal glint sheen wave sweeping across the metallic emblem */
+    .glint-sheen-layer {
+      opacity: 0;
+      mix-blend-mode: color-dodge;
+      pointer-events: none;
+    }
+    .animating .glint-sheen-layer {
+      animation: glintSweep calc(1.35s / var(--speed-factor)) cubic-bezier(0.16, 1, 0.3, 1) forwards calc(1.5s / var(--speed-factor));
+    }
+    @keyframes glintSweep {
+      0% {
+        opacity: 0;
+        transform: translate(-140%, -140%) rotate(38deg);
+      }
+      15% {
+        opacity: 0.95;
+      }
+      55% {
+        opacity: 1;
+      }
+      90% {
+        opacity: 0.2;
+      }
+      100% {
+        opacity: 0;
+        transform: translate(140%, 140%) rotate(38deg);
+      }
+    }
+
+    /* Badge glow flare on glint trigger */
+    .animating .badge-flare {
+      animation: badgeGlowPulse calc(1.2s / var(--speed-factor)) ease-out forwards calc(1.6s / var(--speed-factor));
+    }
+    @keyframes badgeGlowPulse {
+      0% { opacity: 0; transform: scale(0.92); }
+      35% { opacity: 0.65; transform: scale(1.08); filter: blur(28px); }
+      100% { opacity: 0.15; transform: scale(1); filter: blur(22px); }
+    }
+
+    /* Logo Idle Breathing & Pulse (Phase 3) */
+    .animating .logo-stage {
+      animation: stageFloating calc(4s / var(--speed-factor)) ease-in-out infinite calc(2.4s / var(--speed-factor));
+    }
+    @keyframes stageFloating {
+      0%, 100% { transform: translateY(0px); }
+      50% { transform: translateY(-4px); }
+    }
+
+    /* Text Fade In and Tracking Reveal */
+    .brand-title {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    .animating .brand-title {
+      animation: textReveal calc(1.2s / var(--speed-factor)) cubic-bezier(0.16, 1, 0.3, 1) forwards calc(1.7s / var(--speed-factor));
+    }
+    @keyframes textReveal {
+      0% {
+        opacity: 0;
+        transform: translateY(14px);
+        letter-spacing: 0.22em;
+        filter: blur(4px);
+      }
+      100% {
+        opacity: 1;
+        transform: translateY(0px);
+        letter-spacing: 0.42em;
+        filter: blur(0px);
+      }
+    }
+
+    .brand-subtitle {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    .animating .brand-subtitle {
+      animation: subTextReveal calc(1s / var(--speed-factor)) ease-out forwards calc(1.95s / var(--speed-factor));
+    }
+    @keyframes subTextReveal {
+      0% { opacity: 0; transform: translateY(10px); }
+      100% { opacity: 0.6; transform: translateY(0px); }
+    }
+
+    /* Status spinner bar for desktop boot loader */
+    .boot-loader-line {
+      width: 0%;
+      opacity: 0;
+    }
+    .animating .boot-loader-line {
+      animation: bootProgress calc(2.6s / var(--speed-factor)) cubic-bezier(0.65, 0, 0.35, 1) forwards calc(0.5s / var(--speed-factor));
+    }
+    @keyframes bootProgress {
+      0% { width: 0%; opacity: 0; }
+      10% { opacity: 0.8; }
+      40% { width: 38%; }
+      75% { width: 72%; }
+      100% { width: 100%; opacity: 0.9; }
+    }
+
+    /* Background Canvas Particles */
+    #embersCanvas {
+      pointer-events: none;
+    }
+
+    /* Scrollbar styling for code view */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #111114;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #2b2b32;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #3e3e48;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between items-center text-zinc-100 overflow-x-hidden relative selection:bg-amber-500/20">
+
+  <!-- Ambient Cinematic Background Spotlights -->
+  <div class="ambient-spotlight absolute inset-0 z-0 pointer-events-none"></div>
+
+  <!-- Warm Micro-Embers Ambient Canvas -->
+  <canvas id="embersCanvas" class="absolute inset-0 z-0"></canvas>
+
+  <!-- Top Status Bar (Mimicking native Windows Frameless App Bar) -->
+  <header class="w-full relative z-20 flex items-center justify-between px-6 py-4 border-b border-white/[0.04] bg-black/20 backdrop-blur-sm">
+    <div class="flex items-center space-x-2.5">
+      <div class="w-2.5 h-2.5 rounded-full bg-amber-400/80 shadow-[0_0_8px_rgba(251,191,36,0.8)]"></div>
+      <span class="text-xs font-medium tracking-wider uppercase text-zinc-400">Cadence Desktop Client &bull; Splash Boot Sequence</span>
+    </div>
+    <div class="flex items-center space-x-3 text-xs text-zinc-400">
+      <span class="inline-flex items-center px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300 font-mono text-[10px]">60 FPS GPU-ACCELERATED</span>
+      <span class="hidden sm:inline font-mono text-[11px] text-zinc-500">Zero JS Runtime Lag</span>
+    </div>
+  </header>
+
+  <!-- Main Animation Canvas Centerpiece -->
+  <main class="relative z-10 flex-1 flex flex-col items-center justify-center p-6 w-full max-w-4xl mx-auto">
+    
+    <!-- Outer Glow Aura -->
+    <div class="relative flex flex-col items-center">
+      
+      <!-- Backlight Glow Pill Behind Logo -->
+      <div class="badge-flare absolute -top-8 w-64 h-64 rounded-full bg-gradient-to-tr from-amber-600/30 via-yellow-500/25 to-amber-200/20 blur-3xl pointer-events-none -z-10 opacity-0 transition-opacity"></div>
+
+      <!-- Main Stage Container -->
+      <div class="logo-stage flex flex-col items-center">
+
+        <!-- The Rounded Golden Tile Emblem -->
+        <div class="logo-badge relative w-36 h-36 sm:w-44 sm:h-44 rounded-3xl flex items-center justify-center overflow-hidden cursor-pointer group shadow-2xl transition-transform duration-500 active:scale-95" id="logoBadge" title="Click to replay animation">
+          
+          <!-- Diagonal Metallic Glint Sheen (Phase 2) -->
+          <div class="glint-sheen-layer absolute -inset-full bg-gradient-to-r from-transparent via-amber-100/90 to-transparent w-[300%] h-[300%] z-20"></div>
+
+          <!-- Secondary subtle ambient corner reflections -->
+          <div class="absolute inset-0 rounded-3xl bg-[radial-gradient(ellipse_at_top_left,rgba(255,230,170,0.14),transparent_60%)] pointer-events-none z-10"></div>
+          <div class="absolute inset-0 rounded-3xl bg-[radial-gradient(ellipse_at_bottom_right,rgba(0,0,0,0.85),transparent_65%)] pointer-events-none z-10"></div>
+
+          <!-- Concentric Arcs Vector SVG -->
+          <svg class="w-24 h-24 sm:w-28 sm:h-28 relative z-10" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <!-- Luxury Metallic Multi-stop Gold Linear Gradients -->
+              <linearGradient id="goldSheenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#fff4cf" />
+                <stop offset="28%" stop-color="#ffd573" />
+                <stop offset="55%" stop-color="#d9a838" />
+                <stop offset="78%" stop-color="#aa791c" />
+                <stop offset="100%" stop-color="#ffd573" />
+              </linearGradient>
+
+              <!-- Radial glow filter for the spark head -->
+              <filter id="sparkBloom" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="3.5" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+
+              <!-- Motion Paths for the 3 Arcs matching concentric C geometry exactly -->
+              <!-- Center is (60, 60). Radius Outer=44, Mid=32, Inner=20 -->
+              <!-- Starts at +48deg (top open notch), sweeps clockwise by 264deg to -48deg (bottom open notch) -->
+              <path id="pathOuter" d="M 89.43 27.27 A 44 44 0 1 0 89.43 92.73" />
+              <path id="pathMid"   d="M 81.40 36.20 A 32 32 0 1 0 81.40 83.80" />
+              <path id="pathInner" d="M 73.38 45.12 A 20 20 0 1 0 73.38 74.88" />
+            </defs>
+
+            <!-- Shadow duplicate for rich 3D engraved depth -->
+            <g stroke="#050506" stroke-width="6.8" stroke-linecap="round" opacity="0.85" transform="translate(0, 2.5)">
+              <path d="M 89.43 27.27 A 44 44 0 1 0 89.43 92.73" />
+              <path d="M 81.40 36.20 A 32 32 0 1 0 81.40 83.80" />
+              <path d="M 73.38 45.12 A 20 20 0 1 0 73.38 74.88" />
+            </g>
+
+            <!-- Base Golden Concentric C Arcs (Animated with stroke-dashoffset) -->
+            <g id="ringsGroup" stroke="url(#goldSheenGrad)" stroke-linecap="round">
+              <!-- Outer Ring (Radius 44, Stroke 6.5) -->
+              <path 
+                id="svgRingOuter"
+                class="c-ring ring-outer" 
+                d="M 89.43 27.27 A 44 44 0 1 0 89.43 92.73" 
+                stroke-width="6.5" 
+              />
+              
+              <!-- Middle Ring (Radius 32, Stroke 6) -->
+              <path 
+                id="svgRingMid"
+                class="c-ring ring-mid" 
+                d="M 81.40 36.20 A 32 32 0 1 0 81.40 83.80" 
+                stroke-width="5.8" 
+              />
+              
+              <!-- Inner Ring (Radius 20, Stroke 5.2) -->
+              <path 
+                id="svgRingInner"
+                class="c-ring ring-inner" 
+                d="M 73.38 45.12 A 20 20 0 1 0 73.38 74.88" 
+                stroke-width="5.2" 
+              />
+            </g>
+
+            <!-- Dynamic Neon Amber Spark Heads travelling along paths (CSS offset-path) -->
+            <g id="sparksGroup" filter="url(#sparkBloom)">
+              <circle 
+                class="spark-head spark-outer fill-amber-200" 
+                r="4.2" 
+                style="offset-path: path('M 89.43 27.27 A 44 44 0 1 0 89.43 92.73'); offset-rotate: auto;" 
+              />
+              <circle 
+                class="spark-head spark-mid fill-yellow-100" 
+                r="3.8" 
+                style="offset-path: path('M 81.40 36.20 A 32 32 0 1 0 81.40 83.80'); offset-rotate: auto;" 
+              />
+              <circle 
+                class="spark-head spark-inner fill-white" 
+                r="3.2" 
+                style="offset-path: path('M 73.38 45.12 A 20 20 0 1 0 73.38 74.88'); offset-rotate: auto;" 
+              />
+            </g>
+          </svg>
+
+          <!-- Subtle Hover Ripple Indicator -->
+          <div class="absolute inset-0 rounded-3xl opacity-0 group-hover:opacity-100 transition-opacity duration-300 border border-amber-300/30 pointer-events-none"></div>
+        </div>
+
+        <!-- Typography Section (Phase 3) -->
+        <div class="mt-9 text-center flex flex-col items-center">
+          <h1 class="brand-title brand-font text-2xl sm:text-3xl font-bold tracking-[0.42em] text-transparent bg-clip-text bg-gradient-to-b from-amber-100 via-amber-200 to-amber-500/90 pl-[0.42em] drop-shadow-[0_2px_12px_rgba(212,175,55,0.25)]">
+            CADENCE
+          </h1>
+          <p class="brand-subtitle text-xs sm:text-sm tracking-[0.24em] font-light text-amber-200/60 uppercase mt-2.5">
+            Precision Audio Engine
+          </p>
+
+          <!-- Windows App Boot Progress Bar -->
+          <div class="w-48 sm:w-56 h-[2px] bg-zinc-800/80 rounded-full mt-7 overflow-hidden relative shadow-inner">
+            <div id="bootBar" class="boot-loader-line h-full bg-gradient-to-r from-amber-600 via-amber-300 to-yellow-100 rounded-full shadow-[0_0_8px_rgba(251,191,36,0.8)]"></div>
+          </div>
+
+          <!-- Micro status descriptor -->
+          <p id="statusFeedback" class="text-[11px] font-mono tracking-widest text-zinc-500 mt-2.5 uppercase transition-opacity">
+            Initializing Core Modules...
+          </p>
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Interactive Controls & Developer Integration Drawer -->
+  <footer class="w-full relative z-30 pb-6 px-6">
+    <div class="max-w-xl mx-auto bg-zinc-900/80 border border-white/10 rounded-2xl backdrop-blur-md p-3.5 shadow-2xl flex flex-wrap items-center justify-between gap-3">
+      
+      <!-- Playback Controls -->
+      <div class="flex items-center space-x-2">
+        <button id="replayBtn" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-xs font-medium transition active:scale-95 shadow-sm">
+          <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
+            <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
+          </svg>
+          <span>Replay</span>
+        </button>
+
+        <button id="pauseToggleBtn" class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700/80 border border-white/5 text-zinc-300 text-xs font-medium transition active:scale-95">
+          <span id="pauseLabel">Pause</span>
+        </button>
+      </div>
+
+      <!-- Speed Selector Pills -->
+      <div class="flex items-center space-x-1 bg-black/40 p-1 rounded-xl border border-white/5">
+        <span class="text-[10px] text-zinc-500 font-mono px-1.5 uppercase">Speed:</span>
+        <button class="speed-btn px-2 py-0.5 rounded-lg text-xs font-mono text-zinc-400 hover:text-white transition" data-speed="0.5">0.5x</button>
+        <button class="speed-btn px-2 py-0.5 rounded-lg text-xs font-mono text-amber-300 bg-amber-500/20 border border-amber-500/30 transition" data-speed="1.0">1.0x</button>
+        <button class="speed-btn px-2 py-0.5 rounded-lg text-xs font-mono text-zinc-400 hover:text-white transition" data-speed="1.5">1.5x</button>
+      </div>
+
+      <!-- Code Inspector Drawer Toggle -->
+      <button id="inspectCodeBtn" class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-white/5 text-zinc-300 text-xs font-medium flex items-center space-x-1.5 transition active:scale-95">
+        <svg class="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+        </svg>
+        <span>Export Snippet</span>
+      </button>
+
+    </div>
+  </footer>
+
+  <!-- Modal Drawer for Windows Desktop Integration Snippets -->
+  <div id="codeModal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4">
+    <div class="bg-zinc-900 border border-amber-500/30 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+      
+      <!-- Modal Header -->
+      <div class="px-5 py-4 border-b border-white/10 flex items-center justify-between bg-zinc-950/60">
+        <div>
+          <h3 class="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+            Cadence Splash Screen Production Snippet
+          </h3>
+          <p class="text-xs text-zinc-400 mt-0.5">Drop directly into your C# / C++ WebView2 or Electron window</p>
+        </div>
+        <button id="closeModalBtn" class="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- Code Snippet Display -->
+      <div class="p-4 overflow-y-auto flex-1 font-mono text-xs bg-zinc-950 text-amber-200/90 leading-relaxed">
+        <pre><code id="snippetCode">/* === CADENCE WINDOWS STARTUP SPLASH: PURE CSS/SVG EMBED === */
+/* Zero dependencies, zero runtime delay, hardware accelerated */
+
+/* 1. Concentric Arcs Draw Keyframe */
+@keyframes drawArc {
+  0%   { stroke-dashoffset: 400; filter: drop-shadow(0 0 12px #fcd34d); }
+  100% { stroke-dashoffset: 0;   filter: drop-shadow(0 0 4px #d4af37); }
+}
+
+/* 2. Specular Diagonal Metallic Sheen Glint */
+@keyframes glintSweep {
+  0%   { transform: translate(-140%, -140%) rotate(38deg); opacity: 0; }
+  20%  { opacity: 1; }
+  100% { transform: translate(140%, 140%) rotate(38deg); opacity: 0; }
+}
+
+/* 3. Concentric C Outer Arc Specification */
+.c-ring-outer {
+  stroke: url(#goldSheenGrad);
+  stroke-width: 6.5;
+  stroke-dasharray: 400;
+  animation: drawArc 1.4s cubic-bezier(0.25, 1, 0.35, 1) forwards;
+}
+
+/* SVG Path definition:
+   M 89.43 27.27 A 44 44 0 1 0 89.43 92.73
+*/</code></pre>
+      </div>
+
+      <!-- Modal Footer with Copy Button -->
+      <div class="p-4 border-t border-white/10 flex items-center justify-between bg-zinc-900">
+        <span id="copyConfirmMsg" class="text-xs text-amber-400 opacity-0 transition-opacity">Copied to clipboard!</span>
+        <button id="copySnippetBtn" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold tracking-wide shadow-lg shadow-amber-500/20 active:scale-95 transition">
+          Copy Integration Code
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Notification Toast for UI Feedback -->
+  <div id="toast" class="fixed top-6 right-6 z-50 bg-zinc-900 border border-amber-500/40 text-amber-200 text-xs px-4 py-2.5 rounded-xl shadow-2xl opacity-0 transition-all pointer-events-none transform translate-y-2">
+    Animation restarted
+  </div>
+
+  <script>
+    // Document elements
+    const body = document.body;
+    const logoBadge = document.getElementById('logoBadge');
+    const replayBtn = document.getElementById('replayBtn');
+    const pauseToggleBtn = document.getElementById('pauseToggleBtn');
+    const pauseLabel = document.getElementById('pauseLabel');
+    const speedButtons = document.querySelectorAll('.speed-btn');
+    const inspectCodeBtn = document.getElementById('inspectCodeBtn');
+    const codeModal = document.getElementById('codeModal');
+    const closeModalBtn = document.getElementById('closeModalBtn');
+    const copySnippetBtn = document.getElementById('copySnippetBtn');
+    const copyConfirmMsg = document.getElementById('copyConfirmMsg');
+    const statusFeedback = document.getElementById('statusFeedback');
+    const toast = document.getElementById('toast');
+    const canvas = document.getElementById('embersCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let isPaused = false;
+    let currentSpeed = 1.0;
+
+    // Toast feedback helper
+    function showToast(msg) {
+      toast.innerText = msg;
+      toast.classList.remove('opacity-0', 'translate-y-2');
+      toast.classList.add('opacity-100', 'translate-y-0');
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-y-2');
+        toast.classList.remove('opacity-100', 'translate-y-0');
+      }, 2000);
+    }
+
+    // Trigger full synchronized animation restart
+    function triggerAnimationSequence() {
+      // Remove animating class to reset all CSS animations
+      body.classList.remove('animating');
+      statusFeedback.innerText = "Initializing Core Audio Engines...";
+      
+      // Force DOM reflow
+      void body.offsetWidth;
+
+      // Re-apply speed factor and restart class
+      document.documentElement.style.setProperty('--speed-factor', currentSpeed);
+      body.classList.add('animating');
+
+      // Update feedback progression to match bootloader phases
+      const step1Time = (1200 / currentSpeed);
+      const step2Time = (2000 / currentSpeed);
+      const step3Time = (2700 / currentSpeed);
+
+      setTimeout(() => {
+        if (body.classList.contains('animating')) {
+          statusFeedback.innerText = "Loading DSP Presets & Audio Buffers...";
+        }
+      }, step1Time);
+
+      setTimeout(() => {
+        if (body.classList.contains('animating')) {
+          statusFeedback.innerText = "Connecting Low-Latency ASIO Driver...";
+        }
+      }, step2Time);
+
+      setTimeout(() => {
+        if (body.classList.contains('animating')) {
+          statusFeedback.innerText = "Cadence Ready";
+          statusFeedback.style.color = "#fcd34d";
+        }
+      }, step3Time);
+    }
+
+    // Toggle Pause/Play
+    function togglePause() {
+      isPaused = !isPaused;
+      if (isPaused) {
+        document.querySelectorAll('*').forEach(el => {
+          el.style.animationPlayState = 'paused';
+        });
+        pauseLabel.innerText = "Resume";
+      } else {
+        document.querySelectorAll('*').forEach(el => {
+          el.style.animationPlayState = 'running';
+        });
+        pauseLabel.innerText = "Pause";
+      }
+    }
+
+    // Speed Selector Handler
+    speedButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        speedButtons.forEach(b => {
+          b.classList.remove('text-amber-300', 'bg-amber-500/20', 'border', 'border-amber-500/30');
+          b.classList.add('text-zinc-400');
+        });
+        btn.classList.add('text-amber-300', 'bg-amber-500/20', 'border', 'border-amber-500/30');
+        btn.classList.remove('text-zinc-400');
+
+        currentSpeed = parseFloat(btn.getAttribute('data-speed'));
+        triggerAnimationSequence();
+        showToast(`Speed set to ${currentSpeed}x`);
+      });
+    });
+
+    // Event listeners
+    replayBtn.addEventListener('click', () => {
+      if (isPaused) togglePause();
+      triggerAnimationSequence();
+      showToast("Replaying startup sequence");
+    });
+
+    logoBadge.addEventListener('click', () => {
+      if (isPaused) togglePause();
+      triggerAnimationSequence();
+    });
+
+    pauseToggleBtn.addEventListener('click', togglePause);
+
+    // Modal Drawer logic
+    inspectCodeBtn.addEventListener('click', () => {
+      codeModal.classList.remove('hidden');
+    });
+    closeModalBtn.addEventListener('click', () => {
+      codeModal.classList.add('hidden');
+    });
+    codeModal.addEventListener('click', (e) => {
+      if (e.target === codeModal) codeModal.classList.add('hidden');
+    });
+
+    // Copy to Clipboard with fallback
+    copySnippetBtn.addEventListener('click', () => {
+      const codeText = document.getElementById('snippetCode').innerText;
+      
+      const textarea = document.createElement('textarea');
+      textarea.value = codeText;
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        copyConfirmMsg.style.opacity = '1';
+        setTimeout(() => {
+          copyConfirmMsg.style.opacity = '0';
+        }, 2500);
+      } catch (err) {
+        console.error('Copy fallback failed', err);
+      }
+      document.body.removeChild(textarea);
+    });
+
+    // =================================================================
+    // LIGHTWEIGHT AMBIENT MICRO-EMBERS CANVAS
+    // Zero external library, ultra-low GPU overhead floating particles
+    // =================================================================
+    let particles = [];
+    const PARTICLE_COUNT = 32;
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+
+    class EmberParticle {
+      constructor() {
+        this.reset(true);
+      }
+      reset(initial = false) {
+        this.x = Math.random() * canvas.width;
+        this.y = initial ? Math.random() * canvas.height : canvas.height + 10;
+        this.size = Math.random() * 1.8 + 0.4;
+        this.speedY = Math.random() * 0.45 + 0.15;
+        this.speedX = (Math.random() - 0.5) * 0.3;
+        this.maxOpacity = Math.random() * 0.5 + 0.2;
+        this.opacity = 0;
+        this.fadeIn = true;
+        this.hue = Math.random() > 0.4 ? 42 : 36; // Warm gold to amber
+      }
+      update() {
+        this.y -= this.speedY;
+        this.x += this.speedX;
+
+        if (this.fadeIn) {
+          this.opacity += 0.008;
+          if (this.opacity >= this.maxOpacity) this.fadeIn = false;
+        } else {
+          this.opacity -= 0.003;
+        }
+
+        if (this.y < -10 || this.opacity <= 0) {
+          this.reset(false);
+        }
+      }
+      draw() {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${this.hue}, 85%, 68%, ${this.opacity})`;
+        ctx.fill();
+      }
+    }
+
+    function initParticles() {
+      particles = [];
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        particles.push(new EmberParticle());
+      }
+    }
+
+    function renderParticles() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (let i = 0; i < particles.length; i++) {
+        particles[i].update();
+        particles[i].draw();
+      }
+      requestAnimationFrame(renderParticles);
+    }
+
+    // Lifecycle startup
+    window.addEventListener('resize', () => {
+      resizeCanvas();
+    });
+
+    window.onload = function() {
+      resizeCanvas();
+      initParticles();
+      renderParticles();
+      triggerAnimationSequence();
+    };
+  </script>
+</body>
+</html>

@@ -67,6 +67,25 @@ pub enum RendererEvent {
 #[serde(rename_all = "lowercase")]
 enum Activity { Idle, Loading, Playing, Paused }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaybackOwner {
+    None,
+    Core,
+    External,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPlaybackInfo {
+    pub active: bool,
+    pub transport_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_seconds: Option<f64>,
+}
+
 #[derive(Clone)]
 struct State {
     revision: u64,
@@ -79,6 +98,7 @@ struct State {
     position: f64,
     run: Option<RunToken>,
     ready: bool,
+    external_playback: Option<ExternalPlaybackInfo>,
 }
 
 impl State {
@@ -161,13 +181,17 @@ impl<R: Renderer> SessionOwner<R> {
         let mut durations = HashMap::new();
         for track in &catalog {
             token(&track.id)?; text(&track.title)?; text(&track.artist)?; text(&track.album)?; seconds(track.duration_seconds)?;
+            if let Some(ref rid) = track.release_id { token(rid)?; }
+            if let Some(ref aa) = track.album_artist { text(aa)?; }
+            if let Some(ref ed) = track.edition { text(ed)?; }
             ensure(durations.insert(track.id.clone(), track.duration_seconds).is_none())?;
         }
         Ok(Self {
             config, catalog, durations,
             session: Mutex::new(Session {
                 state: State { revision: 0, entries: vec![], current: None, repeat: Repeat::Off,
-                    shuffle: false, order: vec![], activity: Activity::Idle, position: 0.0, run: None, ready: true },
+                    shuffle: false, order: vec![], activity: Activity::Idle, position: 0.0, run: None, ready: true,
+                    external_playback: None },
                 renderer, recent: VecDeque::with_capacity(RECENT_COMMAND_LIMIT),
             }),
         })
@@ -224,10 +248,28 @@ impl<R: Renderer> SessionOwner<R> {
     }
 
     fn base_snapshot(&self, state: &State) -> Value {
+        let external_active = state.external_playback.as_ref().is_some_and(|ext| ext.active);
+        let owner = if state.activity != Activity::Idle {
+            PlaybackOwner::Core
+        } else if external_active {
+            PlaybackOwner::External
+        } else {
+            PlaybackOwner::None
+        };
+        let takeover_required = matches!(owner, PlaybackOwner::External);
+        let mut playback = json!({
+            "activity": state.activity,
+            "positionSeconds": state.position,
+            "owner": owner,
+            "takeoverRequired": takeover_required,
+        });
+        if let Some(ref ext) = state.external_playback {
+            playback["externalPlayback"] = json!(ext);
+        }
         json!({"engineId":self.config.engine_id,"libraryId":self.config.library_id,
             "revision":state.revision,"catalog":{"revision":0,"tracks":[],"nextCursor":null},
             "queue":{"entries":state.entries,"currentEntryId":state.current,"repeat":state.repeat,"shuffle":state.shuffle},
-            "playback":{"activity":state.activity,"positionSeconds":state.position},"output":self.config.output})
+            "playback":playback,"output":self.config.output})
     }
 
     fn snapshot(&self, state: &State) -> Value {
@@ -252,7 +294,14 @@ impl<R: Renderer> SessionOwner<R> {
 
     fn apply_command(&self, session: &mut Session<R>, command: &Mutation) -> Result<()> {
         if command.revision != session.state.revision { return Err(ErrorCode::StaleRevision); }
-        if !session.state.ready && !matches!(command.action, Action::Stop) { return Err(ErrorCode::NotReady); }
+        let external_active = session.state.external_playback.as_ref().is_some_and(|e| e.active);
+        let confirmed_takeover = matches!(command.action, Action::Play { force_takeover: true, .. });
+        if !session.state.ready && !matches!(command.action, Action::Stop) && !(confirmed_takeover && external_active) {
+            return Err(ErrorCode::NotReady);
+        }
+        if matches!(command.action, Action::Play { force_takeover: false, .. }) && external_active {
+            return Err(ErrorCode::TakeoverRequired);
+        }
         ensure(session.state.revision < MAX_REVISION)?;
         let mut next = session.state.clone();
         let effect = self.plan(&mut next, &command.action)?;
@@ -285,7 +334,7 @@ impl<R: Renderer> SessionOwner<R> {
                 Ok(None)
             }
             Action::Stop => {
-                next.stop(); next.ready = true;
+                next.stop(); next.ready = true; next.external_playback = None;
                 Ok(Some(RendererAction::Stop))
             }
             Action::Pause => {
@@ -310,9 +359,13 @@ impl<R: Renderer> SessionOwner<R> {
                 if next.activity == Activity::Playing { next.activity = Activity::Loading; }
                 Ok(Some(RendererAction::Seek { position_seconds: *position, token }))
             }
-            Action::Play(track) => {
+            Action::Play { track_id: track, force_takeover } => {
                 self.require_output()?;
                 ensure(self.durations.contains_key(track))?;
+                if *force_takeover {
+                    next.external_playback = None;
+                    next.ready = true;
+                }
                 let index = next.current_index().filter(|&i| next.entries[i].track_id == *track)
                     .or_else(|| next.entries.iter().position(|entry| entry.track_id == *track));
                 let index = match index {
@@ -376,13 +429,133 @@ impl<R: Renderer> SessionOwner<R> {
                 if next.activity != Activity::Playing { return Ok(false); }
                 next.next(true)
             }
-            RendererEvent::Failed(_) | RendererEvent::ExternalTakeover(_) => {
-                next.ready = false; next.run = None; None
+            RendererEvent::Failed(_) => {
+                next.ready = false;
+                next.stop();
+                None
+            }
+            RendererEvent::ExternalTakeover(_) => {
+                next.ready = false;
+                next.stop();
+                next.external_playback = Some(ExternalPlaybackInfo {
+                    active: true,
+                    transport_state: "PLAYING".into(),
+                    current_uri: None,
+                    position_seconds: None,
+                });
+                None
             }
         };
         ensure(next.revision < MAX_REVISION)?; next.revision += 1;
         self.commit(&mut session, next, effect)?;
         Ok(true)
+    }
+
+    pub fn sync_external_renderer(&self, info: Option<ExternalPlaybackInfo>) -> Result<bool> {
+        let mut session = self.session.lock().map_err(|_| ErrorCode::Unavailable)?;
+        if session.state.run.is_some() || session.state.activity != Activity::Idle {
+            return Ok(false);
+        }
+        if session.state.external_playback == info {
+            return Ok(false);
+        }
+        session.state.external_playback = info;
+        if session.state.revision < MAX_REVISION {
+            session.state.revision += 1;
+        }
+        Ok(true)
+    }
+
+    pub fn on_renderer_external_takeover(
+        &self,
+        token: RunToken,
+        transport_state: String,
+        current_uri: Option<String>,
+        position_seconds: Option<f64>,
+    ) -> Result<bool> {
+        let mut session = self.session.lock().map_err(|_| ErrorCode::Unavailable)?;
+        if !session.state.ready || session.state.run.as_ref() != Some(&token) {
+            return Ok(false);
+        }
+        let mut next = session.state.clone();
+        next.ready = false;
+        next.stop();
+        next.external_playback = Some(ExternalPlaybackInfo {
+            active: true,
+            transport_state,
+            current_uri,
+            position_seconds,
+        });
+        ensure(next.revision < MAX_REVISION)?;
+        next.revision += 1;
+        self.commit(&mut session, next, None)?;
+        Ok(true)
+    }
+
+    pub fn sync_active_playback(
+        &self,
+        token: &RunToken,
+        transport_state: &str,
+        position_seconds: Option<f64>,
+    ) -> Result<bool> {
+        let mut session = self.session.lock().map_err(|_| ErrorCode::Unavailable)?;
+        if !session.state.ready || session.state.run.as_ref() != Some(token) {
+            return Ok(false);
+        }
+        let max_duration = session
+            .state
+            .current_index()
+            .and_then(|idx| self.durations.get(&session.state.entries[idx].track_id).copied())
+            .unwrap_or(MAX_REVISION as f64);
+        let clamp_pos = position_seconds
+            .filter(|p| p.is_finite() && *p >= 0.0)
+            .map(|p| p.min(max_duration));
+
+        match transport_state {
+            "PAUSED_PLAYBACK" => {
+                let mut changed = false;
+                if session.state.activity != Activity::Paused {
+                    session.state.activity = Activity::Paused;
+                    if let Some(pos) = clamp_pos {
+                        session.state.position = pos;
+                    }
+                    ensure(session.state.revision < MAX_REVISION)?;
+                    session.state.revision += 1;
+                    changed = true;
+                } else if let Some(pos) = clamp_pos {
+                    if (session.state.position - pos).abs() > 0.25 {
+                        session.state.position = pos;
+                    }
+                }
+                Ok(changed)
+            }
+            "PLAYING" => {
+                let mut changed = false;
+                if matches!(session.state.activity, Activity::Loading | Activity::Paused) {
+                    session.state.activity = Activity::Playing;
+                    if let Some(pos) = clamp_pos {
+                        session.state.position = pos;
+                    }
+                    ensure(session.state.revision < MAX_REVISION)?;
+                    session.state.revision += 1;
+                    changed = true;
+                } else if let Some(pos) = clamp_pos {
+                    session.state.position = pos;
+                }
+                Ok(changed)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    pub(crate) fn is_external_playback_blocking_play(&self, force_takeover: bool) -> bool {
+        if force_takeover {
+            return false;
+        }
+        self.session
+            .lock()
+            .map(|s| s.state.external_playback.as_ref().is_some_and(|e| e.active))
+            .unwrap_or(false)
     }
 
     pub(crate) fn current_track_id(&self) -> Option<String> {

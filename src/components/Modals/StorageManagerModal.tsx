@@ -24,6 +24,9 @@ interface StorageManagerModalProps {
   mounts: StorageMount[]
   watchedFolders: WatchedFolder[]
   totalTracksCount: number
+  isCoreEngineActive?: boolean
+  activeEngineLabel?: string
+  onSwitchToLocalEngine?: () => void
   onRefreshLibrary: () => void
   onTriggerScan: (folderPath: string, forceFull?: boolean) => void
   onToggleMountLock: (mountId: string) => void
@@ -37,6 +40,9 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
   mounts,
   watchedFolders,
   totalTracksCount,
+  isCoreEngineActive = false,
+  activeEngineLabel = 'This PC',
+  onSwitchToLocalEngine,
   onRefreshLibrary,
   onTriggerScan,
   onToggleMountLock,
@@ -164,10 +170,12 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-semibold tracking-wide">
-                Storage & Library Folders
+                {isCoreEngineActive ? 'This PC Storage & Library Folders' : 'Storage & Library Folders'}
               </h2>
               <p className="text-xs text-white/50">
-                Manage watched roots, network shares, and storage drives.
+                {isCoreEngineActive
+                  ? `Local desktop watched roots (inactive while browsing ${activeEngineLabel}).`
+                  : 'Manage watched roots, network shares, and storage drives.'}
               </p>
             </div>
           </div>
@@ -215,13 +223,43 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
             </button>
             <button
               onClick={() => setIsAddingFolder(true)}
-              className="px-3 py-1.5 rounded-lg bg-[#00F5FF] hover:bg-[#00F5FF]/90 text-black font-semibold text-xs flex items-center gap-1.5 transition-all shadow-[0_0_12px_rgba(0,245,255,0.3)]"
+              disabled={isCoreEngineActive}
+              title={
+                isCoreEngineActive
+                  ? `Switch to This PC first — ${activeEngineLabel} cannot index folders from the desktop app`
+                  : 'Add a local directory or UNC network share to This PC'
+              }
+              className="px-3 py-1.5 rounded-lg bg-[#00F5FF] hover:bg-[#00F5FF]/90 disabled:opacity-40 disabled:cursor-not-allowed text-black font-semibold text-xs flex items-center gap-1.5 transition-all shadow-[0_0_12px_rgba(0,245,255,0.3)]"
             >
               <FolderPlus className="w-3.5 h-3.5" />
               Add Watched Folder
             </button>
           </div>
         </div>
+
+        {isCoreEngineActive && (
+          <div className="px-6 py-3 bg-amber-500/10 border-b border-amber-500/25 flex items-center justify-between gap-4 text-xs text-amber-200">
+            <div className="space-y-1">
+              <div className="font-medium text-amber-100">
+                Browsing remote <strong className="text-white">{activeEngineLabel}</strong> (read-only NAS catalog)
+              </div>
+              <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                Folders added here are indexed into <strong className="text-white">This PC</strong> ({totalTracksCount.toLocaleString()} local tracks) and do <strong className="text-white">not</strong> load into {activeEngineLabel}. To add DSD albums to {activeEngineLabel}, mount the folder into its container (<code className="px-1 py-0.5 rounded bg-black/30">/music</code>) and sync its database via <code className="px-1 py-0.5 rounded bg-black/30">cadence-headless --import-snapshot</code>.
+              </p>
+            </div>
+            {onSwitchToLocalEngine && (
+              <button
+                onClick={() => {
+                  onSwitchToLocalEngine()
+                  onClose()
+                }}
+                className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-100 font-medium shrink-0 cursor-pointer transition-colors"
+              >
+                Switch to This PC
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -269,7 +307,9 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-white/50 flex items-center gap-2">
                 <Folder className="w-3.5 h-3.5" />
-                Monitored Storage Roots ({watchedFolders.length})
+                {isCoreEngineActive
+                  ? `This PC Watched Roots (${watchedFolders.length}) — Not Synced to ${activeEngineLabel}`
+                  : `Monitored Storage Roots (${watchedFolders.length})`}
               </h3>
             </div>
 
@@ -315,6 +355,10 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                               <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 font-medium">
                                 Drive Offline
                               </span>
+                            ) : isCoreEngineActive ? (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-white/[0.08] text-white/60 font-medium">
+                                This PC Only
+                              </span>
                             ) : (
                               <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-300 font-medium">
                                 Watching
@@ -334,8 +378,12 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                       <div className="flex items-center gap-2 shrink-0">
                         <button
                           onClick={() => onTriggerScan(f.folderPath, false)}
-                          disabled={isOffline}
-                          title="Quick Rescan: Check timestamps and ingest modified or newly added tracks in <1 sec"
+                          disabled={isOffline || isCoreEngineActive}
+                          title={
+                            isCoreEngineActive
+                              ? 'Switch to This PC to scan local or UNC watched folders'
+                              : 'Quick Rescan: Check timestamps and ingest modified or newly added tracks in <1 sec'
+                          }
                           className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-[#00F5FF]/15 hover:text-[#00F5FF] disabled:opacity-30 text-xs font-medium text-white/70 transition-colors flex items-center gap-1.5"
                         >
                           <RefreshCw className="w-3.5 h-3.5" />
@@ -343,8 +391,12 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                         </button>
                         <button
                           onClick={() => onTriggerScan(f.folderPath, true)}
-                          disabled={isOffline}
-                          title="Force Full Rescan: Re-read all audio metadata tags and sidecars from disk"
+                          disabled={isOffline || isCoreEngineActive}
+                          title={
+                            isCoreEngineActive
+                              ? 'Switch to This PC to scan local or UNC watched folders'
+                              : 'Force Full Rescan: Re-read all audio metadata tags and sidecars from disk'
+                          }
                           className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-30 text-xs font-medium text-white/50 hover:text-white transition-colors flex items-center gap-1"
                         >
                           <RotateCw className="w-3.5 h-3.5" />

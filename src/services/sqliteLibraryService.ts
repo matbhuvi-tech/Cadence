@@ -639,7 +639,7 @@ export class SqliteLibraryService {
           discsCount: 1,
           tracksCount: rTracks.length,
           genreTags: r.genreTags ? JSON.parse(r.genreTags) : [],
-          storageMountId: storageMounts[0]?.id || '',
+          storageMountId: rTracks[0]?.storageMountId || storageMounts[0]?.id || '',
         }
       })
 

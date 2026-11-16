@@ -3,7 +3,7 @@
  * Seamless abstraction supporting native Tauri v2 desktop IPC and fallback Web Audio
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import {
   AudioEndpoint,
@@ -1757,6 +1757,27 @@ export interface RemoteServerStatus {
 }
 
 export const tauriBridge = new TauriBridgeService()
+
+/**
+ * Converts local filesystem image/media paths (such as cached APPDATA artwork)
+ * into Tauri asset protocol URLs inside WebView2 while preserving HTTP(S), data, and web URLs.
+ */
+export function resolveMediaUrl(url?: string | null): string {
+  if (!url) return ''
+  const trimmed = url.trim()
+  if (!trimmed) return ''
+  if (/^(https?:|data:|blob:|asset:|tauri:|\/api\/)/i.test(trimmed)) {
+    return trimmed
+  }
+  if (!tauriBridge.isTauri()) {
+    return trimmed
+  }
+  try {
+    return convertFileSrc(trimmed)
+  } catch {
+    return trimmed
+  }
+}
 
 frontendDiagnostics.setSender(async (events) => {
   await tauriBridge.logFrontendDebugBatch(events)

@@ -16,12 +16,13 @@ pub enum ErrorCode {
     IdentityMismatch,
     StaleRevision,
     NotReady,
+    TakeoverRequired,
     Unavailable,
 }
 
 type Result<T> = std::result::Result<T, ErrorCode>;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogTrack {
     pub id: String,
@@ -29,6 +30,14 @@ pub struct CatalogTrack {
     pub artist: String,
     pub album: String,
     pub duration_seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_compilation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,8 +86,16 @@ pub(crate) struct Mutation {
 }
 
 pub(crate) enum Action {
-    Play(String), Pause, Resume, Stop, Seek(f64), Replace(Vec<QueueEntry>),
-    Next, Previous, Jump(String), Modes { repeat: Repeat, shuffle: bool },
+    Play { track_id: String, force_takeover: bool },
+    Pause,
+    Resume,
+    Stop,
+    Seek(f64),
+    Replace(Vec<QueueEntry>),
+    Next,
+    Previous,
+    Jump(String),
+    Modes { repeat: Repeat, shuffle: bool },
 }
 
 pub(crate) fn ensure(valid: bool) -> Result<()> {
@@ -154,7 +171,13 @@ pub(crate) fn parse(input: &[u8], engine: &str, library: &str) -> Result<Operati
                 let parsed = match (operation, action) {
                     ("playback.control", "play") => {
                         keys.push("trackId"); let id = string(object, "trackId")?; token(id)?;
-                        Action::Play(id.to_owned())
+                        let force_takeover = if let Some(ft) = object.get("forceTakeover") {
+                            keys.push("forceTakeover");
+                            ft.as_bool().ok_or(ErrorCode::InvalidPayload)?
+                        } else {
+                            false
+                        };
+                        Action::Play { track_id: id.to_owned(), force_takeover }
                     }
                     ("playback.control", "pause") => Action::Pause,
                     ("playback.control", "resume") => Action::Resume,

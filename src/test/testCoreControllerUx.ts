@@ -704,3 +704,290 @@ test('Issues #38 and #39: mapCoreCatalogToUi maps WAV/DSD formats & executeCoreC
   assert.equal(store.getState().lastError?.includes('Connection lost'), false)
   store.dispose()
 })
+
+test('Stage P1: mapCoreCatalogToUi separates editions by releaseId and serialized executeCoreCommand prevents stale_revision & gates external RS130 takeover', async () => {
+  const { mapCoreCatalogToUi } = await import('../context/EngineControllerContext')
+  const { CoreServiceError } = await import('../core/coreProtocol')
+  const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
+
+  const { tracks, releases } = mapCoreCatalogToUi([
+    {
+      id: 'trk_sym_1988',
+      title: 'Allegro Con Brio',
+      artist: 'Berlin Phil',
+      album: 'Symphony No. 5',
+      releaseId: 'rel_1988',
+      edition: '1988',
+      durationSeconds: 420,
+      format: 'WAV',
+      sampleRate: 44100,
+      bitDepth: 16,
+      trackNumber: 1,
+      discNumber: 1,
+    },
+    {
+      id: 'trk_sym_2015',
+      title: 'Allegro Con Brio',
+      artist: 'Berlin Phil',
+      album: 'Symphony No. 5',
+      releaseId: 'rel_2015',
+      edition: '2015 Remaster',
+      durationSeconds: 425,
+      format: 'FLAC',
+      sampleRate: 192000,
+      bitDepth: 24,
+      trackNumber: 1,
+      discNumber: 1,
+    },
+    {
+      id: 'trk_comp_1',
+      title: 'Dawn Raga',
+      artist: 'Artist Alpha',
+      album: 'A World Of Music',
+      albumArtist: 'Various Artists',
+      releaseId: 'rel_comp',
+      isCompilation: true,
+      durationSeconds: 240,
+      format: 'FLAC',
+      sampleRate: 96000,
+      bitDepth: 24,
+      trackNumber: 1,
+      discNumber: 1,
+    },
+  ])
+
+  assert.equal(releases.length, 3)
+  assert.equal(releases[0].id, 'core_rel_rel_1988')
+  assert.equal(releases[0].title, 'Symphony No. 5 (1988)')
+  assert.equal(releases[1].id, 'core_rel_rel_2015')
+  assert.equal(releases[1].title, 'Symphony No. 5 (2015 Remaster)')
+  assert.equal(tracks[2].releaseId, 'core_rel_rel_comp')
+  assert.equal(releases[2].artistCredit, 'Various Artists')
+  assert.equal(releases[2].isCompilation, true)
+
+  const seenExpectedRevisions: Array<number | undefined> = []
+  const core = createFakeCoreNode()
+  let throwTakeoverOnce = true
+  const baseChannel = core.channel
+  const store = createDesktopCoreControllerStore({
+    channelFactory: () => ({
+      ...baseChannel,
+      async request(req) {
+        if (req.operation === 'queue.replace' || req.operation === 'playback.control') {
+          seenExpectedRevisions.push(req.expectedRevision)
+          if (req.operation === 'playback.control' && req.action === 'play' && throwTakeoverOnce) {
+            throwTakeoverOnce = false
+            const snapReply = await baseChannel.request({ ...req, operation: 'session.snapshot' })
+            const snap = snapReply.data as CoreSnapshot
+            throw new CoreServiceError('takeover_required', {
+              ...snap,
+              playback: {
+                activity: 'idle',
+                positionSeconds: 42,
+                owner: 'external',
+                takeoverRequired: true,
+              },
+            })
+          }
+        }
+        return baseChannel.request(req)
+      },
+    }),
+    localOwner: {
+      getActivity: () => 'idle',
+      stopAndAcknowledge: async () => true,
+      request: async () => ({ ok: true, data: {} }),
+    },
+  })
+
+  await store.stageCandidate({
+    engineId: 'core_living_room',
+    libraryId: 'lib_nas_master',
+    label: 'Music Room Core',
+    baseUrl: 'https://192.168.1.50:4040',
+    musicRoots: ['/music'],
+  })
+  await store.activateStagedCore()
+
+  // Rapid concurrent queue replacements must serialize cleanly with monotonically advancing revisions
+  const r1 = store.executeCoreCommand({
+    operation: 'queue.replace',
+    entries: [{ entryId: 'e1', trackId: 'trk_1' }],
+  })
+  const r2 = store.executeCoreCommand({
+    operation: 'queue.replace',
+    entries: [{ entryId: 'e2', trackId: 'trk_2' }],
+  })
+  await Promise.all([r1, r2])
+  assert.equal(seenExpectedRevisions.length, 2)
+  assert.equal(seenExpectedRevisions[1], (seenExpectedRevisions[0] ?? 0) + 1)
+
+  // takeover_required opens external_rs130_takeover prompt; dismissing leaves Core undisturbed
+  await assert.rejects(
+    () =>
+      store.executeCoreCommand({
+        operation: 'playback.control',
+        action: 'play',
+        trackId: 'trk_1',
+      }),
+    /RS130 is currently playing|external/i,
+  )
+  assert.equal(store.getState().switchPrompt?.kind, 'external_rs130_takeover')
+  store.dismissSwitchPrompt()
+  assert.equal(store.getState().switchPrompt, null)
+
+  // Confirming external takeover issues forceTakeover play via onConfirm callback
+  let callbackInvoked = false
+  store.requestExternalRs130Takeover('trk_1', async () => {
+    callbackInvoked = true
+    await store.executeCoreCommand({
+      operation: 'playback.control',
+      action: 'play',
+      trackId: 'trk_1',
+      forceTakeover: true,
+    })
+  })
+  assert.equal(store.getState().switchPrompt?.kind, 'external_rs130_takeover')
+  await store.confirmRs130Takeover()
+  assert.equal(callbackInvoked, true)
+  assert.equal(store.getState().view.snapshot?.playback.activity, 'playing')
+
+  store.dispose()
+})
+
+test('graphEngine.filterTracks keeps explicit Core and empty This PC catalogs isolated without leaking', async () => {
+  const { graphEngine } = await import('../core/graphEngine')
+  const { mapCoreCatalogToUi } = await import('../context/EngineControllerContext')
+  graphEngine.loadCustomLibrary({
+    tracks: [],
+    releases: [],
+    works: [],
+    auditIssues: [],
+    storageMounts: [],
+  })
+
+  const { tracks: coreTracks, releases: coreReleases } = mapCoreCatalogToUi([
+    {
+      id: 'trk_core_iso_1',
+      title: 'Core Isolation Track',
+      artist: 'Core Artist',
+      album: 'Core Album',
+      durationSeconds: 180,
+      format: 'FLAC',
+      sampleRate: 96000,
+      bitDepth: 24,
+      trackNumber: 1,
+      discNumber: 1,
+    },
+  ])
+  const coreFiltered = graphEngine.filterTracks(
+    { searchQuery: 'Core Album' },
+    coreTracks,
+    coreReleases,
+  )
+  assert.equal(coreFiltered.length, 1)
+  assert.equal(graphEngine.getAllTracks().length, 0)
+  assert.equal(graphEngine.getAllReleases().length, 0)
+
+  const localEmptyFiltered = graphEngine.filterTracks({ searchQuery: '' }, [], [])
+  assert.equal(localEmptyFiltered.length, 0)
+})
+
+test('Issue #40 computeCoreDisplayPosition advances monotonically at 1 Hz and loading settle check refreshes loading -> playing', async () => {
+  const { computeCoreDisplayPosition } = await import('../hooks/useCorePlaybackClock')
+  assert.equal(computeCoreDisplayPosition(0, 1000, 3600, true, true, 180), 2.6)
+  // Paused or disconnected freezes at authoritative position
+  assert.equal(computeCoreDisplayPosition(14, 1000, 5000, false, true, 180), 14)
+  assert.equal(computeCoreDisplayPosition(14, 1000, 5000, true, false, 180), 14)
+  // Clamps to durationSeconds when positive
+  assert.equal(computeCoreDisplayPosition(178, 1000, 8000, true, true, 180), 180)
+
+  const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
+  const settleCore = createFakeCoreNode()
+  const baseChannel = settleCore.channel
+  let snapshotReadsAfterCommand = 0
+  let commandIssued = false
+
+  const store = createDesktopCoreControllerStore({
+    localOwner: {
+      getActivity: () => 'idle',
+      stopAndAcknowledge: async () => true,
+      request: async () => ({ ok: true, data: {} }),
+    },
+    channelFactory: () => ({
+      ...baseChannel,
+      async request(req) {
+        if (req.operation === 'playback.control') {
+          commandIssued = true
+          const snapReply = await baseChannel.request({ ...req, operation: 'session.snapshot' })
+          const snap = snapReply.data as CoreSnapshot
+          return {
+            ok: true,
+            data: {
+              ...snap,
+              revision: snap.revision + 1,
+              queue: {
+                ...snap.queue,
+                entries: [{ entryId: 'entry_1', trackId: 'trk_1' }],
+                currentEntryId: 'entry_1',
+              },
+              playback: {
+                activity: 'loading',
+                positionSeconds: 0,
+                owner: 'core',
+              },
+            },
+          }
+        }
+        if (req.operation === 'session.snapshot' && commandIssued) {
+          snapshotReadsAfterCommand += 1
+          const snapReply = await baseChannel.request(req)
+          const snap = snapReply.data as CoreSnapshot
+          const settled = snapshotReadsAfterCommand >= 2
+          return {
+            ok: true,
+            data: {
+              ...snap,
+              revision: snap.revision + 1 + snapshotReadsAfterCommand,
+              queue: {
+                ...snap.queue,
+                entries: [{ entryId: 'entry_1', trackId: 'trk_1' }],
+                currentEntryId: 'entry_1',
+              },
+              playback: {
+                activity: settled ? 'playing' : 'loading',
+                positionSeconds: settled ? 1 : 0,
+                owner: 'core',
+              },
+            },
+          }
+        }
+        return baseChannel.request(req)
+      },
+    }),
+  })
+
+  await store.stageCandidate({
+    engineId: 'core_living_room',
+    libraryId: 'lib_nas_master',
+    label: 'Music Room Core',
+    baseUrl: 'https://192.168.1.50:4040',
+    musicRoots: ['/music'],
+  })
+  assert.equal(await store.activateStagedCore(), 'activated')
+
+  await store.executeCoreCommand({
+    operation: 'playback.control',
+    action: 'play',
+    trackId: 'trk_1',
+  })
+  assert.equal(store.getState().view.snapshot?.playback.activity, 'loading')
+
+  // Wait ~1.1s for the single-shot 900ms loading settle check (well under 5000ms passive sync)
+  await new Promise((resolve) => setTimeout(resolve, 1150))
+  assert.equal(snapshotReadsAfterCommand >= 2, true)
+  assert.equal(store.getState().view.snapshot?.playback.activity, 'playing')
+  assert.equal(store.getState().view.snapshot?.playback.positionSeconds, 1)
+
+  store.dispose()
+})

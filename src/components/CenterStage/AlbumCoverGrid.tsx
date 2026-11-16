@@ -22,7 +22,15 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
-import { getCuratedAlbumArtwork, generateMonogramAvatar } from '../../core/taxonomyUtils'
+import {
+  getCuratedAlbumArtwork,
+  generateMonogramAvatar,
+  canonicalizeComposer,
+  extractAlbumComposers,
+  matchesComposer,
+  matchesSearchText,
+} from '../../core/taxonomyUtils'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { IntegrityScanner } from '../../services/integrityScanner'
@@ -136,7 +144,7 @@ const AlbumCardItem: React.FC<AlbumCardItemProps> = React.memo(({
 
         {album.coverArtUrl ? (
           <img
-            src={album.coverArtUrl}
+            src={resolveMediaUrl(album.coverArtUrl)}
             alt={album.title}
             className="absolute inset-0 w-full h-full object-cover rounded-lg group-hover/card:scale-[1.03] transition-transform duration-500 z-[1]"
             loading="lazy"
@@ -467,7 +475,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
           : 0
       const stagedCount = groupTracks.filter((t) => t.sidecarStatus === 'uncommitted_sidecar').length
       const discCount = grc?.discCount || rel?.discsCount || 1
-      const variantsCount = (rel as any)?.pressingVariants?.length || 0
+      const variantsCount = effectiveRelease?.variants?.length || rel?.variants?.length || 0
 
       // Sort groupTracks in sequential disc then track order
       const sortedGroupTracks = [...groupTracks].sort((a, b) => {
@@ -505,13 +513,18 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
     const filtered = cards.filter((album) => {
       if (favoritesOnly && !album.isFavorite) return false
       if (!searchFilter.trim()) return true
-      const q = searchFilter.toLowerCase()
       return (
-        album.title.toLowerCase().includes(q) ||
-        album.artistCredit.toLowerCase().includes(q) ||
-        album.composerName.toLowerCase().includes(q) ||
-        album.tracks.some((t) => (t.artistCredit && t.artistCredit.toLowerCase().includes(q)) || (t.title && t.title.toLowerCase().includes(q))) ||
-        album.formats.some((f) => f.toLowerCase().includes(q))
+        matchesSearchText(album.title, searchFilter) ||
+        matchesSearchText(album.artistCredit, searchFilter) ||
+        matchesSearchText(album.composerName, searchFilter) ||
+        extractAlbumComposers(album).some((c) => matchesSearchText(c.canonicalName, searchFilter)) ||
+        album.tracks.some(
+          (t) =>
+            matchesSearchText(t.artistCredit, searchFilter) ||
+            matchesSearchText(t.albumArtist, searchFilter) ||
+            matchesSearchText(t.title, searchFilter)
+        ) ||
+        album.formats.some((f) => matchesSearchText(f, searchFilter))
       )
     })
 
@@ -563,13 +576,10 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
   // Drilldown Filtered Albums for Selected Composer
   const composerFilteredAlbums = useMemo(() => {
     if (!selectedComposer) return []
-    const norm = selectedComposer.toLowerCase().trim()
-    return unfilteredCards.filter((a) => {
-      if ((a.composerName || '').toLowerCase().trim() === norm) return true
-      return a.tracks.some(
-        (t) => (t.composerName || (t as any).composer || '').toLowerCase().trim() === norm
-      )
-    })
+    const targetKey = canonicalizeComposer(selectedComposer).key
+    return unfilteredCards.filter((a) =>
+      extractAlbumComposers(a).some((c) => c.key === targetKey)
+    )
   }, [unfilteredCards, selectedComposer])
 
   // Zero-match drilldown guards: collapse back to grid if active filter leaves 0 matching albums
@@ -606,31 +616,10 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
     >()
 
     albumCards.forEach((album) => {
-      // Collect all distinct composers that contributed to this album
-      const albumComposers = new Map<string, { name: string; count: number }>()
-
-      // 1. Release-level composer
-      if (album.composerName && album.composerName.trim()) {
-        const rawComp = album.composerName.trim()
-        const norm = rawComp.toLowerCase()
-        albumComposers.set(norm, { name: rawComp, count: 0 })
-      }
-
-      // 2. Track-level composers
-      album.tracks.forEach((t) => {
-        const trackComp = (t.composerName || (t as any).composer || '').trim()
-        if (trackComp) {
-          const norm = trackComp.toLowerCase()
-          const cur = albumComposers.get(norm) || { name: trackComp, count: 0 }
-          cur.count += 1
-          albumComposers.set(norm, cur)
-        }
-      })
-
-      // Add this album to each contributing composer's group
-      albumComposers.forEach((info, norm) => {
-        const cur = map.get(norm) || {
-          composer: info.name,
+      // Collect all distinct canonical composers that contributed to this album (including Core authority fallback)
+      extractAlbumComposers(album).forEach(({ key, canonicalName, count }) => {
+        const cur = map.get(key) || {
+          composer: canonicalName,
           albums: [],
           albumIds: new Set<string>(),
           tracksCount: 0,
@@ -639,8 +628,8 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
           cur.albumIds.add(album.id)
           cur.albums.push(album)
         }
-        cur.tracksCount += info.count > 0 ? info.count : album.tracks.length
-        map.set(norm, cur)
+        cur.tracksCount += count
+        map.set(key, cur)
       })
     })
 
@@ -844,7 +833,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
           <div className="relative w-48 h-48 sm:w-56 sm:h-56 shrink-0 rounded-2xl overflow-hidden bg-black/80 border border-white/[0.15] shadow-2xl group">
             {album.coverArtUrl ? (
               <img
-                src={album.coverArtUrl}
+                src={resolveMediaUrl(album.coverArtUrl)}
                 alt={album.title}
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                 onError={(e) => {
@@ -1377,7 +1366,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
             <div className="w-20 h-20 rounded-full overflow-hidden bg-black/60 border-2 border-[#00F5FF]/60 shadow-lg shrink-0 flex items-center justify-center">
               {albums[0]?.coverArtUrl ? (
                 <img
-                  src={albums[0].coverArtUrl}
+                  src={resolveMediaUrl(albums[0].coverArtUrl)}
                   alt={artistName}
                   className="w-full h-full object-cover"
                 />
@@ -1426,13 +1415,16 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
 
   // Render Composer Detail View
   const renderComposerDetail = (composerName: string, albums: AlbumCardData[]) => {
-    const norm = composerName.toLowerCase().trim()
+    const targetKey = canonicalizeComposer(composerName).key
     const composerTracks = albums.flatMap((a) => {
       const specific = a.tracks.filter(
-        (t) => (t.composerName || (t as any).composer || '').toLowerCase().trim() === norm
+        (t) =>
+          matchesComposer(t, composerName) ||
+          canonicalizeComposer((t.composerName || (t as any).composer || '').trim()).key === targetKey
       )
       return specific.length > 0 ? specific : a.tracks
     })
+    const norm = composerName.toLowerCase().trim()
     const heroPortrait =
       composerPortraits.get(norm) ||
       albums[0]?.coverArtUrl ||
@@ -1446,7 +1438,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
             <div className="w-20 h-20 rounded-full overflow-hidden bg-black/60 border-2 border-[#818CF8]/60 shadow-lg shrink-0 flex items-center justify-center text-3xl">
               {heroPortrait ? (
                 <img
-                  src={heroPortrait}
+                  src={resolveMediaUrl(heroPortrait)}
                   alt={composerName}
                   className="w-full h-full object-cover"
                   onError={(e) => {
@@ -1973,7 +1965,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
                       >
                         {compPortrait ? (
                           <img
-                            src={compPortrait}
+                            src={resolveMediaUrl(compPortrait)}
                             alt={group.composer}
                             className="w-full h-full object-cover group-hover/comp:scale-105 transition-transform"
                             onError={(e) => {

@@ -765,6 +765,26 @@ export function splitAndCanonicalizePerformers(rawArtistString: string): string[
 }
 
 /**
+ * Returns canonical authority info when a raw credit string matches a known composer authority.
+ */
+export function resolveKnownComposer(rawCredit?: string | null): { canonicalName: string; key: string } | null {
+  if (!rawCredit) return null
+  const norm = rawCredit.toLowerCase().replace(/[\.\-_,\s]+/g, '')
+  if (!norm) return null
+  for (const comp of KNOWN_COMPOSERS) {
+    if (
+      comp.aliases.some((alias) => {
+        const normAlias = alias.replace(/[\.\-_,\s]+/g, '')
+        return normAlias.length > 0 && norm.includes(normAlias)
+      })
+    ) {
+      return { canonicalName: comp.canonicalName, key: comp.key }
+    }
+  }
+  return null
+}
+
+/**
  * Matches a track against a composer key or canonical name.
  */
 export function matchesComposer(track: Track, composerKeyOrName: string): boolean {
@@ -807,18 +827,97 @@ export function matchesComposer(track: Track, composerKeyOrName: string): boolea
     }
   }
 
-  // 3. Check artistCredit or folder/file if composer was put in artist credit
-  const normArtist = (track.artistCredit || '').toLowerCase().replace(/[\.\-_,\s]+/g, '')
-  for (const comp of KNOWN_COMPOSERS) {
-    if (comp.key.replace(/[\.\-_,\s]+/g, '') === targetKey) {
-      for (const alias of comp.aliases) {
-        const normAlias = alias.replace(/[\.\-_,\s]+/g, '')
-        if (normArtist.includes(normAlias)) return true
-      }
+  // 3. Check albumArtist / artistCredit when a known composer authority is tagged on the album or track
+  const targetCanonical = canonicalizeComposer(composerKeyOrName)
+  for (const credit of [track.albumArtist, track.artistCredit]) {
+    const matched = resolveKnownComposer(credit)
+    if (
+      matched &&
+      (matched.key === targetCanonical.key ||
+        matched.key.replace(/[\.\-_,\s]+/g, '') === targetKey ||
+        matched.canonicalName.toLowerCase().replace(/[\.\-_,\s]+/g, '') === targetKey)
+    ) {
+      return true
     }
   }
 
   return false
+}
+
+const SEARCH_SEPARATOR_REGEX = /[\s.,\-_–—'"()/\\&:]+/g
+
+/**
+ * Punctuation- and whitespace-tolerant substring matcher for catalog search.
+ * Enables queries like "A.R.Rahman" to match "A. R. Rahman" and vice versa.
+ */
+export function matchesSearchText(haystack: string | undefined | null, query: string): boolean {
+  if (!haystack || !query) return false
+  const trimmed = query.trim().toLowerCase()
+  if (!trimmed) return false
+  const lower = haystack.toLowerCase()
+  if (lower.includes(trimmed)) return true
+  const compactQuery = trimmed.replace(SEARCH_SEPARATOR_REGEX, '')
+  if (compactQuery.length < 2) return false
+  return lower.replace(SEARCH_SEPARATOR_REGEX, '').includes(compactQuery)
+}
+
+export interface AlbumComposerEntry {
+  key: string
+  canonicalName: string
+  count: number
+}
+
+/**
+ * Resolves canonical composers for an album or release, falling back to
+ * KNOWN_COMPOSERS inference from album-level credits when explicit composer
+ * tags are omitted (for example, remote Music Room Core projections).
+ */
+export function extractAlbumComposers(album: {
+  composerName?: string
+  artistCredit?: string
+  tracks: Array<{ composerName?: string; artistCredit?: string; albumArtist?: string }>
+}): AlbumComposerEntry[] {
+  const albumComposers = new Map<string, { canonicalName: string; count: number }>()
+
+  if (album.composerName && album.composerName.trim()) {
+    const { key, canonicalName } = canonicalizeComposer(album.composerName.trim())
+    if (key !== 'unknown') {
+      albumComposers.set(key, { canonicalName, count: 0 })
+    }
+  }
+
+  for (const t of album.tracks) {
+    const rawTrackComp = (t.composerName || (t as { composer?: string }).composer || '').trim()
+    if (!rawTrackComp) continue
+    const { key, canonicalName } = canonicalizeComposer(rawTrackComp)
+    if (key === 'unknown') continue
+    const cur = albumComposers.get(key) || { canonicalName, count: 0 }
+    cur.count += 1
+    albumComposers.set(key, cur)
+  }
+
+  if (albumComposers.size === 0) {
+    const creditsToCheck = [
+      album.artistCredit,
+      ...album.tracks.map((t) => t.albumArtist),
+    ]
+    for (const credit of creditsToCheck) {
+      const matched = resolveKnownComposer(credit)
+      if (matched) {
+        albumComposers.set(matched.key, {
+          canonicalName: matched.canonicalName,
+          count: album.tracks.length,
+        })
+        break
+      }
+    }
+  }
+
+  return Array.from(albumComposers.entries()).map(([key, info]) => ({
+    key,
+    canonicalName: info.canonicalName,
+    count: info.count > 0 ? info.count : album.tracks.length,
+  }))
 }
 
 /**

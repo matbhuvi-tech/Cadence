@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { Image as ImageIcon, Sparkles, Disc3, Music2, Check, Music } from 'lucide-react'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 
 export interface ArtworkHoverPreviewProps {
   children: React.ReactNode
@@ -219,7 +220,7 @@ export const ArtworkHoverPreview: React.FC<ArtworkHoverPreviewProps> = ({
               >
                 {!imgError ? (
                   <img
-                    src={src}
+                    src={resolveMediaUrl(src)}
                     alt={alt}
                     onError={() => setImgError(true)}
                     className="w-full h-full object-cover rounded-xl"

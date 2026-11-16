@@ -79,6 +79,12 @@ export type CoreSwitchPrompt =
       coreLabel: string
       onConfirm: () => Promise<void>
     }
+  | {
+      kind: 'external_rs130_takeover'
+      coreLabel: string
+      trackId: string
+      onConfirm: () => Promise<void>
+    }
 
 export interface CoreControllerState {
   view: EngineServiceView
@@ -416,7 +422,114 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
   let activeCoreService: EngineService | null = null
   let activeCoreProfile: SavedCoreProfile | null = null
   let disposed = false
+  let commandQueue: Promise<void> = Promise.resolve()
+  let passiveSyncTimer: ReturnType<typeof setInterval> | null = null
+  let passiveSyncInFlight = false
+  let loadingSettleTimer: ReturnType<typeof setTimeout> | null = null
+  const PASSIVE_SYNC_INTERVAL_MS = 5000
+  const LOADING_SETTLE_DELAY_MS = 700
+  const MAX_LOADING_SETTLE_ATTEMPTS = 8
   const listeners = new Set<(state: CoreControllerState) => void>()
+
+  function clearLoadingSettleTimer() {
+    if (loadingSettleTimer !== null) {
+      clearTimeout(loadingSettleTimer)
+      loadingSettleTimer = null
+    }
+  }
+
+  function scheduleLoadingSettleCheck(attempt = 1) {
+    clearLoadingSettleTimer()
+    if (disposed || attempt > MAX_LOADING_SETTLE_ATTEMPTS || typeof setTimeout !== 'function') return
+    loadingSettleTimer = setTimeout(() => {
+      loadingSettleTimer = null
+      if (disposed || !activeCoreService) return
+      const currentView = controller.getView()
+      if (
+        currentView.session.active.kind !== 'core' ||
+        currentView.snapshot?.playback.activity !== 'loading'
+      ) {
+        return
+      }
+      void controller
+        .refresh()
+        .then((outcome) => {
+          if (disposed) return
+          const nextView = controller.getView()
+          if (outcome === 'updated' && nextView.snapshot) {
+            state = { ...state, view: nextView, lastError: null }
+            emit()
+          }
+          if (nextView.session.active.kind === 'core' && nextView.snapshot?.playback.activity === 'loading') {
+            scheduleLoadingSettleCheck(attempt + 1)
+          }
+        })
+        .catch(() => {})
+    }, LOADING_SETTLE_DELAY_MS)
+    ;(loadingSettleTimer as { unref?: () => void }).unref?.()
+  }
+
+  function stopPassiveSync() {
+    clearLoadingSettleTimer()
+    if (passiveSyncTimer !== null) {
+      clearInterval(passiveSyncTimer)
+      passiveSyncTimer = null
+    }
+  }
+
+  function startPassiveSync() {
+    stopPassiveSync()
+    if (disposed || typeof setInterval !== 'function') return
+    passiveSyncTimer = setInterval(() => {
+      if (disposed || passiveSyncInFlight || !activeCoreService) return
+      const currentView = controller.getView()
+      if (currentView.session.active.kind !== 'core') {
+        stopPassiveSync()
+        return
+      }
+      passiveSyncInFlight = true
+      void controller
+        .refresh()
+        .then((outcome) => {
+          if (disposed) return
+          const nextView = controller.getView()
+          if (outcome === 'updated') {
+            const prevSnap = currentView.snapshot
+            const nextSnap = nextView.snapshot
+            const changed =
+              !prevSnap ||
+              !nextSnap ||
+              prevSnap.revision !== nextSnap.revision ||
+              prevSnap.playback.activity !== nextSnap.playback.activity ||
+              Math.floor(prevSnap.playback.positionSeconds) !==
+                Math.floor(nextSnap.playback.positionSeconds) ||
+              prevSnap.playback.owner !== nextSnap.playback.owner ||
+              prevSnap.playback.takeoverRequired !== nextSnap.playback.takeoverRequired ||
+              prevSnap.playback.externalPlayback?.active !==
+                nextSnap.playback.externalPlayback?.active ||
+              prevSnap.playback.externalPlayback?.transportState !==
+                nextSnap.playback.externalPlayback?.transportState ||
+              prevSnap.catalog.revision !== nextSnap.catalog.revision
+            if (changed) {
+              state = { ...state, view: nextView, lastError: null }
+              emit()
+            }
+          } else if (outcome === 'failed' && currentView.session.connected) {
+            state = {
+              ...state,
+              view: nextView,
+              lastError: 'Connection lost. Playback may still be continuing.',
+              statusAnnouncement: 'Connection lost. Playback may still be continuing.',
+            }
+            emit()
+          }
+        })
+        .finally(() => {
+          passiveSyncInFlight = false
+        })
+    }, PASSIVE_SYNC_INTERVAL_MS)
+    ;(passiveSyncTimer as { unref?: () => void }).unref?.()
+  }
 
   let state: CoreControllerState = {
     view: controller.getView(),
@@ -591,6 +704,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         statusAnnouncement: `Playback engine: ${profile.label}. Audio output: ${outLabel}.`,
       }
       emit()
+      startPassiveSync()
       return 'activated'
     }
 
@@ -604,6 +718,136 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     }
     emit()
     return outcome
+  }
+
+  async function runSerializedCoreCommand(commandInput: CoreCommandInput): Promise<CoreSnapshot> {
+    const preflightView = controller.getView()
+    if (preflightView.session.active.kind !== 'core' || !activeCoreService || !preflightView.snapshot) {
+      throw new CoreServiceError('not_ready')
+    }
+    let releaseLock!: () => void
+    const prevLock = commandQueue
+    commandQueue = new Promise<void>((resolve) => {
+      releaseLock = resolve
+    })
+    await prevLock
+    try {
+      const sendWithCurrentRevision = async (): Promise<CoreSnapshot> => {
+        const beforeView = controller.getView()
+        if (beforeView.session.active.kind !== 'core' || !activeCoreService || !beforeView.snapshot) {
+          throw new CoreServiceError('not_ready')
+        }
+        const command: CoreCommand = {
+          ...commandInput,
+          commandId: generateCommandId(),
+          expectedRevision: beforeView.snapshot.revision,
+        } as CoreCommand
+        await activeCoreService.execute(command)
+        await controller.refresh()
+        const afterView = controller.getView()
+        const parsed = parseCoreSnapshot(afterView.snapshot, beforeView.session.active)
+        state = {
+          ...state,
+          view: afterView,
+          lastError: null,
+        }
+        emit()
+        if (parsed.playback.activity === 'loading') {
+          scheduleLoadingSettleCheck()
+        } else {
+          clearLoadingSettleTimer()
+        }
+        return parsed
+      }
+
+      try {
+        return await sendWithCurrentRevision()
+      } catch (err) {
+        if (err instanceof CoreServiceError && err.code === 'stale_revision') {
+          await controller.refresh().catch(() => {})
+          const refreshed = controller.getView()
+          if (refreshed.session.active.kind === 'core' && refreshed.snapshot) {
+            return await sendWithCurrentRevision()
+          }
+        }
+        throw err
+      }
+    } catch (err) {
+      const latestView = controller.getView()
+      if (err instanceof CoreServiceError && err.code === 'takeover_required') {
+        await controller.refresh().catch(() => {})
+        const refreshedView = controller.getView()
+        const pendingTrackId =
+          commandInput.operation === 'playback.control' && commandInput.action === 'play'
+            ? commandInput.trackId
+            : ''
+        state = {
+          ...state,
+          view: refreshedView,
+          lastError: err.message,
+          statusAnnouncement: err.message,
+          switchPrompt: pendingTrackId
+            ? {
+                kind: 'external_rs130_takeover',
+                coreLabel: refreshedView.session.active.label,
+                trackId: pendingTrackId,
+                onConfirm: async () => {
+                  await runSerializedCoreCommand({
+                    operation: 'playback.control',
+                    action: 'play',
+                    trackId: pendingTrackId,
+                    forceTakeover: true,
+                  })
+                },
+              }
+            : state.switchPrompt,
+        }
+        emit()
+        throw err
+      }
+      if (err instanceof CoreServiceError && err.code === 'stale_revision' && err.snapshot) {
+        await controller.refresh()
+        state = {
+          ...state,
+          view: controller.getView(),
+          lastError: err.message,
+          statusAnnouncement: err.message,
+        }
+        emit()
+        throw err
+      }
+      if (
+        err instanceof CoreServiceError &&
+        (err.code === 'not_ready' ||
+          err.code === 'invalid_payload' ||
+          err.code === 'unsupported_capability')
+      ) {
+        state = {
+          ...state,
+          view: latestView,
+          lastError: err.message,
+          statusAnnouncement: err.message,
+        }
+        emit()
+        throw err
+      }
+      controller.setConnection(
+        latestView.session.activeEpoch,
+        latestView.session.active,
+        false,
+        latestView.connectionGeneration,
+      )
+      state = {
+        ...state,
+        view: controller.getView(),
+        lastError: 'Connection lost. Playback may still be continuing.',
+        statusAnnouncement: 'Connection lost. Playback may still be continuing.',
+      }
+      emit()
+      throw err
+    } finally {
+      releaseLock()
+    }
   }
 
   return {
@@ -727,6 +971,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       }
       const outcome = await controller.select(localService, 'idle', 'leave_core_playing')
       if (outcome === 'activated') {
+        stopPassiveSync()
         activeCoreService = null
         activeCoreProfile = null
         state = {
@@ -785,6 +1030,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         disposition === 'stop_before_switch' ? 'idle' : coreActivity
       const outcome = await controller.select(localService, effectiveSourceActivity, disposition)
       if (outcome === 'activated') {
+        stopPassiveSync()
         activeCoreService = null
         activeCoreProfile = null
         state = {
@@ -845,74 +1091,38 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         state = { ...state, view: nextView, isBusy: false }
       }
       emit()
+      if (outcome === 'updated') {
+        startPassiveSync()
+      }
       return outcome
     },
 
     async executeCoreCommand(commandInput: CoreCommandInput): Promise<CoreSnapshot> {
+      return runSerializedCoreCommand(commandInput)
+    },
+
+    async refreshSnapshot(): Promise<CoreSnapshot | null> {
       const beforeView = controller.getView()
-      if (beforeView.session.active.kind !== 'core' || !activeCoreService || !beforeView.snapshot) {
-        throw new CoreServiceError('not_ready')
+      if (beforeView.session.active.kind !== 'core' || !activeCoreService) {
+        return null
       }
-      const command: CoreCommand = {
-        ...commandInput,
-        commandId: generateCommandId(),
-        expectedRevision: beforeView.snapshot.revision,
-      } as CoreCommand
-      try {
-        await activeCoreService.execute(command)
-        await controller.refresh()
-        const afterView = controller.getView()
+      const outcome = await controller.refresh()
+      const afterView = controller.getView()
+      if (outcome === 'updated') {
+        state = { ...state, view: afterView, lastError: null }
+        emit()
+        return afterView.snapshot ?? null
+      }
+      if (outcome === 'failed') {
         state = {
           ...state,
           view: afterView,
-          lastError: null,
-        }
-        emit()
-        return parseCoreSnapshot(afterView.snapshot, beforeView.session.active)
-      } catch (err) {
-        if (err instanceof CoreServiceError && err.code === 'stale_revision' && err.snapshot) {
-          await controller.refresh()
-          const afterView = controller.getView()
-          state = {
-            ...state,
-            view: afterView,
-            lastError: err.message,
-            statusAnnouncement: err.message,
-          }
-          emit()
-          throw err
-        }
-        if (
-          err instanceof CoreServiceError &&
-          (err.code === 'not_ready' ||
-            err.code === 'invalid_payload' ||
-            err.code === 'unsupported_capability')
-        ) {
-          state = {
-            ...state,
-            view: beforeView,
-            lastError: err.message,
-            statusAnnouncement: err.message,
-          }
-          emit()
-          throw err
-        }
-        controller.setConnection(
-          beforeView.session.activeEpoch,
-          beforeView.session.active,
-          false,
-          beforeView.connectionGeneration,
-        )
-        const nextView = controller.getView()
-        state = {
-          ...state,
-          view: nextView,
           lastError: 'Connection lost. Playback may still be continuing.',
           statusAnnouncement: 'Connection lost. Playback may still be continuing.',
         }
         emit()
-        throw err
       }
+      return afterView.snapshot ?? null
     },
 
     async loadCatalogPage(cursor: string | null, limit = 200): Promise<CoreCatalogPage> {
@@ -961,7 +1171,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
 
     async confirmRs130Takeover(): Promise<void> {
       const prompt = state.switchPrompt
-      if (!prompt || prompt.kind !== 'rs130_takeover') return
+      if (!prompt || (prompt.kind !== 'rs130_takeover' && prompt.kind !== 'external_rs130_takeover')) return
       state = { ...state, switchPrompt: null, isBusy: true }
       emit()
       try {
@@ -970,6 +1180,21 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         state = { ...state, isBusy: false }
         emit()
       }
+    },
+
+    requestExternalRs130Takeover(trackId: string, onConfirm: () => Promise<void>): void {
+      const currentView = controller.getView()
+      if (currentView.session.active.kind !== 'core') return
+      state = {
+        ...state,
+        switchPrompt: {
+          kind: 'external_rs130_takeover',
+          coreLabel: currentView.session.active.label,
+          trackId,
+          onConfirm,
+        },
+      }
+      emit()
     },
 
     removeSavedCore(engineId: string, libraryId: string): void {
@@ -984,6 +1209,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     /** Closing the controller never sends Stop to Core; the Core session continues independently. */
     dispose(): void {
       disposed = true
+      stopPassiveSync()
       listeners.clear()
     },
   }

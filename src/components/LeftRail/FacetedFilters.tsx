@@ -22,7 +22,7 @@ import {
   matchesEra,
   matchesFormat,
   detectLanguage,
-  KNOWN_COMPOSERS,
+  resolveKnownComposer,
 } from '../../core/taxonomyUtils'
 import { FacetSelections } from '../../core/types'
 import { FEATURES } from '../../config/features'
@@ -150,13 +150,17 @@ export const FacetedFilters: React.FC<FacetedFiltersProps> = ({
         })
       }
 
-      // Safe fallback to artistCredit ONLY if it matches a catalogued composer authority and is NOT the album title
-      if (candidates.length === 0 && t.artistCredit && t.artistCredit !== 'Unknown Artist') {
-        const normArt = t.artistCredit.toLowerCase().trim()
-        const isKnownComp = KNOWN_COMPOSERS.some((c) => c.aliases.some((al) => normArt.includes(al)))
-        const isAlbumName = normArt === albumTitle || normArt === folderName
-        if (isKnownComp && !isAlbumName) {
-          candidates.push(t.artistCredit)
+      // Safe fallback to albumArtist/artistCredit ONLY if it matches a catalogued composer authority and is NOT the album title
+      if (candidates.length === 0) {
+        for (const credit of [t.albumArtist, t.artistCredit, rel?.artistCredit]) {
+          if (!credit || credit === 'Unknown Artist') continue
+          const normCredit = credit.toLowerCase().trim()
+          if (normCredit === albumTitle || normCredit === folderName) continue
+          const matchedComp = resolveKnownComposer(credit)
+          if (matchedComp) {
+            candidates.push(matchedComp.canonicalName)
+            break
+          }
         }
       }
 

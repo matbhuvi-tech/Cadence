@@ -17,6 +17,12 @@ pub fn generate_fingerprint_for_file<P: AsRef<Path>>(
     max_duration_secs: u32,
 ) -> Result<(String, i32), String> {
     let path_ref = path.as_ref();
+    if crate::scanner::dsd::is_dsd_path(path_ref) {
+        return Err(format!(
+            "Native DSD format does not support acoustic fingerprinting: {:?}",
+            path_ref
+        ));
+    }
     let file = File::open(path_ref).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -111,4 +117,23 @@ pub fn generate_fingerprint_for_file<P: AsRef<Path>>(
     };
 
     Ok((encoded, duration))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_dsd_extensions_before_opening_file() {
+        for ext in ["dsf", "DSF", "dff", "dsdiff"] {
+            let err = generate_fingerprint_for_file(format!("nonexistent_track.{}", ext), 120)
+                .expect_err("DSD files should fail early before file open / Symphonia probe");
+            assert!(
+                err.contains("Native DSD format"),
+                "unexpected error for .{}: {}",
+                ext,
+                err
+            );
+        }
+    }
 }

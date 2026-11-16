@@ -20,6 +20,7 @@ export type CoreErrorCode =
   | 'untrusted_peer'
   | 'identity_mismatch'
   | 'not_ready'
+  | 'takeover_required'
   | 'invalid_payload'
   | 'stale_revision'
   | 'unavailable';
@@ -56,6 +57,17 @@ export interface CoreCatalogTrack {
   trackNumber?: number;
   discNumber?: number;
   releaseYear?: number;
+  releaseId?: string;
+  albumArtist?: string;
+  isCompilation?: boolean;
+  edition?: string;
+}
+
+export interface CoreExternalPlaybackInfo {
+  active: boolean;
+  transportState: string;
+  currentUri?: string;
+  positionSeconds?: number;
 }
 
 export interface CoreSnapshot {
@@ -76,6 +88,9 @@ export interface CoreSnapshot {
   playback: {
     activity: 'idle' | 'playing' | 'paused' | 'loading';
     positionSeconds: number;
+    owner?: 'none' | 'core' | 'external';
+    takeoverRequired?: boolean;
+    externalPlayback?: CoreExternalPlaybackInfo;
   };
   output: {
     id: string;
@@ -89,6 +104,7 @@ export type CoreClientCommand =
       operation: 'playback.control';
       action: 'play';
       trackId: string;
+      forceTakeover?: boolean;
       commandId: string;
       expectedRevision: number;
     }
@@ -157,6 +173,8 @@ function defaultMessageForCode(code: CoreErrorCode): string {
       return 'The responder does not match the selected Core engine and library identity.';
     case 'not_ready':
       return 'Cadence Core is not ready yet.';
+    case 'takeover_required':
+      return 'RS130 is currently playing from an external controller (HiFi ROSE). Confirm takeover before starting Core playback.';
     case 'stale_revision':
       return 'Queue or playback state changed on Core. Refreshed authoritative snapshot.';
     case 'invalid_payload':
@@ -218,6 +236,47 @@ export function parseCoreDescriptor(
   };
 }
 
+function parseCoreCatalogTrack(item: unknown): CoreCatalogTrack {
+  const t = assertRecord(item);
+  if (typeof t.durationSeconds !== 'number' || !Number.isFinite(t.durationSeconds)) {
+    throw new CoreClientError('invalid_payload');
+  }
+  return {
+    id: nonEmptyString(t.id),
+    title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled',
+    artist: typeof t.artist === 'string' ? t.artist : 'Unknown Artist',
+    album: typeof t.album === 'string' ? t.album : 'Unknown Album',
+    durationSeconds: Math.max(0, t.durationSeconds),
+    format: typeof t.format === 'string' && t.format.trim() ? t.format.trim() : undefined,
+    sampleRate:
+      typeof t.sampleRate === 'number' && Number.isInteger(t.sampleRate) && t.sampleRate > 0
+        ? t.sampleRate
+        : undefined,
+    bitDepth:
+      typeof t.bitDepth === 'number' && Number.isInteger(t.bitDepth) && t.bitDepth > 0
+        ? t.bitDepth
+        : undefined,
+    trackNumber:
+      typeof t.trackNumber === 'number' && Number.isInteger(t.trackNumber) && t.trackNumber > 0
+        ? t.trackNumber
+        : undefined,
+    discNumber:
+      typeof t.discNumber === 'number' && Number.isInteger(t.discNumber) && t.discNumber > 0
+        ? t.discNumber
+        : undefined,
+    releaseYear:
+      typeof t.releaseYear === 'number' && Number.isInteger(t.releaseYear) && t.releaseYear > 0
+        ? t.releaseYear
+        : undefined,
+    releaseId:
+      typeof t.releaseId === 'string' && t.releaseId.trim() ? t.releaseId.trim() : undefined,
+    albumArtist:
+      typeof t.albumArtist === 'string' && t.albumArtist.trim() ? t.albumArtist.trim() : undefined,
+    isCompilation: typeof t.isCompilation === 'boolean' ? t.isCompilation : undefined,
+    edition: typeof t.edition === 'string' && t.edition.trim() ? t.edition.trim() : undefined,
+  };
+}
+
 export function parseCoreSnapshot(
   raw: unknown,
   profile: Pick<ServerProfile, 'engineId' | 'libraryId'>
@@ -243,40 +302,7 @@ export function parseCoreSnapshot(
   ) {
     throw new CoreClientError('invalid_payload');
   }
-  const tracks: CoreCatalogTrack[] = catalogObj.tracks.map((item) => {
-    const t = assertRecord(item);
-    if (typeof t.durationSeconds !== 'number' || !Number.isFinite(t.durationSeconds)) {
-      throw new CoreClientError('invalid_payload');
-    }
-    return {
-      id: nonEmptyString(t.id),
-      title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled',
-      artist: typeof t.artist === 'string' ? t.artist : 'Unknown Artist',
-      album: typeof t.album === 'string' ? t.album : 'Unknown Album',
-      durationSeconds: Math.max(0, t.durationSeconds),
-      format: typeof t.format === 'string' && t.format.trim() ? t.format.trim() : undefined,
-      sampleRate:
-        typeof t.sampleRate === 'number' && Number.isInteger(t.sampleRate) && t.sampleRate > 0
-          ? t.sampleRate
-          : undefined,
-      bitDepth:
-        typeof t.bitDepth === 'number' && Number.isInteger(t.bitDepth) && t.bitDepth > 0
-          ? t.bitDepth
-          : undefined,
-      trackNumber:
-        typeof t.trackNumber === 'number' && Number.isInteger(t.trackNumber) && t.trackNumber > 0
-          ? t.trackNumber
-          : undefined,
-      discNumber:
-        typeof t.discNumber === 'number' && Number.isInteger(t.discNumber) && t.discNumber > 0
-          ? t.discNumber
-          : undefined,
-      releaseYear:
-        typeof t.releaseYear === 'number' && Number.isInteger(t.releaseYear) && t.releaseYear > 0
-          ? t.releaseYear
-          : undefined,
-    };
-  });
+  const tracks: CoreCatalogTrack[] = catalogObj.tracks.map(parseCoreCatalogTrack);
 
   const queueObj = assertRecord(obj.queue);
   if (!Array.isArray(queueObj.entries)) {
@@ -308,6 +334,32 @@ export function parseCoreSnapshot(
   }
   if (typeof playbackObj.positionSeconds !== 'number' || !Number.isFinite(playbackObj.positionSeconds)) {
     throw new CoreClientError('invalid_payload');
+  }
+
+  let owner: 'none' | 'core' | 'external' | undefined;
+  if (playbackObj.owner !== undefined) {
+    if (playbackObj.owner !== 'none' && playbackObj.owner !== 'core' && playbackObj.owner !== 'external') {
+      throw new CoreClientError('invalid_payload');
+    }
+    owner = playbackObj.owner;
+  }
+  const takeoverRequired =
+    typeof playbackObj.takeoverRequired === 'boolean' ? playbackObj.takeoverRequired : undefined;
+  let externalPlayback: CoreExternalPlaybackInfo | undefined;
+  if (playbackObj.externalPlayback !== undefined) {
+    const ext = assertRecord(playbackObj.externalPlayback);
+    if (typeof ext.active !== 'boolean' || typeof ext.transportState !== 'string') {
+      throw new CoreClientError('invalid_payload');
+    }
+    externalPlayback = {
+      active: ext.active,
+      transportState: ext.transportState,
+      currentUri: typeof ext.currentUri === 'string' ? ext.currentUri : undefined,
+      positionSeconds:
+        typeof ext.positionSeconds === 'number' && Number.isFinite(ext.positionSeconds)
+          ? Math.max(0, ext.positionSeconds)
+          : undefined,
+    };
   }
 
   let output: CoreSnapshot['output'] = null;
@@ -342,6 +394,9 @@ export function parseCoreSnapshot(
     playback: {
       activity,
       positionSeconds: Math.max(0, playbackObj.positionSeconds),
+      ...(owner !== undefined ? { owner } : {}),
+      ...(takeoverRequired !== undefined ? { takeoverRequired } : {}),
+      ...(externalPlayback !== undefined ? { externalPlayback } : {}),
     },
     output,
   };
@@ -355,7 +410,7 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
   const trackMap = new Map(snapshot.catalog.tracks.map((t) => [t.id, t]));
   const items: RemoteTrackItem[] = snapshot.queue.entries.map((entry) => {
     const trk = trackMap.get(entry.trackId);
-    const rawFmt = (trk?.format || 'CORE').toUpperCase();
+    const rawFmt = (trk?.format || 'FLAC').toUpperCase();
     const isDsd = rawFmt === 'DSD' || rawFmt === 'DSF' || rawFmt === 'DFF';
     const isHighRes =
       isDsd || (trk?.sampleRate ?? 0) > 48000 || (trk?.bitDepth ?? 0) > 16;
@@ -399,8 +454,10 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
           artist: activeItem.artist,
           album: activeItem.album,
           durationSecs: activeItem.durationSecs,
-          format: 'CORE',
-          isHighRes: false,
+          format: activeItem.format || 'FLAC',
+          sampleRate: activeItem.sampleRate,
+          bitDepth: activeItem.bitDepth,
+          isHighRes: activeItem.isHighRes,
         }
       : null,
   };
@@ -441,6 +498,8 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
     });
 
   let cachedDescriptor: CoreDescriptor | null = null;
+  let cachedCatalogRevision: number | null = null;
+  let cachedCatalogTracks: CoreCatalogTrack[] | null = null;
 
   async function requestCore(payload: Record<string, unknown>): Promise<unknown> {
     const endpoint = `${profile.baseUrl.replace(/\/+$/, '')}/v1/core`;
@@ -489,6 +548,7 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
       code === 'untrusted_peer' ||
       code === 'identity_mismatch' ||
       code === 'not_ready' ||
+      code === 'takeover_required' ||
       code === 'invalid_payload'
     ) {
       throw new CoreClientError(code);
@@ -505,7 +565,21 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
   }
 
   async function hydrateCatalog(snapshot: CoreSnapshot): Promise<CoreSnapshot> {
-    if (!snapshot.catalog.nextCursor) return snapshot;
+    if (!snapshot.catalog.nextCursor) {
+      cachedCatalogRevision = snapshot.catalog.revision;
+      cachedCatalogTracks = snapshot.catalog.tracks;
+      return snapshot;
+    }
+    if (cachedCatalogTracks && cachedCatalogRevision === snapshot.catalog.revision) {
+      return {
+        ...snapshot,
+        catalog: {
+          ...snapshot.catalog,
+          tracks: cachedCatalogTracks,
+          nextCursor: null,
+        },
+      };
+    }
     const merged = [...snapshot.catalog.tracks];
     const seen = new Set(merged.map((t) => t.id));
     let cursor: string | null = snapshot.catalog.nextCursor;
@@ -516,18 +590,10 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
       const pageObj = assertRecord(rawPage);
       if (!Array.isArray(pageObj.tracks)) break;
       for (const item of pageObj.tracks) {
-        const t = assertRecord(item);
-        const dur = typeof t.durationSeconds === 'number' && Number.isFinite(t.durationSeconds) ? Math.max(0, t.durationSeconds) : 0;
-        const id = nonEmptyString(t.id);
-        if (!seen.has(id)) {
-          seen.add(id);
-          merged.push({
-            id,
-            title: typeof t.title === 'string' && t.title.trim() ? t.title : 'Untitled',
-            artist: typeof t.artist === 'string' ? t.artist : 'Unknown Artist',
-            album: typeof t.album === 'string' ? t.album : 'Unknown Album',
-            durationSeconds: dur,
-          });
+        const parsed = parseCoreCatalogTrack(item);
+        if (!seen.has(parsed.id)) {
+          seen.add(parsed.id);
+          merged.push(parsed);
         }
       }
       const next = pageObj.nextCursor === null ? null : typeof pageObj.nextCursor === 'string' ? pageObj.nextCursor : null;
@@ -537,6 +603,8 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
         cursor = next;
       }
     }
+    cachedCatalogRevision = snapshot.catalog.revision;
+    cachedCatalogTracks = merged;
     return {
       ...snapshot,
       catalog: {
@@ -567,7 +635,7 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
         throw new CoreClientError('unsupported_capability');
       }
       const rawSnap = await requestCore(command);
-      return parseCoreSnapshot(rawSnap, profile);
+      return hydrateCatalog(parseCoreSnapshot(rawSnap, profile));
     },
   };
 }

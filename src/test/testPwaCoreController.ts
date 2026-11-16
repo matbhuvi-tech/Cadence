@@ -28,6 +28,8 @@ if (typeof globalThis.window === 'undefined') {
     addEventListener: () => {},
     removeEventListener: () => {},
     dispatchEvent: () => true,
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
     location: { href: 'http://localhost:5174', search: '', pathname: '/', origin: 'http://localhost:5174' },
     localStorage: storage,
   }
@@ -424,4 +426,224 @@ test('Phase 10 PWA Core client paginates catalog.page cursors across multi-page 
   assert.equal(prepared.snapshot.catalog.tracks.length, 410)
   assert.equal(prepared.snapshot.catalog.nextCursor, null)
   assert.equal(prepared.snapshot.catalog.tracks.at(-1)?.id, 'trk_410')
+})
+
+test('Stage P1: PWA Core client preserves format metadata across >200 pages, emits real format in streamInfo, and surfaces takeover_required & forceTakeover', async () => {
+  const { createPwaCoreClient, mapCoreSnapshotToPwa } = await import('../../pwa/src/services/coreRemoteClient')
+  const { probeCadenceServer } = await import('../../pwa/src/platform/cadenceBridge')
+
+  const originalFetch = globalThis.fetch
+  const probedUrls: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const u = String(input)
+    probedUrls.push(u)
+    if (u.endsWith('/healthz')) {
+      return new Response(
+        JSON.stringify({ ready: true, label: 'E2E Core', engineId: 'core_room', libraryId: 'lib_master' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        data: {
+          protocolVersion: 1,
+          engineId: 'core_room',
+          libraryId: 'lib_master',
+          label: 'E2E Core',
+          capabilities: ['catalog.read', 'session.read', 'playback.control', 'queue.write'],
+          ready: true,
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as typeof fetch
+  try {
+    const probeRes = await probeCadenceServer('http://127.0.0.1:4040', '4829', undefined, true, 3500, 'core')
+    assert.equal(probeRes.reachable, true)
+    assert.equal(probedUrls.some((u) => u.includes('/api/remote/')), false)
+    assert.equal(probedUrls.some((u) => u.endsWith('/healthz')), true)
+    assert.equal(probedUrls.some((u) => u.endsWith('/v1/core')), true)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  const pagedTracks = Array.from({ length: 205 }, (_, i) => ({
+    id: `trk_${i + 1}`,
+    title: `Track ${i + 1}`,
+    artist: 'Glenn Gould',
+    album: 'Goldberg Variations',
+    releaseId: 'rel_goldberg',
+    durationSeconds: 210,
+    format: i >= 200 ? 'DSF' : 'FLAC',
+    sampleRate: i >= 200 ? 2822400 : 96000,
+    bitDepth: i >= 200 ? 1 : 24,
+    discNumber: i >= 200 ? 2 : 1,
+    trackNumber: i + 1,
+  }))
+
+  let takeoverForced = false
+  const client = createPwaCoreClient(
+    {
+      id: 'http://127.0.0.1:4040',
+      label: 'E2E Core',
+      baseUrl: 'http://127.0.0.1:4040',
+      port: 4040,
+      token: '4829',
+      engineKind: 'core',
+      engineId: 'core_room',
+      libraryId: 'lib_master',
+    },
+    async (_url, body) => {
+      const req = JSON.parse(body) as {
+        operation: string
+        cursor?: string | null
+        limit?: number
+        forceTakeover?: boolean
+      }
+      if (req.operation === 'core.hello') {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          errorKind: 'ok',
+          body: JSON.stringify({
+            ok: true,
+            data: {
+              protocolVersion: 1,
+              engineId: 'core_room',
+              libraryId: 'lib_master',
+              label: 'E2E Core',
+              capabilities: ['catalog.read', 'session.read', 'playback.control', 'queue.write'],
+              ready: true,
+            },
+          }),
+        }
+      }
+      if (req.operation === 'catalog.page') {
+        const start = req.cursor === 'p2' ? 200 : 0
+        const slice = pagedTracks.slice(start, start + 200)
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          errorKind: 'ok',
+          body: JSON.stringify({
+            ok: true,
+            data: { revision: 3, tracks: slice, nextCursor: start === 0 ? 'p2' : null },
+          }),
+        }
+      }
+      if (req.operation === 'playback.control' && !req.forceTakeover) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          errorKind: 'ok',
+          body: JSON.stringify({
+            ok: false,
+            error: {
+              code: 'takeover_required',
+              message: 'External HiFi ROSE playback active',
+              snapshot: {
+                engineId: 'core_room',
+                libraryId: 'lib_master',
+                revision: 5,
+                catalog: { revision: 3, tracks: pagedTracks.slice(0, 200), nextCursor: 'p2' },
+                queue: { entries: [{ entryId: 'e1', trackId: 'trk_205' }], currentEntryId: 'e1', repeat: 'off', shuffle: false },
+                playback: { activity: 'idle', owner: 'external', takeoverRequired: true, positionSeconds: 42 },
+                output: { id: 'rs130', label: 'RS130', transport: 'upnp' },
+              },
+            },
+          }),
+        }
+      }
+      if (req.operation === 'playback.control' && req.forceTakeover) {
+        takeoverForced = true
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        errorKind: 'ok',
+        body: JSON.stringify({
+          ok: true,
+          data: {
+            engineId: 'core_room',
+            libraryId: 'lib_master',
+            revision: 6,
+            catalog: { revision: 3, tracks: pagedTracks.slice(0, 200), nextCursor: 'p2' },
+            queue: { entries: [{ entryId: 'e1', trackId: 'trk_205' }], currentEntryId: 'e1', repeat: 'off', shuffle: false },
+            playback: {
+              activity: 'playing',
+              trackId: 'trk_205',
+              owner: 'core',
+              takeoverRequired: false,
+              positionSeconds: 0,
+            },
+            output: { id: 'rs130', label: 'RS130', transport: 'upnp' },
+          },
+        }),
+      }
+    },
+  )
+
+  const prepared = await client.prepare()
+  const page2Track = prepared.snapshot.catalog.tracks.find((t) => t.id === 'trk_205')
+  assert.equal(page2Track?.format, 'DSF')
+  assert.equal(page2Track?.sampleRate, 2822400)
+  assert.equal(page2Track?.releaseId, 'rel_goldberg')
+
+  await assert.rejects(
+    () => client.execute({ operation: 'playback.control', action: 'play', expectedRevision: 5 }),
+    (err: unknown) => err instanceof Error && (err as { code?: string }).code === 'takeover_required',
+  )
+
+  const afterForce = await client.execute({
+    operation: 'playback.control',
+    action: 'play',
+    expectedRevision: 5,
+    forceTakeover: true,
+  })
+  assert.equal(takeoverForced, true)
+  const { status: remoteStatus } = mapCoreSnapshotToPwa(afterForce)
+  assert.equal(remoteStatus.streamInfo?.format, 'DSD')
+  assert.equal(remoteStatus.streamInfo?.sampleRate, 2822400)
+  assert.equal(remoteStatus.streamInfo?.isHighRes, true)
+})
+
+test('Issue #40 hasCoreSnapshotChanged triggers passive sync updates on timer/activity changes without idle churn', async () => {
+  const { hasCoreSnapshotChanged } = await import('../../pwa/src/hooks/useRemoteSocket')
+  const base = {
+    engineId: 'core_room',
+    libraryId: 'lib_master',
+    revision: 10,
+    catalog: { revision: 3, tracks: [], nextCursor: null },
+    queue: { entries: [{ entryId: 'e1', trackId: 'trk_1' }], currentEntryId: 'e1', repeat: 'off' as const, shuffle: false },
+    playback: {
+      activity: 'loading' as const,
+      trackId: 'trk_1',
+      owner: 'core' as const,
+      takeoverRequired: false,
+      positionSeconds: 0,
+      durationSeconds: 185,
+    },
+    output: { id: 'rs130', label: 'RS130', transport: 'upnp' },
+  }
+  assert.equal(hasCoreSnapshotChanged(null, base), true)
+  assert.equal(hasCoreSnapshotChanged(base, { ...base }), false)
+  assert.equal(
+    hasCoreSnapshotChanged(base, {
+      ...base,
+      playback: { ...base.playback, activity: 'playing' },
+    }),
+    true,
+  )
+  assert.equal(
+    hasCoreSnapshotChanged(base, {
+      ...base,
+      playback: { ...base.playback, positionSeconds: 5 },
+    }),
+    true,
+  )
 })

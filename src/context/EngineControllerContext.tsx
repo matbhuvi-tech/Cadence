@@ -15,9 +15,14 @@ import {
   type SavedCoreProfile,
   type StorageLike,
 } from '../services/coreControllerTransport'
-import type { CoreCatalogTrack, CoreRequest, CoreSnapshot } from '../core/coreProtocol'
+import { CoreServiceError, type CoreCatalogTrack, type CoreRequest, type CoreSnapshot } from '../core/coreProtocol'
 import type { EngineActivity } from '../core/engineSession'
 import type { AudioEndpoint } from '../core/endpointRouting'
+
+export interface CoreQueueEntryProjection {
+  entryId: string
+  track: Track
+}
 
 export interface EngineControllerContextValue {
   state: CoreControllerState
@@ -25,6 +30,10 @@ export interface EngineControllerContextValue {
   activeCoreSnapshot: CoreSnapshot | null
   coreCatalogTracks: Track[]
   coreCatalogReleases: Release[]
+  coreNowPlayingTrack: Track | null
+  coreQueueEntries: CoreQueueEntryProjection[]
+  coreCurrentEntryIndex: number
+  coreUpcomingEntries: CoreQueueEntryProjection[]
   probeAndStageAddress: (input: {
     baseUrl: string
     label?: string
@@ -52,7 +61,11 @@ export interface EngineControllerContextValue {
   corePrevTrack: () => Promise<void>
   coreSeek: (seconds: number) => Promise<void>
   coreJumpToEntry: (entryId: string) => Promise<void>
+  coreRemoveQueueEntry: (entryId: string) => Promise<void>
+  coreClearUpcomingQueue: () => Promise<void>
+  coreReorderQueueEntry: (fromIndex: number, toIndex: number) => Promise<void>
   coreSetModes: (repeat: 'off' | 'one' | 'all', shuffle: boolean) => Promise<void>
+  coreRefreshSnapshot: () => Promise<void>
   selectLocalEndpointWithCoreGuard: (endpoint: AudioEndpoint) => Promise<void>
   confirmRs130Takeover: () => Promise<void>
 }
@@ -152,7 +165,9 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
   const uiTracks: Track[] = []
 
   tracks.forEach((ct) => {
-    const releaseId = `core_rel_${ct.album.toLowerCase().replace(/[^a-z0-9]+/g, '_') || 'album'}`
+    const releaseId = ct.releaseId
+      ? `core_rel_${ct.releaseId}`
+      : `core_rel_${ct.album.toLowerCase().replace(/[^a-z0-9]+/g, '_') || 'album'}`
     const existing = releaseMap.get(releaseId)
     const fallbackTrackNo = existing ? existing.tracks.length + 1 : 1
     const format = normalizeCoreFormat(ct.format)
@@ -161,6 +176,14 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
       format === 'DSD' || (ct.sampleRate ?? 0) > 48_000 || (ct.bitDepth ?? 0) > 16
     const discNumber = ct.discNumber ?? 1
     const releaseYear = ct.releaseYear ?? 0
+    const editionLabel = ct.edition?.trim() || ''
+    const displayAlbumTitle =
+      editionLabel && !ct.album.toLowerCase().includes(editionLabel.toLowerCase())
+        ? `${ct.album} (${editionLabel})`
+        : ct.album
+    const displayAlbumArtist = ct.isCompilation
+      ? 'Various Artists'
+      : ct.albumArtist?.trim() || ct.artist
 
     const uiTrack: Track = {
       id: ct.id,
@@ -187,8 +210,8 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
       credits: [],
       masterReleaseId: releaseId,
       isOnline: true,
-      albumTitle: ct.album,
-      releaseTitle: ct.album,
+      albumTitle: displayAlbumTitle,
+      releaseTitle: displayAlbumTitle,
     }
     uiTracks.push(uiTrack)
 
@@ -202,19 +225,23 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
         existing.release.releaseYear = releaseYear
         existing.release.originalYear = releaseYear
       }
+      if (ct.isCompilation) {
+        existing.release.isCompilation = true
+        existing.release.artistCredit = 'Various Artists'
+      }
     } else {
       releaseMap.set(releaseId, {
         release: {
           id: releaseId,
           masterReleaseId: releaseId,
-          title: ct.album,
-          folderName: ct.album,
+          title: displayAlbumTitle,
+          folderName: editionLabel || ct.album,
           folderPath: '',
-          artistCredit: ct.artist,
+          artistCredit: displayAlbumArtist,
           releaseYear,
           originalYear: releaseYear,
           label: 'Cadence Core',
-          catalogNumber: '',
+          catalogNumber: editionLabel,
           mediaFormat: 'Digital',
           country: '',
           matrixRunout: '',
@@ -233,7 +260,7 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
           tracksCount: 1,
           genreTags: [],
           storageMountId: 'core',
-          isCompilation: false,
+          isCompilation: Boolean(ct.isCompilation),
         },
         tracks: [uiTrack],
       })
@@ -304,6 +331,76 @@ export const EngineControllerProvider: React.FC<{
   const isCoreActive = state.view.session.active.kind === 'core'
   const activeCoreSnapshot = isCoreActive ? state.view.snapshot : null
 
+  const playIntentRef = useRef(0)
+
+  const commitCoreQueueAndPlayRef = useRef<
+    (trackId: string, queueTrackIds?: string[], forceTakeover?: boolean) => Promise<void>
+  >(async () => {})
+
+  commitCoreQueueAndPlayRef.current = async (trackId, queueTrackIds, forceTakeover = false) => {
+    const intentId = ++playIntentRef.current
+    const executeSequence = async (useForceTakeover: boolean) => {
+      if (playIntentRef.current !== intentId) return
+      const validIds = queueTrackIds && queueTrackIds.length > 0 ? queueTrackIds : null
+
+      if (useForceTakeover) {
+        const afterPlay = await store.executeCoreCommand({
+          operation: 'playback.control',
+          action: 'play',
+          trackId,
+          forceTakeover: true,
+        })
+        if (playIntentRef.current !== intentId || !validIds) return
+        let preserved = false
+        const baseTs = Date.now().toString(36)
+        const entries = validIds.map((id, i) => {
+          if (!preserved && id === trackId && afterPlay.queue.currentEntryId) {
+            preserved = true
+            return { entryId: afterPlay.queue.currentEntryId, trackId: id }
+          }
+          return { entryId: `qe_${baseTs}_${i}`, trackId: id }
+        })
+        await store.executeCoreCommand({ operation: 'queue.replace', entries })
+        return
+      }
+
+      if (validIds) {
+        const baseTs = Date.now().toString(36)
+        const entries = validIds.map((id, i) => ({
+          entryId: `qe_${baseTs}_${i}`,
+          trackId: id,
+        }))
+        await store.executeCoreCommand({ operation: 'queue.replace', entries })
+        if (playIntentRef.current !== intentId) return
+      }
+
+      await store.executeCoreCommand({
+        operation: 'playback.control',
+        action: 'play',
+        trackId,
+      })
+    }
+
+    if (!forceTakeover && store.getState().view.snapshot?.playback.takeoverRequired) {
+      store.requestExternalRs130Takeover(trackId, () =>
+        commitCoreQueueAndPlayRef.current(trackId, queueTrackIds, true),
+      )
+      return
+    }
+
+    try {
+      await executeSequence(forceTakeover)
+    } catch (err) {
+      if (err instanceof CoreServiceError && err.code === 'takeover_required') {
+        store.requestExternalRs130Takeover(trackId, () =>
+          commitCoreQueueAndPlayRef.current(trackId, queueTrackIds, true),
+        )
+        return
+      }
+      throw err
+    }
+  }
+
   useEffect(() => {
     if (typeof registerExternalPlaybackDelegate !== 'function') return
     if (!isCoreActive) {
@@ -312,16 +409,9 @@ export const EngineControllerProvider: React.FC<{
     }
     registerExternalPlaybackDelegate({
       playTrack: async (track, queueContext) => {
-        if (queueContext && queueContext.length > 0) {
-          const idx = queueContext.findIndex((t) => t.id === track.id)
-          const ordered = idx > 0 ? queueContext.slice(idx) : queueContext
-          const entries = ordered.map((t, i) => ({
-            entryId: `qe_${Date.now().toString(36)}_${i}`,
-            trackId: t.id,
-          }))
-          await store.executeCoreCommand({ operation: 'queue.replace', entries })
-        }
-        await store.executeCoreCommand({ operation: 'playback.control', action: 'play', trackId: track.id })
+        const queueIds =
+          queueContext && queueContext.length > 0 ? queueContext.map((t) => t.id) : undefined
+        await commitCoreQueueAndPlayRef.current(track.id, queueIds, false)
       },
       addToQueue: async (tracksInput) => {
         const items = Array.isArray(tracksInput) ? tracksInput : [tracksInput]
@@ -362,13 +452,48 @@ export const EngineControllerProvider: React.FC<{
   }, [isCoreActive, registerExternalPlaybackDelegate, store])
 
   const { tracks: coreCatalogTracks, releases: coreCatalogReleases } = useMemo(() => {
-    if (!activeCoreSnapshot) return { tracks: [], releases: [] }
+    if (!isCoreActive || !activeCoreSnapshot) return { tracks: [], releases: [] }
     const allTracks =
       state.hydratedCatalogTracks.length > activeCoreSnapshot.catalog.tracks.length
         ? state.hydratedCatalogTracks
         : activeCoreSnapshot.catalog.tracks
     return mapCoreCatalogToUi(allTracks)
-  }, [activeCoreSnapshot, state.hydratedCatalogTracks])
+  }, [isCoreActive, activeCoreSnapshot?.catalog.tracks, state.hydratedCatalogTracks])
+
+  const {
+    coreNowPlayingTrack,
+    coreQueueEntries,
+    coreCurrentEntryIndex,
+    coreUpcomingEntries,
+  } = useMemo(() => {
+    if (!isCoreActive || !activeCoreSnapshot) {
+      return {
+        coreNowPlayingTrack: null,
+        coreQueueEntries: [] as CoreQueueEntryProjection[],
+        coreCurrentEntryIndex: -1,
+        coreUpcomingEntries: [] as CoreQueueEntryProjection[],
+      }
+    }
+    const trackMap = new Map(coreCatalogTracks.map((t) => [t.id, t]))
+    const entries: CoreQueueEntryProjection[] = []
+    for (const qe of activeCoreSnapshot.queue.entries) {
+      const trk = trackMap.get(qe.trackId)
+      if (trk) {
+        entries.push({ entryId: qe.entryId, track: trk })
+      }
+    }
+    const curIdx = activeCoreSnapshot.queue.currentEntryId
+      ? entries.findIndex((e) => e.entryId === activeCoreSnapshot.queue.currentEntryId)
+      : -1
+    const nowTrack = curIdx >= 0 ? entries[curIdx].track : null
+    const upcoming = curIdx >= 0 ? entries.slice(curIdx + 1) : entries
+    return {
+      coreNowPlayingTrack: nowTrack,
+      coreQueueEntries: entries,
+      coreCurrentEntryIndex: curIdx,
+      coreUpcomingEntries: upcoming,
+    }
+  }, [isCoreActive, activeCoreSnapshot?.queue.entries, activeCoreSnapshot?.queue.currentEntryId, coreCatalogTracks])
 
   const value = useMemo<EngineControllerContextValue>(() => {
     const exec = async (cmd: CoreCommandInput) => {
@@ -381,6 +506,10 @@ export const EngineControllerProvider: React.FC<{
       activeCoreSnapshot,
       coreCatalogTracks,
       coreCatalogReleases,
+      coreNowPlayingTrack,
+      coreQueueEntries,
+      coreCurrentEntryIndex,
+      coreUpcomingEntries,
       async probeAndStageAddress(input) {
         try {
           const { profile } = await probeCoreNodeAddress(
@@ -425,14 +554,7 @@ export const EngineControllerProvider: React.FC<{
       },
       removeSavedCore: (engineId, libraryId) => store.removeSavedCore(engineId, libraryId),
       corePlayTrack: async (trackId, queueTrackIds) => {
-        if (queueTrackIds && queueTrackIds.length > 0) {
-          const entries = queueTrackIds.map((id, idx) => ({
-            entryId: `qe_${Date.now().toString(36)}_${idx}`,
-            trackId: id,
-          }))
-          await exec({ operation: 'queue.replace', entries })
-        }
-        await exec({ operation: 'playback.control', action: 'play', trackId })
+        await commitCoreQueueAndPlayRef.current(trackId, queueTrackIds, false)
       },
       coreTogglePlayPause: async () => {
         const snap = store.getState().view.snapshot
@@ -444,14 +566,10 @@ export const EngineControllerProvider: React.FC<{
         } else if (snap.queue.currentEntryId) {
           const entry = snap.queue.entries.find((e) => e.entryId === snap.queue.currentEntryId)
           if (entry) {
-            await exec({ operation: 'playback.control', action: 'play', trackId: entry.trackId })
+            await commitCoreQueueAndPlayRef.current(entry.trackId, undefined, false)
           }
         } else if (snap.catalog.tracks[0]) {
-          await exec({
-            operation: 'playback.control',
-            action: 'play',
-            trackId: snap.catalog.tracks[0].id,
-          })
+          await commitCoreQueueAndPlayRef.current(snap.catalog.tracks[0].id, undefined, false)
         }
       },
       coreStop: () => exec({ operation: 'playback.control', action: 'stop' }),
@@ -461,8 +579,43 @@ export const EngineControllerProvider: React.FC<{
         exec({ operation: 'playback.control', action: 'seek', positionSeconds }),
       coreJumpToEntry: (entryId) =>
         exec({ operation: 'queue.control', action: 'jump', entryId }),
+      coreRemoveQueueEntry: async (entryId) => {
+        const snap = store.getState().view.snapshot
+        if (!snap) return
+        const entries = snap.queue.entries.filter((e) => e.entryId !== entryId)
+        await exec({ operation: 'queue.replace', entries })
+      },
+      coreClearUpcomingQueue: async () => {
+        const snap = store.getState().view.snapshot
+        if (!snap) return
+        const curIdx = snap.queue.currentEntryId
+          ? snap.queue.entries.findIndex((e) => e.entryId === snap.queue.currentEntryId)
+          : -1
+        const kept = curIdx >= 0 ? snap.queue.entries.slice(0, curIdx + 1) : []
+        await exec({ operation: 'queue.replace', entries: kept })
+      },
+      coreReorderQueueEntry: async (fromIndex, toIndex) => {
+        const snap = store.getState().view.snapshot
+        if (!snap) return
+        const entries = [...snap.queue.entries]
+        if (
+          fromIndex < 0 ||
+          fromIndex >= entries.length ||
+          toIndex < 0 ||
+          toIndex >= entries.length ||
+          fromIndex === toIndex
+        ) {
+          return
+        }
+        const [moved] = entries.splice(fromIndex, 1)
+        entries.splice(toIndex, 0, moved)
+        await exec({ operation: 'queue.replace', entries })
+      },
       coreSetModes: (repeat, shuffle) =>
         exec({ operation: 'queue.control', action: 'modes', repeat, shuffle }),
+      coreRefreshSnapshot: async () => {
+        await store.refreshSnapshot()
+      },
       selectLocalEndpointWithCoreGuard: async (endpoint) => {
         const intercepted = store.requestRs130TakeoverIfControlledByCore(endpoint, () =>
           selectEndpoint(endpoint),
@@ -473,7 +626,19 @@ export const EngineControllerProvider: React.FC<{
       },
       confirmRs130Takeover: () => store.confirmRs130Takeover(),
     }
-  }, [state, isCoreActive, activeCoreSnapshot, coreCatalogTracks, coreCatalogReleases, store, selectEndpoint])
+  }, [
+    state,
+    isCoreActive,
+    activeCoreSnapshot,
+    coreCatalogTracks,
+    coreCatalogReleases,
+    coreNowPlayingTrack,
+    coreQueueEntries,
+    coreCurrentEntryIndex,
+    coreUpcomingEntries,
+    store,
+    selectEndpoint,
+  ])
 
   return <EngineControllerContext.Provider value={value}>{children}</EngineControllerContext.Provider>
 }
@@ -488,4 +653,83 @@ export function useEngineController(): EngineControllerContextValue {
 
 export function useOptionalEngineController(): EngineControllerContextValue | null {
   return useContext(EngineControllerContext)
+}
+
+export function useEffectiveQueueControl() {
+  const local = useAudioPlayer()
+  const engine = useOptionalEngineController()
+  const isCoreActive = Boolean(engine?.isCoreActive)
+  const coreSnap = isCoreActive ? engine?.activeCoreSnapshot ?? null : null
+
+  return useMemo(() => {
+    if (!isCoreActive || !engine) {
+      return {
+        ...local,
+        isCoreActive: false,
+        coreConnected: true,
+        corePositionSeconds: null as number | null,
+        playUpcomingAtIndex: (upcomingIdx: number) => {
+          const target = local.upcomingTracks[upcomingIdx]
+          if (target) {
+            local.playTrack(target, local.queue)
+          }
+        },
+      }
+    }
+
+    const nowTrack = engine.coreNowPlayingTrack
+    const nowRelease =
+      nowTrack?.releaseId
+        ? engine.coreCatalogReleases.find((r) => r.id === nowTrack.releaseId) ?? null
+        : null
+    const upcomingTracks = engine.coreUpcomingEntries.map((e) => e.track)
+    const queueTracks = engine.coreQueueEntries.map((e) => e.track)
+    const repeatMode = coreSnap?.queue.repeat ?? 'off'
+    const isShuffle = Boolean(coreSnap?.queue.shuffle)
+    const curIndex = engine.coreCurrentEntryIndex >= 0 ? engine.coreCurrentEntryIndex : 0
+
+    return {
+      ...local,
+      isCoreActive: true,
+      coreConnected: Boolean(engine.state.view.session.connected),
+      currentTrack: nowTrack,
+      currentRelease: nowRelease,
+      queue: queueTracks,
+      queueIndex: curIndex,
+      upcomingTracks,
+      isPlaying: coreSnap?.playback.activity === 'playing',
+      isPaused: coreSnap?.playback.activity === 'paused',
+      isShuffle,
+      repeatMode,
+      corePositionSeconds: coreSnap?.playback.positionSeconds ?? 0,
+      togglePlayPause: () => {
+        void engine.coreTogglePlayPause()
+      },
+      toggleShuffle: () => {
+        void engine.coreSetModes(repeatMode, !isShuffle)
+      },
+      seek: (seconds: number) => {
+        void engine.coreSeek(seconds)
+      },
+      clearQueue: () => {
+        void engine.coreClearUpcomingQueue()
+      },
+      removeFromQueue: (upcomingIdx: number) => {
+        const entry = engine.coreUpcomingEntries[upcomingIdx]
+        if (entry) {
+          void engine.coreRemoveQueueEntry(entry.entryId)
+        }
+      },
+      reorderQueue: (fromUpcomingIdx: number, toUpcomingIdx: number) => {
+        const offset = engine.coreCurrentEntryIndex >= 0 ? engine.coreCurrentEntryIndex + 1 : 0
+        void engine.coreReorderQueueEntry(offset + fromUpcomingIdx, offset + toUpcomingIdx)
+      },
+      playUpcomingAtIndex: (upcomingIdx: number) => {
+        const entry = engine.coreUpcomingEntries[upcomingIdx]
+        if (entry) {
+          void engine.coreJumpToEntry(entry.entryId)
+        }
+      },
+    }
+  }, [isCoreActive, engine, coreSnap, local])
 }

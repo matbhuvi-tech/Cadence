@@ -65,6 +65,27 @@ const INITIAL_QUEUE: RemoteQueue = {
 };
 
 const RECONNECT_DELAYS_MS = [2000, 4000, 8000, 15000, 15000, 15000];
+const CORE_PASSIVE_SYNC_INTERVAL_MS = 5000;
+const CORE_LOADING_SETTLE_DELAY_MS = 700;
+const MAX_CORE_LOADING_SETTLE_ATTEMPTS = 8;
+
+export function hasCoreSnapshotChanged(
+  prev: CoreSnapshot | null,
+  next: CoreSnapshot
+): boolean {
+  if (!prev) return true;
+  return (
+    prev.revision !== next.revision ||
+    prev.playback.activity !== next.playback.activity ||
+    Math.floor(prev.playback.positionSeconds) !== Math.floor(next.playback.positionSeconds) ||
+    prev.playback.owner !== next.playback.owner ||
+    prev.playback.takeoverRequired !== next.playback.takeoverRequired ||
+    Boolean(prev.playback.externalPlayback) !== Boolean(next.playback.externalPlayback) ||
+    prev.catalog.revision !== next.catalog.revision ||
+    prev.queue.currentEntryId !== next.queue.currentEntryId ||
+    prev.queue.entries.length !== next.queue.entries.length
+  );
+}
 
 function normalizeDiagnosticKind(rawKind?: string, statusCode?: number): DiagnosticErrorKind {
   if (statusCode === 401 || statusCode === 403 || rawKind === 'unauthorized') {
@@ -247,6 +268,7 @@ export function useRemoteSocket() {
   );
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const coreLoadingSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualDisconnectRef = useRef<boolean>(false);
   const reconnectAttemptRef = useRef<number>(0);
   const autoFallbackAttemptedRef = useRef<boolean>(false);
@@ -278,12 +300,89 @@ export function useRemoteSocket() {
     }
   }, []);
 
+  const clearCoreLoadingSettleTimer = useCallback(() => {
+    if (coreLoadingSettleTimerRef.current) {
+      clearTimeout(coreLoadingSettleTimerRef.current);
+      coreLoadingSettleTimerRef.current = null;
+    }
+  }, []);
+
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-  }, []);
+    clearCoreLoadingSettleTimer();
+  }, [clearCoreLoadingSettleTimer]);
+
+  const refreshCorePassiveSnapshot = useCallback(async (): Promise<CoreSnapshot | null> => {
+    const target = activeProfileRef.current;
+    const client = coreClientRef.current;
+    if (
+      !target ||
+      target.engineKind !== 'core' ||
+      !client ||
+      manualDisconnectRef.current ||
+      !isForegroundRef.current
+    ) {
+      return null;
+    }
+    try {
+      const latest = await client.getSnapshot();
+      if (
+        manualDisconnectRef.current ||
+        !activeProfileRef.current ||
+        !isSameProfileScope(activeProfileRef.current, target)
+      ) {
+        return null;
+      }
+      if (latest.playback.activity !== 'loading') {
+        clearCoreLoadingSettleTimer();
+      }
+      if (hasCoreSnapshotChanged(coreSnapshotRef.current, latest)) {
+        applyCoreSnapshot(latest, target);
+      }
+      setIsConnected(true);
+      setError(null);
+      return latest;
+    } catch {
+      if (
+        !manualDisconnectRef.current &&
+        activeProfileRef.current &&
+        isSameProfileScope(activeProfileRef.current, target) &&
+        coreClientRef.current === client
+      ) {
+        setIsConnected(false);
+        setError('Connection lost. Playback may still be continuing.');
+      }
+      return null;
+    }
+  }, [applyCoreSnapshot, clearCoreLoadingSettleTimer]);
+
+  const scheduleCoreLoadingSettleCheck = useCallback(
+    (attempt = 1) => {
+      clearCoreLoadingSettleTimer();
+      if (attempt > MAX_CORE_LOADING_SETTLE_ATTEMPTS) return;
+      const timer = setTimeout(() => {
+        coreLoadingSettleTimerRef.current = null;
+        void refreshCorePassiveSnapshot().then((latest) => {
+          if (
+            latest?.playback.activity === 'loading' &&
+            isForegroundRef.current &&
+            !manualDisconnectRef.current
+          ) {
+            scheduleCoreLoadingSettleCheck(attempt + 1);
+          }
+        });
+      }, CORE_LOADING_SETTLE_DELAY_MS);
+      const maybeTimer = timer as unknown as { unref?: () => void };
+      if (typeof maybeTimer.unref === 'function') {
+        maybeTimer.unref();
+      }
+      coreLoadingSettleTimerRef.current = timer;
+    },
+    [clearCoreLoadingSettleTimer, refreshCorePassiveSnapshot]
+  );
 
   const applyRemoteQueue = useCallback((remoteQueue: any) => {
     if (!remoteQueue || !Array.isArray(remoteQueue.items)) return;
@@ -582,6 +681,11 @@ export function useRemoteSocket() {
           setIsConnecting(false);
           setError(null);
           setConnectionDiagnostic(null);
+          if (prepared.snapshot.playback.activity === 'loading') {
+            scheduleCoreLoadingSettleCheck();
+          } else {
+            clearCoreLoadingSettleTimer();
+          }
         } catch (err) {
           // Retain Core context cleanly on disconnect/error — never auto-fallback
           setIsConnected(false);
@@ -735,7 +839,8 @@ export function useRemoteSocket() {
           current.token,
           current.certFingerprint,
           Boolean(current.trustInsecure),
-          2500
+          2500,
+          current.engineKind
         );
         if (probe.reachable && probe.authenticated && probe.fingerprintMatches !== false) {
           const nextIps = Array.from(
@@ -920,6 +1025,28 @@ export function useRemoteSocket() {
     detachAndCloseBrowserSocket,
   ]);
 
+  // Audiophile Core passive sync (5s foreground polling when connected; suspends on background)
+  useEffect(() => {
+    if (activeProfile?.engineKind !== 'core' || !isConnected) {
+      clearCoreLoadingSettleTimer();
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (!isForegroundRef.current || manualDisconnectRef.current) return;
+      void refreshCorePassiveSnapshot();
+    }, CORE_PASSIVE_SYNC_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+      clearCoreLoadingSettleTimer();
+    };
+  }, [
+    activeProfile?.id,
+    activeProfile?.engineKind,
+    isConnected,
+    clearCoreLoadingSettleTimer,
+    refreshCorePassiveSnapshot,
+  ]);
+
   // Explicit Foreground/Background & Screen-Lock Audiophile Lifecycle
   useEffect(() => {
     const handleVisibilityTransition = (isActive: boolean) => {
@@ -1049,7 +1176,8 @@ export function useRemoteSocket() {
       profile.token,
       profile.certFingerprint,
       Boolean(profile.trustInsecure),
-      3500
+      3500,
+      profile.engineKind
     );
 
     if (probe.reachable && probe.authenticated) {
@@ -1094,6 +1222,7 @@ export function useRemoteSocket() {
             operation: 'playback.control',
             action: 'play',
             trackId: cmd.file_path,
+            ...(cmd.forceTakeover === true ? { forceTakeover: true } : {}),
             commandId,
             expectedRevision: snap.revision,
           };
@@ -1150,6 +1279,11 @@ export function useRemoteSocket() {
           setIsConnected(true);
           setError(null);
           setConflictEvent(null);
+          if (updated.playback.activity === 'loading') {
+            scheduleCoreLoadingSettleCheck();
+          } else {
+            clearCoreLoadingSettleTimer();
+          }
           return true;
         } catch (err) {
           if (err instanceof CoreClientError && err.code === 'stale_revision' && err.snapshot) {
@@ -1160,6 +1294,16 @@ export function useRemoteSocket() {
               items: mapped.queue.items,
               currentIndex: mapped.queue.currentIndex,
             });
+            return false;
+          }
+          if (
+            err instanceof CoreClientError &&
+            (err.code === 'takeover_required' ||
+              err.code === 'not_ready' ||
+              err.code === 'invalid_payload')
+          ) {
+            setIsConnected(true);
+            setError(err.message);
             return false;
           }
           setIsConnected(false);

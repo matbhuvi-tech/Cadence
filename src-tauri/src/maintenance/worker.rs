@@ -527,6 +527,11 @@ impl MaintenanceWorker {
             if !self.is_audio_idle() {
                 return false;
             }
+            if crate::scanner::dsd::is_dsd_path(Path::new(&file_path)) {
+                let conn = self.db.conn.lock();
+                let _ = DbOperations::update_track_fingerprint(&conn, &track_id, "UNSUPPORTED_DSD");
+                return true;
+            }
             let file_name = Path::new(&file_path)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -632,6 +637,9 @@ impl MaintenanceWorker {
                     let ext_lower = t_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
                     if ext_lower == "dsf" {
                         raw_bytes = extract_dsf_artwork(t_path);
+                    } else if ext_lower == "dff" || ext_lower == "dsdiff" {
+                        raw_bytes = crate::scanner::dsd::probe_dsd_file(t_path)
+                            .and_then(|d| d.tag.and_then(|t| t.pictures().first().map(|p| p.data().to_vec())));
                     }
                     if raw_bytes.is_none() {
                         if let Ok(tagged_file) = Probe::open(t_path).and_then(|p| p.read()) {
@@ -812,6 +820,12 @@ impl MaintenanceWorker {
             if ext_lower == "dsf" {
                 if let Some(dsf_art) = extract_dsf_artwork(audio_path) {
                     return Some(dsf_art);
+                }
+            } else if ext_lower == "dff" || ext_lower == "dsdiff" {
+                if let Some(dff_art) = crate::scanner::dsd::probe_dsd_file(audio_path)
+                    .and_then(|d| d.tag.and_then(|t| t.pictures().first().map(|p| p.data().to_vec())))
+                {
+                    return Some(dff_art);
                 }
             }
 

@@ -3,7 +3,9 @@ import type { PluginListenerHandle } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
 import { BarcodeScanner, BarcodeFormat } from '@capacitor-mlkit/barcode-scanning';
 import type {
+  DiagnosticErrorKind,
   DiscoveredServer,
+  EngineKind,
   NetworkDiagnostics,
   ProbeResult,
   ServerProfile,
@@ -88,13 +90,200 @@ export async function syncNativeServerProfile(profile: ServerProfile | null): Pr
   });
 }
 
+async function probeCoreNodeServer(
+  cleanBase: string,
+  token: string | undefined,
+  fingerprint: string | undefined,
+  trustInsecure: boolean,
+  timeoutMs: number
+): Promise<ProbeResult> {
+  const t0 = performance.now();
+  const sendProbe = async (
+    url: string,
+    opts: { method: 'GET' | 'POST'; headers?: Record<string, string>; body?: string }
+  ): Promise<{ ok: boolean; status: number; body: string; errorKind: DiagnosticErrorKind; errorMessage?: string }> => {
+    if (isNativeAndroid()) {
+      const r = await CadenceRemote.httpRequest({ url, ...opts });
+      return {
+        ...r,
+        errorKind: (r.errorKind as DiagnosticErrorKind) || 'http_error',
+      };
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: opts.method,
+        headers: opts.headers,
+        body: opts.body,
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      return {
+        ok: res.ok,
+        status: res.status,
+        body: text,
+        errorKind: res.ok ? 'ok' : res.status === 401 || res.status === 403 ? 'unauthorized' : 'http_error',
+      };
+    } catch (err) {
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      return {
+        ok: false,
+        status: 0,
+        body: '',
+        errorKind: isAbort ? 'timeout' : 'network_error',
+        errorMessage: isAbort
+          ? 'Connection timed out'
+          : err instanceof Error
+          ? err.message
+          : 'Unable to reach Cadence Core',
+      };
+    } finally {
+      window.clearTimeout(timer);
+    }
+  };
+
+  void fingerprint;
+  void trustInsecure;
+  const healthRes = await sendProbe(`${cleanBase}/healthz`, { method: 'GET' });
+  if (healthRes.status === 0) {
+    return {
+      reachable: false,
+      authenticated: false,
+      httpStatus: 0,
+      errorKind: healthRes.errorKind,
+      errorMessage: healthRes.errorMessage || 'Unable to reach Cadence Core',
+      latencyMs: Math.round(performance.now() - t0),
+    };
+  }
+  if (!healthRes.ok) {
+    return {
+      reachable: true,
+      authenticated: false,
+      httpStatus: healthRes.status,
+      errorKind: 'http_error',
+      errorMessage: `HTTP ${healthRes.status}`,
+      latencyMs: Math.round(performance.now() - t0),
+    };
+  }
+
+  let observedFp: string | undefined;
+  let observedEngineId: string | undefined;
+  let observedLibraryId: string | undefined;
+  let observedLabel: string | undefined;
+  try {
+    const parsedHealth = JSON.parse(healthRes.body) as Record<string, unknown>;
+    if (typeof parsedHealth?.tlsFingerprintSha256 === 'string') {
+      observedFp = parsedHealth.tlsFingerprintSha256;
+    }
+    if (typeof parsedHealth?.engineId === 'string') {
+      observedEngineId = parsedHealth.engineId;
+    }
+    if (typeof parsedHealth?.libraryId === 'string') {
+      observedLibraryId = parsedHealth.libraryId;
+    }
+    if (typeof parsedHealth?.label === 'string') {
+      observedLabel = parsedHealth.label;
+    }
+  } catch {
+    // Allow non-fatal parse fallback; /v1/core below enforces full protocol
+  }
+
+  if (!token) {
+    return {
+      reachable: true,
+      authenticated: false,
+      httpStatus: healthRes.status,
+      label: observedLabel,
+      engineId: observedEngineId,
+      libraryId: observedLibraryId,
+      certFingerprint: observedFp,
+      errorKind: 'ok',
+      errorMessage: '',
+      latencyMs: Math.round(performance.now() - t0),
+    };
+  }
+
+  const helloRes = await sendProbe(`${cleanBase}/v1/core`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-cadence-token': token,
+    },
+    body: JSON.stringify({
+      protocolVersion: 1,
+      engineId: observedEngineId,
+      libraryId: observedLibraryId,
+      operation: 'core.hello',
+    }),
+  });
+
+  if (helloRes.status === 401 || helloRes.status === 403) {
+    return {
+      reachable: true,
+      authenticated: false,
+      httpStatus: helloRes.status,
+      label: observedLabel,
+      engineId: observedEngineId,
+      libraryId: observedLibraryId,
+      certFingerprint: observedFp,
+      errorKind: 'unauthorized',
+      errorMessage: 'Pairing PIN/token was rejected by Cadence Core.',
+      latencyMs: Math.round(performance.now() - t0),
+    };
+  }
+  if (helloRes.ok) {
+    try {
+      const parsedHello = JSON.parse(helloRes.body) as { data?: Record<string, unknown> };
+      if (typeof parsedHello?.data?.engineId === 'string') {
+        observedEngineId = parsedHello.data.engineId;
+      }
+      if (typeof parsedHello?.data?.libraryId === 'string') {
+        observedLibraryId = parsedHello.data.libraryId;
+      }
+      if (typeof parsedHello?.data?.label === 'string') {
+        observedLabel = parsedHello.data.label;
+      }
+    } catch {
+      // Keep healthz metadata when present
+    }
+    return {
+      reachable: true,
+      authenticated: true,
+      httpStatus: helloRes.status,
+      label: observedLabel,
+      engineId: observedEngineId,
+      libraryId: observedLibraryId,
+      certFingerprint: observedFp,
+      errorKind: 'ok',
+      errorMessage: '',
+      latencyMs: Math.round(performance.now() - t0),
+    };
+  }
+  return {
+    reachable: helloRes.status > 0,
+    authenticated: false,
+    httpStatus: helloRes.status,
+    certFingerprint: observedFp,
+    errorKind: helloRes.errorKind || 'http_error',
+    errorMessage: helloRes.errorMessage || `HTTP ${helloRes.status}`,
+    latencyMs: Math.round(performance.now() - t0),
+  };
+}
+
 export async function probeCadenceServer(
   baseUrl: string,
   token?: string,
   fingerprint?: string,
   trustInsecure = false,
-  timeoutMs = 3500
+  timeoutMs = 3500,
+  engineKind?: EngineKind
 ): Promise<ProbeResult> {
+  const cleanBase = baseUrl.replace(/\/+$/, '');
+  if (engineKind === 'core') {
+    return probeCoreNodeServer(cleanBase, token, fingerprint, trustInsecure, timeoutMs);
+  }
+
   if (isNativeAndroid()) {
     return CadenceRemote.probeServer({
       baseUrl,
@@ -106,7 +295,6 @@ export async function probeCadenceServer(
   }
 
   const t0 = performance.now();
-  const cleanBase = baseUrl.replace(/\/+$/, '');
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {

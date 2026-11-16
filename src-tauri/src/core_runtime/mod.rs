@@ -16,8 +16,8 @@ pub use platform::{
 };
 
 use crate::core_session::{
-    CatalogTrack, ErrorCode, Output, Renderer, RendererAction, RendererError, RendererEvent,
-    SessionConfig, SessionOwner, MAX_MESSAGE_BYTES,
+    CatalogTrack, ErrorCode, ExternalPlaybackInfo, Output, Renderer, RendererAction, RendererError,
+    RendererEvent, RunToken, SessionConfig, SessionOwner, MAX_MESSAGE_BYTES,
 };
 use crate::db::AppDb;
 use serde_json::{json, Value};
@@ -348,6 +348,54 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         Ok(applied)
     }
 
+    pub fn sync_external_renderer(&mut self, info: Option<ExternalPlaybackInfo>) -> Result<bool, ErrorCode> {
+        self.owner.sync_external_renderer(info)
+    }
+
+    pub fn on_renderer_external_takeover_at(
+        &mut self,
+        token: RunToken,
+        transport_state: String,
+        current_uri: Option<String>,
+        position_seconds: Option<f64>,
+        now: Instant,
+    ) -> Result<bool, ErrorCode> {
+        let was_active = self.current_activity() != "idle";
+        let applied = self
+            .owner
+            .on_renderer_external_takeover(token, transport_state, current_uri, position_seconds)?;
+        if applied && was_active && self.current_activity() == "idle" {
+            self.last_stopped_at = Some(now);
+        }
+        Ok(applied)
+    }
+
+    pub fn sync_active_playback(
+        &mut self,
+        token: &RunToken,
+        transport_state: &str,
+        position_seconds: Option<f64>,
+    ) -> Result<bool, ErrorCode> {
+        self.owner
+            .sync_active_playback(token, transport_state, position_seconds)
+    }
+
+    pub(crate) fn is_external_playback_blocking_play(&self, body_bytes: &[u8]) -> bool {
+        let Ok(parsed) = serde_json::from_slice::<Value>(body_bytes) else {
+            return false;
+        };
+        if parsed.get("operation").and_then(Value::as_str) != Some("playback.control")
+            || parsed.get("action").and_then(Value::as_str) != Some("play")
+        {
+            return false;
+        }
+        let force = parsed
+            .get("forceTakeover")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.owner.is_external_playback_blocking_play(force)
+    }
+
     /// Deterministically stops any active session, unlocks all pinned RAM buffers,
     /// checkpoints WAL, and closes the SQLite handle cleanly.
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
@@ -627,11 +675,15 @@ fn load_catalog_projection(
         .prepare(
             "SELECT t.id, t.title, t.artist_credit, t.album_title, t.duration_secs, t.file_path,
                     t.format, t.sample_rate, t.bit_depth, t.track_number, t.disc_number,
-                    COALESCE(t.release_year, r.release_year)
+                    COALESCE(t.release_year, r.release_year),
+                    t.release_id,
+                    COALESCE(NULLIF(TRIM(t.album_artist), ''), NULLIF(TRIM(r.artist_credit), '')),
+                    CASE WHEN COALESCE(r.is_compilation, 0) != 0 OR COALESCE(t.is_compilation, 0) != 0 THEN 1 ELSE 0 END,
+                    COALESCE(NULLIF(TRIM(r.folder_name), ''), NULLIF(TRIM(t.folder_name), ''))
              FROM tracks t
              LEFT JOIN releases r ON t.release_id = r.id
              WHERE t.is_online != 0
-             ORDER BY t.album_title ASC, COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 0) ASC, t.title ASC, t.id ASC",
+             ORDER BY t.album_title ASC, t.release_id ASC, COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 0) ASC, t.title ASC, t.id ASC",
         )
         .map_err(|e| RuntimeError::Database(e.to_string()))?;
 
@@ -650,6 +702,10 @@ fn load_catalog_projection(
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<i64>>(10)?,
                 row.get::<_, Option<i64>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, i64>(14)?,
+                row.get::<_, Option<String>>(15)?,
             ))
         })
         .map_err(|e| RuntimeError::Database(e.to_string()))?;
@@ -672,6 +728,10 @@ fn load_catalog_projection(
             raw_track_number,
             raw_disc_number,
             raw_release_year,
+            raw_release_id,
+            raw_album_artist,
+            raw_is_compilation,
+            raw_folder_name,
         ) = row.map_err(|e| RuntimeError::Database(e.to_string()))?;
         let token_id = sanitize_or_hash_token(&raw_id, &mut used_ids);
         let safe_duration = if duration_secs.is_finite() && (0.001..=86_400.0).contains(&duration_secs) {
@@ -707,13 +767,37 @@ fn load_catalog_projection(
         let release_year = raw_release_year
             .filter(|&v| (1..=u16::MAX as i64).contains(&v))
             .map(|v| v as u16);
+        let clean_title = sanitize_display_text(&title, "Untitled");
+        let clean_artist = sanitize_display_text(&artist, "Unknown Artist");
+        let clean_album = sanitize_display_text(&album, "Unknown Album");
+        let release_id = raw_release_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(sanitize_group_token);
+        let album_artist = raw_album_artist
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&clean_artist))
+            .map(|s| sanitize_display_text(s, ""))
+            .filter(|s| !s.is_empty());
+        let edition = raw_folder_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&clean_album))
+            .map(|s| sanitize_display_text(s, ""))
+            .filter(|s| !s.is_empty());
 
         catalog.push(CatalogTrack {
             id: token_id.clone(),
-            title: sanitize_display_text(&title, "Untitled"),
-            artist: sanitize_display_text(&artist, "Unknown Artist"),
-            album: sanitize_display_text(&album, "Unknown Album"),
+            title: clean_title,
+            artist: clean_artist,
+            album: clean_album,
             duration_seconds: safe_duration,
+            release_id,
+            album_artist,
+            is_compilation: Some(raw_is_compilation != 0),
+            edition,
             format: normalized_format,
             sample_rate,
             bit_depth,
@@ -737,24 +821,37 @@ fn is_valid_v1_token(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
+fn hash_token_with_prefix(prefix: &str, raw_id: &str, counter: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw_id.as_bytes());
+    if counter > 0 {
+        hasher.update(counter.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(prefix.len() + 24);
+    hex.push_str(prefix);
+    for byte in &digest[..12] {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{:02x}", byte);
+    }
+    hex
+}
+
+fn sanitize_group_token(raw_id: &str) -> String {
+    if is_valid_v1_token(raw_id) {
+        raw_id.to_string()
+    } else {
+        hash_token_with_prefix("rel_", raw_id, 0)
+    }
+}
+
 fn sanitize_or_hash_token(raw_id: &str, used_ids: &mut HashSet<String>) -> String {
     if is_valid_v1_token(raw_id) && used_ids.insert(raw_id.to_string()) {
         return raw_id.to_string();
     }
     let mut counter = 0u32;
     loop {
-        let mut hasher = Sha256::new();
-        hasher.update(raw_id.as_bytes());
-        if counter > 0 {
-            hasher.update(counter.to_le_bytes());
-        }
-        let digest = hasher.finalize();
-        let mut hex = String::with_capacity(28);
-        hex.push_str("trk_");
-        for byte in &digest[..12] {
-            use std::fmt::Write;
-            let _ = write!(&mut hex, "{:02x}", byte);
-        }
+        let hex = hash_token_with_prefix("trk_", raw_id, counter);
         if used_ids.insert(hex.clone()) {
             return hex;
         }

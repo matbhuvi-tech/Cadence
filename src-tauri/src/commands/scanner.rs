@@ -69,8 +69,6 @@ pub fn inspect_single_audio_file(path: &Path) -> Option<ScannedAudioFile> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let probe_res = Probe::open(path).and_then(|p| p.read());
-
     let (
         title,
         artist,
@@ -84,30 +82,59 @@ pub fn inspect_single_audio_file(path: &Path) -> Option<ScannedAudioFile> {
         mut bit_depth,
         mut channels,
         has_embedded_art,
-    ) = match probe_res {
-        Ok(tagged_file) => {
-            let props = tagged_file.properties();
-            let dur = props.duration().as_secs_f64();
-            let sr = props.sample_rate();
-            let bd = props.bit_depth();
-            let ch = props.channels().map(|c| c as u16);
-
-            let tag = tagged_file
-                .primary_tag()
-                .or_else(|| tagged_file.first_tag());
-
-            let t = tag.and_then(|t| t.title().map(|s| s.to_string()));
-            let a = tag.and_then(|t| t.artist().map(|s| s.to_string()));
-            let alb = tag.and_then(|t| t.album().map(|s| s.to_string()));
-            let yr = tag.and_then(|t| t.year());
-            let trk = tag.and_then(|t| t.track());
-            let g = tag.and_then(|t| t.genre().map(|s| s.to_string()));
-            let comp = tag.and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
-            let has_art = tag.map(|t| !t.pictures().is_empty()).unwrap_or(false);
-
-            (t, a, alb, yr, trk, g, comp, dur, sr, bd, ch, has_art)
+    ) = if crate::scanner::dsd::is_dsd_path(path) {
+        if let Some(dsd) = crate::scanner::dsd::probe_dsd_file(path) {
+            let t = dsd.tag.as_ref().and_then(|t| t.title().map(|s| s.to_string()));
+            let a = dsd.tag.as_ref().and_then(|t| t.artist().map(|s| s.to_string()));
+            let alb = dsd.tag.as_ref().and_then(|t| t.album().map(|s| s.to_string()));
+            let yr = dsd.tag.as_ref().and_then(|t| t.year());
+            let trk = dsd.tag.as_ref().and_then(|t| t.track());
+            let g = dsd.tag.as_ref().and_then(|t| t.genre().map(|s| s.to_string()));
+            let comp = dsd.tag.as_ref().and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
+            let has_art = dsd.tag.as_ref().map(|t| !t.pictures().is_empty()).unwrap_or(false);
+            (
+                t,
+                a,
+                alb,
+                yr,
+                trk,
+                g,
+                comp,
+                dsd.duration_secs,
+                dsd.sample_rate,
+                dsd.bit_depth,
+                dsd.channels,
+                has_art,
+            )
+        } else {
+            (None, None, None, None, None, None, None, 0.0, None, None, None, false)
         }
-        Err(_) => (None, None, None, None, None, None, None, 0.0, None, None, None, false),
+    } else {
+        match Probe::open(path).and_then(|p| p.read()) {
+            Ok(tagged_file) => {
+                let props = tagged_file.properties();
+                let dur = props.duration().as_secs_f64();
+                let sr = props.sample_rate();
+                let bd = props.bit_depth();
+                let ch = props.channels().map(|c| c as u16);
+
+                let tag = tagged_file
+                    .primary_tag()
+                    .or_else(|| tagged_file.first_tag());
+
+                let t = tag.and_then(|t| t.title().map(|s| s.to_string()));
+                let a = tag.and_then(|t| t.artist().map(|s| s.to_string()));
+                let alb = tag.and_then(|t| t.album().map(|s| s.to_string()));
+                let yr = tag.and_then(|t| t.year());
+                let trk = tag.and_then(|t| t.track());
+                let g = tag.and_then(|t| t.genre().map(|s| s.to_string()));
+                let comp = tag.and_then(|t| t.get_string(&ItemKey::Composer).map(|s| s.to_string()));
+                let has_art = tag.map(|t| !t.pictures().is_empty()).unwrap_or(false);
+
+                (t, a, alb, yr, trk, g, comp, dur, sr, bd, ch, has_art)
+            }
+            Err(_) => (None, None, None, None, None, None, None, 0.0, None, None, None, false),
+        }
     };
 
     if ext_lower == "dsf" && (duration_secs <= 0.0 || sample_rate.is_none()) {
@@ -174,7 +201,15 @@ pub fn read_cover_art_base64(file_path: String) -> Result<Option<String>, String
 
     // 1. Try embedded picture when the requested path is an audio file.
     if path.is_file() {
-        if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
+        if crate::scanner::dsd::is_dsd_path(path) {
+            if let Some(dsd) = crate::scanner::dsd::probe_dsd_file(path) {
+                if let Some(pic) = dsd.tag.as_ref().and_then(|t| t.pictures().first()) {
+                    let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");
+                    let b64 = BASE64_STANDARD.encode(pic.data());
+                    return Ok(Some(format!("data:{};base64,{}", mime, b64)));
+                }
+            }
+        } else if let Ok(tagged_file) = Probe::open(path).and_then(|p| p.read()) {
             if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
                 if let Some(pic) = tag.pictures().first() {
                     let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("image/jpeg");

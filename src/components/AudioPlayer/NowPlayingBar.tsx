@@ -28,6 +28,8 @@ import {
 } from 'lucide-react'
 import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import { resolveMediaUrl } from '../../services/tauriBridge'
+import { useCorePlaybackClock } from '../../hooks/useCorePlaybackClock'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath, getEndpointDisplayName } from '../../core/endpointRouting'
@@ -85,6 +87,67 @@ const NowPlayingElapsedTime: React.FC = React.memo(() => {
   return (
     <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
       {formatClockTime(currentTime)}
+    </span>
+  )
+})
+
+const CoreScrubberBar: React.FC<{
+  positionSeconds: number
+  durationSeconds: number
+  isPlaying: boolean
+  isConnected: boolean
+  hasTrack: boolean
+  trackKey?: string | null
+  onSeek: (seconds: number) => void
+}> = React.memo(({ positionSeconds, durationSeconds, isPlaying, isConnected, hasTrack, trackKey, onSeek }) => {
+  const displaySeconds = useCorePlaybackClock({
+    corePositionSeconds: positionSeconds,
+    isPlaying,
+    isConnected,
+    durationSeconds,
+    trackKey,
+  })
+  const fraction =
+    durationSeconds > 0 ? Math.max(0, Math.min(1, displaySeconds / durationSeconds)) : 0
+
+  return (
+    <div
+      className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 ${
+        !hasTrack ? 'opacity-30 pointer-events-none' : ''
+      }`}
+      onClick={(e) => {
+        if (!hasTrack || durationSeconds <= 0) return
+        const rect = e.currentTarget.getBoundingClientRect()
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+        onSeek(pct * durationSeconds)
+      }}
+      title={`Seek: ${formatClockTime(displaySeconds)} / ${durationSeconds > 0 ? formatClockTime(durationSeconds) : '00:00'}`}
+    >
+      <div
+        className="w-full h-full origin-left bg-gradient-to-r from-[#D4AF37] via-[#F59E0B] to-[#10B981] transition-transform duration-150 ease-linear"
+        style={{ transform: `scaleX(${fraction})` }}
+      />
+    </div>
+  )
+})
+
+const CoreElapsedTime: React.FC<{
+  positionSeconds: number
+  durationSeconds: number
+  isPlaying: boolean
+  isConnected: boolean
+  trackKey?: string | null
+}> = React.memo(({ positionSeconds, durationSeconds, isPlaying, isConnected, trackKey }) => {
+  const displaySeconds = useCorePlaybackClock({
+    corePositionSeconds: positionSeconds,
+    isPlaying,
+    isConnected,
+    durationSeconds,
+    trackKey,
+  })
+  return (
+    <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
+      {formatClockTime(displaySeconds)}
     </span>
   )
 })
@@ -271,25 +334,15 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
         <div className="glass-dropdown border border-white/[0.08] rounded-2xl h-[56px] px-4 grid grid-cols-[minmax(180px,0.85fr)_minmax(300px,auto)_minmax(0,1.4fr)] items-center gap-x-4 shadow-2xl relative select-none">
           {/* Subtle Top Specular Scrubber Highlight */}
           {isCoreActive ? (
-            <div
-              className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 ${
-                !effectiveTrack ? 'opacity-30 pointer-events-none' : ''
-              }`}
-              onClick={(e) => {
-                if (!effectiveTrack || fallbackDuration <= 0) return
-                const rect = e.currentTarget.getBoundingClientRect()
-                const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-                handleSeek(pct * fallbackDuration)
-              }}
-              title={`Seek: ${formatClockTime(corePositionSeconds)} / ${fallbackDuration > 0 ? formatClockTime(fallbackDuration) : '00:00'}`}
-            >
-              <div
-                className="w-full h-full origin-left bg-gradient-to-r from-[#D4AF37] via-[#F59E0B] to-[#10B981] transition-transform duration-150 ease-linear"
-                style={{
-                  transform: `scaleX(${fallbackDuration > 0 ? Math.max(0, Math.min(1, corePositionSeconds / fallbackDuration)) : 0})`,
-                }}
-              />
-            </div>
+            <CoreScrubberBar
+              positionSeconds={corePositionSeconds}
+              durationSeconds={fallbackDuration}
+              isPlaying={effectiveIsPlaying}
+              isConnected={engineConnected}
+              hasTrack={Boolean(effectiveTrack)}
+              trackKey={coreCurrentEntry?.entryId ?? effectiveTrack?.id ?? null}
+              onSeek={handleSeek}
+            />
           ) : (
             <NowPlayingScrubber
               fallbackDuration={fallbackDuration}
@@ -310,7 +363,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 >
                   {coverUrl && !imgError ? (
                     <img
-                      src={coverUrl}
+                      src={resolveMediaUrl(coverUrl)}
                       alt={effectiveTrack?.title || 'Album Art'}
                       onError={() => setImgError(true)}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform"
@@ -356,9 +409,13 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
           <div className={`transport-controls flex items-center justify-center gap-2 sm:gap-3 min-w-0 transition-opacity ${!effectiveTrack ? 'opacity-40 pointer-events-none' : ''}`}>
             {/* Elapsed Time */}
             {isCoreActive ? (
-              <span className="text-[11px] font-mono tabular-nums text-[#8E8E93] w-10 text-right select-none">
-                {formatClockTime(corePositionSeconds)}
-              </span>
+              <CoreElapsedTime
+                positionSeconds={corePositionSeconds}
+                durationSeconds={fallbackDuration}
+                isPlaying={effectiveIsPlaying}
+                isConnected={engineConnected}
+                trackKey={coreCurrentEntry?.entryId ?? effectiveTrack?.id ?? null}
+              />
             ) : (
               <NowPlayingElapsedTime />
             )}

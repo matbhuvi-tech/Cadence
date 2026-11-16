@@ -39,7 +39,7 @@ export const EngineSwitchPromptModal: React.FC = () => {
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#D4AF37]/30 bg-[#D4AF37]/10 text-[#D4AF37] shrink-0">
-              {prompt.kind === 'rs130_takeover' ? (
+              {prompt.kind === 'rs130_takeover' || prompt.kind === 'external_rs130_takeover' ? (
                 <Speaker className="h-4 w-4" aria-hidden="true" />
               ) : prompt.kind === 'local_to_core' ? (
                 <Server className="h-4 w-4" aria-hidden="true" />
@@ -53,14 +53,18 @@ export const EngineSwitchPromptModal: React.FC = () => {
                   ? `Local playback is ${prompt.sourceActivity}`
                   : prompt.kind === 'core_to_local'
                     ? `${prompt.coreLabel} is ${prompt.sourceActivity}`
-                    : 'Coordinate Renderer Takeover'}
+                    : prompt.kind === 'external_rs130_takeover'
+                      ? 'RS130 is Playing via HiFi ROSE'
+                      : 'Coordinate Renderer Takeover'}
               </h2>
               <p className="mt-1 text-xs text-white/65 leading-relaxed">
                 {prompt.kind === 'local_to_core'
                   ? `Stop playback on This PC before switching to ${prompt.target.label}, or keep listening here.`
                   : prompt.kind === 'core_to_local'
                     ? `Choose whether ${prompt.coreLabel} should keep playing in the background or stop before returning to This PC. Local audio will not start automatically.`
-                    : `${getEndpointDisplayName(prompt.endpoint)} is currently associated with ${prompt.coreLabel}. Confirm before claiming it from This PC.`}
+                    : prompt.kind === 'external_rs130_takeover'
+                      ? `${prompt.coreLabel} observed active external playback on the RS130. Keep HiFi ROSE playing undisturbed, or confirm takeover to play your selected track.`
+                      : `${getEndpointDisplayName(prompt.endpoint)} is currently associated with ${prompt.coreLabel}. Confirm before claiming it from This PC.`}
               </p>
             </div>
           </div>
@@ -81,7 +85,9 @@ export const EngineSwitchPromptModal: React.FC = () => {
               ? 'This PC must confirm idle state before Core activation completes.'
               : prompt.kind === 'core_to_local'
                 ? 'Switching to This PC restores your local view with local playback stopped.'
-                : 'Merely browsing engines never seizes an active UPnP renderer.'}
+                : prompt.kind === 'external_rs130_takeover'
+                  ? 'Declining leaves existing RS130 playback completely undisturbed and does not import or replace the external queue.'
+                  : 'Merely browsing engines never seizes an active UPnP renderer.'}
           </span>
         </div>
 
@@ -150,6 +156,26 @@ export const EngineSwitchPromptModal: React.FC = () => {
                 className="rounded-xl bg-[#D4AF37] px-3.5 py-2 text-xs font-semibold text-black hover:bg-[#D4AF37]/90 cursor-pointer disabled:opacity-50"
               >
                 Release from Core &amp; Use on This PC
+              </button>
+            </>
+          )}
+
+          {prompt.kind === 'external_rs130_takeover' && (
+            <>
+              <button
+                type="button"
+                onClick={() => engine.dismissSwitchPrompt()}
+                className="rounded-xl border border-white/15 bg-white/[0.06] px-3.5 py-2 text-xs font-medium text-white hover:bg-white/[0.12] cursor-pointer"
+              >
+                Keep HiFi ROSE
+              </button>
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => void engine.confirmRs130Takeover()}
+                className="rounded-xl bg-[#D4AF37] px-3.5 py-2 text-xs font-semibold text-black hover:bg-[#D4AF37]/90 cursor-pointer disabled:opacity-50"
+              >
+                Take Over RS130 &amp; Play
               </button>
             </>
           )}

@@ -202,9 +202,12 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   const {
     state: engineState,
     isCoreActive,
+    activeCoreSnapshot,
     coreCatalogTracks,
     coreCatalogReleases,
+    requestSwitchToLocal,
     reconnectCore,
+    coreRefreshSnapshot,
   } = useEngineController()
   const tracks = useMemo(
     () => (isCoreActive && topMode !== 'curate' ? coreCatalogTracks : curateCatalog.tracks),
@@ -283,6 +286,22 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null)
   const [selectedArtist, setSelectedArtist] = useState<string | null>(null)
   const [selectedComposer, setSelectedComposer] = useState<string | null>(null)
+
+  // Isolate navigation/filter state across playback engines (This PC <-> Cadence Core)
+  const activeEngineKey = `${engineState.view.session.active.kind}:${engineState.view.session.active.engineId}:${engineState.view.session.active.libraryId}`
+  useEffect(() => {
+    setSelectedAlbumId(null)
+    setSelectedArtist(null)
+    setSelectedComposer(null)
+    setNavigationAnchor(null)
+    setSelectedTrackIds(new Set())
+    setActiveTriageFilter(undefined)
+    setSelectedMountId(undefined)
+    setSelectedFolderFilter(undefined)
+    setSearchQuery('')
+    setFacets({})
+    setActiveCoverTab('albums')
+  }, [activeEngineKey, engineState.view.session.activeEpoch])
 
   // Active Entity Scope (Compound hierarchy awareness)
   const activeEntityScope = useMemo<ActiveEntityScope | null>(() => {
@@ -1876,7 +1895,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             }`}
           >
             <Server className="w-3.5 h-3.5" aria-hidden="true" />
-            <span className="hidden xl:inline max-w-[110px] truncate">
+            <span className={isCoreActive ? 'inline max-w-[130px] truncate' : 'hidden xl:inline max-w-[110px] truncate'}>
               {engineState.view.session.active.label}
             </span>
           </button>
@@ -2234,6 +2253,31 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
                 </div>
               </div>
             )}
+            {isCoreActive &&
+              engineState.view.session.connected &&
+              activeCoreSnapshot?.playback.takeoverRequired && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+                    <span className="text-amber-200 truncate">
+                      {engineState.view.session.active.label}: RS130 is currently playing via HiFi ROSE (
+                      {activeCoreSnapshot.playback.externalPlayback?.transportState || 'PLAYING'}
+                      ). External playback remains undisturbed until you confirm takeover.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void coreRefreshSnapshot()}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border border-amber-500/40 text-[11px] font-medium cursor-pointer shrink-0"
+                  >
+                    Refresh status
+                  </button>
+                </div>
+              )}
             {/* If some mounts are offline, render top alert banner */}
             {offlineMounts.length > 0 && (
               <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0 animate-in fade-in duration-200">
@@ -2294,6 +2338,10 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
               onOpenBatchDiff={() => setIsBatchDiffModalOpen(true)}
               onOpenBatchAi={() => setIsBatchDiffModalOpen(true)}
               totalLibraryTracksCount={tracks.length}
+              totalLibraryReleasesCount={releases.length}
+              activeEngineLabel={engineState.view.session.active.label}
+              isCoreEngineActive={isCoreActive}
+              onSwitchToLocalEngine={() => void requestSwitchToLocal()}
               stagedAlbumsCount={stagedAlbumsCount}
               splitReleaseIds={splitReleaseIds}
               onToggleReleaseSplit={handleToggleReleaseSplit}
@@ -2578,7 +2626,10 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
         onClose={() => setIsStorageManagerOpen(false)}
         mounts={storageMounts}
         watchedFolders={watchedFolders}
-        totalTracksCount={tracks.length}
+        totalTracksCount={catalogTracks.length}
+        isCoreEngineActive={isCoreActive}
+        activeEngineLabel={engineState.view.session.active.label}
+        onSwitchToLocalEngine={() => void requestSwitchToLocal()}
         onRefreshLibrary={handleRefreshLibrary}
         onTriggerScan={handleTriggerScan}
         onToggleMountLock={handleToggleMountLock}

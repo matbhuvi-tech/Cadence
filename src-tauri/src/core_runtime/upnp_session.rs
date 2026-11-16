@@ -20,7 +20,7 @@
 //!    emits `RendererEvent::Completed(RunToken)`. External URI takeover quarantines the session
 //!    without fighting via repeated `Play` commands.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream as StdTcpStream};
 use std::path::PathBuf;
@@ -36,7 +36,7 @@ use super::{
     SystemMemoryLocker, SystemPlatformProbe,
 };
 use crate::core_session::{
-    Renderer, RendererAction, RendererError, RendererEvent, RunToken,
+    ExternalPlaybackInfo, Renderer, RendererAction, RendererError, RendererEvent, RunToken,
 };
 
 /// Strict Core UPnP pre-roll cap (512 KiB), resolving the audiophile policy ceiling
@@ -1293,6 +1293,92 @@ pub(crate) fn discover_rs130_device(
     None
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PlaybackClockState {
+    pub(crate) base_position_secs: f64,
+    pub(crate) playing_since: Option<Instant>,
+    pub(crate) last_seek_at: Option<Instant>,
+    pub(crate) duration_secs: f64,
+}
+
+impl PlaybackClockState {
+    #[cfg(test)]
+    fn new(duration_secs: f64) -> Self {
+        Self {
+            base_position_secs: 0.0,
+            playing_since: None,
+            last_seek_at: None,
+            duration_secs: duration_secs.max(0.0),
+        }
+    }
+
+    fn clamp_pos(duration_secs: f64, pos: f64) -> f64 {
+        if !pos.is_finite() || pos < 0.0 {
+            return 0.0;
+        }
+        if duration_secs > 0.0 {
+            pos.min(duration_secs)
+        } else {
+            pos
+        }
+    }
+
+    fn current_position(&self) -> f64 {
+        let elapsed = self
+            .playing_since
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        Self::clamp_pos(self.duration_secs, self.base_position_secs + elapsed)
+    }
+
+    fn mark_paused(&mut self, reported_pos: Option<f64>) -> f64 {
+        let fallback = self.current_position();
+        let within_seek_settle = self
+            .last_seek_at
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+        let chosen = match reported_pos.filter(|p| p.is_finite() && *p > 0.25) {
+            Some(p) if !within_seek_settle || (p - fallback).abs() <= 3.0 => {
+                Self::clamp_pos(self.duration_secs, p)
+            }
+            _ => fallback,
+        };
+        self.base_position_secs = chosen;
+        self.playing_since = None;
+        chosen
+    }
+
+    fn mark_resumed(&mut self) {
+        if self.playing_since.is_none() {
+            self.playing_since = Some(Instant::now());
+        }
+    }
+
+    fn mark_seek(&mut self, pos_secs: f64, is_paused: bool) {
+        self.base_position_secs = Self::clamp_pos(self.duration_secs, pos_secs);
+        self.playing_since = if is_paused { None } else { Some(Instant::now()) };
+        self.last_seek_at = Some(Instant::now());
+    }
+
+    fn effective_playing_position(&mut self, reported_pos: Option<f64>) -> f64 {
+        let current = self.current_position();
+        let within_seek_settle = self
+            .last_seek_at
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+        if let Some(p) = reported_pos.filter(|p| p.is_finite() && *p > 0.5) {
+            if !within_seek_settle || (p - current).abs() <= 3.0 {
+                let clamped = Self::clamp_pos(self.duration_secs, p);
+                self.base_position_secs = clamped;
+                self.playing_since = Some(Instant::now());
+                return clamped;
+            }
+        }
+        if self.playing_since.is_none() {
+            self.playing_since = Some(Instant::now());
+        }
+        current
+    }
+}
+
 pub(crate) struct ActiveMediaSession {
     pub(crate) capability_path: String,
     pub(crate) stream_url: String,
@@ -1309,6 +1395,35 @@ pub(crate) struct ActiveMediaSession {
     pub(crate) has_streamed_audio: AtomicBool,
     pub(crate) last_audio_end_offset: AtomicU64,
     pub(crate) cancelled: AtomicBool,
+    pub(crate) playback_clock: Mutex<PlaybackClockState>,
+}
+
+impl ActiveMediaSession {
+    pub(crate) fn mark_paused(&self, reported_pos: Option<f64>) -> f64 {
+        self.playback_clock
+            .lock()
+            .map(|mut c| c.mark_paused(reported_pos))
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn mark_resumed(&self) {
+        if let Ok(mut c) = self.playback_clock.lock() {
+            c.mark_resumed();
+        }
+    }
+
+    pub(crate) fn mark_seek(&self, pos_secs: f64, is_paused: bool) {
+        if let Ok(mut c) = self.playback_clock.lock() {
+            c.mark_seek(pos_secs, is_paused);
+        }
+    }
+
+    pub(crate) fn effective_playing_position(&self, reported_pos: Option<f64>) -> f64 {
+        self.playback_clock
+            .lock()
+            .map(|mut c| c.effective_playing_position(reported_pos))
+            .unwrap_or_else(|_| reported_pos.filter(|p| p.is_finite() && *p >= 0.0).unwrap_or(0.0))
+    }
 }
 
 struct StreamSlotGuard {
@@ -1676,7 +1791,9 @@ pub struct UpnpSessionConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportReport {
     NoActiveRun,
+    ExternalActive,
     StartedPlaying,
+    Paused,
     Steady,
     CompletedAndAdvanced,
     ExternalTakeover,
@@ -1794,6 +1911,12 @@ impl Renderer for UpnpBridgeRenderer {
                     has_streamed_audio: AtomicBool::new(false),
                     last_audio_end_offset: AtomicU64::new(0),
                     cancelled: AtomicBool::new(false),
+                    playback_clock: Mutex::new(PlaybackClockState {
+                        base_position_secs: 0.0,
+                        playing_since: None,
+                        last_seek_at: None,
+                        duration_secs: meta.duration_secs.max(0.0),
+                    }),
                 });
 
                 if let Ok(mut guard) = self.active_session.lock() {
@@ -1805,6 +1928,11 @@ impl Renderer for UpnpBridgeRenderer {
             }
             RendererAction::Pause => {
                 self.paused_flag.store(true, Ordering::Release);
+                if let Ok(guard) = self.active_session.lock() {
+                    if let Some(s) = guard.as_ref() {
+                        s.mark_paused(None);
+                    }
+                }
                 send_simple_avtransport_action(&self.device.control_url, "Pause", "")
                     .map(|_| ())
                     .map_err(|_| RendererError)
@@ -1815,6 +1943,7 @@ impl Renderer for UpnpBridgeRenderer {
                         if let Ok(mut tok_guard) = s.run_token.lock() {
                             *tok_guard = token.clone();
                         }
+                        s.mark_resumed();
                     }
                 }
                 self.paused_flag.store(false, Ordering::Release);
@@ -1830,11 +1959,13 @@ impl Renderer for UpnpBridgeRenderer {
                 position_seconds,
                 token,
             } => {
+                let is_paused = self.paused_flag.load(Ordering::Acquire);
                 if let Ok(guard) = self.active_session.lock() {
                     if let Some(s) = guard.as_ref() {
                         if let Ok(mut tok_guard) = s.run_token.lock() {
                             *tok_guard = token.clone();
                         }
+                        s.mark_seek(*position_seconds, is_paused);
                     }
                 }
                 let rel_time = format_rel_time(*position_seconds);
@@ -1955,71 +2086,17 @@ impl<P: PlatformProbe, L: MemoryLocker> UpnpSessionRuntime<P, L> {
             .lock()
             .ok()
             .and_then(|g| g.clone());
-        let Some(session) = active else {
-            return Ok(TransportReport::NoActiveRun);
-        };
-        let token = session
-            .run_token
-            .lock()
-            .map_err(|_| RuntimeError::Closed)?
-            .clone();
-
-        let probe = match query_renderer_state(&self.device.control_url) {
-            Ok(p) => {
-                self.consecutive_failures = 0;
-                p
-            }
-            Err(_) => {
-                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-                if self.consecutive_failures >= 3 {
-                    self.media_server.stop_active_session();
-                    let _ = self.inner.on_renderer_event(RendererEvent::Failed(token));
-                    return Ok(TransportReport::RendererFailed);
-                }
-                return Ok(TransportReport::Steady);
-            }
-        };
-
-        // Detect external takeover: renderer's CurrentURI changed away from our opaque session URI
-        if !probe.current_uri.is_empty() && probe.current_uri != session.stream_url {
-            self.media_server.stop_active_session();
-            let _ = self
-                .inner
-                .on_renderer_event(RendererEvent::ExternalTakeover(token));
-            return Ok(TransportReport::ExternalTakeover);
-        }
-
-        match probe.transport_state.as_str() {
-            "PLAYING" => {
-                let changed = self
-                    .inner
-                    .on_renderer_event(RendererEvent::Started(token))
-                    .unwrap_or(false);
-                if changed {
-                    Ok(TransportReport::StartedPlaying)
-                } else {
-                    Ok(TransportReport::Steady)
-                }
-            }
-            "STOPPED" => {
-                // CRITICAL: HTTP EOF alone does not establish completion, and STOPPED before
-                // audio tail delivery does not complete. Require both audio delivery to reach
-                // `audio_payload_end` AND renderer `STOPPED` on the matching session URI.
-                let streamed = session.has_streamed_audio.load(Ordering::Acquire);
-                let end_offset = session.last_audio_end_offset.load(Ordering::Acquire);
-                if streamed && end_offset >= session.audio_payload_end {
-                    let advanced = self
-                        .inner
-                        .on_renderer_event(RendererEvent::Completed(token))
-                        .unwrap_or(false);
-                    if advanced {
-                        return Ok(TransportReport::CompletedAndAdvanced);
-                    }
-                }
-                Ok(TransportReport::Steady)
-            }
-            _ => Ok(TransportReport::Steady),
-        }
+        let probe_result = query_renderer_state(&self.device.control_url);
+        let paused_flag = self.media_server.paused_flag_arc();
+        Ok(apply_reconcile_probe_to_runtime(
+            &mut self.inner,
+            &self.media_server.active_session,
+            &paused_flag,
+            &self.shared_buffers,
+            active.as_ref(),
+            probe_result,
+            &mut self.consecutive_failures,
+        ))
     }
 
     /// Inspects the renderer state after a Core restart without seizing the renderer or
@@ -2034,6 +2111,167 @@ impl<P: PlatformProbe, L: MemoryLocker> UpnpSessionRuntime<P, L> {
             map.clear();
         }
         self.inner.shutdown()
+    }
+}
+
+pub(crate) fn parse_rel_time_seconds(rel_time: &str) -> Option<f64> {
+    let trimmed = rel_time.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NOT_IMPLEMENTED") {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    let secs = match parts.len() {
+        3 => {
+            let h: f64 = parts[0].parse().ok()?;
+            let m: f64 = parts[1].parse().ok()?;
+            let s: f64 = parts[2].parse().ok()?;
+            h * 3600.0 + m * 60.0 + s
+        }
+        2 => {
+            let m: f64 = parts[0].parse().ok()?;
+            let s: f64 = parts[1].parse().ok()?;
+            m * 60.0 + s
+        }
+        1 => parts[0].parse::<f64>().ok()?,
+        _ => return None,
+    };
+    if secs.is_finite() && secs >= 0.0 {
+        Some(secs)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn apply_reconcile_probe_to_runtime<R: Renderer, P: PlatformProbe, L: MemoryLocker>(
+    rt: &mut HeadlessCoreRuntime<R, P, L>,
+    active_session_ref: &Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
+    paused_flag: &Arc<AtomicBool>,
+    shared_buffers: &Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    active_session: Option<&Arc<ActiveMediaSession>>,
+    probe_result: Result<RestartProbeSnapshot, String>,
+    consecutive_failures: &mut u32,
+) -> TransportReport {
+    let Some(session) = active_session else {
+        *consecutive_failures = 0;
+        if let Ok(probe) = probe_result {
+            let ext_active = !probe.current_uri.is_empty()
+                && matches!(
+                    probe.transport_state.as_str(),
+                    "PLAYING" | "PAUSED_PLAYBACK" | "TRANSITIONING"
+                );
+            if ext_active {
+                let _ = rt.sync_external_renderer(Some(ExternalPlaybackInfo {
+                    active: true,
+                    transport_state: probe.transport_state,
+                    current_uri: Some(probe.current_uri),
+                    position_seconds: parse_rel_time_seconds(&probe.rel_time),
+                }));
+                return TransportReport::ExternalActive;
+            } else {
+                let _ = rt.sync_external_renderer(None);
+            }
+        }
+        return TransportReport::NoActiveRun;
+    };
+
+    let Ok(token) = session.run_token.lock().map(|g| g.clone()) else {
+        return TransportReport::Steady;
+    };
+
+    let probe = match probe_result {
+        Ok(p) => {
+            *consecutive_failures = 0;
+            p
+        }
+        Err(_) => {
+            *consecutive_failures = consecutive_failures.saturating_add(1);
+            if *consecutive_failures >= 3 {
+                if let Ok(mut guard) = active_session_ref.lock() {
+                    if let Some(prev) = guard.take() {
+                        prev.cancelled.store(true, Ordering::Release);
+                    }
+                }
+                paused_flag.store(false, Ordering::Release);
+                let _ = rt.on_renderer_event(RendererEvent::Failed(token));
+                return TransportReport::RendererFailed;
+            }
+            return TransportReport::Steady;
+        }
+    };
+
+    // Detect external takeover: renderer's CurrentURI changed away from our opaque session URI.
+    if !probe.current_uri.is_empty() && probe.current_uri != session.stream_url {
+        if let Ok(mut guard) = active_session_ref.lock() {
+            if let Some(prev) = guard.take() {
+                prev.cancelled.store(true, Ordering::Release);
+            }
+        }
+        paused_flag.store(false, Ordering::Release);
+        let pos = parse_rel_time_seconds(&probe.rel_time);
+        let _ = rt.on_renderer_external_takeover_at(
+            token,
+            probe.transport_state,
+            Some(probe.current_uri),
+            pos,
+            Instant::now(),
+        );
+        return TransportReport::ExternalTakeover;
+    }
+
+    let pos = parse_rel_time_seconds(&probe.rel_time);
+    match probe.transport_state.as_str() {
+        "PLAYING" => {
+            paused_flag.store(false, Ordering::Release);
+            let effective_pos = session.effective_playing_position(pos);
+            let changed = rt
+                .sync_active_playback(&token, "PLAYING", Some(effective_pos))
+                .unwrap_or(false);
+            if changed {
+                TransportReport::StartedPlaying
+            } else {
+                TransportReport::Steady
+            }
+        }
+        "PAUSED_PLAYBACK" => {
+            paused_flag.store(true, Ordering::Release);
+            let effective_pos = session.mark_paused(pos);
+            let changed = rt
+                .sync_active_playback(&token, "PAUSED_PLAYBACK", Some(effective_pos))
+                .unwrap_or(false);
+            if changed {
+                TransportReport::Paused
+            } else {
+                TransportReport::Steady
+            }
+        }
+        "STOPPED" => {
+            let streamed = session.has_streamed_audio.load(Ordering::Acquire);
+            let end_offset = session.last_audio_end_offset.load(Ordering::Acquire);
+            if streamed && end_offset >= session.audio_payload_end {
+                if let Some(next_id) = rt.peek_next_queue_track_id() {
+                    let mut keep = HashSet::new();
+                    keep.insert(next_id.clone());
+                    if let Ok(admitted) =
+                        rt.admit_tracks_for_explicit_user_play(&[next_id], &keep)
+                    {
+                        if let Ok(mut guard) = shared_buffers.lock() {
+                            guard.retain(|id, _| keep.contains(id));
+                            for (id, buf) in admitted {
+                                guard.insert(id, buf);
+                            }
+                        }
+                    }
+                }
+                let advanced = rt
+                    .on_renderer_event(RendererEvent::Completed(token))
+                    .unwrap_or(false);
+                if advanced {
+                    return TransportReport::CompletedAndAdvanced;
+                }
+            }
+            TransportReport::Steady
+        }
+        _ => TransportReport::Steady,
     }
 }
 
@@ -2150,16 +2388,21 @@ fn send_set_avtransport_uri_and_play(
     meta: &TrackMediaMeta,
 ) -> Result<(), String> {
     let mime = content_type_for_ext(&meta.extension);
+    let duration_attr = if meta.duration_secs > 0.5 {
+        format!(" duration=\"{}\"", format_rel_time(meta.duration_secs))
+    } else {
+        String::new()
+    };
     let res_elements = if meta.extension == "dsf" || meta.extension == "dff" {
         format!(
-            "&lt;res protocolInfo=\"http-get:*:audio/x-dsd:*\"&gt;{}&lt;/res&gt;\
-             &lt;res protocolInfo=\"http-get:*:audio/dsf:*\"&gt;{}&lt;/res&gt;",
-            stream_url, stream_url
+            "&lt;res protocolInfo=\"http-get:*:audio/x-dsd:*\"{}&gt;{}&lt;/res&gt;\
+             &lt;res protocolInfo=\"http-get:*:audio/dsf:*\"{}&gt;{}&lt;/res&gt;",
+            duration_attr, stream_url, duration_attr, stream_url
         )
     } else {
         format!(
-            "&lt;res protocolInfo=\"http-get:*:{}:*\"&gt;{}&lt;/res&gt;",
-            mime, stream_url
+            "&lt;res protocolInfo=\"http-get:*:{}:*\"{}&gt;{}&lt;/res&gt;",
+            mime, duration_attr, stream_url
         )
     };
 
@@ -2217,11 +2460,17 @@ fn send_simple_avtransport_action(
 
 pub(crate) fn query_renderer_state(control_url: &str) -> Result<RestartProbeSnapshot, String> {
     let transport_xml = send_simple_avtransport_action(control_url, "GetTransportInfo", "")?;
-    let pos_xml = send_simple_avtransport_action(control_url, "GetPositionInfo", "")?;
+    let pos_xml = send_simple_avtransport_action(control_url, "GetPositionInfo", "").ok();
     let transport_state =
         extract_xml_tag(&transport_xml, "CurrentTransportState").unwrap_or_else(|| "UNKNOWN".into());
-    let current_uri = extract_xml_tag(&pos_xml, "TrackURI").unwrap_or_default();
-    let rel_time = extract_xml_tag(&pos_xml, "RelTime").unwrap_or_else(|| "00:00:00".into());
+    let current_uri = pos_xml
+        .as_deref()
+        .and_then(|xml| extract_xml_tag(xml, "TrackURI"))
+        .unwrap_or_default();
+    let rel_time = pos_xml
+        .as_deref()
+        .and_then(|xml| extract_xml_tag(xml, "RelTime"))
+        .unwrap_or_else(|| "00:00:00".into());
     Ok(RestartProbeSnapshot {
         transport_state,
         current_uri,
@@ -2290,11 +2539,39 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
 }
 
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    Some(xml[start..end].trim().to_string())
+    let mut cursor = 0usize;
+    while let Some(rel_lt) = xml[cursor..].find('<') {
+        let lt_idx = cursor + rel_lt;
+        let rest = &xml[lt_idx + 1..];
+        if rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('!') {
+            cursor = lt_idx + 1;
+            continue;
+        }
+        let Some(rel_gt) = rest.find('>') else {
+            break;
+        };
+        let tag_header = &rest[..rel_gt];
+        let raw_name = tag_header.split_whitespace().next().unwrap_or("").trim_end_matches('/');
+        let local_name = raw_name.rsplit(':').next().unwrap_or(raw_name);
+        if local_name.eq_ignore_ascii_case(tag) && !tag_header.trim_end().ends_with('/') {
+            let content_start = lt_idx + 1 + rel_gt + 1;
+            let mut close_cursor = content_start;
+            while let Some(rel_close) = xml[close_cursor..].find("</") {
+                let close_start = close_cursor + rel_close;
+                let close_rest = &xml[close_start + 2..];
+                if let Some(close_gt) = close_rest.find('>') {
+                    let close_raw = close_rest[..close_gt].trim();
+                    let close_local = close_raw.rsplit(':').next().unwrap_or(close_raw);
+                    if close_local.eq_ignore_ascii_case(tag) {
+                        return Some(xml[content_start..close_start].trim().to_string());
+                    }
+                }
+                close_cursor = close_start + 2;
+            }
+        }
+        cursor = lt_idx + 1 + rel_gt + 1;
+    }
+    None
 }
 
 fn extract_avtransport_control_url(xml: &str) -> Option<String> {
@@ -2302,4 +2579,37 @@ fn extract_avtransport_control_url(xml: &str) -> Option<String> {
     let section = &xml[pos..];
     let end_service = section.find("</service>")?;
     extract_xml_tag(&section[..end_service], "controlURL")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_xml_tag_handles_attributes_and_namespaces() {
+        let bare = "<RelTime>00:01:23</RelTime>";
+        assert_eq!(extract_xml_tag(bare, "RelTime").as_deref(), Some("00:01:23"));
+
+        let namespaced = "<u:RelTime xmlns:u=\"urn:rose\">00:02:15</u:RelTime>";
+        assert_eq!(extract_xml_tag(namespaced, "RelTime").as_deref(), Some("00:02:15"));
+    }
+
+    #[test]
+    fn active_media_session_clock_advances_when_rel_time_is_zero_and_latches_on_pause() {
+        let mut clock = PlaybackClockState::new(220.0);
+        clock.playing_since = Some(Instant::now() - Duration::from_secs(3));
+
+        let elapsed = clock.effective_playing_position(Some(0.0));
+        assert!(elapsed >= 2.9 && elapsed < 10.0, "expected >=3s monotonic fallback, got {}", elapsed);
+
+        let paused = clock.mark_paused(Some(0.0));
+        assert!(paused >= 2.9, "pause must preserve accumulated clock instead of resetting to 0");
+
+        let hw_pos = clock.effective_playing_position(Some(42.0));
+        assert!((hw_pos - 42.0).abs() < 0.01, "non-zero RelTime must re-anchor clock");
+
+        clock.mark_seek(120.0, false);
+        let after_seek = clock.effective_playing_position(Some(42.0));
+        assert!(after_seek >= 119.9 && after_seek <= 122.0, "seek must reject stale pre-seek RelTime");
+    }
 }

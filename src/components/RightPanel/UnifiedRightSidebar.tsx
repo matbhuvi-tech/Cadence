@@ -17,7 +17,9 @@ import {
   Music2,
 } from 'lucide-react'
 import { Track, Playlist, Release } from '../../core/types'
-import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
+import { useAudioProgress } from '../../context/AudioPlayerContext'
+import { useEffectiveQueueControl } from '../../context/EngineControllerContext'
+import { useCorePlaybackClock } from '../../hooks/useCorePlaybackClock'
 import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 
 interface UnifiedRightSidebarProps {
@@ -45,24 +47,48 @@ const formatTotalDuration = (seconds: number) => {
   return `${mins}m`
 }
 
-const SidebarTrackDuration: React.FC<{ fallbackDuration: number }> = React.memo(({ fallbackDuration }) => {
+const SidebarTrackDuration: React.FC<{
+  fallbackDuration: number
+  isCoreActive?: boolean
+}> = React.memo(({ fallbackDuration, isCoreActive }) => {
   const { duration } = useAudioProgress()
-  return <span>{formatClockTime(duration || fallbackDuration)}</span>
+  const effectiveDuration = isCoreActive ? fallbackDuration : duration || fallbackDuration
+  return <span>{formatClockTime(effectiveDuration)}</span>
 })
 
 const SidebarScrubber: React.FC<{
   fallbackDuration: number
+  corePositionSeconds?: number | null
+  coreIsPlaying?: boolean
+  coreConnected?: boolean
+  coreTrackKey?: string | null
   onSeek: (seconds: number) => void
-}> = React.memo(({ fallbackDuration, onSeek }) => {
+}> = React.memo(({
+  fallbackDuration,
+  corePositionSeconds = null,
+  coreIsPlaying = false,
+  coreConnected = true,
+  coreTrackKey = null,
+  onSeek,
+}) => {
   const { currentTime, duration } = useAudioProgress()
-  const effectiveDuration = duration > 0 ? duration : fallbackDuration
+  const coreClockSeconds = useCorePlaybackClock({
+    corePositionSeconds,
+    isPlaying: coreIsPlaying,
+    isConnected: coreConnected,
+    durationSeconds: fallbackDuration,
+    trackKey: coreTrackKey,
+  })
+  const effectiveCurrent = corePositionSeconds !== null ? coreClockSeconds : currentTime
+  const effectiveDuration =
+    corePositionSeconds !== null ? fallbackDuration : duration > 0 ? duration : fallbackDuration
   const progressFraction =
-    effectiveDuration > 0 ? Math.max(0, Math.min(1, currentTime / effectiveDuration)) : 0
+    effectiveDuration > 0 ? Math.max(0, Math.min(1, effectiveCurrent / effectiveDuration)) : 0
 
   return (
     <div className="flex items-center gap-2 mt-3 pt-2 border-t border-white/5">
       <span className="text-[10px] text-neutral-400 font-mono w-7 text-left select-none">
-        {formatClockTime(currentTime)}
+        {formatClockTime(effectiveCurrent)}
       </span>
       <div
         onClick={(e) => {
@@ -90,9 +116,30 @@ const SidebarScrubber: React.FC<{
 const SidebarRemainingTime: React.FC<{
   fallbackDuration: number
   totalUpcomingSecs: number
-}> = React.memo(({ fallbackDuration, totalUpcomingSecs }) => {
+  corePositionSeconds?: number | null
+  coreIsPlaying?: boolean
+  coreConnected?: boolean
+  coreTrackKey?: string | null
+}> = React.memo(({
+  fallbackDuration,
+  totalUpcomingSecs,
+  corePositionSeconds = null,
+  coreIsPlaying = false,
+  coreConnected = true,
+  coreTrackKey = null,
+}) => {
   const { currentTime, duration } = useAudioProgress()
-  const currentRemaining = Math.max(0, (duration || fallbackDuration) - currentTime)
+  const coreClockSeconds = useCorePlaybackClock({
+    corePositionSeconds,
+    isPlaying: coreIsPlaying,
+    isConnected: coreConnected,
+    durationSeconds: fallbackDuration,
+    trackKey: coreTrackKey,
+  })
+  const effectiveCurrent = corePositionSeconds !== null ? coreClockSeconds : currentTime
+  const effectiveDuration =
+    corePositionSeconds !== null ? fallbackDuration : duration || fallbackDuration
+  const currentRemaining = Math.max(0, effectiveDuration - effectiveCurrent)
   return (
     <span className="text-[10px] text-neutral-400 font-mono">
       {formatTotalDuration(currentRemaining + totalUpcomingSecs)} remaining
@@ -120,13 +167,17 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
     toggleShuffle,
     upcomingTracks,
     playTrack,
+    playUpcomingAtIndex,
     addToQueue,
     removeFromQueue,
     reorderQueue,
     clearQueue,
     rightSidebarTab,
     setRightSidebarTab,
-  } = useAudioPlayer()
+    isCoreActive,
+    coreConnected,
+    corePositionSeconds,
+  } = useEffectiveQueueControl()
 
   const [playlists, setPlaylists] = useState<Playlist[]>([])
   const [isLoadingPlaylists, setIsLoadingPlaylists] = useState(false)
@@ -481,6 +532,10 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                 {/* Scrubber / Progress Bar */}
                 <SidebarScrubber
                   fallbackDuration={currentTrack.durationSeconds || 0}
+                  corePositionSeconds={corePositionSeconds}
+                  coreIsPlaying={isPlaying}
+                  coreConnected={isCoreActive ? coreConnected : true}
+                  coreTrackKey={currentTrack.id}
                   onSeek={seek}
                 />
               </div>
@@ -508,6 +563,10 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                   <SidebarRemainingTime
                     fallbackDuration={currentTrack?.durationSeconds || 0}
                     totalUpcomingSecs={totalUpcomingSecs}
+                    corePositionSeconds={corePositionSeconds}
+                    coreIsPlaying={isPlaying}
+                    coreConnected={isCoreActive ? coreConnected : true}
+                    coreTrackKey={currentTrack?.id ?? null}
                   />
                 )}
 
@@ -676,7 +735,11 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                               <button
                                 type="button"
                                 onClick={() => {
-                                  playTrack(trk, queue)
+                                  if (isCoreActive) {
+                                    playUpcomingAtIndex(idx)
+                                  } else {
+                                    playTrack(trk, queue)
+                                  }
                                   setActiveMenuIndex(null)
                                 }}
                                 className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-neutral-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"

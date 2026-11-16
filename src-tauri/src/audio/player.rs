@@ -2614,6 +2614,38 @@ impl AudioEngine {
 
         let is_dsd = extension == "DSF" || extension == "DFF";
 
+        if is_dsd {
+            if let Some(dsd) = crate::scanner::dsd::probe_dsd_file(path) {
+                let tag = dsd.tag.as_ref();
+                let sample_rate = dsd.sample_rate;
+                let bit_depth = dsd.bit_depth.or(Some(1));
+                let title = tag
+                    .and_then(|t| t.title().map(|s| s.to_string()))
+                    .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()));
+                let artist = tag.and_then(|t| t.artist().map(|s| s.to_string()));
+                let album = tag
+                    .and_then(|t| t.album().map(|s| s.to_string()))
+                    .or_else(|| {
+                        path.parent()
+                            .and_then(|p| p.file_name())
+                            .map(|s| s.to_string_lossy().to_string())
+                    });
+
+                return Ok(AudioStreamInfo {
+                    file_path: path.to_string_lossy().to_string(),
+                    title,
+                    artist,
+                    album,
+                    duration_secs: dsd.duration_secs,
+                    sample_rate,
+                    bit_depth,
+                    channels: dsd.channels,
+                    format: extension,
+                    is_high_res: true,
+                });
+            }
+        }
+
         // Attempt reading via Lofty
         let probe_res = Probe::open(path)
             .ok()

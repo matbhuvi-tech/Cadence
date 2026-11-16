@@ -160,7 +160,8 @@ export const PairingView: React.FC<PairingViewProps> = ({
         candidate.token,
         candidate.certFingerprint,
         Boolean(candidate.trustInsecure),
-        4000
+        4000,
+        candidate.engineKind
       );
 
       if (!probe.reachable || !probe.authenticated) {
@@ -170,20 +171,26 @@ export const PairingView: React.FC<PairingViewProps> = ({
 
       if (candidate.engineKind === 'core') {
         try {
-          const client = createPwaCoreClient({
+          const seededCandidate: ServerProfile = {
             ...candidate,
+            engineId: candidate.engineId || probe.engineId,
+            libraryId: candidate.libraryId || probe.libraryId,
+            label:
+              candidate.label && candidate.label !== 'Cadence Core'
+                ? candidate.label
+                : probe.label || candidate.label,
             certFingerprint: probe.certFingerprint || candidate.certFingerprint,
-          });
+          };
+          const client = createPwaCoreClient(seededCandidate);
           const prepared = await client.prepare();
           const finalizedCore: ServerProfile = {
-            ...candidate,
+            ...seededCandidate,
             engineKind: 'core',
-            label: prepared.descriptor.label || candidate.label,
+            label: prepared.descriptor.label || seededCandidate.label,
             engineId: prepared.descriptor.engineId,
             libraryId: prepared.descriptor.libraryId,
             outputLabel: prepared.snapshot.output?.label,
             capabilities: prepared.descriptor.capabilities,
-            certFingerprint: probe.certFingerprint || candidate.certFingerprint,
             lastConnectedAt: Date.now(),
           };
           completeSelectionWithLeaveGuard(finalizedCore);

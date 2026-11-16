@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Disc } from 'lucide-react'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 
 export interface CurateArtworkThumbnailProps {
   src?: string | null
@@ -37,7 +38,8 @@ export function CurateArtworkThumbnail({
     setHasError(false)
   }
 
-  const effectiveSrc = typeof src === 'string' && src.trim().length > 0 ? src.trim() : null
+  const rawSrc = typeof src === 'string' && src.trim().length > 0 ? src.trim() : null
+  const effectiveSrc = rawSrc ? resolveMediaUrl(rawSrc) : null
   const isImageAvailable = Boolean(effectiveSrc && !hasError)
 
   const handleImageError = () => {

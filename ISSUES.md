@@ -18,3 +18,5 @@
 - [#37](https://github.com/matbhuvi-tech/Cadence/issues/37): Snapshot import fails with `no such column: id` on legacy `playlist_tracks` schema.
 - [#38](https://github.com/matbhuvi-tech/Cadence/issues/38): Core mode displays all remote tracks as `FLAC Core Stream` with sequential index numbers.
 - [#39](https://github.com/matbhuvi-tech/Cadence/issues/39): Clicking Play on TrueNAS Core multi-track album immediately triggers `Connection lost`.
+- [#40](https://github.com/matbhuvi-tech/Cadence/issues/40): Core mode playback timer stays stuck at `00:00` while audio plays on RS130 (and Mobile Remote lacks passive Core sync).
+- [#41](https://github.com/matbhuvi-tech/Cadence/issues/41): DSD (`.dsf`/`.dff`) albums missing ID3v2 metadata in catalogue and fail Symphonia fingerprinting.

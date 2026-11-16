@@ -15,7 +15,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react'
-import { convertFileSrc } from '@tauri-apps/api/core'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 import {
   ArtistSummary,
   ArtistDetail,
@@ -70,17 +70,7 @@ interface ArtistsViewProps {
 type RoleFilter = 'all' | 'composer' | 'performer'
 type SortBy = 'albums_desc' | 'tracks_desc' | 'name_asc'
 
-function resolvePortraitUrl(url?: string): string {
-  if (!url) return ''
-  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) {
-    return url
-  }
-  try {
-    return convertFileSrc(url)
-  } catch {
-    return url
-  }
-}
+const resolvePortraitUrl = resolveMediaUrl
 
 export const ArtistsView: React.FC<ArtistsViewProps> = ({
   releases,
@@ -628,7 +618,7 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
           <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-5 mb-12">
             {filteredDiscography.map((rel) => {
               const coverArt =
-                rel.artwork?.frontCoverUrl ||
+                resolveMediaUrl(rel.artwork?.frontCoverUrl) ||
                 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" fill="%23222"><rect width="200" height="200"/></svg>'
 
               return (

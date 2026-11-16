@@ -32,16 +32,16 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::upnp_session::{
-    discover_rs130_device, inspect_rs130_description, load_track_media_meta, query_renderer_state,
-    validate_advertised_lan_ip, ActiveMediaSession, CoreMediaServer, Rs130DeviceDescriptor,
-    TrackMediaMeta, UpnpBridgeRenderer,
+    apply_reconcile_probe_to_runtime, discover_rs130_device, inspect_rs130_description,
+    load_track_media_meta, query_renderer_state, validate_advertised_lan_ip, ActiveMediaSession,
+    CoreMediaServer, Rs130DeviceDescriptor, TrackMediaMeta, UpnpBridgeRenderer,
 };
 use super::{
     HeadlessConfig, HeadlessCoreRuntime, MemoryLocker, PlatformProbe, RuntimeError,
     SystemMemoryLocker, SystemPlatformProbe, DEFAULT_CONTAINER_HEADROOM_BYTES,
 };
 use crate::core_session::{
-    Output, Renderer, RendererAction, RendererError, RendererEvent, MAX_MESSAGE_BYTES,
+    Output, Renderer, RendererAction, RendererError, MAX_MESSAGE_BYTES,
 };
 
 /// Default HTTPS/WSS controller port for TrueNAS Dragonfish deployments.
@@ -228,7 +228,13 @@ struct DragonfishRenderer {
 
 impl DragonfishRenderer {
     fn resolve_device_if_needed(&mut self) {
-        if self.bridge.is_some() || self.allow_loopback_for_tests {
+        if self.bridge.is_some() {
+            return;
+        }
+        let has_explicit_desc = std::env::var("CADENCE_RS130_DESC_URL")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty());
+        if self.allow_loopback_for_tests && !has_explicit_desc {
             return;
         }
         let desc = resolve_rs130_target(self.pinned_rs130_udn.as_deref(), self.allow_loopback_for_tests);
@@ -286,9 +292,6 @@ fn resolve_rs130_target(
     pinned_udn: Option<&str>,
     allow_loopback_for_tests: bool,
 ) -> Option<Rs130DeviceDescriptor> {
-    if allow_loopback_for_tests {
-        return None;
-    }
     if let Ok(url) = std::env::var("CADENCE_RS130_DESC_URL") {
         let trimmed = url.trim();
         if !trimmed.is_empty() {
@@ -296,6 +299,9 @@ fn resolve_rs130_target(
                 return Some(desc);
             }
         }
+    }
+    if allow_loopback_for_tests {
+        return None;
     }
     discover_rs130_device(pinned_udn, allow_loopback_for_tests)
 }
@@ -556,17 +562,28 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             })
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
 
-        let reconcile_join = if !config.allow_loopback_for_tests {
+        let has_explicit_desc = std::env::var("CADENCE_RS130_DESC_URL")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty());
+        let reconcile_join = if !config.allow_loopback_for_tests || has_explicit_desc {
             let rt_rec = Arc::clone(&runtime);
             let stop_rec = Arc::clone(&stop_control);
             let session_rec = Arc::clone(&active_session);
+            let paused_rec = Arc::clone(&paused_flag);
             let ctrl_url_rec = Arc::clone(&discovered_control_url);
             let buffers_rec = Arc::clone(&shared_buffers);
             Some(
                 std::thread::Builder::new()
                     .name("cadence-dragonfish-reconcile".into())
                     .spawn(move || {
-                        run_reconcile_loop(rt_rec, stop_rec, session_rec, ctrl_url_rec, buffers_rec);
+                        run_reconcile_loop(
+                            rt_rec,
+                            stop_rec,
+                            session_rec,
+                            paused_rec,
+                            ctrl_url_rec,
+                            buffers_rec,
+                        );
                     })
                     .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?,
             )
@@ -1137,7 +1154,7 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                 let path = parts.next().unwrap_or("");
 
                 if method == "OPTIONS" {
-                    let header = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let header = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-cadence-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(header.as_bytes());
                     let _ = stream.flush();
                 } else if method == "GET" && (path == "/healthz" || path == "/readyz") {
@@ -1167,7 +1184,9 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                     };
                     let resp_val = match runtime.lock() {
                         Ok(mut rt) => {
-                            if let Err(err_val) =
+                            if rt.is_external_playback_blocking_play(body_bytes) {
+                                rt.request(body_bytes)
+                            } else if let Err(err_val) =
                                 admit_requested_tracks_for_v1_command(&mut rt, &shared_buffers, body_bytes)
                             {
                                 err_val
@@ -1301,92 +1320,46 @@ fn run_reconcile_loop<P: PlatformProbe, L: MemoryLocker>(
     runtime: Arc<Mutex<HeadlessCoreRuntime<DragonfishRenderer, P, L>>>,
     stop_flag: Arc<AtomicBool>,
     active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
+    paused_flag: Arc<AtomicBool>,
     control_url_ref: Arc<Mutex<Option<String>>>,
     shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
 ) {
     let mut consecutive_failures: u32 = 0;
     while !stop_flag.load(Ordering::Acquire) {
         let session = active_session.lock().ok().and_then(|g| g.clone());
-        let Some(session) = session else {
-            consecutive_failures = 0;
-            std::thread::sleep(Duration::from_millis(400));
-            continue;
-        };
-
         let control_url = control_url_ref.lock().ok().and_then(|g| g.clone());
         let Some(control_url) = control_url else {
-            std::thread::sleep(Duration::from_millis(500));
+            consecutive_failures = 0;
+            std::thread::sleep(Duration::from_millis(5000));
             continue;
         };
 
-        let Ok(token) = session.run_token.lock().map(|g| g.clone()) else {
-            std::thread::sleep(Duration::from_millis(400));
-            continue;
-        };
-
-        match query_renderer_state(&control_url) {
-            Ok(probe) => {
-                consecutive_failures = 0;
-                if !probe.current_uri.is_empty() && probe.current_uri != session.stream_url {
-                    if let Ok(mut guard) = active_session.lock() {
-                        if let Some(prev) = guard.take() {
-                            prev.cancelled.store(true, Ordering::Release);
-                        }
-                    }
-                    if let Ok(mut rt) = runtime.lock() {
-                        let _ = rt.on_renderer_event(RendererEvent::ExternalTakeover(token));
-                    }
-                } else if probe.transport_state == "PLAYING" {
-                    if let Ok(mut rt) = runtime.lock() {
-                        let _ = rt.on_renderer_event(RendererEvent::Started(token));
-                    }
-                } else if probe.transport_state == "STOPPED" {
-                    let streamed = session.has_streamed_audio.load(Ordering::Acquire);
-                    let end_offset = session.last_audio_end_offset.load(Ordering::Acquire);
-                    if streamed && end_offset >= session.audio_payload_end {
-                        if let Ok(mut rt) = runtime.lock() {
-                            if let Some(next_id) = rt.peek_next_queue_track_id() {
-                                let mut keep = HashSet::new();
-                                keep.insert(next_id.clone());
-                                if let Ok(admitted) =
-                                    rt.admit_tracks_for_explicit_user_play(&[next_id], &keep)
-                                {
-                                    if let Ok(mut guard) = shared_buffers.lock() {
-                                        guard.retain(|id, _| keep.contains(id));
-                                        for (id, buf) in admitted {
-                                            guard.insert(id, buf);
-                                        }
-                                    }
-                                }
-                            }
-                            let _ = rt.on_renderer_event(RendererEvent::Completed(token));
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                consecutive_failures = consecutive_failures.saturating_add(1);
-                if consecutive_failures >= 3 {
-                    if let Ok(mut guard) = active_session.lock() {
-                        if let Some(prev) = guard.take() {
-                            prev.cancelled.store(true, Ordering::Release);
-                        }
-                    }
-                    if let Ok(mut rt) = runtime.lock() {
-                        let _ = rt.on_renderer_event(RendererEvent::Failed(token));
-                    }
-                }
-            }
+        let probe_result = query_renderer_state(&control_url);
+        let is_active = session.is_some();
+        if let Ok(mut rt) = runtime.lock() {
+            let _ = apply_reconcile_probe_to_runtime(
+                &mut rt,
+                &active_session,
+                &paused_flag,
+                &shared_buffers,
+                session.as_ref(),
+                probe_result,
+                &mut consecutive_failures,
+            );
         }
 
-        std::thread::sleep(Duration::from_millis(800));
+        let sleep_ms = if is_active { 800 } else { 5000 };
+        let deadline = std::time::Instant::now() + Duration::from_millis(sleep_ms);
+        while !stop_flag.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 }
 
 fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, body: &Value) {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
     let header = format!(
-        "HTTP/1.1 {} {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-cadence-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status,
         reason,
         bytes.len()

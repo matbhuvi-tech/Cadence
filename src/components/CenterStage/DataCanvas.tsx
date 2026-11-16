@@ -17,6 +17,7 @@ import {
   FolderPlus,
   Filter,
   Heart,
+  Server,
 } from 'lucide-react'
 import { Work, Track, Release, AlbumDisplayMode, AuditIssue, CanvasViewMode } from '../../core/types'
 import { AlbumCoverGrid, EntityTab, SortBy, CardSize } from './AlbumCoverGrid'
@@ -29,7 +30,7 @@ import { VirtualDataTable } from './VirtualDataTable'
 import { SpreadsheetMultiEdit } from './SpreadsheetMultiEdit'
 import { FolderTreeExplorer } from './FolderTreeExplorer'
 import { FacetSelections } from '../LeftRail/FacetedFilters'
-import { splitMultiArtistCredits, detectLanguage } from '../../core/taxonomyUtils'
+import { splitMultiArtistCredits, detectLanguage, extractAlbumComposers } from '../../core/taxonomyUtils'
 import { groupAlbumReleases } from '../../services/albumGroupingService'
 import { sqliteLibraryService } from '../../services/sqliteLibraryService'
 
@@ -78,6 +79,10 @@ interface DataCanvasProps {
   onOpenBatchDiff?: () => void
   onOpenBatchAi?: () => void
   totalLibraryTracksCount?: number
+  totalLibraryReleasesCount?: number
+  activeEngineLabel?: string
+  isCoreEngineActive?: boolean
+  onSwitchToLocalEngine?: () => void
   onResetFilters?: () => void
 
   activeTriageIssue?: AuditIssue
@@ -126,6 +131,10 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   onOpenBatchDiff,
   onOpenBatchAi,
   totalLibraryTracksCount = 0,
+  totalLibraryReleasesCount,
+  activeEngineLabel = 'This PC',
+  isCoreEngineActive = false,
+  onSwitchToLocalEngine,
   onResetFilters,
   activeTriageIssue,
   onClearTriageFilter,
@@ -167,11 +176,24 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
   }, [releases, tracks, splitReleaseIds])
 
   const composerCount = useMemo(() => {
-    const set = new Set<string>()
-    releases.forEach((r) => r.composerName && set.add(r.composerName.trim().toLowerCase()))
-    tracks.forEach((t) => t.composerName && set.add(t.composerName.trim().toLowerCase()))
-    return set.size
-  }, [releases, tracks])
+    const grouped = groupAlbumReleases(releases, splitReleaseIds)
+    const tracksByRelease = new Map<string, Track[]>()
+    tracks.forEach((t) => {
+      const list = tracksByRelease.get(t.releaseId) || []
+      list.push(t)
+      tracksByRelease.set(t.releaseId, list)
+    })
+    const keys = new Set<string>()
+    grouped.forEach((card) => {
+      const cardTracks = card.constituentReleases.flatMap((r) => tracksByRelease.get(r.id) || [])
+      extractAlbumComposers({
+        composerName: card.masterRelease.composerName,
+        artistCredit: card.masterRelease.artistCredit,
+        tracks: cardTracks,
+      }).forEach((entry) => keys.add(entry.key))
+    })
+    return keys.size
+  }, [releases, tracks, splitReleaseIds])
 
   // Dynamically detect non-zero languages across the mount/folder catalog scope
   const availableLanguages = useMemo(() => {
@@ -654,6 +676,31 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
         </div>
       )}
 
+      {/* 2.5 Active Core Catalog Banner (always visible when browsing a remote Core instead of This PC) */}
+      {isCoreEngineActive && (
+        <div
+          data-testid="active-core-catalog-banner"
+          className="px-6 py-2 bg-[#D4AF37]/10 border-b border-[#D4AF37]/25 flex items-center justify-between gap-4 text-xs shrink-0"
+        >
+          <div className="flex items-center gap-2 min-w-0 text-amber-100/90">
+            <Server className="w-3.5 h-3.5 text-[#D4AF37] shrink-0" />
+            <span className="truncate">
+              Browsing <strong className="text-white">{activeEngineLabel}</strong> ({totalLibraryTracksCount.toLocaleString()} tracks &bull; {totalLibraryReleasesCount ?? releases.length} albums) &mdash; folders added on <strong className="text-white">This PC</strong> do not sync automatically to the Core host.
+            </span>
+          </div>
+          {onSwitchToLocalEngine && (
+            <button
+              type="button"
+              data-testid="btn-switch-to-this-pc"
+              onClick={onSwitchToLocalEngine}
+              className="px-3 py-1 rounded-lg bg-[#D4AF37]/20 hover:bg-[#D4AF37]/30 border border-[#D4AF37]/40 text-white text-[11px] font-semibold shrink-0 cursor-pointer transition-colors"
+            >
+              Switch to This PC
+            </button>
+          )}
+        </div>
+      )}
+
       {/* 3. Active Triage Anomaly Banner */}
       {activeTriageIssue && (
         <div
@@ -717,23 +764,39 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                   <h2 className="text-xl font-bold text-white tracking-tight mb-2">
                     No Tracks Match Current Filter
                   </h2>
-                  <p className="text-xs text-[#8E8E93] leading-relaxed max-w-md mb-8">
-                    Your collection contains {totalLibraryTracksCount} audio tracks across {releases.length} albums, but none match the currently active search query or taxonomy filter.
+                  <p className="text-xs text-[#8E8E93] leading-relaxed max-w-md mb-6">
+                    Your {isCoreEngineActive ? `${activeEngineLabel} ` : ''}collection contains {totalLibraryTracksCount} audio tracks across {totalLibraryReleasesCount ?? releases.length} albums, but none match the currently active search query or taxonomy filter.
                   </p>
 
-                  {onResetFilters && (
-                    <button
-                      onClick={() => {
-                        onResetFilters()
-                        onSearchChange('')
-                        if (onFacetChange) onFacetChange({})
-                      }}
-                      className="px-6 py-2.5 rounded-xl bg-white text-black font-semibold text-xs shadow-xl transition-all flex items-center justify-center gap-2 cursor-pointer hover:bg-white/90"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Clear All Filters</span>
-                    </button>
+                  {isCoreEngineActive && (
+                    <div className="mb-6 max-w-md w-full rounded-xl bg-amber-500/10 border border-amber-500/25 px-3.5 py-2.5 text-[11px] text-amber-200/90 leading-relaxed">
+                      Listen is browsing <span className="font-semibold text-white">{activeEngineLabel}</span>. Folders added via Storage Manager belong to <span className="font-semibold text-white">This PC</span>.
+                    </div>
                   )}
+
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    {onResetFilters && (
+                      <button
+                        onClick={() => {
+                          onResetFilters()
+                          onSearchChange('')
+                          if (onFacetChange) onFacetChange({})
+                        }}
+                        className="px-6 py-2.5 rounded-xl bg-white text-black font-semibold text-xs shadow-xl transition-all flex items-center justify-center gap-2 cursor-pointer hover:bg-white/90"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Clear All Filters</span>
+                      </button>
+                    )}
+                    {isCoreEngineActive && onSwitchToLocalEngine && (
+                      <button
+                        onClick={onSwitchToLocalEngine}
+                        className="px-5 py-2.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] border border-white/[0.12] text-white font-semibold text-xs transition-all cursor-pointer"
+                      >
+                        Switch to This PC
+                      </button>
+                    )}
+                  </div>
                 </>
               ) : (
                 <>

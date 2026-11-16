@@ -26,6 +26,7 @@
     "test:engine-session": "node --import tsx --test src/test/testEngineSession.ts",
     "test:core-services": "node --import tsx --test src/test/testCoreServices.ts",
     "test:core-session-protocol": "node --import tsx --test src/test/testCoreSessionProtocol.ts",
+    "test:core-e2e": "tsx scripts/qa/coreE2eGate.ts",
     "test:diagnostics": "tsx src/test/testDebugDiagnostics.ts",
     "test:settings": "tsx src/test/testCadenceSettingsModal.ts",
     "tauri": "tauri",

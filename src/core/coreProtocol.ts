@@ -22,6 +22,10 @@ export interface CoreCatalogTrack {
   artist: string
   album: string
   durationSeconds: number
+  releaseId?: string
+  albumArtist?: string
+  isCompilation?: boolean
+  edition?: string
   format?: string
   sampleRate?: number
   bitDepth?: number
@@ -38,6 +42,15 @@ export interface CoreCatalogPage {
 
 export interface CoreQueueEntry { entryId: string; trackId: string }
 
+export type PlaybackOwner = 'none' | 'core' | 'external'
+
+export interface ExternalPlaybackInfo {
+  active: boolean
+  transportState: string
+  currentUri?: string
+  positionSeconds?: number
+}
+
 export interface CoreSnapshot {
   engineId: string
   libraryId: string
@@ -45,14 +58,20 @@ export interface CoreSnapshot {
   /** Initial catalog page, not a claim that the full library fits in one response. */
   catalog: CoreCatalogPage
   queue: { entries: CoreQueueEntry[]; currentEntryId: string | null; repeat: 'off' | 'one' | 'all'; shuffle: boolean }
-  playback: { activity: EngineActivity; positionSeconds: number }
+  playback: {
+    activity: EngineActivity
+    positionSeconds: number
+    owner?: PlaybackOwner
+    takeoverRequired?: boolean
+    externalPlayback?: ExternalPlaybackInfo
+  }
   output: { id: string; label: string; transport: 'upnp' | 'wasapi' | 'system_default' } | null
 }
 
 type Mutation = { commandId: string; expectedRevision: number }
 export type CoreCommand = Mutation & (
   | { operation: 'playback.control'; action: 'pause' | 'resume' | 'stop' }
-  | { operation: 'playback.control'; action: 'play'; trackId: string }
+  | { operation: 'playback.control'; action: 'play'; trackId: string; forceTakeover?: boolean }
   | { operation: 'playback.control'; action: 'seek'; positionSeconds: number }
   | { operation: 'queue.replace'; entries: readonly CoreQueueEntry[] }
   | { operation: 'queue.control'; action: 'next' | 'previous' }
@@ -69,6 +88,7 @@ const errorMessages = {
   incompatible_protocol: 'Core protocol version is incompatible.',
   unsupported_capability: 'Core does not support the required operation.',
   not_ready: 'Core is not ready for activation.',
+  takeover_required: 'RS130 is currently playing from an external controller (HiFi ROSE). Confirm takeover before starting Core playback.',
   invalid_payload: 'Core request or response is invalid or exceeds its limit.',
   identity_mismatch: 'Core or library identity does not match this session.',
   unauthorized: 'Core authorization is required.',
@@ -181,9 +201,13 @@ function catalogPage(value: unknown): CoreCatalogPage {
     const track = fields(
       value,
       ['id', 'title', 'artist', 'album', 'durationSeconds'],
-      ['format', 'sampleRate', 'bitDepth', 'trackNumber', 'discNumber', 'releaseYear'],
+      ['releaseId', 'albumArtist', 'isCompilation', 'edition', 'format', 'sampleRate', 'bitDepth', 'trackNumber', 'discNumber', 'releaseYear'],
     )
     token(track.id); text(track.title); text(track.artist); text(track.album); seconds(track.durationSeconds)
+    if (track.releaseId !== undefined) token(track.releaseId)
+    if (track.albumArtist !== undefined) text(track.albumArtist)
+    if (track.isCompilation !== undefined) requireValue(typeof track.isCompilation === 'boolean')
+    if (track.edition !== undefined) text(track.edition)
     if (track.format !== undefined) text(track.format, 32)
     optionalPositiveInt(track.sampleRate, 90_316_800)
     optionalPositiveInt(track.bitDepth, 64)
@@ -221,8 +245,21 @@ export function parseCoreSnapshot(value: unknown, expected: Readonly<EngineConte
     requireValue(entries.some(entry => entry.entryId === queue.currentEntryId))
   }
   requireValue(['off', 'one', 'all'].includes(queue.repeat as string) && typeof queue.shuffle === 'boolean')
-  const playback = fields(object.playback, ['activity', 'positionSeconds'])
+  const playback = fields(
+    object.playback,
+    ['activity', 'positionSeconds'],
+    ['owner', 'takeoverRequired', 'externalPlayback'],
+  )
   requireValue(['idle', 'playing', 'paused', 'loading'].includes(playback.activity as string)); seconds(playback.positionSeconds)
+  if (playback.owner !== undefined) requireValue(['none', 'core', 'external'].includes(playback.owner as string))
+  if (playback.takeoverRequired !== undefined) requireValue(typeof playback.takeoverRequired === 'boolean')
+  if (playback.externalPlayback !== undefined) {
+    const ext = fields(playback.externalPlayback, ['active', 'transportState'], ['currentUri', 'positionSeconds'])
+    requireValue(typeof ext.active === 'boolean')
+    text(ext.transportState, 64)
+    if (ext.currentUri !== undefined) text(ext.currentUri, 1024)
+    if (ext.positionSeconds !== undefined) seconds(ext.positionSeconds)
+  }
   if (object.output !== null) {
     const output = fields(object.output, ['id', 'label', 'transport'])
     token(output.id); text(output.label)
@@ -246,11 +283,19 @@ export function parseCoreRequest(value: unknown, expected: Readonly<EngineContex
       requireValue(Number.isInteger(object.limit) && (object.limit as number) >= 1 && (object.limit as number) <= CORE_MAX_PAGE_TRACKS)
       break
     case 'playback.control': {
-      const extra = object.action === 'play' ? ['trackId'] : object.action === 'seek' ? ['positionSeconds'] : []
+      const extra =
+        object.action === 'play'
+          ? (Object.hasOwn(object, 'forceTakeover') ? ['trackId', 'forceTakeover'] : ['trackId'])
+          : object.action === 'seek'
+            ? ['positionSeconds']
+            : []
       fields(object, [...base, 'commandId', 'expectedRevision', 'action', ...extra])
       token(object.commandId); revision(object.expectedRevision)
       requireValue(['play', 'pause', 'resume', 'stop', 'seek'].includes(object.action as string))
-      if (object.action === 'play') token(object.trackId)
+      if (object.action === 'play') {
+        token(object.trackId)
+        if (Object.hasOwn(object, 'forceTakeover')) requireValue(typeof object.forceTakeover === 'boolean')
+      }
       if (object.action === 'seek') seconds(object.positionSeconds)
       break
     }
