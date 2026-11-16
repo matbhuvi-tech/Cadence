@@ -1,5 +1,19 @@
 # Issue Log
 
+## GitHub #42: Linux Core DSD256 stuttering caused by `tcpi_rcv_space` substituted for `tcpi_snd_wnd` in `CorePacer`
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/42
+- **Branch:** `fix/42-linux-dsd-stutter-tcp-info`
+- **Reported:** While playing DSD256 through TrueNAS `Music Room Core` → HiFi ROSE RS130 → T+A DAC 200, playback suffers frequent audible stutters, whereas Windows UPnP playback was stutter-free.
+- **Cause:**
+  1. In `src-tauri/src/core_runtime/upnp_session.rs`, `query_socket_tcp_info` defined a truncated `KernelTcpInfoPrefix` ending at `tcpi_total_retrans` and passed `info.tcpi_rcv_space.max(65_536)` as `tcpi_snd_wnd`.
+  2. Live `ss -tin` telemetry on TrueNAS (`192.168.1.6:18890 -> 192.168.1.106:52896`) showed RS130's real `snd_wnd = 1,476,992` bytes while the server socket's `rcv_space = 14,480` bytes (clamped to `65_536`).
+  3. Because `steady_sndbuf * 2 = 65_536` for bitrates `> 160 KB/s`, `sample.snd_wnd <= low_wnd_floor` (`65_536 <= 65_536`) evaluated `true` on every `200 ms` `TCP_INFO` probe, immediately aborting `InitialFill` (`1.180x`) and trapping steady-state streaming in `FlowSuppressed` (`0.995x`), draining the `512 KiB` (`185.7 ms` DSD256) pre-roll.
+- **Fix:**
+  1. Updated `query_socket_tcp_info` in `src-tauri/src/core_runtime/upnp_session.rs` to read `libc::tcp_info` up to the kernel-returned `len` (guarded by `core::mem::offset_of!`), extracting the real `tcpi_snd_wnd`, `tcpi_min_rtt`, and `tcpi_bytes_retrans`.
+  2. Added regression tests for Linux `tcp_info` length handling, genuine `snd_wnd == 0` preservation, live loopback `query_socket_tcp_info`, and open-window DSD256 `CorePacer` behavior.
+- **Status:** Implemented locally; awaiting TrueNAS release-build verification.
+
 ## Feature: Optional Linux Cadence Core
 
 - Requested: 2026-11-15. Preserve standalone Windows Cadence while optionally using a headless Linux UPnP engine on TrueNAS, controlled by Windows and Android.

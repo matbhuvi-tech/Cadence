@@ -1080,49 +1080,61 @@ fn apply_socket_sndbuf(
 }
 
 #[cfg(target_os = "linux")]
+fn core_tcp_sample_from_linux_tcp_info(info: &libc::tcp_info, len: usize) -> Option<CoreTcpSample> {
+    let min_prefix = core::mem::offset_of!(libc::tcp_info, tcpi_total_retrans)
+        + core::mem::size_of::<u32>();
+    if len < min_prefix {
+        return None;
+    }
+
+    let has_min_rtt = len
+        >= core::mem::offset_of!(libc::tcp_info, tcpi_min_rtt) + core::mem::size_of::<u32>();
+    let tcpi_min_rtt = if has_min_rtt && info.tcpi_min_rtt > 0 {
+        info.tcpi_min_rtt
+    } else {
+        info.tcpi_rtt.saturating_sub(info.tcpi_rttvar)
+    };
+
+    // Never substitute `tcpi_rcv_space` (server's own receive space) for `tcpi_snd_wnd`
+    // (peer's advertised RWIN): on Linux 4.10+ (`len >= ~232`), `tcpi_snd_wnd` reports the
+    // real peer window including `0` on TCP ZeroWindow. Only ancient kernels lacking the
+    // field treat it as unknown (`u32::MAX`) so steady-state pacing is not falsely throttled.
+    let has_snd_wnd = len
+        >= core::mem::offset_of!(libc::tcp_info, tcpi_snd_wnd) + core::mem::size_of::<u32>();
+    let tcpi_snd_wnd = if has_snd_wnd {
+        info.tcpi_snd_wnd
+    } else {
+        u32::MAX
+    };
+
+    let mut sample = normalize_linux_tcp_info(LinuxTcpInfoRaw {
+        tcpi_state: info.tcpi_state,
+        tcpi_rtt: info.tcpi_rtt,
+        tcpi_min_rtt,
+        tcpi_snd_mss: info.tcpi_snd_mss,
+        tcpi_unacked: info.tcpi_unacked,
+        tcpi_snd_cwnd: info.tcpi_snd_cwnd,
+        tcpi_snd_wnd,
+        tcpi_total_retrans: info.tcpi_total_retrans,
+    });
+
+    let has_bytes_retrans = len
+        >= core::mem::offset_of!(libc::tcp_info, tcpi_bytes_retrans)
+            + core::mem::size_of::<u64>();
+    if has_bytes_retrans {
+        sample.bytes_retrans = info.tcpi_bytes_retrans.min(u32::MAX as u64) as u32;
+    }
+
+    Some(sample)
+}
+
+#[cfg(target_os = "linux")]
 fn query_socket_tcp_info(stream: &StdTcpStream) -> Option<CoreTcpSample> {
     use std::os::unix::io::AsRawFd;
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct KernelTcpInfoPrefix {
-        tcpi_state: u8,
-        tcpi_ca_state: u8,
-        tcpi_retransmits: u8,
-        tcpi_probes: u8,
-        tcpi_backoff: u8,
-        tcpi_options: u8,
-        tcpi_snd_wscale_rcv_wscale: u8,
-        tcpi_delivery_rate_app_limited: u8,
-        tcpi_rto: u32,
-        tcpi_ato: u32,
-        tcpi_snd_mss: u32,
-        tcpi_rcv_mss: u32,
-        tcpi_unacked: u32,
-        tcpi_sacked: u32,
-        tcpi_lost: u32,
-        tcpi_retrans: u32,
-        tcpi_fackets: u32,
-        tcpi_last_data_sent: u32,
-        tcpi_last_ack_sent: u32,
-        tcpi_last_data_recv: u32,
-        tcpi_last_ack_recv: u32,
-        tcpi_pmtu: u32,
-        tcpi_rcv_ssthresh: u32,
-        tcpi_rtt: u32,
-        tcpi_rttvar: u32,
-        tcpi_snd_ssthresh: u32,
-        tcpi_snd_cwnd: u32,
-        tcpi_advmss: u32,
-        tcpi_reordering: u32,
-        tcpi_rcv_rtt: u32,
-        tcpi_rcv_space: u32,
-        tcpi_total_retrans: u32,
-    }
-
     unsafe {
-        let mut info = std::mem::zeroed::<KernelTcpInfoPrefix>();
-        let mut len = std::mem::size_of::<KernelTcpInfoPrefix>() as libc::socklen_t;
+        let mut info = std::mem::zeroed::<libc::tcp_info>();
+        let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
         let rc = libc::getsockopt(
             stream.as_raw_fd(),
             libc::SOL_TCP,
@@ -1130,17 +1142,8 @@ fn query_socket_tcp_info(stream: &StdTcpStream) -> Option<CoreTcpSample> {
             (&raw mut info) as *mut libc::c_void,
             &mut len,
         );
-        if rc == 0 && (len as usize) >= std::mem::size_of::<KernelTcpInfoPrefix>() {
-            Some(normalize_linux_tcp_info(LinuxTcpInfoRaw {
-                tcpi_state: info.tcpi_state,
-                tcpi_rtt: info.tcpi_rtt,
-                tcpi_min_rtt: info.tcpi_rtt.saturating_sub(info.tcpi_rttvar),
-                tcpi_snd_mss: info.tcpi_snd_mss,
-                tcpi_unacked: info.tcpi_unacked,
-                tcpi_snd_cwnd: info.tcpi_snd_cwnd,
-                tcpi_snd_wnd: info.tcpi_rcv_space.max(65_536),
-                tcpi_total_retrans: info.tcpi_total_retrans,
-            }))
+        if rc == 0 {
+            core_tcp_sample_from_linux_tcp_info(&info, len as usize)
         } else {
             None
         }
@@ -2611,5 +2614,89 @@ mod tests {
         clock.mark_seek(120.0, false);
         let after_seek = clock.effective_playing_position(Some(42.0));
         assert!(after_seek >= 119.9 && after_seek <= 122.0, "seek must reject stale pre-seek RelTime");
+    }
+
+    #[test]
+    fn dsd256_pacer_does_not_drop_to_flow_suppressed_when_peer_snd_wnd_is_open() {
+        let metrics = Arc::new(CorePacingMetrics::default());
+        let paused = Arc::new(AtomicBool::new(false));
+        let mut pacer = CorePacer::new(
+            CorePacerConfig::default(),
+            Some(2_822_400.0), // DSD256: steady_sndbuf=32768 -> low_wnd_floor=65536
+            0,
+            MAX_CORE_STEADY_SNDBUF_BYTES,
+            false,
+            true,
+            false,
+            Arc::clone(&metrics),
+            paused,
+        );
+
+        let t0 = Instant::now();
+        // Simulated healthy RS130 peer TCP window observed via `ss -tin` (1,476,992 bytes).
+        let open_sample = CoreTcpSample {
+            rtt_us: 476,
+            min_rtt_us: 208,
+            bytes_in_flight: 16 * 1024,
+            cwnd: 194 * 1448,
+            snd_wnd: 1_476_992,
+            bytes_retrans: 0,
+        };
+        for step in 0..8u64 {
+            let now = t0 + Duration::from_millis(step * 200);
+            pacer.set_sent_for_test((step + 1) * 620_000);
+            let _ = pacer.advance_with_sample(
+                now,
+                4096,
+                Duration::from_micros(20),
+                false,
+                Some(open_sample),
+            );
+        }
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.flow_control_events, 0, "open RWIN must not trigger flow backoff");
+        assert!(
+            snap.current_multiplier >= 1.000,
+            "expected >= 1.000x steady rate with open RWIN, got {}",
+            snap.current_multiplier
+        );
+        assert_ne!(snap.current_regime, "flow_suppressed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tcp_info_extracts_real_snd_wnd_even_when_kernel_struct_is_shorter_than_libc() {
+        let mut info = unsafe { std::mem::zeroed::<libc::tcp_info>() };
+        info.tcpi_state = 1;
+        info.tcpi_rtt = 476;
+        info.tcpi_min_rtt = 208;
+        info.tcpi_snd_mss = 1448;
+        info.tcpi_unacked = 4;
+        info.tcpi_snd_cwnd = 194;
+        info.tcpi_rcv_space = 14_480; // Small server receive space must NOT mask peer snd_wnd
+        info.tcpi_snd_wnd = 1_476_992;
+        info.tcpi_bytes_retrans = 0;
+
+        // Simulate Linux 6.12 kernel returning 248 bytes (< full libc::tcp_info with 6.14+ fields).
+        let linux_612_len = (core::mem::offset_of!(libc::tcp_info, tcpi_rcv_wnd) + 16)
+            .min(core::mem::size_of::<libc::tcp_info>());
+        let sample = core_tcp_sample_from_linux_tcp_info(&info, linux_612_len).unwrap();
+        assert_eq!(sample.snd_wnd, 1_476_992);
+        assert_eq!(sample.min_rtt_us, 208);
+
+        // Preserve genuine TCP ZeroWindow when peer actually closes RWIN to 0.
+        info.tcpi_snd_wnd = 0;
+        let zero_wnd = core_tcp_sample_from_linux_tcp_info(&info, linux_612_len).unwrap();
+        assert_eq!(zero_wnd.snd_wnd, 0);
+
+        // Verify live loopback socket query returns peer's real non-zero window (> 65536).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _peer) = listener.accept().unwrap();
+        let live = query_socket_tcp_info(&server).expect("TCP_INFO must succeed on Linux loopback");
+        assert!(live.snd_wnd > 65_536, "expected real loopback snd_wnd > 65536, got {}", live.snd_wnd);
+        drop(client);
     }
 }
