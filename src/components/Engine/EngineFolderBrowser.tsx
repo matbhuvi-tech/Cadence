@@ -8,17 +8,20 @@ import {
   Loader2,
   RefreshCw,
 } from 'lucide-react'
-import type { EngineFsEntry } from '../../core/coreProtocol'
+import type { EngineFsEntry, EngineNetworkShareRecord } from '../../core/coreProtocol'
 import type { EngineClient } from '../../services/engineClient'
+import { formatEngineDisplayName, formatEngineDisplayPath } from '../../utils/enginePathDisplay'
 
 interface EngineFolderBrowserProps {
   engineClient: EngineClient
+  smbShares?: readonly EngineNetworkShareRecord[]
   onFolderAdded?: (path: string) => void
   showToast?: (msg: string) => void
 }
 
 export const EngineFolderBrowser: React.FC<EngineFolderBrowserProps> = ({
   engineClient,
+  smbShares = [],
   onFolderAdded,
   showToast,
 }) => {
@@ -71,7 +74,8 @@ export const EngineFolderBrowser: React.FC<EngineFolderBrowserProps> = ({
     setAddingPath(path)
     setError(null)
     try {
-      const displayName = path.split(/[/\\]/).filter(Boolean).pop() || path
+      const fallbackName = path.split(/[/\\]/).filter(Boolean).pop() || path
+      const displayName = formatEngineDisplayName(path, fallbackName, smbShares)
       const added = await engineClient.addFolder({
         path,
         displayName,
@@ -111,7 +115,11 @@ export const EngineFolderBrowser: React.FC<EngineFolderBrowserProps> = ({
                 onClick={() => handleNavigateBack(idx)}
                 className="rounded px-1.5 py-1 text-white/70 hover:bg-white/[0.06] hover:text-white cursor-pointer truncate max-w-[160px]"
               >
-                {item.split(/[/\\]/).filter(Boolean).pop() || item}
+                {formatEngineDisplayName(
+                  item,
+                  item.split(/[/\\]/).filter(Boolean).pop() || item,
+                  smbShares,
+                )}
               </button>
             </React.Fragment>
           ))}
@@ -119,7 +127,11 @@ export const EngineFolderBrowser: React.FC<EngineFolderBrowserProps> = ({
             <>
               <ChevronRight className="w-3.5 h-3.5 text-white/30 shrink-0" />
               <span className="px-1.5 py-1 font-medium text-white truncate max-w-[180px]">
-                {currentPath.split(/[/\\]/).filter(Boolean).pop() || currentPath}
+                {formatEngineDisplayName(
+                  currentPath,
+                  currentPath.split(/[/\\]/).filter(Boolean).pop() || currentPath,
+                  smbShares,
+                )}
               </span>
             </>
           )}
@@ -181,9 +193,15 @@ export const EngineFolderBrowser: React.FC<EngineFolderBrowserProps> = ({
                 <Folder className="w-4 h-4 text-[#D4AF37] shrink-0" />
                 <div className="min-w-0">
                   <div className="text-xs font-medium text-white truncate">
-                    {entry.name || entry.path}
+                    {formatEngineDisplayName(
+                      entry.path,
+                      entry.name || entry.path,
+                      smbShares,
+                    )}
                   </div>
-                  <div className="text-[10px] font-mono text-white/40 truncate">{entry.path}</div>
+                  <div className="text-[10px] font-mono text-white/40 truncate">
+                    {formatEngineDisplayPath(entry.path, smbShares)}
+                  </div>
                 </div>
               </button>
 

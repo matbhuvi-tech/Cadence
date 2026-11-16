@@ -19,6 +19,7 @@ import type {
 } from '../../core/coreProtocol'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { EngineFolderBrowser } from '../Engine/EngineFolderBrowser'
+import { formatEngineDisplayPath, isSmbBackedPath } from '../../utils/enginePathDisplay'
 
 interface StorageManagerModalProps {
   isOpen: boolean
@@ -89,6 +90,27 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
       void refreshEngineStorage()
     }
   }, [isOpen, engineClient, refreshEngineStorage])
+
+  useEffect(() => {
+    if (!isOpen || !engine) return
+    return engine.subscribeEngineEvents((ev) => {
+      if (ev.event === 'scan.progress' && ev.data && typeof ev.data === 'object') {
+        const next = ev.data as unknown as EngineScanStatus
+        if (typeof next.status !== 'string') return
+        const isTerminal = next.status === 'completed' || next.status === 'failed'
+        const processed = typeof next.processed === 'number' ? next.processed : 0
+        if (isTerminal || processed % 25 === 0) {
+          setScanStatus(next)
+        }
+        if (isTerminal) {
+          void refreshEngineStorage()
+          onRefreshLibrary()
+        }
+      } else if (ev.event === 'catalog.changed') {
+        void refreshEngineStorage()
+      }
+    })
+  }, [isOpen, engine, refreshEngineStorage, onRefreshLibrary])
 
   if (!isOpen) return null
 
@@ -247,7 +269,10 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => void refreshEngineStorage()}
+              onClick={() => {
+                void refreshEngineStorage()
+                onRefreshLibrary()
+              }}
               disabled={isLoading || !engineClient}
               className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/80 font-medium text-xs flex items-center gap-1.5 transition-colors border border-white/[0.08] cursor-pointer disabled:opacity-40"
             >
@@ -427,7 +452,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                         </span>
                       </div>
                       <div className="text-[11px] font-mono text-white/40 truncate">
-                        //{s.server}/{s.share} → {s.mountPath}
+                        //{s.server}/{s.share}
                       </div>
                     </div>
                     <button
@@ -460,6 +485,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
               </div>
               <EngineFolderBrowser
                 engineClient={engineClient}
+                smbShares={smbShares}
                 showToast={showToast}
                 onFolderAdded={() => {
                   void refreshEngineStorage()
@@ -492,7 +518,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                   >
                     <div className="flex items-center gap-3 min-w-0">
                       <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-white/[0.05] text-white/75">
-                        {f.path.startsWith('\\\\') || f.path.startsWith('//') ? (
+                        {isSmbBackedPath(f.path, smbShares) ? (
                           <Server className="w-4 h-4" />
                         ) : (
                           <Folder className="w-4 h-4" />
@@ -517,7 +543,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                           </span>
                         </div>
                         <div className="text-[11px] font-mono text-white/40 truncate">
-                          {f.path}
+                          {formatEngineDisplayPath(f.path, smbShares)}
                         </div>
                       </div>
                     </div>

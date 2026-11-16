@@ -419,6 +419,25 @@ export const EngineControllerProvider: React.FC<{
     if (!tauriBridge.isTauri()) return
     let cancelled = false
     let unlisten: (() => void) | undefined
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+    const scheduleSseReconnect = () => {
+      if (cancelled || reconnectTimer !== null) return
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        if (cancelled) return
+        void tauriBridge
+          .coreConnectEvents(activeProfile, activeProfile.engineId)
+          .then(() => {
+            if (!cancelled) {
+              void store.refreshCatalog().catch(() => {})
+            }
+          })
+          .catch(() => {
+            scheduleSseReconnect()
+          })
+      }, 5000)
+    }
 
     void tauriBridge
       .listenCoreEvents((ev) => {
@@ -427,6 +446,8 @@ export const EngineControllerProvider: React.FC<{
         if (!payload || typeof payload.event !== 'string') return
         if (payload.event === 'catalog.changed') {
           void store.refreshCatalog().catch(() => {})
+        } else if (payload.event === 'stream.disconnected') {
+          scheduleSseReconnect()
         }
         for (const fn of eventListenersRef.current) {
           try {
@@ -441,10 +462,18 @@ export const EngineControllerProvider: React.FC<{
         else unlisten = fn
       })
 
-    void tauriBridge.coreConnectEvents(activeProfile, activeProfile.engineId).catch(() => {})
+    void tauriBridge
+      .coreConnectEvents(activeProfile, activeProfile.engineId)
+      .catch(() => {
+        scheduleSseReconnect()
+      })
 
     return () => {
       cancelled = true
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
       unlisten?.()
       void tauriBridge.coreDisconnectEvents()
     }

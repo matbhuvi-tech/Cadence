@@ -374,3 +374,42 @@ test('Phase 2: EngineClient invokes v2 SMB share status/list/add/remove endpoint
     ['shares.status', 'shares.list', 'shares.add', 'shares.remove'],
   )
 })
+
+test('Phase 2: SMB display path helpers hide internal /tmp mountpoint paths', async () => {
+  const {
+    formatEngineDisplayName,
+    formatEngineDisplayPath,
+    isSmbBackedPath,
+  } = await import('../utils/enginePathDisplay.ts')
+
+  const shares = [
+    {
+      id: 'smb_78ff06d46cafb9b8',
+      server: '192.168.1.6',
+      share: 'rajafans',
+      mountPath: '/tmp/cadence-mounts/smb_78ff06d46cafb9b8',
+      displayName: 'rajafans',
+      readOnly: false,
+      mounted: true,
+    },
+  ]
+
+  assert.equal(
+    formatEngineDisplayPath('/tmp/cadence-mounts/smb_78ff06d46cafb9b8', shares),
+    '//192.168.1.6/rajafans',
+  )
+  assert.equal(
+    formatEngineDisplayPath('/tmp/cadence-mounts/smb_78ff06d46cafb9b8/Master/Hindi/A.R.Rahman', shares),
+    '//192.168.1.6/rajafans/Master/Hindi/A.R.Rahman',
+  )
+  assert.equal(
+    formatEngineDisplayName('/tmp/cadence-mounts/smb_78ff06d46cafb9b8', 'smb_78ff06d46cafb9b8', shares),
+    'rajafans',
+  )
+  assert.equal(
+    isSmbBackedPath('/tmp/cadence-mounts/smb_78ff06d46cafb9b8/Master', shares),
+    true,
+  )
+  assert.equal(formatEngineDisplayPath('/music', shares), '/music')
+  assert.equal(isSmbBackedPath('/music', shares), false)
+})
