@@ -33,8 +33,9 @@ use sha2::{Digest, Sha256};
 
 use super::upnp_session::{
     apply_reconcile_probe_to_runtime, discover_rs130_device, inspect_rs130_description,
-    load_track_media_meta, query_renderer_state, validate_advertised_lan_ip, ActiveMediaSession,
-    CoreMediaServer, Rs130DeviceDescriptor, TrackMediaMeta, UpnpBridgeRenderer,
+    load_or_seed_renderer_profiles, load_track_media_meta, query_renderer_state,
+    validate_advertised_lan_ip, ActiveMediaSession, CoreMediaServer, RendererPacerProfileFile,
+    Rs130DeviceDescriptor, TrackMediaMeta, UpnpBridgeRenderer,
 };
 use super::{
     HeadlessConfig, HeadlessCoreRuntime, MemoryLocker, PlatformProbe, RuntimeError,
@@ -214,6 +215,7 @@ impl DragonfishError {
 
 struct DragonfishRenderer {
     bridge: Option<UpnpBridgeRenderer>,
+    renderer_profiles: RendererPacerProfileFile,
     discovered_control_url: Arc<Mutex<Option<String>>>,
     pinned_rs130_udn: Option<String>,
     allow_loopback_for_tests: bool,
@@ -242,8 +244,10 @@ impl DragonfishRenderer {
             if let Ok(mut ctrl) = self.discovered_control_url.lock() {
                 *ctrl = Some(device.control_url.clone());
             }
+            let (_profile_id, pacer_config) = self.renderer_profiles.resolve_for_device(&device);
             self.bridge = Some(UpnpBridgeRenderer {
                 device,
+                pacer_config,
                 media_server_addr: self.media_server_addr,
                 advertised_ip: self.advertised_ip,
                 active_session: Arc::clone(&self.active_session),
@@ -445,12 +449,16 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
         // 5. Load or initialize persistent TLS certificate metadata + PEM material
         let tls_cert = load_or_create_tls_certificate(&config, advertised_ip, &identity)?;
 
+        // 5b. Load or seed persisted renderer pacing profiles (`/var/lib/cadence/renderer-profiles.json`)
+        let renderer_profiles = load_or_seed_renderer_profiles(&config.app_data_dir);
+
         // 6. Bind fixed media HTTP listener (default 18890) - fail readiness on conflict
-        let media_server = CoreMediaServer::bind(
+        let media_server = CoreMediaServer::bind_with_config(
             config.media_bind_addr,
             advertised_ip.to_string(),
             config.allow_loopback_for_tests,
             2,
+            renderer_profiles.resolve_generic().1,
         )
         .map_err(|detail| DragonfishError::PortConflict {
             role: "media",
@@ -489,17 +497,22 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
         ));
         let active_session = media_server.active_session_arc();
         let paused_flag = media_server.paused_flag_arc();
-        let bridge = initial_device.map(|device| UpnpBridgeRenderer {
-            device,
-            media_server_addr: media_server.listen_addr(),
-            advertised_ip: media_server.advertised_ip_addr(),
-            active_session: Arc::clone(&active_session),
-            paused_flag: Arc::clone(&paused_flag),
-            shared_buffers: Arc::clone(&shared_buffers),
-            track_meta: Arc::clone(&track_meta),
+        let bridge = initial_device.map(|device| {
+            let (_profile_id, pacer_config) = renderer_profiles.resolve_for_device(&device);
+            UpnpBridgeRenderer {
+                device,
+                pacer_config,
+                media_server_addr: media_server.listen_addr(),
+                advertised_ip: media_server.advertised_ip_addr(),
+                active_session: Arc::clone(&active_session),
+                paused_flag: Arc::clone(&paused_flag),
+                shared_buffers: Arc::clone(&shared_buffers),
+                track_meta: Arc::clone(&track_meta),
+            }
         });
         let renderer = DragonfishRenderer {
             bridge,
+            renderer_profiles,
             discovered_control_url: Arc::clone(&discovered_control_url),
             pinned_rs130_udn: identity.pinned_rs130_udn.clone(),
             allow_loopback_for_tests: config.allow_loopback_for_tests,

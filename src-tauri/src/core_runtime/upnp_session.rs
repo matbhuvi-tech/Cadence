@@ -23,12 +23,12 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream as StdTcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
@@ -210,7 +210,8 @@ pub const fn normalize_linux_tcp_info(raw: LinuxTcpInfoRaw) -> CoreTcpSample {
 }
 
 /// Tuning parameters for the synchronous Core UPnP pacer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorePacerConfig {
     pub initial_lead_target_ms: u64,
     pub initial_fill_multiplier: f64,
@@ -234,6 +235,15 @@ pub struct CorePacerConfig {
     pub tcp_info_min_event_ms: u64,
     pub tcp_info_stale_ms: u64,
     pub uncertain_max_margin_ms: u64,
+    /// When true, steady-state locks to cruise/overfeed floor after cushion fill or backoff
+    /// instead of periodically creeping back up toward `max_overfeed_multiplier`.
+    pub lock_cruise_on_fill_or_backoff: bool,
+    /// When true, any TCP retransmission increment (`retrans_delta > 0`, e.g., TLP probes)
+    /// triggers flow backoff immediately without requiring a > `stall_threshold_ms` write block.
+    pub retrans_only_backoff: bool,
+    /// Optional percentage (1..=99) of `baseline_open_snd_wnd` below which steady-state
+    /// triggers flow backoff even when RWIN stays above 128 KiB.
+    pub relative_wnd_dip_pct: Option<u8>,
     pub disable_sleep_for_tests: bool,
 }
 
@@ -262,6 +272,9 @@ impl Default for CorePacerConfig {
             tcp_info_min_event_ms: 50,
             tcp_info_stale_ms: 750,
             uncertain_max_margin_ms: 250,
+            lock_cruise_on_fill_or_backoff: false,
+            retrans_only_backoff: false,
+            relative_wnd_dip_pct: None,
             disable_sleep_for_tests: false,
         }
     }
@@ -274,6 +287,187 @@ impl CorePacerConfig {
             ..Self::default()
         }
     }
+}
+
+pub const RENDERER_PROFILES_SCHEMA_VERSION: u32 = 1;
+pub const RENDERER_PROFILES_FILENAME: &str = "renderer-profiles.json";
+
+/// Matcher rules selecting a persisted pacing configuration for a UPnP renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RendererPacerMatch {
+    /// Exact normalized UDN match (highest precedence, intended for per-unit stress-test learnings).
+    pub udn: Option<String>,
+    /// Case-insensitive tokens that must all appear in renderer identity text when non-empty.
+    pub all_keywords: Vec<String>,
+    /// Case-insensitive tokens where any match selects this profile when `all_keywords` is empty.
+    pub any_keywords: Vec<String>,
+}
+
+impl RendererPacerMatch {
+    fn matches_identity(&self, device: &Rs130DeviceDescriptor) -> bool {
+        let combined = format!(
+            "{} {} {} {}",
+            device.friendly_name,
+            device.model_name.as_deref().unwrap_or(""),
+            device.model_description.as_deref().unwrap_or(""),
+            device.manufacturer.as_deref().unwrap_or("")
+        )
+        .to_ascii_lowercase();
+
+        if !self.all_keywords.is_empty() {
+            return self
+                .all_keywords
+                .iter()
+                .all(|kw| !kw.trim().is_empty() && combined.contains(&kw.to_ascii_lowercase()));
+        }
+        if !self.any_keywords.is_empty() {
+            return self
+                .any_keywords
+                .iter()
+                .any(|kw| !kw.trim().is_empty() && combined.contains(&kw.to_ascii_lowercase()));
+        }
+        false
+    }
+}
+
+/// Named renderer pacing profile persisted in `renderer-profiles.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RendererPacerProfile {
+    pub id: String,
+    pub description: String,
+    pub learned_from_stress_test: bool,
+    pub matcher: RendererPacerMatch,
+    pub pacer_config: CorePacerConfig,
+}
+
+impl Default for RendererPacerProfile {
+    fn default() -> Self {
+        Self {
+            id: "custom".into(),
+            description: String::new(),
+            learned_from_stress_test: false,
+            matcher: RendererPacerMatch::default(),
+            pacer_config: CorePacerConfig::default(),
+        }
+    }
+}
+
+/// Persisted renderer pacing registry (`renderer-profiles.json`) supplying `CorePacerConfig`
+/// per renderer without device-specific branches in the streaming loop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RendererPacerProfileFile {
+    pub schema_version: u32,
+    pub default_profile: CorePacerConfig,
+    pub profiles: Vec<RendererPacerProfile>,
+}
+
+impl Default for RendererPacerProfileFile {
+    fn default() -> Self {
+        Self::built_in_defaults()
+    }
+}
+
+/// Pre-characterized RS130 profile derived from TrueNAS -> HiFi ROSE RS130 DSD256/CD captures:
+/// fills a ~1.2s playback cushion cleanly via InitialFill, then locks onto 1.000x cruise
+/// before hitting RS130's ~2.14s (DSD256) / ~6.96s (CD) buffer wall, with TLP/RWIN dip safety nets.
+pub fn rs130_default_pacer_config() -> CorePacerConfig {
+    CorePacerConfig {
+        initial_fill_multiplier: 1.180,
+        initial_fill_lead_ms: 1_200,
+        initial_overfeed_multiplier: 1.000,
+        min_steady_multiplier: 1.000,
+        max_overfeed_multiplier: 1.000,
+        soft_ceiling_floor: 1.000,
+        lock_cruise_on_fill_or_backoff: true,
+        retrans_only_backoff: true,
+        relative_wnd_dip_pct: Some(92),
+        ..CorePacerConfig::default()
+    }
+}
+
+fn normalize_udn(udn: &str) -> String {
+    udn.trim()
+        .strip_prefix("uuid:")
+        .or_else(|| udn.trim().strip_prefix("UUID:"))
+        .unwrap_or(udn.trim())
+        .trim()
+        .to_ascii_lowercase()
+}
+
+impl RendererPacerProfileFile {
+    pub fn built_in_defaults() -> Self {
+        Self {
+            schema_version: RENDERER_PROFILES_SCHEMA_VERSION,
+            default_profile: CorePacerConfig::default(),
+            profiles: vec![RendererPacerProfile {
+                id: "hifi-rose-rs130".into(),
+                description: "HiFi ROSE RS130 (CITECH): ~1.2s cushion fill then 1.000x cruise lock with TLP/RWIN dip safety net".into(),
+                learned_from_stress_test: false,
+                matcher: RendererPacerMatch {
+                    udn: None,
+                    all_keywords: Vec::new(),
+                    any_keywords: vec!["rs130".into(), "rose".into(), "citech".into()],
+                },
+                pacer_config: rs130_default_pacer_config(),
+            }],
+        }
+    }
+
+    /// Resolves `(profile_id, CorePacerConfig)` in memory for `device`:
+    /// exact normalized UDN match first -> keyword matcher -> `generic` default.
+    pub fn resolve_for_device(&self, device: &Rs130DeviceDescriptor) -> (&str, CorePacerConfig) {
+        let target_udn = normalize_udn(&device.udn);
+        if !target_udn.is_empty() {
+            if let Some(p) = self.profiles.iter().find(|p| {
+                p.matcher
+                    .udn
+                    .as_deref()
+                    .is_some_and(|u| normalize_udn(u) == target_udn)
+            }) {
+                return (p.id.as_str(), p.pacer_config);
+            }
+        }
+        if let Some(p) = self
+            .profiles
+            .iter()
+            .find(|p| p.matcher.matches_identity(device))
+        {
+            return (p.id.as_str(), p.pacer_config);
+        }
+        ("generic", self.default_profile)
+    }
+
+    pub fn resolve_generic(&self) -> (&str, CorePacerConfig) {
+        ("generic", self.default_profile)
+    }
+}
+
+/// Loads `app_data_dir/renderer-profiles.json` at idle/startup, seeding built-in defaults if absent.
+/// Falls back cleanly to built-in defaults on read or parse errors so playback is never blocked.
+pub fn load_or_seed_renderer_profiles(app_data_dir: &Path) -> RendererPacerProfileFile {
+    let path = app_data_dir.join(RENDERER_PROFILES_FILENAME);
+    if path.is_file() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(parsed) = serde_json::from_str::<RendererPacerProfileFile>(&raw) {
+                return parsed;
+            }
+        }
+        return RendererPacerProfileFile::built_in_defaults();
+    }
+
+    let defaults = RendererPacerProfileFile::built_in_defaults();
+    if app_data_dir.is_dir() {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&defaults) {
+            let tmp = app_data_dir.join(format!("{}.tmp", RENDERER_PROFILES_FILENAME));
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+    defaults
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -771,12 +965,21 @@ impl CorePacer {
                 let collapsed = self.baseline_open_snd_wnd >= 256 * 1024
                     && sample.snd_wnd <= self.baseline_open_snd_wnd / 4
                     && sample.snd_wnd <= 128 * 1024;
-                if sample.snd_wnd <= low_wnd_floor || collapsed {
+                let relative_dip = self.state == CorePacingState::SteadyMaintain
+                    && self.config.relative_wnd_dip_pct.is_some_and(|pct| {
+                        let pct = u64::from(pct.clamp(1, 99));
+                        self.baseline_open_snd_wnd >= 256 * 1024
+                            && u64::from(sample.snd_wnd).saturating_mul(100)
+                                <= u64::from(self.baseline_open_snd_wnd).saturating_mul(pct)
+                    });
+                let retrans_hit = self.config.retrans_only_backoff && retrans_delta > 0;
+                if sample.snd_wnd <= low_wnd_floor || collapsed || relative_dip || retrans_hit {
                     self.metrics
                         .flow_control_events
                         .fetch_add(1, Ordering::Relaxed);
                     self.trigger_flow_backoff(now);
-                } else if is_write_stall && retrans_delta > 0 {
+                }
+                if is_write_stall && retrans_delta > 0 {
                     self.metrics
                         .congestion_events
                         .fetch_add(1, Ordering::Relaxed);
@@ -824,8 +1027,14 @@ impl CorePacer {
         self.ceiling_relax_anchor = Some(until);
         self.flow_strikes = self.flow_strikes.saturating_add(1);
 
-        let prev_mult = self.active_pace_mult;
         let floor = self.config.min_steady_multiplier;
+        if self.config.lock_cruise_on_fill_or_backoff {
+            self.active_pace_mult = floor;
+            self.soft_ceiling_mult = floor;
+            return;
+        }
+
+        let prev_mult = self.active_pace_mult;
         let excess = (prev_mult - floor).max(0.0);
         let halved = floor + excess * self.config.backoff_excess_factor;
         let rounded = (halved * 1000.0).round() / 1000.0;
@@ -860,7 +1069,15 @@ impl CorePacer {
             let cushion_ready = display_lead_ms >= self.config.initial_fill_lead_ms;
             if flow_active || self.flow_strikes > 0 || cushion_ready || clean_elapsed {
                 self.state = CorePacingState::SteadyMaintain;
-                if !(flow_active || self.flow_strikes > 0) {
+                if self.config.lock_cruise_on_fill_or_backoff {
+                    let target = self
+                        .config
+                        .initial_overfeed_multiplier
+                        .min(self.soft_ceiling_mult)
+                        .max(self.config.min_steady_multiplier);
+                    self.active_pace_mult = target;
+                    self.soft_ceiling_mult = target;
+                } else if !(flow_active || self.flow_strikes > 0) {
                     self.active_pace_mult = self
                         .config
                         .initial_overfeed_multiplier
@@ -896,6 +1113,9 @@ impl CorePacer {
     }
 
     fn maybe_step_up_while_clean(&mut self, now: Instant) {
+        if self.config.lock_cruise_on_fill_or_backoff {
+            return;
+        }
         let relax_dur = Duration::from_millis(self.config.soft_ceiling_relax_ms);
         let relax_anchor = *self.ceiling_relax_anchor.get_or_insert(now);
         if now.saturating_duration_since(relax_anchor) >= relax_dur {
@@ -1395,6 +1615,7 @@ pub(crate) struct ActiveMediaSession {
     pub(crate) chunk_bytes: usize,
     pub(crate) metadata_offset: Option<u64>,
     pub(crate) audio_payload_end: u64,
+    pub(crate) pacer_config: Option<CorePacerConfig>,
     pub(crate) has_streamed_audio: AtomicBool,
     pub(crate) last_audio_end_offset: AtomicU64,
     pub(crate) cancelled: AtomicBool,
@@ -1712,7 +1933,7 @@ impl CoreMediaServer {
         }
 
         let mut pacer = CorePacer::new(
-            pacer_config,
+            session.pacer_config.unwrap_or(pacer_config),
             session.realtime_bytes_per_sec,
             session.preroll_bytes,
             session.steady_sndbuf_bytes,
@@ -1813,6 +2034,7 @@ pub struct RestartProbeSnapshot {
 
 pub(crate) struct UpnpBridgeRenderer {
     pub(crate) device: Rs130DeviceDescriptor,
+    pub(crate) pacer_config: CorePacerConfig,
     pub(crate) media_server_addr: SocketAddr,
     pub(crate) advertised_ip: Ipv4Addr,
     pub(crate) active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
@@ -1911,6 +2133,7 @@ impl Renderer for UpnpBridgeRenderer {
                     chunk_bytes,
                     metadata_offset,
                     audio_payload_end,
+                    pacer_config: Some(self.pacer_config),
                     has_streamed_audio: AtomicBool::new(false),
                     last_audio_end_offset: AtomicU64::new(0),
                     cancelled: AtomicBool::new(false),
@@ -2038,6 +2261,7 @@ impl<P: PlatformProbe, L: MemoryLocker> UpnpSessionRuntime<P, L> {
 
         let bridge = UpnpBridgeRenderer {
             device: upnp_config.target_device.clone(),
+            pacer_config: upnp_config.pacer_config,
             media_server_addr: media_server.listen_addr(),
             advertised_ip: media_server.advertised_ip,
             active_session: Arc::clone(&media_server.active_session),
@@ -2698,5 +2922,230 @@ mod tests {
         let live = query_socket_tcp_info(&server).expect("TCP_INFO must succeed on Linux loopback");
         assert!(live.snd_wnd > 65_536, "expected real loopback snd_wnd > 65536, got {}", live.snd_wnd);
         drop(client);
+    }
+
+    #[test]
+    fn renderer_profiles_json_seeds_parses_and_resolves_rs130_vs_generic_and_udn_override() {
+        let dir = std::env::temp_dir().join(format!("cadence_profiles_test_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let seeded = load_or_seed_renderer_profiles(&dir);
+        assert_eq!(seeded.schema_version, RENDERER_PROFILES_SCHEMA_VERSION);
+        assert!(dir.join(RENDERER_PROFILES_FILENAME).is_file());
+
+        let reloaded = load_or_seed_renderer_profiles(&dir);
+        assert_eq!(reloaded, seeded);
+
+        let rs130 = Rs130DeviceDescriptor {
+            udn: "uuid:ROSE-RS130-MAIN".into(),
+            friendly_name: "HiFi ROSE RS130".into(),
+            model_name: Some("RS130".into()),
+            model_description: Some("HiFi ROSE".into()),
+            manufacturer: Some("CITECH".into()),
+            description_url: "http://192.168.1.106:9999/description.xml".into(),
+            control_url: "http://192.168.1.106:9999/AVTransport/ctrl".into(),
+        };
+        let (id, cfg) = reloaded.resolve_for_device(&rs130);
+        assert_eq!(id, "hifi-rose-rs130");
+        assert!(cfg.lock_cruise_on_fill_or_backoff);
+        assert!(cfg.retrans_only_backoff);
+        assert_eq!(cfg.relative_wnd_dip_pct, Some(92));
+        assert!((cfg.initial_overfeed_multiplier - 1.0).abs() < 1e-6);
+
+        let generic = Rs130DeviceDescriptor {
+            udn: "uuid:ANTHEM-AVM70".into(),
+            friendly_name: "Living Room AVR".into(),
+            model_name: Some("AVM 70".into()),
+            model_description: None,
+            manufacturer: Some("Anthem".into()),
+            description_url: "http://192.168.1.120:9999/description.xml".into(),
+            control_url: "http://192.168.1.120:9999/AVTransport/ctrl".into(),
+        };
+        let (gid, gcfg) = reloaded.resolve_for_device(&generic);
+        assert_eq!(gid, "generic");
+        assert_eq!(gcfg, CorePacerConfig::default());
+
+        // Learned per-UDN override must beat generic keyword match.
+        let mut custom = reloaded.clone();
+        let mut learned_cfg = rs130_default_pacer_config();
+        learned_cfg.initial_fill_lead_ms = 1_500;
+        custom.profiles.push(RendererPacerProfile {
+            id: "learned-rs130-main".into(),
+            description: "Learned from calibration".into(),
+            learned_from_stress_test: true,
+            matcher: RendererPacerMatch {
+                udn: Some("uuid:rose-rs130-main".into()),
+                ..RendererPacerMatch::default()
+            },
+            pacer_config: learned_cfg,
+        });
+        std::fs::write(
+            dir.join(RENDERER_PROFILES_FILENAME),
+            serde_json::to_vec_pretty(&custom).unwrap(),
+        )
+        .unwrap();
+        let overridden = load_or_seed_renderer_profiles(&dir);
+        let (oid, ocfg) = overridden.resolve_for_device(&rs130);
+        assert_eq!(oid, "learned-rs130-main");
+        assert_eq!(ocfg.initial_fill_lead_ms, 1_500);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rs130_config_transitions_from_initial_fill_straight_to_locked_cruise() {
+        let metrics = Arc::new(CorePacingMetrics::default());
+        let paused = Arc::new(AtomicBool::new(false));
+        let mut pacer = CorePacer::new(
+            rs130_default_pacer_config(),
+            Some(2_822_400.0), // DSD256
+            MAX_CORE_PREROLL_BYTES,
+            MAX_CORE_STEADY_SNDBUF_BYTES,
+            false,
+            false,
+            false,
+            Arc::clone(&metrics),
+            paused,
+        );
+        pacer.clamped_to_steady = true;
+
+        let t0 = Instant::now();
+        let healthy = CoreTcpSample {
+            rtt_us: 490,
+            min_rtt_us: 200,
+            bytes_in_flight: 16_384,
+            cwnd: 194 * 1448,
+            snd_wnd: 700_864,
+            bytes_retrans: 0,
+        };
+
+        // At t=0.5s with ~600ms lead (< 1200ms target), remains in InitialFill (1.180x).
+        pacer.set_sent_for_test(524_288 + (0.5 * 2_822_400.0 * 1.180) as u64);
+        let _ = pacer.advance_with_sample(
+            t0 + Duration::from_millis(500),
+            4096,
+            Duration::from_micros(20),
+            false,
+            Some(healthy),
+        );
+        let s1 = metrics.snapshot();
+        assert_eq!(s1.current_state, "initial_fill");
+        assert!((s1.current_multiplier - 1.180).abs() < 1e-6);
+
+        // Once lead passes 1,200 ms (~5.0s), transitions straight to 1.000x cruise.
+        pacer.set_sent_for_test((5.0 * 2_822_400.0 + 1.35 * 2_822_400.0) as u64);
+        let _ = pacer.advance_with_sample(
+            t0 + Duration::from_millis(5_000),
+            4096,
+            Duration::from_micros(20),
+            false,
+            Some(healthy),
+        );
+        let s2 = metrics.snapshot();
+        assert_eq!(s2.current_state, "steady_maintain");
+        assert_eq!(s2.current_regime, "cruise");
+        assert!((s2.current_multiplier - 1.000).abs() < 1e-6);
+
+        // Even after 40s clean, locked profile does NOT ramp back up to 1.08x / 1.12x.
+        for sec in [12u64, 24, 42] {
+            pacer.set_sent_for_test(((sec as f64 + 1.35) * 2_822_400.0) as u64);
+            let _ = pacer.advance_with_sample(
+                t0 + Duration::from_secs(sec),
+                4096,
+                Duration::from_micros(20),
+                false,
+                Some(healthy),
+            );
+        }
+        let s3 = metrics.snapshot();
+        assert_eq!(s3.current_regime, "cruise");
+        assert!((s3.current_multiplier - 1.000).abs() < 1e-6);
+        assert_eq!(s3.flow_control_events, 0);
+    }
+
+    #[test]
+    fn rs130_config_backs_off_on_retrans_delta_and_relative_high_window_dip() {
+        // Case A: +1200B TLP retransmission delta without write stall triggers backoff under RS130 profile.
+        let metrics_a = Arc::new(CorePacingMetrics::default());
+        let paused_a = Arc::new(AtomicBool::new(false));
+        let mut pacer_a = CorePacer::new(
+            rs130_default_pacer_config(),
+            Some(2_822_400.0),
+            0,
+            MAX_CORE_STEADY_SNDBUF_BYTES,
+            false,
+            true,
+            false,
+            Arc::clone(&metrics_a),
+            paused_a,
+        );
+        let t0 = Instant::now();
+        let base_sample = CoreTcpSample {
+            rtt_us: 490,
+            min_rtt_us: 200,
+            bytes_in_flight: 16_384,
+            cwnd: 194 * 1448,
+            snd_wnd: 700_864,
+            bytes_retrans: 0,
+        };
+        pacer_a.set_sent_for_test(700_000);
+        let _ = pacer_a.advance_with_sample(t0, 4096, Duration::from_micros(20), false, Some(base_sample));
+
+        let mut tlp_sample = base_sample;
+        tlp_sample.bytes_retrans = 1200;
+        pacer_a.set_sent_for_test(1_300_000);
+        let _ = pacer_a.advance_with_sample(
+            t0 + Duration::from_millis(200),
+            4096,
+            Duration::from_micros(20),
+            false,
+            Some(tlp_sample),
+        );
+        let snap_a = metrics_a.snapshot();
+        assert_eq!(snap_a.flow_control_events, 1);
+        assert_eq!(snap_a.current_regime, "flow_suppressed");
+
+        // After flow clear window (1.5s), must remain locked at 1.000x cruise.
+        pacer_a.set_sent_for_test(6_000_000);
+        let _ = pacer_a.advance_with_sample(
+            t0 + Duration::from_millis(2_000),
+            4096,
+            Duration::from_micros(20),
+            false,
+            Some(tlp_sample),
+        );
+        let snap_a2 = metrics_a.snapshot();
+        assert_eq!(snap_a2.current_regime, "cruise");
+        assert!((snap_a2.current_multiplier - 1.000).abs() < 1e-6);
+
+        // Case B: High-window dip (700,864 -> 639,296, ~91.2% <= 92%) triggers backoff in SteadyMaintain.
+        let metrics_b = Arc::new(CorePacingMetrics::default());
+        let paused_b = Arc::new(AtomicBool::new(false));
+        let mut pacer_b = CorePacer::new(
+            rs130_default_pacer_config(),
+            Some(2_822_400.0),
+            0,
+            MAX_CORE_STEADY_SNDBUF_BYTES,
+            true, // starts in SteadyMaintain
+            true,
+            false,
+            Arc::clone(&metrics_b),
+            paused_b,
+        );
+        pacer_b.set_sent_for_test(700_000);
+        let _ = pacer_b.advance_with_sample(t0, 4096, Duration::from_micros(20), false, Some(base_sample));
+        assert_eq!(metrics_b.snapshot().flow_control_events, 0);
+
+        let mut dipped = base_sample;
+        dipped.snd_wnd = 639_296;
+        pacer_b.set_sent_for_test(1_300_000);
+        let _ = pacer_b.advance_with_sample(
+            t0 + Duration::from_millis(200),
+            4096,
+            Duration::from_micros(20),
+            false,
+            Some(dipped),
+        );
+        assert_eq!(metrics_b.snapshot().flow_control_events, 1);
     }
 }
