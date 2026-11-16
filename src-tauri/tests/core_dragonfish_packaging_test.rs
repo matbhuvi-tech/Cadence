@@ -179,14 +179,20 @@ fn http_get_json(addr: SocketAddr, path: &str) -> (u16, Value) {
     (status, parsed)
 }
 
-fn http_post_json(addr: SocketAddr, path: &str, payload: &Value) -> (u16, Value) {
+fn http_post_json(
+    app_data: &std::path::Path,
+    addr: SocketAddr,
+    path: &str,
+    payload: &Value,
+) -> (u16, Value) {
+    let pairing_token = std::fs::read_to_string(app_data.join("pairing-token")).unwrap();
     let body_bytes = serde_json::to_vec(payload).unwrap();
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     let req = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {} HTTP/1.1\r\nx-cadence-token: {pairing_token}\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         path,
         addr,
         body_bytes.len()
@@ -215,12 +221,9 @@ fn clean_install_persists_identity_cert_wal_db_and_serves_control_and_readiness(
     assert_eq!(DEFAULT_CONTROL_PORT, 4040);
     assert_eq!(DEFAULT_MEDIA_PORT, 18890);
 
-    let mut node = DragonfishNode::bootstrap_with_platform(
-        cfg,
-        generous_dragonfish_probe(),
-        locker,
-    )
-    .expect("bootstrap clean install");
+    let mut node =
+        DragonfishNode::bootstrap_with_platform(cfg, generous_dragonfish_probe(), locker)
+            .expect("bootstrap clean install");
 
     // Verify persistent state files created on `/var/lib/cadence`
     assert!(dirs.app_data_dir.join("node-identity.json").is_file());
@@ -252,6 +255,7 @@ fn clean_install_persists_identity_cert_wal_db_and_serves_control_and_readiness(
     assert_eq!(health_json["musicReadOnly"], true);
 
     let (status_hello, hello_json) = http_post_json(
+        &dirs.app_data_dir,
         control_addr,
         "/v1/core",
         &json!({
@@ -319,6 +323,7 @@ fn restart_retains_persisted_identity_certificate_pinned_udn_and_database_state(
     assert_eq!(node2.tls_certificate().cert_pem, cert1.cert_pem);
 
     let (status, snap) = http_post_json(
+        &dirs.app_data_dir,
         node2.control_listen_addr(),
         "/v1/core",
         &json!({
@@ -546,12 +551,9 @@ fn versioned_backup_blocks_incompatible_schema_and_restores_cleanly_on_rollback(
     DragonfishNode::restore_versioned_backup(&dirs.app_data_dir, "0.1.0-pre-upgrade")
         .expect("restore versioned backup");
 
-    let mut restored_node = DragonfishNode::bootstrap_with_platform(
-        cfg,
-        generous_dragonfish_probe(),
-        locker,
-    )
-    .expect("boot after rollback restore");
+    let mut restored_node =
+        DragonfishNode::bootstrap_with_platform(cfg, generous_dragonfish_probe(), locker)
+            .expect("boot after rollback restore");
 
     assert_eq!(restored_node.identity().engine_id, original_id.engine_id);
     assert_eq!(
@@ -560,6 +562,7 @@ fn versioned_backup_blocks_incompatible_schema_and_restores_cleanly_on_rollback(
     );
 
     let (status, snap) = http_post_json(
+        &dirs.app_data_dir,
         restored_node.control_listen_addr(),
         "/v1/core",
         &json!({
@@ -602,7 +605,8 @@ fn dragonfish_dockerfile_and_custom_app_recipe_enforce_truenas_24_04_invariants(
     let custom_app_text = std::fs::read_to_string(&custom_app_path).unwrap();
 
     validate_dragonfish_dockerfile(&dockerfile_text).expect("Dockerfile invariants");
-    validate_dragonfish_custom_app_yaml(&custom_app_text).expect("Dragonfish Custom App invariants");
+    validate_dragonfish_custom_app_yaml(&custom_app_text)
+        .expect("Dragonfish Custom App invariants");
 
     // Also test the CLI `--validate-dragonfish-recipe` mode on `cadence-headless`
     let exe = env!("CARGO_BIN_EXE_cadence-headless");
@@ -659,6 +663,8 @@ fn cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtr
             .arg("--healthcheck")
             .arg("--control-port")
             .arg(ctrl_port.to_string())
+            .env("CADENCE_ALLOW_LOOPBACK", "true")
+            .env("CADENCE_APP_DATA_DIR", &dirs.app_data_dir)
             .output()
             .expect("run healthcheck");
         if hc.status.success() {
@@ -676,6 +682,7 @@ fn cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtr
     let library_id = health_json["libraryId"].as_str().unwrap().to_string();
 
     let (status_hello, hello) = http_post_json(
+        &dirs.app_data_dir,
         ctrl_addr,
         "/v1/core",
         &json!({
@@ -758,6 +765,8 @@ fn cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtr
             .arg("--healthcheck")
             .arg("--control-port")
             .arg(ctrl_port.to_string())
+            .env("CADENCE_ALLOW_LOOPBACK", "true")
+            .env("CADENCE_APP_DATA_DIR", &dirs.app_data_dir)
             .output()
             .expect("run healthcheck after restore");
         if hc.status.success() {
@@ -828,6 +837,7 @@ fn dragonfish_projects_track_formats_and_plays_multi_track_queue_with_navigation
     track_ids.push(tid4);
 
     let (status, snap) = http_post_json(
+        &dirs.app_data_dir,
         addr,
         "/v1/core",
         &json!({
@@ -854,6 +864,7 @@ fn dragonfish_projects_track_formats_and_plays_multi_track_queue_with_navigation
         .map(|(i, tid)| json!({ "entryId": format!("e-{}", i + 1), "trackId": tid }))
         .collect();
     let (_, replace_res) = http_post_json(
+        &dirs.app_data_dir,
         addr,
         "/v1/core",
         &json!({
@@ -866,10 +877,14 @@ fn dragonfish_projects_track_formats_and_plays_multi_track_queue_with_navigation
             "entries": entries
         }),
     );
-    assert_eq!(replace_res["ok"], true, "multi-track queue.replace failed: {replace_res}");
+    assert_eq!(
+        replace_res["ok"], true,
+        "multi-track queue.replace failed: {replace_res}"
+    );
     let rev1 = replace_res["data"]["revision"].as_u64().unwrap();
 
     let (_, play_res) = http_post_json(
+        &dirs.app_data_dir,
         addr,
         "/v1/core",
         &json!({
@@ -888,6 +903,7 @@ fn dragonfish_projects_track_formats_and_plays_multi_track_queue_with_navigation
 
     // Jump to entry #4 (previously unadmitted idx >= 2)
     let (_, jump_res) = http_post_json(
+        &dirs.app_data_dir,
         addr,
         "/v1/core",
         &json!({
@@ -906,6 +922,7 @@ fn dragonfish_projects_track_formats_and_plays_multi_track_queue_with_navigation
     let rev3 = jump_res["data"]["revision"].as_u64().unwrap();
 
     let (_, prev_res) = http_post_json(
+        &dirs.app_data_dir,
         addr,
         "/v1/core",
         &json!({

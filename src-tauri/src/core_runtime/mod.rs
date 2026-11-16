@@ -4,6 +4,7 @@
 pub mod curate;
 pub mod dragonfish;
 pub mod migration;
+pub mod library;
 pub mod platform;
 pub mod upnp_session;
 
@@ -90,6 +91,11 @@ pub struct HeadlessCoreRuntime<
     arena: LockedBytesArena<P, L>,
     last_stopped_at: Option<Instant>,
     music_read_only: bool,
+    library: Option<library::Library>,
+    catalog_extras: HashMap<String, Value>,
+    curate_pending: bool,
+    track_db_ids: HashMap<String,String>,
+    public_track_ids: HashMap<String,String>,
 }
 
 impl<R: Renderer> HeadlessCoreRuntime<R, SystemPlatformProbe, SystemMemoryLocker> {
@@ -134,6 +140,8 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             config.headroom_bytes
         };
 
+        let track_db_ids=load_track_identifiers(&db,&track_files)?;
+        let public_track_ids=track_db_ids.iter().map(|(public,raw)|(raw.clone(),public.clone())).collect();
         Ok(Self {
             config,
             db: Some(db),
@@ -143,6 +151,11 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             arena: LockedBytesArena::new(probe, locker, headroom),
             last_stopped_at: None,
             music_read_only: true,
+            library: None,
+            catalog_extras: HashMap::new(),
+            curate_pending: false,
+            track_db_ids,
+            public_track_ids,
         })
     }
 
@@ -288,18 +301,14 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         let db = self.db.as_ref().ok_or(RuntimeError::Closed)?;
         let (catalog, track_files) = load_catalog_projection(db)?;
         let count = catalog.len();
-        self.owner = SessionOwner::new(
-            SessionConfig {
-                engine_id: self.config.engine_id.clone(),
-                library_id: self.config.library_id.clone(),
-                label: self.config.label.clone(),
-                output: self.config.output.clone(),
-            },
-            catalog,
-            self.renderer.clone(),
-        )
-        .map_err(RuntimeError::SessionInit)?;
+        self.owner.replace_catalog(catalog).map_err(RuntimeError::SessionInit)?;
         self.track_files = track_files;
+        self.track_db_ids=load_track_identifiers(db,&self.track_files)?;
+        self.public_track_ids=self.track_db_ids.iter().map(|(public,raw)|(raw.clone(),public.clone())).collect();
+        if let Some(library) = &self.library {
+            let extras=library.enriched_tracks().map_err(RuntimeError::Database)?;
+            self.catalog_extras=self.track_db_ids.iter().filter_map(|(public,raw)|extras.get(raw).map(|e|(public.clone(),e.clone()))).collect();
+        }
         Ok(count)
     }
 
@@ -310,8 +319,12 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     pub fn request_at(&mut self, input: &[u8], now: Instant) -> Value {
         if input.len() <= MAX_MESSAGE_BYTES {
             if let Ok(parsed) = serde_json::from_slice::<Value>(input) {
+                if parsed.get("protocolVersion").and_then(Value::as_u64) == Some(2) {
+                    return self.request_v2_at(parsed, now);
+                }
                 if let Some(op) = parsed.get("operation").and_then(Value::as_str) {
                     if op.starts_with("curate.") {
+                        if parsed["protocolVersion"].as_u64()!=Some(1){return json!({"ok":false,"error":{"code":"incompatible_protocol"}});}
                         return self.handle_curate_request_at(&parsed, now);
                     }
                 }
@@ -325,9 +338,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         }
         let was_active = self.current_activity() != "idle";
         let response = self.owner.request(input);
-        if was_active && self.current_activity() == "idle" {
-            self.last_stopped_at = Some(now);
-        }
+        self.track_activity_change(was_active,now);
         response
     }
 
@@ -342,14 +353,15 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     ) -> Result<bool, ErrorCode> {
         let was_active = self.current_activity() != "idle";
         let applied = self.owner.on_renderer_event(event)?;
-        if applied && was_active && self.current_activity() == "idle" {
-            self.last_stopped_at = Some(now);
-        }
+        if applied {self.track_activity_change(was_active,now);}
         Ok(applied)
     }
 
     pub fn sync_external_renderer(&mut self, info: Option<ExternalPlaybackInfo>) -> Result<bool, ErrorCode> {
-        self.owner.sync_external_renderer(info)
+        let was_active=self.owner.activity()!="idle";
+        let result=self.owner.sync_external_renderer(info);
+        if result.is_ok(){self.track_activity_change(was_active,Instant::now());}
+        result
     }
 
     pub fn on_renderer_external_takeover_at(
@@ -364,9 +376,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         let applied = self
             .owner
             .on_renderer_external_takeover(token, transport_state, current_uri, position_seconds)?;
-        if applied && was_active && self.current_activity() == "idle" {
-            self.last_stopped_at = Some(now);
-        }
+        if applied {self.track_activity_change(was_active,now);}
         Ok(applied)
     }
 
@@ -399,6 +409,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     /// Deterministically stops any active session, unlocks all pinned RAM buffers,
     /// checkpoints WAL, and closes the SQLite handle cleanly.
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
+        if self.owner.activity()!="idle"{if let Some(library)=&self.library{library.record_activity(false).map_err(RuntimeError::Database)?;}}
         let _ = self.renderer.apply(&RendererAction::Stop);
         self.arena.clear();
         if let Ok(mut admitted) = self.renderer.admitted_ids.lock() {
@@ -418,7 +429,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         if self.db.is_none() {
             return Err(RuntimeError::Closed);
         }
-        if self.current_activity() != "idle" {
+        if self.owner.activity() != "idle" {
             return Err(RuntimeError::TransportNotIdle);
         }
         if let Some(stopped_at) = self.last_stopped_at {
@@ -433,18 +444,14 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         Ok(())
     }
 
+    fn track_activity_change(&mut self,was_active:bool,now:Instant){
+        let active=self.owner.activity()!="idle";
+        if was_active && !active{self.last_stopped_at=Some(now);}
+        if active!=was_active{if let Some(library)=&self.library{let _=library.record_activity(active);}}
+    }
+
     fn current_activity(&self) -> String {
-        let req = json!({
-            "protocolVersion": 1,
-            "engineId": self.config.engine_id,
-            "libraryId": self.config.library_id,
-            "operation": "session.snapshot"
-        });
-        let resp = self.owner.request(&serde_json::to_vec(&req).unwrap_or_default());
-        resp["data"]["playback"]["activity"]
-            .as_str()
-            .unwrap_or("idle")
-            .to_string()
+        self.owner.activity().to_owned()
     }
 
     fn rejects_unadmitted_target(&self, parsed: &Value) -> bool {
@@ -498,6 +505,115 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.music_read_only = read_only;
     }
 
+    pub fn configure_library(&mut self, roots: Vec<PathBuf>) -> Result<(), RuntimeError> {
+        self.ensure_storage_idle_at(Instant::now())?;
+        let data_root=self.config.db_path.parent().ok_or_else(||RuntimeError::Database("Missing app-data root".into()))?.canonicalize().map_err(|e|RuntimeError::Database(e.to_string()))?;
+        for root in &roots {
+            let root=root.canonicalize().map_err(|e|RuntimeError::Database(e.to_string()))?;
+            if root.starts_with(&data_root) || data_root.starts_with(&root){return Err(RuntimeError::Database("Browse roots and persistent app data must not overlap".into()));}
+        }
+        let db = self.db.as_ref().ok_or(RuntimeError::Closed)?.clone();
+        curate::ensure_schema(&db).map_err(|e| RuntimeError::Database(format!("{e:?}")))?;
+        let library = library::Library::open(db, roots).map_err(RuntimeError::Database)?;
+        let extras=library.enriched_tracks().map_err(RuntimeError::Database)?;
+        self.catalog_extras=self.track_db_ids.iter().filter_map(|(public,raw)|extras.get(raw).map(|e|(public.clone(),e.clone()))).collect();
+        let remaining=library.recovery_cooldown().map_err(RuntimeError::Database)?;
+        if !remaining.is_zero(){
+            self.last_stopped_at=Some(Instant::now()-(COOLDOWN_DURATION-remaining.min(COOLDOWN_DURATION)));
+            library.record_activity(false).map_err(RuntimeError::Database)?;
+        }
+        self.library = Some(library);
+        self.curate_pending = !curate::list_active_jobs(self.db.as_ref().unwrap()).map_err(|e|RuntimeError::Database(format!("{e:?}")))?.is_empty();
+        Ok(())
+    }
+
+    /// Existing control dispatcher calls this only after pending controller
+    /// commands, one scan operation at a time; no new timer/worker is introduced.
+    pub fn library_step_at(&mut self, now: Instant) -> Result<(), RuntimeError> {
+        if self.ensure_storage_idle_at(now).is_err() { return Ok(()); }
+        if let Some(library) = &mut self.library {
+            if library.step().map_err(RuntimeError::Database)? { self.reload_catalog_at(now)?; }
+        }
+        if !self.music_read_only && self.curate_pending {
+            self.execute_pending_curate_jobs_at(now).map_err(|e|RuntimeError::Database(format!("{e:?}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn artwork_at(&mut self, id: &str, now: Instant) -> Result<(String, Vec<u8>), String> {
+        if id.len()>128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'_' || b==b'-') { return Err("Invalid release ID".into()); }
+        let idle = self.ensure_storage_idle_at(now).is_ok();
+        self.library.as_mut().ok_or("Library unavailable")?.artwork(id,idle)
+    }
+
+    pub fn take_library_events(&mut self)->Vec<Value>{self.library.as_mut().map(|l|l.take_events()).unwrap_or_default()}
+
+    fn request_v2_at(&mut self, mut request: Value, now: Instant) -> Value {
+        if request["engineId"].as_str()!=Some(&self.config.engine_id) || request["libraryId"].as_str()!=Some(&self.config.library_id) {
+            return json!({"ok":false,"error":{"code":"identity_mismatch"}});
+        }
+        let operation=request["operation"].as_str().unwrap_or_default().to_string();
+        let public_ids=&self.public_track_ids;
+        if operation=="curate.draft.save"{
+            if let Some(raw)=request["draft"]["trackId"].as_str().and_then(|id|self.track_db_ids.get(id)){
+                request["draft"]["trackId"]=json!(raw);
+            }
+        }
+        if operation.starts_with("curate.") && operation!="curate.draft.list" {
+            let idle = self.ensure_storage_idle_at(now).is_ok();
+            if !idle {return json!({"ok":false,"error":{"code":"deferred_until_idle"}});}
+            // Authorize the stored path, never trust a frontend-supplied file path.
+            let track_id = if operation=="curate.draft.save" {request["draft"]["trackId"].as_str().map(str::to_string)} else {
+                self.db.as_ref().and_then(|db| db.conn.lock().query_row("SELECT track_id FROM remote_curate_drafts WHERE draft_id=?1",rusqlite::params![request["draftId"].as_str().unwrap_or_default()],|r|r.get::<_,String>(0)).ok())
+            };
+            if let Some(id)=track_id {
+                let public=public_ids.get(&id).unwrap_or(&id);
+                let authorized=self.track_files.get(public).and_then(|path| self.library.as_ref().map(|lib|lib.open_path(path).is_ok())).unwrap_or(false);
+                if !authorized {return json!({"ok":false,"error":{"code":"unauthorized_path"}});}
+            }
+            let mut response=self.handle_curate_request_at(&request,now);
+            project_track_tokens(&mut response,&self.public_track_ids);
+            return response;
+        }
+        if operation.starts_with("fs.") || operation.starts_with("folders.") || operation.starts_with("playlists.") || operation.starts_with("releases.split.") || operation=="engine.events" || operation=="curate.draft.list" {
+            let idle=self.ensure_storage_idle_at(now).is_ok();
+            if operation=="playlists.setTracks"{if let Some(ids)=request["trackIds"].as_array_mut(){for id in ids{if let Some(raw)=id.as_str().and_then(|id|self.track_db_ids.get(id)){*id=json!(raw);}}}}
+            return match self.library.as_mut().ok_or("Library unavailable".to_string()).and_then(|lib|lib.request(&operation,&request,idle)) {
+                Ok(mut value)=>{
+                    project_track_tokens(&mut value,public_ids);
+                    json!({"ok":true,"data":value})
+                },
+                Err(error)=>json!({"ok":false,"error":{"code":if error=="deferred_until_idle"{"deferred_until_idle"}else{"invalid_payload"},"message":error}}),
+            };
+        }
+        request["protocolVersion"]=json!(1);
+        let mut response=self.request_at(&serde_json::to_vec(&request).unwrap_or_default(),now);
+        let revision=self.library.as_ref().map(|lib|lib.revision()).unwrap_or(0);
+        if operation=="core.hello" && response["ok"]==true {
+            response["data"]["protocolVersion"]=json!(2);
+            if let Some(caps)=response["data"]["capabilities"].as_array_mut(){caps.extend(["fs.browse","folders.manage","playlists.manage","artwork.read","curate.write"].iter().map(|s|json!(s)));}
+        }
+        let catalog=if operation=="catalog.page" {response.get_mut("data")} else if operation=="session.snapshot"{response.get_mut("data").and_then(|v|v.get_mut("catalog"))} else {None};
+        if let Some(catalog)=catalog {
+            catalog["revision"]=json!(revision);
+            if let Some(tracks)=catalog["tracks"].as_array_mut(){for track in tracks{if let Some(extra)=track["id"].as_str().and_then(|id|self.catalog_extras.get(id)).and_then(Value::as_object){track.as_object_mut().unwrap().extend(extra.clone());}}}
+        }
+        // Enrichment must respect the same bounded wire size as v1, including
+        // large lyric fields and snapshots containing a substantial queue.
+        if matches!(operation.as_str(),"catalog.page"|"session.snapshot") {
+            loop {
+                if serde_json::to_vec(&response).map_or(false,|b|b.len()<=MAX_MESSAGE_BYTES){break;}
+                let catalog=if operation=="catalog.page"{&mut response["data"]}else{&mut response["data"]["catalog"]};
+                let Some(tracks)=catalog["tracks"].as_array_mut()else{break};
+                if tracks.pop().is_none(){return json!({"ok":false,"error":{"code":"invalid_payload"}});}
+                let count=tracks.len();
+                let start=request["cursor"].as_str().and_then(|c|c.strip_prefix("page_")).and_then(|c|c.parse::<usize>().ok()).unwrap_or(0);
+                catalog["nextCursor"]=json!(format!("page_{}",start+count));
+            }
+        }
+        response
+    }
+
     pub fn register_writable_root(
         &mut self,
         root_path: &std::path::Path,
@@ -538,19 +654,24 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         draft_id: &str,
         expected_approval_hash: &str,
         command_id: &str,
-        _now: Instant,
+        now: Instant,
     ) -> Result<curate::CurateApprovalReceipt, curate::RemoteCurateError> {
+        // Approval rereads the source for optimistic concurrency; it needs the
+        // same protected-phase guard as execution, not just the eventual writer.
+        self.map_idle_gate(now)?;
         let db = self
             .db
             .as_ref()
             .ok_or_else(|| curate::RemoteCurateError::Database("runtime closed".into()))?;
-        curate::approve_draft(
+        let receipt = curate::approve_draft(
             db,
             draft_id,
             expected_approval_hash,
             command_id,
             self.music_read_only,
-        )
+        )?;
+        self.curate_pending = true;
+        Ok(receipt)
     }
 
     pub fn execute_pending_curate_jobs_at(
@@ -564,7 +685,9 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         match self.ensure_storage_idle_at(now) {
             Ok(()) => {
                 let receipts = curate::execute_pending_jobs(db, self.music_read_only)?;
+                self.curate_pending = !curate::list_active_jobs(db)?.is_empty();
                 if !receipts.is_empty() {
+                    if let Some(library)=&mut self.library{library.metadata_changed().map_err(curate::RemoteCurateError::Database)?;}
                     let _ = self.reload_catalog_at(now);
                 }
                 Ok(receipts)
@@ -665,6 +788,13 @@ fn curate_err_json(err: curate::RemoteCurateError) -> Value {
         _ => "invalid_payload",
     };
     json!({ "ok": false, "error": { "code": code } })
+}
+
+fn load_track_identifiers(db:&AppDb,files:&HashMap<String,PathBuf>)->Result<HashMap<String,String>,RuntimeError>{
+    let conn=db.conn.lock();
+    let mut stmt=conn.prepare("SELECT id,file_path FROM tracks").map_err(|e|RuntimeError::Database(e.to_string()))?;
+    let rows=stmt.query_map([],|r|Ok((PathBuf::from(r.get::<_,String>(1)?),r.get::<_,String>(0)?))).map_err(|e|RuntimeError::Database(e.to_string()))?.collect::<Result<HashMap<_,_>,_>>().map_err(|e|RuntimeError::Database(e.to_string()))?;
+    Ok(files.iter().filter_map(|(public,path)|rows.get(path).map(|raw|(public.clone(),raw.clone()))).collect())
 }
 
 fn load_catalog_projection(
@@ -869,5 +999,17 @@ fn sanitize_display_text(value: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         cleaned
+    }
+}
+
+fn project_track_tokens(value:&mut Value,ids:&HashMap<String,String>){
+    match value{
+        Value::Object(object)=>{
+            if let Some(id)=object.get_mut("trackId"){if let Some(public)=id.as_str().and_then(|id|ids.get(id)){*id=json!(public);}}
+            if let Some(Value::Array(tracks))=object.get_mut("trackIds"){for id in tracks{if let Some(public)=id.as_str().and_then(|id|ids.get(id)){*id=json!(public);}}}
+            for nested in object.values_mut(){project_track_tokens(nested,ids);}
+        }
+        Value::Array(values)=>{for nested in values{project_track_tokens(nested,ids);}}
+        _=>{}
     }
 }

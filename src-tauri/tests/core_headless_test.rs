@@ -426,6 +426,21 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
     )
     .expect("open runtime");
 
+    let browse_root=ws.dir.with_extension("library");std::fs::create_dir(&browse_root).unwrap();
+    runtime.configure_library(vec![browse_root.clone()]).unwrap();
+    let v2 = |operation:&str, path:Option<&Path>| serde_json::to_vec(&json!({"protocolVersion":2,"engineId":"truenas-core","libraryId":"main-library","operation":operation,"path":path.map(|p|p.to_string_lossy())})).unwrap();
+    let browse=v2("fs.browse",Some(&browse_root));
+    assert_eq!(runtime.request(&browse)["ok"],true);
+    let protected_checks=|runtime:&mut HeadlessCoreRuntime<RecordingRenderer,FakePlatformProbe,Arc<FakeLocker>>, now:Instant| {
+        assert_eq!(runtime.request_at(&browse,now)["data"]["cached"],true);
+        let miss=v2("fs.browse",Some(&browse_root.join("uncached")));
+        assert_eq!(runtime.request_at(&miss,now)["error"]["code"],"deferred_until_idle");
+        assert_eq!(runtime.request_at(&v2("folders.scan",None),now)["error"]["code"],"deferred_until_idle");
+        assert_eq!(runtime.request_at(&v2("curate.approve",None),now)["error"]["code"],"deferred_until_idle");
+        assert!(runtime.artwork_at("missing",now).is_err());
+        runtime.library_step_at(now).unwrap();
+    };
+
     let snap = runtime.request(&wire(json!({ "operation": "session.snapshot" })));
     let tracks = snap["data"]["catalog"]["tracks"].as_array().unwrap();
     let track_a = tracks[0]["id"].as_str().unwrap().to_string();
@@ -470,6 +485,7 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
     })));
     assert_eq!(play_ok["ok"], true, "{play_ok}");
 
+    protected_checks(&mut runtime,t0+Duration::from_secs(1));
     // While Loading: admission and DB reload are blocked
     assert_eq!(
         runtime.admit_tracks_at(&[track_b.clone()], t0 + Duration::from_secs(1)),
@@ -494,6 +510,7 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
         .on_renderer_event_at(RendererEvent::Started(token), t0 + Duration::from_secs(2))
         .unwrap();
 
+    protected_checks(&mut runtime,t0+Duration::from_secs(5));
     // While Playing: admission and DB reload are blocked
     assert_eq!(
         runtime.admit_tracks_at(&[track_b.clone()], t0 + Duration::from_secs(5)),
@@ -518,6 +535,7 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
         Err(RuntimeError::TransportNotIdle)
     );
 
+    protected_checks(&mut runtime,t0+Duration::from_secs(6));
     // Stop at t0 + 10s -> enters 30s post-playback cooldown
     let stop_at = t0 + Duration::from_secs(10);
     let rev = runtime.request(&wire(json!({ "operation": "session.snapshot" })))["data"]["revision"]
@@ -551,6 +569,7 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
         Err(RuntimeError::CooldownActive { remaining_ms: 1_000 })
     ));
 
+    protected_checks(&mut runtime,stop_at+Duration::from_secs(29));
     // At stop_at + 30s (cooldown elapsed): admission and catalog reload succeed!
     runtime
         .admit_tracks_at(&[track_b], stop_at + COOLDOWN_DURATION)
@@ -562,6 +581,7 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
     runtime.shutdown().unwrap();
     drop(runtime);
     let _ = std::fs::remove_dir_all(&ws.dir);
+    let _ = std::fs::remove_dir_all(&browse_root);
 }
 
 #[test]
@@ -699,8 +719,6 @@ fn headless_dependency_tree_excludes_gui_and_local_audio_crates() {
         "cpal v",
         "rodio v",
         "alsa-sys",
-        "symphonia v",
-        "lofty v",
         "windows v",
     ] {
         assert!(

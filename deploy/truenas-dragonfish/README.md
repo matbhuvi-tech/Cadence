@@ -2,6 +2,46 @@
 
 Versioned deployment recipe for the headless `cadence-core` (`cadence-headless`) container on TrueNAS SCALE Dragonfish 24.04.
 
+## Phase 1 library API and local verification
+
+The controller now uses real HTTPS with a persistent self-signed certificate.
+Trust/pin the engine certificate before connecting; `tlsFingerprintSha256` identifies
+that certificate. All `/v1/*` APIs, artwork and progress streams require an
+`x-cadence-token` or `Authorization: Bearer ...` header. Query-string tokens are
+not supported. The owner credential is generated once in app data as `pairing-token`
+(0600 on Linux); protect it as a secret. `CADENCE_PAIRING_TOKEN` can override it
+with a random 32–256 character value for an isolated test deployment.
+
+`CADENCE_BROWSE_ROOTS` is an OS path list (colon-separated on Linux), defaulting to
+`CADENCE_MUSIC_DIR`. It authorizes directories, never arbitrary paths from a client.
+Library roots must not overlap persistent app data. Linux requires `openat2`
+(kernel 5.6+); unsupported kernels fail closed. Symlinks beneath roots are rejected,
+including symlinks targeting another otherwise authorized directory.
+
+Mount separate datasets at `/music/master` and `/music/rajafans` to browse and scan
+both beneath `/music`; examples are included in Compose. In the Custom App YAML,
+add one `hostPath` volume and `volumeMount` for each submount, retaining
+`readOnly: true`. Real tag commits require **both** `CADENCE_MUSIC_READ_ONLY=false`
+and write access on the specific mount. This repository change does not deploy or
+grant production write access.
+
+Run the disposable regression harness from the repository root:
+
+```sh
+docker build -f deploy/engine-regression/Dockerfile -t cadence-engine-regression:phase1 .
+docker run --rm --network none --cap-add SYS_PTRACE cadence-engine-regression:phase1
+```
+
+The image includes Rust tests, Node/tsx contract tooling, ffmpeg, synthetic DSD256,
+Python HTTP acceptance tests and a Linux syscall audit. The run creates its own
+database/music/caches under temporary directories, starts the actual executable,
+and never contacts a NAS or renderer. Network access is required to build the
+image; execution needs no external network. This is not physical RS130 or
+audiophile performance qualification.
+
+See [the Phase 1 evidence and API contract](../../reports/standalone-playback-phase1.tdd.md)
+for supported operations, writer limits and release gates.
+
 ## Host & Dataset Preparation
 
 1. **App Data Dataset (SSD recommended):**

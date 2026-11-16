@@ -5,19 +5,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::EngineProgressSink;
 use chrono::Utc;
-use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 use crate::audio::AudioEngine;
-use crate::db::{
-    AppDb, DbOperations, DbRelease, DbSkippedFile, DbTrack, DbWatchedFolder,
-};
+use crate::db::{AppDb, DbOperations, DbRelease, DbSkippedFile, DbTrack, DbWatchedFolder};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,14 +81,22 @@ pub fn read_album_sidecar(dir: &Path) -> AlbumSidecar {
     if sidecar_path.is_file() {
         if let Ok(content) = fs::read_to_string(&sidecar_path) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                let alb = v.get("album").and_then(|s| s.as_str()).map(|s| s.to_string());
-                let fn_name = v.get("folderName").and_then(|s| s.as_str()).map(|s| s.to_string());
-                let cover = v.get("coverArtUrl")
+                let alb = v
+                    .get("album")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                let fn_name = v
+                    .get("folderName")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                let cover = v
+                    .get("coverArtUrl")
                     .or_else(|| v.get("artworkUrl"))
                     .and_then(|s| s.as_str())
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
-                let backdrop = v.get("backdropUrl")
+                let backdrop = v
+                    .get("backdropUrl")
                     .and_then(|s| s.as_str())
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
@@ -110,9 +114,18 @@ pub fn read_album_sidecar(dir: &Path) -> AlbumSidecar {
 
 pub fn find_local_cover_art(dir: &Path) -> Option<String> {
     let candidates = [
-        "cover.jpg", "cover.png", "folder.jpg", "folder.png",
-        "front.jpg", "front.png", "cover.jpeg", "folder.jpeg",
-        "Cover.jpg", "Cover.png", "Folder.jpg", "Folder.png"
+        "cover.jpg",
+        "cover.png",
+        "folder.jpg",
+        "folder.png",
+        "front.jpg",
+        "front.png",
+        "cover.jpeg",
+        "folder.jpeg",
+        "Cover.jpg",
+        "Cover.png",
+        "Folder.jpg",
+        "Folder.png",
     ];
     for c in &candidates {
         let p = dir.join(c);
@@ -143,25 +156,63 @@ pub fn read_track_sidecar(audio_path: &Path) -> TrackSidecar {
                 let meta = v.get("metadata");
                 let edits = v.get("pendingEditsApplied");
 
-                let title = meta.and_then(|m| m.get("title")).and_then(|s| s.as_str())
+                let title = meta
+                    .and_then(|m| m.get("title"))
+                    .and_then(|s| s.as_str())
                     .or_else(|| edits.and_then(|e| e.get("title")).and_then(|s| s.as_str()))
                     .map(|s| s.to_string());
-                let artist = meta.and_then(|m| m.get("artist")).and_then(|s| s.as_str())
-                    .or_else(|| edits.and_then(|e| e.get("artistCredit")).and_then(|s| s.as_str()))
+                let artist = meta
+                    .and_then(|m| m.get("artist"))
+                    .and_then(|s| s.as_str())
+                    .or_else(|| {
+                        edits
+                            .and_then(|e| e.get("artistCredit"))
+                            .and_then(|s| s.as_str())
+                    })
                     .map(|s| s.to_string());
-                let album_artist = meta.and_then(|m| m.get("albumArtist")).and_then(|s| s.as_str())
-                    .or_else(|| edits.and_then(|e| e.get("albumArtist")).and_then(|s| s.as_str()))
+                let album_artist = meta
+                    .and_then(|m| m.get("albumArtist"))
+                    .and_then(|s| s.as_str())
+                    .or_else(|| {
+                        edits
+                            .and_then(|e| e.get("albumArtist"))
+                            .and_then(|s| s.as_str())
+                    })
                     .map(|s| s.to_string());
-                let album = meta.and_then(|m| m.get("album")).and_then(|s| s.as_str())
+                let album = meta
+                    .and_then(|m| m.get("album"))
+                    .and_then(|s| s.as_str())
                     .or_else(|| edits.and_then(|e| e.get("album")).and_then(|s| s.as_str()))
                     .map(|s| s.to_string());
-                let composer = meta.and_then(|m| m.get("composer")).and_then(|s| s.as_str())
-                    .or_else(|| edits.and_then(|e| e.get("composerName")).and_then(|s| s.as_str()))
+                let composer = meta
+                    .and_then(|m| m.get("composer"))
+                    .and_then(|s| s.as_str())
+                    .or_else(|| {
+                        edits
+                            .and_then(|e| e.get("composerName"))
+                            .and_then(|s| s.as_str())
+                    })
                     .map(|s| s.to_string());
-                let year = meta.and_then(|m| m.get("year")).and_then(|y| y.as_i64()).map(|y| y as i32)
-                    .or_else(|| edits.and_then(|e| e.get("year")).and_then(|y| y.as_i64()).map(|y| y as i32));
-                let track_number = meta.and_then(|m| m.get("trackNumber")).and_then(|t| t.as_i64()).map(|t| t as i32)
-                    .or_else(|| edits.and_then(|e| e.get("trackNumber")).and_then(|t| t.as_i64()).map(|t| t as i32));
+                let year = meta
+                    .and_then(|m| m.get("year"))
+                    .and_then(|y| y.as_i64())
+                    .map(|y| y as i32)
+                    .or_else(|| {
+                        edits
+                            .and_then(|e| e.get("year"))
+                            .and_then(|y| y.as_i64())
+                            .map(|y| y as i32)
+                    });
+                let track_number = meta
+                    .and_then(|m| m.get("trackNumber"))
+                    .and_then(|t| t.as_i64())
+                    .map(|t| t as i32)
+                    .or_else(|| {
+                        edits
+                            .and_then(|e| e.get("trackNumber"))
+                            .and_then(|t| t.as_i64())
+                            .map(|t| t as i32)
+                    });
                 let genre = meta.and_then(|m| m.get("genre")).and_then(|g| {
                     if let Some(arr) = g.as_array() {
                         arr.first().and_then(|s| s.as_str()).map(|s| s.to_string())
@@ -239,7 +290,7 @@ impl ScannerController {
 
     pub fn start_scan(
         &self,
-        app: AppHandle,
+        app: impl EngineProgressSink,
         db: AppDb,
         folder_path: String,
         mount_id_override: Option<String>,
@@ -251,9 +302,11 @@ impl ScannerController {
 
         let audio_engine_ref = self.audio_engine.read().clone();
         let scan_start_permit = match &audio_engine_ref {
-            Some(engine) => Some(engine.try_library_scan_io().ok_or(
-                "Stop playback before starting a library scan.",
-            )?),
+            Some(engine) => Some(
+                engine
+                    .try_library_scan_io()
+                    .ok_or("Stop playback before starting a library scan.")?,
+            ),
             None => None,
         };
         let dir = PathBuf::from(&folder_path);
@@ -261,7 +314,11 @@ impl ScannerController {
             return Err(format!("Directory does not exist: {}", folder_path));
         }
 
-        if self.is_scanning.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if self
+            .is_scanning
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err("Scan already in progress".into());
         }
         self.is_paused.store(false, Ordering::SeqCst);
@@ -577,36 +634,15 @@ impl ScannerController {
                     .unwrap_or("")
                     .to_lowercase();
 
-                let media_probe = if crate::scanner::dsd::is_dsd_path(path) {
-                    if let Some(dsd) = crate::scanner::dsd::probe_dsd_file(path) {
-                        MediaProbe::Parsed {
-                            duration_secs: dsd.duration_secs,
-                            sample_rate: dsd.sample_rate,
-                            bit_depth: dsd.bit_depth,
-                            channels: dsd.channels,
-                            tag: dsd.tag,
-                        }
-                    } else {
-                        MediaProbe::Failed(format!("Invalid or corrupted {} container header", ext_lower.to_uppercase()))
-                    }
-                } else {
-                    match Probe::open(path).and_then(|p| p.read()) {
-                        Ok(tagged_file) => {
-                            let props = tagged_file.properties();
-                            let tag = tagged_file
-                                .primary_tag()
-                                .or_else(|| tagged_file.first_tag())
-                                .cloned();
-                            MediaProbe::Parsed {
-                                duration_secs: props.duration().as_secs_f64(),
-                                sample_rate: props.sample_rate(),
-                                bit_depth: props.bit_depth(),
-                                channels: props.channels().map(|c| c as u16),
-                                tag,
-                            }
-                        }
-                        Err(err) => MediaProbe::Failed(err.to_string()),
-                    }
+                let media_probe = match crate::scanner::media::inspect(path, &ext_lower) {
+                    Ok(parsed) => MediaProbe::Parsed {
+                        duration_secs: parsed.duration,
+                        sample_rate: parsed.sample_rate,
+                        bit_depth: parsed.bit_depth,
+                        channels: parsed.channels,
+                        tag: parsed.tag,
+                    },
+                    Err(error) => MediaProbe::Failed(error),
                 };
 
                 let trk_sidecar = read_track_sidecar(path);
@@ -996,7 +1032,10 @@ pub fn calculate_dr_score(
         // 1. Check for explicit DR or DYNAMIC_RANGE tags
         for item in t.items() {
             let key_str = format!("{:?}", item.key()).to_uppercase();
-            if key_str.contains("DYNAMIC_RANGE") || key_str.contains("DYNAMIC RANGE") || key_str == "DR" {
+            if key_str.contains("DYNAMIC_RANGE")
+                || key_str.contains("DYNAMIC RANGE")
+                || key_str == "DR"
+            {
                 if let Some(txt) = item.value().text() {
                     let cleaned: String = txt.chars().filter(|c| c.is_ascii_digit()).collect();
                     if let Ok(dr) = cleaned.parse::<i32>() {
@@ -1017,7 +1056,12 @@ pub fn calculate_dr_score(
             let key_str = format!("{:?}", item.key()).to_uppercase();
             if key_str.contains("REPLAYGAIN_TRACK_GAIN") || key_str.contains("R128_TRACK_GAIN") {
                 if let Some(txt) = item.value().text() {
-                    let clean = txt.replace("dB", "").replace("db", "").replace("DB", "").trim().to_string();
+                    let clean = txt
+                        .replace("dB", "")
+                        .replace("db", "")
+                        .replace("DB", "")
+                        .trim()
+                        .to_string();
                     if let Ok(val) = clean.parse::<f64>() {
                         track_gain_db = Some(val);
                     }
@@ -1046,7 +1090,8 @@ pub fn calculate_dr_score(
     }
 
     // 3. Fallback: Format-aware deterministic dynamic range profile
-    let is_dsd = ext.eq_ignore_ascii_case("DSF") || ext.eq_ignore_ascii_case("DFF") || bit_depth == Some(1);
+    let is_dsd =
+        ext.eq_ignore_ascii_case("DSF") || ext.eq_ignore_ascii_case("DFF") || bit_depth == Some(1);
     let str_for_hash = format!("{}-{}-{:?}", file_name, duration_secs as u64, sample_rate);
     let char_sum: usize = str_for_hash.bytes().map(|b| b as usize).sum();
 
@@ -1078,7 +1123,10 @@ pub fn disambiguate_combo_title(raw_title: &str, folder_name: &str) -> String {
             }
             let lower = s.to_lowercase();
             if lower.starts_with("cd") || lower.starts_with("disc") {
-                let rest = lower.trim_start_matches("cd").trim_start_matches("disc").trim();
+                let rest = lower
+                    .trim_start_matches("cd")
+                    .trim_start_matches("disc")
+                    .trim();
                 if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
                     return false;
                 }
@@ -1162,9 +1210,9 @@ pub fn disambiguate_combo_title(raw_title: &str, folder_name: &str) -> String {
                 .filter(|t| t.len() >= 2)
                 .collect();
             st.iter().any(|s| {
-                folder_tokens.iter().any(|f| {
-                    f == s || (s.len() >= 4 && f.starts_with(&s[..4]))
-                })
+                folder_tokens
+                    .iter()
+                    .any(|f| f == s || (s.len() >= 4 && f.starts_with(&s[..4])))
             })
         })
         .count();
@@ -1183,8 +1231,19 @@ pub fn disambiguate_combo_title(raw_title: &str, folder_name: &str) -> String {
 fn strip_rip_noise(s: &str) -> String {
     let mut res = s.to_string();
     for marker in &[
-        " [CD RIP]", " CD RIP", " (CD RIP)", " [FLAC]", " [DSD]", " [MP3]", " [WAV]",
-        " [ALAC]", " CD-RIP", " CDRIP", " v1.0", " v2.0", " v3.0",
+        " [CD RIP]",
+        " CD RIP",
+        " (CD RIP)",
+        " [FLAC]",
+        " [DSD]",
+        " [MP3]",
+        " [WAV]",
+        " [ALAC]",
+        " CD-RIP",
+        " CDRIP",
+        " v1.0",
+        " v2.0",
+        " v3.0",
     ] {
         if let Some(pos) = res.to_lowercase().find(&marker.to_lowercase()) {
             res = res[..pos].to_string();
@@ -1204,5 +1263,3 @@ fn strip_repeated_chars(s: &str) -> String {
     }
     res
 }
-
-

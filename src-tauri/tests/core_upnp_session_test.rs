@@ -726,10 +726,12 @@ fn sequential_range_continuation_seek_late_token_rejection_and_stop_cancellation
         snap_cont.preroll_chunks, 0,
         "Range continuation >= 1 MiB must not repeat pre-roll"
     );
-    assert_eq!(
-        snap_cont.current_regime, "cruise",
-        "Contiguous reconnect must start in steady 1.000x cruise"
-    );
+    // This snapshot is taken *after* the entire socket transfer, when Linux may
+    // legitimately have applied anti-windup flow suppression. Check steady-state
+    // safety here; the constructor regression below checks exact initial cruise.
+    assert_eq!(snap_cont.current_state,"steady_maintain");
+    assert!(matches!(snap_cont.current_regime,"cruise"|"flow_suppressed"),"{snap_cont:?}");
+    assert!(snap_cont.current_multiplier<=1.0,"Continuation must never restart initial overfeed: {snap_cont:?}");
 
     // Reconcile renderer PLAYING state so session enters Playing
     session_rt.reconcile_renderer().expect("reconcile playing");
@@ -789,6 +791,18 @@ fn sequential_range_continuation_seek_late_token_rejection_and_stop_cancellation
     assert!(hdr_after_stop.starts_with("HTTP/1.1 404") || hdr_after_stop.starts_with("HTTP/1.1 410"));
 
     session_rt.shutdown().unwrap();
+}
+
+#[test]
+fn contiguous_reconnect_starts_at_exact_cruise_before_socket_feedback(){
+    use cadence_core_lib::core_runtime::upnp_session::{CorePacer,CorePacingMetrics};
+    let metrics=Arc::new(CorePacingMetrics::default());
+    let _pacer=CorePacer::new(CorePacerConfig::fast_for_tests(),Some(576_000.0),512*1024,32*1024,true,true,false,metrics.clone(),Arc::new(AtomicBool::new(false)));
+    let snapshot=metrics.snapshot();
+    assert_eq!(snapshot.current_state,"steady_maintain");
+    assert_eq!(snapshot.current_regime,"cruise");
+    assert_eq!(snapshot.current_multiplier,1.0);
+    assert_eq!(snapshot.preroll_bytes_configured,0);
 }
 
 #[test]

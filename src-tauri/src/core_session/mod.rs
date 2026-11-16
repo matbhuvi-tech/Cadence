@@ -5,8 +5,11 @@
 //! The mutex serializes commands and renderer events. Renderer implementations must
 //! provide a bounded, non-reentrant control mailbox, not perform media I/O here.
 mod protocol;
+use protocol::{
+    ensure, seconds, text, token, Action, Mutation, Operation, Repeat, MAX_PAGE_TRACKS,
+    MAX_QUEUE_ENTRIES, MAX_REVISION,
+};
 pub use protocol::{CatalogTrack, ErrorCode, Output, QueueEntry, MAX_MESSAGE_BYTES};
-use protocol::{ensure, seconds, text, token, Action, Mutation, Operation, Repeat, MAX_PAGE_TRACKS, MAX_QUEUE_ENTRIES, MAX_REVISION};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -30,17 +33,27 @@ pub struct RunToken(uuid::Uuid);
 
 #[derive(Clone, Debug)]
 pub enum RendererAction {
-    Play { entry: QueueEntry, token: RunToken },
+    Play {
+        entry: QueueEntry,
+        token: RunToken,
+    },
     Pause,
-    Resume { token: RunToken },
-    Seek { position_seconds: f64, token: RunToken },
+    Resume {
+        token: RunToken,
+    },
+    Seek {
+        position_seconds: f64,
+        token: RunToken,
+    },
     Stop,
 }
 
 impl RendererAction {
     pub fn token(&self) -> Option<&RunToken> {
         match self {
-            Self::Play { token, .. } | Self::Resume { token } | Self::Seek { token, .. } => Some(token),
+            Self::Play { token, .. } | Self::Resume { token } | Self::Seek { token, .. } => {
+                Some(token)
+            }
             _ => None,
         }
     }
@@ -65,7 +78,12 @@ pub enum RendererEvent {
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Activity { Idle, Loading, Playing, Paused }
+enum Activity {
+    Idle,
+    Loading,
+    Playing,
+    Paused,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -103,16 +121,23 @@ struct State {
 
 impl State {
     fn current_index(&self) -> Option<usize> {
-        self.current.as_ref().and_then(|id| self.entries.iter().position(|entry| &entry.entry_id == id))
+        self.current
+            .as_ref()
+            .and_then(|id| self.entries.iter().position(|entry| &entry.entry_id == id))
     }
 
     fn rebuild_order(&mut self) {
         self.order = (0..self.entries.len()).collect();
-        if !self.shuffle { return; }
+        if !self.shuffle {
+            return;
+        }
         // Keep the current entry first; visit every other queue entry once per cycle.
         let start = if let Some(current) = self.current_index() {
-            self.order.swap(0, current); 1
-        } else { 0 };
+            self.order.swap(0, current);
+            1
+        } else {
+            0
+        };
         for i in (start + 1..self.order.len()).rev() {
             let random = uuid::Uuid::new_v4().as_u128();
             let j = start + (random % (i - start + 1) as u128) as usize;
@@ -139,26 +164,44 @@ impl State {
     fn next(&mut self, automatic: bool) -> Option<RendererAction> {
         let current = self.current_index();
         if automatic && self.repeat == Repeat::One {
-            if let Some(index) = current { return Some(self.start(index)); }
+            if let Some(index) = current {
+                return Some(self.start(index));
+            }
         }
         let position = current.and_then(|i| self.order.iter().position(|&v| v == i));
         let next = position.map_or(0, |p| p + 1);
-        if next < self.order.len() { return Some(self.start(self.order[next])); }
+        if next < self.order.len() {
+            return Some(self.start(self.order[next]));
+        }
         if self.repeat == Repeat::All && !self.order.is_empty() {
             if self.shuffle {
                 self.rebuild_order();
                 // Current was placed first. Begin a new cycle on a different entry.
-                if self.order.len() > 1 { self.order.rotate_left(1); }
+                if self.order.len() > 1 {
+                    self.order.rotate_left(1);
+                }
             }
             return Some(self.start(self.order[0]));
         }
         self.stop();
-        if automatic { None } else { Some(RendererAction::Stop) }
+        if automatic {
+            None
+        } else {
+            Some(RendererAction::Stop)
+        }
     }
 }
 
-struct Receipt { id: String, fingerprint: [u8; 32], outcome: Result<()> }
-struct Session<R> { state: State, renderer: R, recent: VecDeque<Receipt> }
+struct Receipt {
+    id: String,
+    fingerprint: [u8; 32],
+    outcome: Result<()>,
+}
+struct Session<R> {
+    state: State,
+    renderer: R,
+    recent: VecDeque<Receipt>,
+}
 
 pub struct SessionOwner<R> {
     config: SessionConfig,
@@ -168,31 +211,114 @@ pub struct SessionOwner<R> {
 }
 
 impl<R: Renderer> SessionOwner<R> {
+    /// Constant-size activity observation for storage admission. Never serialize
+    /// the catalog or queue merely to check the playback guard.
+    pub fn activity(&self) -> &'static str {
+        let Ok(session) = self.session.lock() else {
+            return "loading";
+        };
+        match session.state.activity {
+            Activity::Idle => "idle",
+            Activity::Loading => "loading",
+            Activity::Playing => "playing",
+            Activity::Paused => "paused",
+        }
+    }
+    /// Refresh only the prepared catalog; never reset queue, command receipts or
+    /// playback/session revision when an idle scan or metadata job completes.
+    pub fn replace_catalog(&mut self, catalog: Vec<CatalogTrack>) -> Result<()> {
+        let mut durations = HashMap::new();
+        for track in &catalog {
+            token(&track.id)?;
+            text(&track.title)?;
+            text(&track.artist)?;
+            text(&track.album)?;
+            seconds(track.duration_seconds)?;
+            ensure(
+                durations
+                    .insert(track.id.clone(), track.duration_seconds)
+                    .is_none(),
+            )?;
+        }
+        {
+            let session = self.session.get_mut().map_err(|_| ErrorCode::Unavailable)?;
+            let old_len = session.state.entries.len();
+            session
+                .state
+                .entries
+                .retain(|entry| durations.contains_key(&entry.track_id));
+            if session.state.entries.len() != old_len {
+                ensure(session.state.revision < MAX_REVISION)?;
+                if session.state.current_index().is_none() {
+                    session.state.current = None;
+                    session.state.stop();
+                }
+                session.state.rebuild_order();
+                session.state.revision += 1;
+            }
+        }
+        self.catalog = catalog;
+        self.durations = durations;
+        Ok(())
+    }
     /// Catalog is an immutable, already prepared in-memory projection. Loading it
     /// and admitting/locking media remain the future platform owner's responsibility.
     pub fn new(config: SessionConfig, catalog: Vec<CatalogTrack>, renderer: R) -> Result<Self> {
-        token(&config.engine_id)?; token(&config.library_id)?; text(&config.label)?;
+        token(&config.engine_id)?;
+        token(&config.library_id)?;
+        text(&config.label)?;
         ensure(!config.label.trim().is_empty())?;
         ensure((config.engine_id == "local") == (config.library_id == "local"))?;
         if let Some(output) = &config.output {
-            token(&output.id)?; text(&output.label)?;
-            ensure(matches!(output.transport.as_str(), "upnp" | "wasapi" | "system_default"))?;
+            token(&output.id)?;
+            text(&output.label)?;
+            ensure(matches!(
+                output.transport.as_str(),
+                "upnp" | "wasapi" | "system_default"
+            ))?;
         }
         let mut durations = HashMap::new();
         for track in &catalog {
-            token(&track.id)?; text(&track.title)?; text(&track.artist)?; text(&track.album)?; seconds(track.duration_seconds)?;
-            if let Some(ref rid) = track.release_id { token(rid)?; }
-            if let Some(ref aa) = track.album_artist { text(aa)?; }
-            if let Some(ref ed) = track.edition { text(ed)?; }
-            ensure(durations.insert(track.id.clone(), track.duration_seconds).is_none())?;
+            token(&track.id)?;
+            text(&track.title)?;
+            text(&track.artist)?;
+            text(&track.album)?;
+            seconds(track.duration_seconds)?;
+            if let Some(ref rid) = track.release_id {
+                token(rid)?;
+            }
+            if let Some(ref aa) = track.album_artist {
+                text(aa)?;
+            }
+            if let Some(ref ed) = track.edition {
+                text(ed)?;
+            }
+            ensure(
+                durations
+                    .insert(track.id.clone(), track.duration_seconds)
+                    .is_none(),
+            )?;
         }
         Ok(Self {
-            config, catalog, durations,
+            config,
+            catalog,
+            durations,
             session: Mutex::new(Session {
-                state: State { revision: 0, entries: vec![], current: None, repeat: Repeat::Off,
-                    shuffle: false, order: vec![], activity: Activity::Idle, position: 0.0, run: None, ready: true,
-                    external_playback: None },
-                renderer, recent: VecDeque::with_capacity(RECENT_COMMAND_LIMIT),
+                state: State {
+                    revision: 0,
+                    entries: vec![],
+                    current: None,
+                    repeat: Repeat::Off,
+                    shuffle: false,
+                    order: vec![],
+                    activity: Activity::Idle,
+                    position: 0.0,
+                    run: None,
+                    ready: true,
+                    external_playback: None,
+                },
+                renderer,
+                recent: VecDeque::with_capacity(RECENT_COMMAND_LIMIT),
             }),
         })
     }
@@ -201,8 +327,12 @@ impl<R: Renderer> SessionOwner<R> {
     /// A future transport must authenticate the peer and cap bytes BEFORE buffering.
     pub fn request(&self, input: &[u8]) -> Value {
         let result = (|| {
-            let operation = protocol::parse(input, &self.config.engine_id, &self.config.library_id).map_err(|code| (code, None))?;
-            let mut session = self.session.lock().map_err(|_| (ErrorCode::Unavailable, None))?;
+            let operation = protocol::parse(input, &self.config.engine_id, &self.config.library_id)
+                .map_err(|code| (code, None))?;
+            let mut session = self
+                .session
+                .lock()
+                .map_err(|_| (ErrorCode::Unavailable, None))?;
             match operation {
                 Operation::Hello => Ok(json!({"protocolVersion":1,"engineId":self.config.engine_id,
                     "libraryId":self.config.library_id,"label":self.config.label,
@@ -217,22 +347,32 @@ impl<R: Renderer> SessionOwner<R> {
             Ok(data) => json!({"ok":true,"data":data}),
             Err((code, snapshot)) => {
                 let mut error = json!({"code":code});
-                if let Some(snapshot) = snapshot { error["snapshot"] = snapshot; }
+                if let Some(snapshot) = snapshot {
+                    error["snapshot"] = snapshot;
+                }
                 json!({"ok":false,"error":error})
             }
         };
         if serde_json::to_vec(&response).map_or(true, |bytes| bytes.len() > MAX_MESSAGE_BYTES) {
             json!({"ok":false,"error":{"code":"invalid_payload"}})
-        } else { response }
+        } else {
+            response
+        }
     }
 
     fn page_value(&self, start: usize, limit: usize, budget: usize) -> Value {
         let mut tracks = Vec::new();
         let mut used = 0;
         for track in self.catalog.iter().skip(start).take(limit) {
-            let size = serde_json::to_vec(track).expect("validated finite catalog").len() + 1;
-            if used + size > budget { break; }
-            used += size; tracks.push(track);
+            let size = serde_json::to_vec(track)
+                .expect("validated finite catalog")
+                .len()
+                + 1;
+            if used + size > budget {
+                break;
+            }
+            used += size;
+            tracks.push(track);
         }
         let end = start + tracks.len();
         json!({"revision":0,"tracks":tracks,"nextCursor":if end < self.catalog.len() { Some(format!("page_{end}")) } else { None }})
@@ -240,15 +380,23 @@ impl<R: Renderer> SessionOwner<R> {
 
     fn page(&self, cursor: Option<String>, limit: usize) -> Result<Value> {
         let start = if let Some(cursor) = cursor {
-            let index = cursor.strip_prefix("page_").and_then(|v| v.parse::<usize>().ok()).ok_or(ErrorCode::InvalidPayload)?;
+            let index = cursor
+                .strip_prefix("page_")
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or(ErrorCode::InvalidPayload)?;
             ensure(index > 0 && index < self.catalog.len() && cursor == format!("page_{index}"))?;
             index
-        } else { 0 };
+        } else {
+            0
+        };
         Ok(self.page_value(start, limit, MAX_MESSAGE_BYTES - 1024))
     }
 
     fn base_snapshot(&self, state: &State) -> Value {
-        let external_active = state.external_playback.as_ref().is_some_and(|ext| ext.active);
+        let external_active = state
+            .external_playback
+            .as_ref()
+            .is_some_and(|ext| ext.active);
         let owner = if state.activity != Activity::Idle {
             PlaybackOwner::Core
         } else if external_active {
@@ -274,8 +422,14 @@ impl<R: Renderer> SessionOwner<R> {
 
     fn snapshot(&self, state: &State) -> Value {
         let mut snapshot = self.base_snapshot(state);
-        let used = serde_json::to_vec(&snapshot).expect("validated state").len();
-        snapshot["catalog"] = self.page_value(0, MAX_PAGE_TRACKS, MAX_MESSAGE_BYTES.saturating_sub(used + 1024));
+        let used = serde_json::to_vec(&snapshot)
+            .expect("validated state")
+            .len();
+        snapshot["catalog"] = self.page_value(
+            0,
+            MAX_PAGE_TRACKS,
+            MAX_MESSAGE_BYTES.saturating_sub(used + 1024),
+        );
         snapshot
     }
 
@@ -286,27 +440,58 @@ impl<R: Renderer> SessionOwner<R> {
             return Ok(self.snapshot(&session.state));
         }
         let outcome = self.apply_command(session, &command);
-        if session.recent.len() == RECENT_COMMAND_LIMIT { session.recent.pop_front(); }
-        session.recent.push_back(Receipt { id: command.id, fingerprint: command.fingerprint, outcome });
+        if session.recent.len() == RECENT_COMMAND_LIMIT {
+            session.recent.pop_front();
+        }
+        session.recent.push_back(Receipt {
+            id: command.id,
+            fingerprint: command.fingerprint,
+            outcome,
+        });
         outcome?;
         Ok(self.snapshot(&session.state))
     }
 
     fn apply_command(&self, session: &mut Session<R>, command: &Mutation) -> Result<()> {
-        if command.revision != session.state.revision { return Err(ErrorCode::StaleRevision); }
-        let external_active = session.state.external_playback.as_ref().is_some_and(|e| e.active);
-        let confirmed_takeover = matches!(command.action, Action::Play { force_takeover: true, .. });
-        if !session.state.ready && !matches!(command.action, Action::Stop) && !(confirmed_takeover && external_active) {
+        if command.revision != session.state.revision {
+            return Err(ErrorCode::StaleRevision);
+        }
+        let external_active = session
+            .state
+            .external_playback
+            .as_ref()
+            .is_some_and(|e| e.active);
+        let confirmed_takeover = matches!(
+            command.action,
+            Action::Play {
+                force_takeover: true,
+                ..
+            }
+        );
+        if !session.state.ready
+            && !matches!(command.action, Action::Stop)
+            && !(confirmed_takeover && external_active)
+        {
             return Err(ErrorCode::NotReady);
         }
-        if matches!(command.action, Action::Play { force_takeover: false, .. }) && external_active {
+        if matches!(
+            command.action,
+            Action::Play {
+                force_takeover: false,
+                ..
+            }
+        ) && external_active
+        {
             return Err(ErrorCode::TakeoverRequired);
         }
         ensure(session.state.revision < MAX_REVISION)?;
         let mut next = session.state.clone();
         let effect = self.plan(&mut next, &command.action)?;
         // Reserve space for one maximal track in a stale snapshot too (larger envelope).
-        ensure(serde_json::to_vec(&self.base_snapshot(&next)).map_or(false, |v| v.len() < MAX_MESSAGE_BYTES - 16_384))?;
+        ensure(
+            serde_json::to_vec(&self.base_snapshot(&next))
+                .map_or(false, |v| v.len() < MAX_MESSAGE_BYTES - 16_384),
+        )?;
         next.revision += 1; // Even accepted no-ops consume a revision: evicted retries stay stale.
         self.commit(session, next, effect)
     }
@@ -316,7 +501,11 @@ impl<R: Renderer> SessionOwner<R> {
             Action::Replace(entries) => {
                 for entry in entries {
                     ensure(self.durations.contains_key(&entry.track_id))?;
-                    if let Some(old) = next.entries.iter().find(|old| old.entry_id == entry.entry_id) {
+                    if let Some(old) = next
+                        .entries
+                        .iter()
+                        .find(|old| old.entry_id == entry.entry_id)
+                    {
                         ensure(old.track_id == entry.track_id)?;
                     }
                 }
@@ -324,86 +513,150 @@ impl<R: Renderer> SessionOwner<R> {
                 next.entries = entries.clone();
                 let removed = current.is_some() && next.current_index().is_none();
                 let must_stop = removed && next.activity != Activity::Idle;
-                if removed { next.current = None; next.stop(); }
+                if removed {
+                    next.current = None;
+                    next.stop();
+                }
                 next.rebuild_order();
-                Ok(if must_stop { Some(RendererAction::Stop) } else { None })
+                Ok(if must_stop {
+                    Some(RendererAction::Stop)
+                } else {
+                    None
+                })
             }
             Action::Modes { repeat, shuffle } => {
                 next.repeat = *repeat;
-                if next.shuffle != *shuffle { next.shuffle = *shuffle; next.rebuild_order(); }
+                if next.shuffle != *shuffle {
+                    next.shuffle = *shuffle;
+                    next.rebuild_order();
+                }
                 Ok(None)
             }
             Action::Stop => {
-                next.stop(); next.ready = true; next.external_playback = None;
+                next.stop();
+                next.ready = true;
+                next.external_playback = None;
                 Ok(Some(RendererAction::Stop))
             }
             Action::Pause => {
-                if next.activity == Activity::Paused { return Ok(None); }
+                if next.activity == Activity::Paused {
+                    return Ok(None);
+                }
                 ensure(next.activity == Activity::Playing)?;
                 next.activity = Activity::Paused;
                 Ok(Some(RendererAction::Pause))
             }
             Action::Resume => {
-                if next.activity == Activity::Playing { return Ok(None); }
+                if next.activity == Activity::Playing {
+                    return Ok(None);
+                }
                 ensure(next.activity == Activity::Paused)?;
-                let token = RunToken(uuid::Uuid::new_v4()); next.run = Some(token.clone()); next.activity = Activity::Loading;
+                let token = RunToken(uuid::Uuid::new_v4());
+                next.run = Some(token.clone());
+                next.activity = Activity::Loading;
                 Ok(Some(RendererAction::Resume { token }))
             }
             Action::Seek(position) => {
-                ensure(matches!(next.activity, Activity::Playing | Activity::Paused))?;
+                ensure(matches!(
+                    next.activity,
+                    Activity::Playing | Activity::Paused
+                ))?;
                 let index = next.current_index().ok_or(ErrorCode::InvalidPayload)?;
                 ensure(*position <= self.durations[&next.entries[index].track_id])?;
                 next.position = *position;
                 let token = RunToken(uuid::Uuid::new_v4());
                 next.run = Some(token.clone());
-                if next.activity == Activity::Playing { next.activity = Activity::Loading; }
-                Ok(Some(RendererAction::Seek { position_seconds: *position, token }))
+                if next.activity == Activity::Playing {
+                    next.activity = Activity::Loading;
+                }
+                Ok(Some(RendererAction::Seek {
+                    position_seconds: *position,
+                    token,
+                }))
             }
-            Action::Play { track_id: track, force_takeover } => {
+            Action::Play {
+                track_id: track,
+                force_takeover,
+            } => {
                 self.require_output()?;
                 ensure(self.durations.contains_key(track))?;
                 if *force_takeover {
                     next.external_playback = None;
                     next.ready = true;
                 }
-                let index = next.current_index().filter(|&i| next.entries[i].track_id == *track)
-                    .or_else(|| next.entries.iter().position(|entry| entry.track_id == *track));
+                let index = next
+                    .current_index()
+                    .filter(|&i| next.entries[i].track_id == *track)
+                    .or_else(|| {
+                        next.entries
+                            .iter()
+                            .position(|entry| entry.track_id == *track)
+                    });
                 let index = match index {
                     Some(index) => index,
                     None => {
                         ensure(next.entries.len() < MAX_QUEUE_ENTRIES)?;
-                        next.entries.push(QueueEntry { entry_id: uuid::Uuid::new_v4().to_string(), track_id: track.clone() });
-                        next.rebuild_order(); next.entries.len() - 1
+                        next.entries.push(QueueEntry {
+                            entry_id: uuid::Uuid::new_v4().to_string(),
+                            track_id: track.clone(),
+                        });
+                        next.rebuild_order();
+                        next.entries.len() - 1
                     }
                 };
                 Ok(Some(next.start(index)))
             }
             Action::Jump(id) => {
                 self.require_output()?;
-                let index = next.entries.iter().position(|entry| entry.entry_id == *id).ok_or(ErrorCode::InvalidPayload)?;
+                let index = next
+                    .entries
+                    .iter()
+                    .position(|entry| entry.entry_id == *id)
+                    .ok_or(ErrorCode::InvalidPayload)?;
                 Ok(Some(next.start(index)))
             }
-            Action::Next => { self.require_output()?; Ok(next.next(false)) }
+            Action::Next => {
+                self.require_output()?;
+                Ok(next.next(false))
+            }
             Action::Previous => {
                 self.require_output()?;
                 ensure(!next.order.is_empty())?;
-                let position = next.current_index().and_then(|i| next.order.iter().position(|&v| v == i)).unwrap_or(0);
-                let previous = if position == 0 && next.repeat == Repeat::All { next.order.len() - 1 } else { position.saturating_sub(1) };
+                let position = next
+                    .current_index()
+                    .and_then(|i| next.order.iter().position(|&v| v == i))
+                    .unwrap_or(0);
+                let previous = if position == 0 && next.repeat == Repeat::All {
+                    next.order.len() - 1
+                } else {
+                    position.saturating_sub(1)
+                };
                 Ok(Some(next.start(next.order[previous])))
             }
         }
     }
 
     fn require_output(&self) -> Result<()> {
-        if self.config.output.is_some() { Ok(()) } else { Err(ErrorCode::NotReady) }
+        if self.config.output.is_some() {
+            Ok(())
+        } else {
+            Err(ErrorCode::NotReady)
+        }
     }
 
-    fn commit(&self, session: &mut Session<R>, mut next: State, effect: Option<RendererAction>) -> Result<()> {
+    fn commit(
+        &self,
+        session: &mut Session<R>,
+        mut next: State,
+        effect: Option<RendererAction>,
+    ) -> Result<()> {
         if let Some(effect) = effect {
             if session.renderer.apply(&effect).is_err() {
                 // Never replay an uncertain effect. Keep the attempted projection,
                 // quarantine authority and invalidate events until explicit Stop ACK.
-                next.ready = false; next.run = None; session.state = next;
+                next.ready = false;
+                next.run = None;
+                session.state = next;
                 return Err(ErrorCode::Unavailable);
             }
         }
@@ -416,17 +669,27 @@ impl<R: Renderer> SessionOwner<R> {
     pub fn on_renderer_event(&self, event: RendererEvent) -> Result<bool> {
         let mut session = self.session.lock().map_err(|_| ErrorCode::Unavailable)?;
         let token = match &event {
-            RendererEvent::Started(t) | RendererEvent::Completed(t) | RendererEvent::Failed(t) | RendererEvent::ExternalTakeover(t) => t,
+            RendererEvent::Started(t)
+            | RendererEvent::Completed(t)
+            | RendererEvent::Failed(t)
+            | RendererEvent::ExternalTakeover(t) => t,
         };
-        if !session.state.ready || session.state.run.as_ref() != Some(token) { return Ok(false); }
+        if !session.state.ready || session.state.run.as_ref() != Some(token) {
+            return Ok(false);
+        }
         let mut next = session.state.clone();
         let effect = match event {
             RendererEvent::Started(_) => {
-                if next.activity != Activity::Loading { return Ok(false); }
-                next.activity = Activity::Playing; None
+                if next.activity != Activity::Loading {
+                    return Ok(false);
+                }
+                next.activity = Activity::Playing;
+                None
             }
             RendererEvent::Completed(_) => {
-                if next.activity != Activity::Playing { return Ok(false); }
+                if next.activity != Activity::Playing {
+                    return Ok(false);
+                }
                 next.next(true)
             }
             RendererEvent::Failed(_) => {
@@ -446,7 +709,8 @@ impl<R: Renderer> SessionOwner<R> {
                 None
             }
         };
-        ensure(next.revision < MAX_REVISION)?; next.revision += 1;
+        ensure(next.revision < MAX_REVISION)?;
+        next.revision += 1;
         self.commit(&mut session, next, effect)?;
         Ok(true)
     }
@@ -505,7 +769,11 @@ impl<R: Renderer> SessionOwner<R> {
         let max_duration = session
             .state
             .current_index()
-            .and_then(|idx| self.durations.get(&session.state.entries[idx].track_id).copied())
+            .and_then(|idx| {
+                self.durations
+                    .get(&session.state.entries[idx].track_id)
+                    .copied()
+            })
             .unwrap_or(MAX_REVISION as f64);
         let clamp_pos = position_seconds
             .filter(|p| p.is_finite() && *p >= 0.0)

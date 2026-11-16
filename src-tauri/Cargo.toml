@@ -50,7 +50,6 @@ desktop = [
     "dep:rodio",
     "dep:cpal",
     "dep:symphonia",
-    "dep:lofty",
     "dep:base64",
     "dep:walkdir",
     "dep:chrono-tz",
@@ -62,11 +61,8 @@ desktop = [
     "dep:tower",
     "dep:tower-http",
     "dep:local-ip-address",
-    "dep:image",
     "dep:rusty-chromaprint",
     "dep:rust-embed",
-    "dep:rcgen",
-    "dep:rustls-pemfile",
     "dep:mime_guess",
     "dep:reqwest",
     "dep:mdns-sd",
@@ -87,7 +83,7 @@ tokio = { version = "1", features = ["full"], optional = true }
 rodio = { version = "0.19", default-features = false, features = ["symphonia-all", "flac", "wav", "mp3", "vorbis"], optional = true }
 cpal = { version = "0.15", optional = true }
 symphonia = { version = "0.5", features = ["all"], optional = true }
-lofty = { version = "0.21", optional = true }
+lofty = { version = "0.21" }
 base64 = { version = "0.22", optional = true }
 parking_lot = "0.12"
 walkdir = { version = "2", optional = true }
@@ -103,13 +99,14 @@ futures-util = { version = "0.3", optional = true }
 tower = { version = "0.5", features = ["limit"], optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 local-ip-address = { version = "0.6", optional = true }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 rusty-chromaprint = { version = "0.3.0", optional = true }
 tauri-plugin-window-state = { version = "~2.4.1", optional = true }
 tauri-plugin-single-instance = { version = "2", optional = true }
 rust-embed = { version = "8.5", features = ["interpolate-folder-path", "compression"], optional = true }
-rcgen = { version = "0.13", optional = true }
-rustls-pemfile = { version = "2", optional = true }
+rcgen = { version = "0.13" }
+rustls-pemfile = { version = "2" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 mime_guess = { version = "2.0", optional = true }
 reqwest = { version = "0.13.5", features = ["json", "query"], optional = true }
 sha2 = "0.10"

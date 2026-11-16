@@ -4,7 +4,6 @@ pub mod audio;
 pub mod commands;
 pub mod core_runtime;
 pub mod core_session;
-#[cfg(feature = "desktop")]
 pub mod curation;
 pub mod db;
 pub mod diagnostics;
@@ -12,7 +11,6 @@ pub mod diagnostics;
 pub mod maintenance;
 #[cfg(feature = "desktop")]
 pub mod remote;
-#[cfg(feature = "desktop")]
 pub mod scanner;
 
 #[cfg(feature = "desktop")]

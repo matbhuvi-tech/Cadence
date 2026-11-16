@@ -29,7 +29,10 @@ services:
       CADENCE_APP_DATA_DIR: "/var/lib/cadence"
       CADENCE_MUSIC_DIR: "/music"
       CADENCE_TMP_DIR: "/tmp"
-      CADENCE_MUSIC_READ_ONLY: "true"
+      CADENCE_MUSIC_READ_ONLY: "${CADENCE_MUSIC_READ_ONLY:-true}"
+      # Linux path-list separator is ':'. All roots must be mounted directories,
+      # separate from app data; symlinks beneath them are rejected.
+      CADENCE_BROWSE_ROOTS: "/music"
       CADENCE_CONTROL_PORT: "4040"
       CADENCE_MEDIA_PORT: "18890"
       CADENCE_HEADROOM_MB: "64"
@@ -38,3 +41,8 @@ services:
     volumes:
       - "${CADENCE_HOST_DATA_DIR:-./data}:/var/lib/cadence:rw"
       - "${CADENCE_HOST_MUSIC_DIR:-./music}:/music:ro"
+      # Alternatively mount independent datasets beneath /music:
+      # - "${CADENCE_HOST_MASTER_DIR}:/music/master:ro"
+      # - "${CADENCE_HOST_RAJAFANS_DIR}:/music/rajafans:ro"
+      # Writable Curate needs BOTH CADENCE_MUSIC_READ_ONLY=false and ':rw' on
+      # the intended music mount. Keep defaults read-only for normal testing.

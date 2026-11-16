@@ -6,8 +6,6 @@ use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, TaggedFile, TaggedFileExt};
 use lofty::tag::{ItemKey, Tag, TagType};
 
-use crate::audio::stream_tuning;
-
 const MAX_ID3_TAG_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DFF_CHUNKS: usize = 128;
 const MAX_DFF_PROP_BYTES: u64 = 64 * 1024;
@@ -35,7 +33,10 @@ pub fn is_dsd_path(path: &Path) -> bool {
 
 /// Parses DSD container properties and embedded ID3v2 metadata without reading the multi-hundred-MB audio payload.
 pub fn probe_dsd_file(path: &Path) -> Option<DsdProbeResult> {
-    let ext = path.extension()?.to_str()?;
+    probe_dsd_as(path, path.extension()?.to_str()?)
+}
+
+pub fn probe_dsd_as(path: &Path, ext: &str) -> Option<DsdProbeResult> {
     if ext.eq_ignore_ascii_case("dsf") {
         probe_dsf(path)
     } else if ext.eq_ignore_ascii_case("dff") || ext.eq_ignore_ascii_case("dsdiff") {
@@ -62,9 +63,41 @@ pub fn extract_original_year(tag: &Tag) -> Option<i32> {
         if key_desc.eq_ignore_ascii_case("ORIGINALYEAR")
             || key_desc.eq_ignore_ascii_case("ORIGINAL_YEAR")
             || key_desc.eq_ignore_ascii_case("ORIGINAL YEAR")
+            || key_desc.eq_ignore_ascii_case("----:com.apple.iTunes:ORIGINALYEAR")
         {
             if let Some(year) = item.value().text().and_then(parse_leading_year) {
                 return Some(year);
+            }
+        }
+    }
+
+    None
+}
+
+/// Extracts `original_album` from standard `OriginalAlbumTitle` (`TOAL`) or custom Vorbis/MP4/TXXX frames.
+pub fn extract_original_album(tag: &Tag) -> Option<String> {
+    if let Some(album) = tag.get_string(&ItemKey::OriginalAlbumTitle) {
+        let trimmed = album.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    for item in tag.items() {
+        let key_desc = match item.key() {
+            ItemKey::Unknown(desc) => desc.as_str(),
+            _ => continue,
+        };
+        if key_desc.eq_ignore_ascii_case("ORIGINALALBUM")
+            || key_desc.eq_ignore_ascii_case("ORIGINAL_ALBUM")
+            || key_desc.eq_ignore_ascii_case("ORIGINAL ALBUM")
+            || key_desc.eq_ignore_ascii_case("----:com.apple.iTunes:ORIGINALALBUM")
+        {
+            if let Some(album) = item.value().text() {
+                let trimmed = album.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
         }
     }
@@ -82,18 +115,45 @@ fn parse_leading_year(raw: &str) -> Option<i32> {
 }
 
 fn probe_dsf(path: &Path) -> Option<DsdProbeResult> {
-    let dsf = stream_tuning::parse_dsf_header(path)?;
-    let tag = if dsf.metadata_offset > 0 {
-        read_id3v2_at_offset(path, dsf.metadata_offset, None)
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut header = [0u8; 92];
+    file.read_exact(&mut header).ok()?;
+    if &header[..4] != b"DSD " || &header[28..32] != b"fmt " || &header[80..84] != b"data" {
+        return None;
+    }
+    let u32_at = |n| u32::from_le_bytes(header[n..n + 4].try_into().unwrap());
+    let u64_at = |n| u64::from_le_bytes(header[n..n + 8].try_into().unwrap());
+    let metadata_offset = u64_at(20);
+    let channels = u32_at(52);
+    let sample_rate = u32_at(56);
+    let bits = u32_at(60);
+    let count = u64_at(64);
+    let data_size = u64_at(84);
+    if u64_at(4) != 28
+        || u64_at(32) != 52
+        || u64_at(12) != len
+        || !(1..=32).contains(&channels)
+        || sample_rate == 0
+        || !matches!(bits, 1 | 8)
+        || data_size < 12
+        || data_size.checked_add(80)? > len
+        || count.checked_mul(channels as u64)?.div_ceil(8) > data_size - 12
+        || (metadata_offset != 0 && (metadata_offset < 80 + data_size || metadata_offset >= len))
+    {
+        return None;
+    }
+    let tag = if metadata_offset > 0 {
+        read_id3v2_at_offset(path, metadata_offset, None)
     } else {
         None
     };
 
     Some(DsdProbeResult {
-        channels: Some(dsf.channels),
-        sample_rate: Some(dsf.sample_rate),
-        bit_depth: Some(dsf.bits_per_sample),
-        duration_secs: dsf.duration_secs,
+        channels: Some(channels as u16),
+        sample_rate: Some(sample_rate),
+        bit_depth: Some(1),
+        duration_secs: count as f64 / sample_rate as f64,
         tag,
     })
 }
@@ -112,7 +172,10 @@ fn probe_dff(path: &Path) -> Option<DsdProbeResult> {
     }
 
     let form_size = u64::from_be_bytes(form_hdr[4..12].try_into().ok()?);
-    let form_end = 12u64.saturating_add(form_size).min(file_len);
+    let form_end = 12u64.checked_add(form_size)?;
+    if form_end > file_len || form_end < 16 {
+        return None;
+    }
 
     let mut channels: Option<u16> = None;
     let mut sample_rate: Option<u32> = None;
@@ -148,7 +211,10 @@ fn probe_dff(path: &Path) -> Option<DsdProbeResult> {
 
         let chunk_size = u64::from_be_bytes(chunk_hdr[4..12].try_into().ok()?);
         let data_start = pos + 12;
-        let data_end = data_start.saturating_add(chunk_size).min(form_end);
+        let data_end = data_start.checked_add(chunk_size)?;
+        if data_end > form_end {
+            return None;
+        }
 
         match chunk_id {
             b"PROP" => {
@@ -167,10 +233,13 @@ fn probe_dff(path: &Path) -> Option<DsdProbeResult> {
                 if dst_duration_secs.is_none() && chunk_size >= 18 {
                     let mut frte_hdr = [0u8; 18];
                     if file.read_exact(&mut frte_hdr).is_ok() && &frte_hdr[0..4] == b"FRTE" {
-                        let sub_size = u64::from_be_bytes(frte_hdr[4..12].try_into().unwrap_or([0; 8]));
+                        let sub_size =
+                            u64::from_be_bytes(frte_hdr[4..12].try_into().unwrap_or([0; 8]));
                         if sub_size >= 6 {
-                            let num_frames = u32::from_be_bytes(frte_hdr[12..16].try_into().unwrap_or([0; 4]));
-                            let frame_rate = u16::from_be_bytes(frte_hdr[16..18].try_into().unwrap_or([0; 2]));
+                            let num_frames =
+                                u32::from_be_bytes(frte_hdr[12..16].try_into().unwrap_or([0; 4]));
+                            let frame_rate =
+                                u16::from_be_bytes(frte_hdr[16..18].try_into().unwrap_or([0; 2]));
                             if frame_rate > 0 {
                                 dst_duration_secs = Some(num_frames as f64 / frame_rate as f64);
                             }
@@ -195,6 +264,13 @@ fn probe_dff(path: &Path) -> Option<DsdProbeResult> {
     // Some DSDIFF taggers append a bare ID3v2 block immediately after the FRM8 container.
     if id3_tag.is_none() && form_end + 10 <= file_len {
         id3_tag = read_id3v2_at_offset(path, form_end, None);
+    }
+
+    if sample_rate.unwrap_or(0) == 0
+        || channels.unwrap_or(0) == 0
+        || (dsd_audio_bytes.is_none() && dst_duration_secs.is_none())
+    {
+        return None;
     }
 
     let duration_secs = if let Some(dur) = dst_duration_secs {
@@ -236,10 +312,14 @@ fn parse_dff_snd_props(buf: &[u8], sample_rate: &mut Option<u32>, channels: &mut
 
         match sub_id {
             b"FS  " if sub_size_usize >= 4 => {
-                *sample_rate = Some(u32::from_be_bytes(buf[val_start..val_start + 4].try_into().unwrap_or([0; 4])));
+                *sample_rate = Some(u32::from_be_bytes(
+                    buf[val_start..val_start + 4].try_into().unwrap_or([0; 4]),
+                ));
             }
             b"CHNL" if sub_size_usize >= 2 => {
-                *channels = Some(u16::from_be_bytes(buf[val_start..val_start + 2].try_into().unwrap_or([0; 2])));
+                *channels = Some(u16::from_be_bytes(
+                    buf[val_start..val_start + 2].try_into().unwrap_or([0; 2]),
+                ));
             }
             _ => {}
         }
@@ -408,7 +488,7 @@ mod tests {
     #[test]
     fn test_probe_dsf_reads_header_and_trailing_id3v2() {
         let id3 = build_id3v24_tag();
-        let data_chunk_len: u64 = 16; // 4 bytes sample stub after 12-byte data header
+        let data_chunk_len: u64 = 12 + (11_289_600u64 * 10 * 2 / 8);
         let metadata_offset: u64 = 80 + data_chunk_len;
         let total_size: u64 = metadata_offset + id3.len() as u64;
 
@@ -433,10 +513,10 @@ mod tests {
         dsf.extend_from_slice(&sample_count.to_le_bytes());
         dsf.extend_from_slice(&4096u32.to_le_bytes()); // block size
         dsf.extend_from_slice(&0u32.to_le_bytes()); // reserved
-        // data chunk (16 bytes)
+                                                    // data chunk (16 bytes)
         dsf.extend_from_slice(b"data");
         dsf.extend_from_slice(&data_chunk_len.to_le_bytes());
-        dsf.extend_from_slice(&[0u8; 4]);
+        dsf.resize(dsf.len() + (data_chunk_len - 12) as usize, 0);
         // ID3v2 chunk
         dsf.extend_from_slice(&id3);
 
@@ -460,6 +540,7 @@ mod tests {
         assert_eq!(tag.genre().as_deref(), Some("OST"));
         assert_eq!(tag.pictures().len(), 1);
         assert_eq!(extract_original_year(&tag), Some(2014));
+        #[cfg(feature = "desktop")]
         assert_eq!(
             crate::scanner::engine::calculate_dr_score(
                 Some(&tag),

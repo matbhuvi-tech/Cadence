@@ -41,7 +41,7 @@ fn seed_track_with_audio_file(
     title: &str,
     payload: &[u8],
 ) {
-    fs::write(audio_path, payload).unwrap();
+    fs::write(audio_path, wav(payload)).unwrap();
     let db = AppDb::new(db_path.to_path_buf()).unwrap();
     let conn = db.conn.lock();
     let folder_str = audio_path.parent().unwrap().to_string_lossy().to_string();
@@ -57,7 +57,7 @@ fn seed_track_with_audio_file(
     )
     .unwrap();
     conn.execute(
-        "INSERT OR REPLACE INTO tracks (id, release_id, mount_id, folder_path, folder_name, file_path, file_name, file_size, mtime, title, artist_credit, album_title, duration_secs, format, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, 180.0, 'FLAC', '2026-11-15T00:00:00Z')",
+        "INSERT OR REPLACE INTO tracks (id, release_id, mount_id, folder_path, folder_name, file_path, file_name, file_size, mtime, title, artist_credit, album_title, duration_secs, format, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, 180.0, 'WAV', '2026-11-15T00:00:00Z')",
         params![
             track_id,
             "rel-1",
@@ -204,7 +204,7 @@ fn immutable_approval_duplicate_commit_and_external_file_change_rejection() {
     assert_eq!(wrong_hash, Err(RemoteCurateError::RevisionConflict));
 
     // Simulate external file modification between dry-run and approval
-    fs::write(&audio_path, b"AUDIO_STREAM_MODIFIED_EXTERNALLY").unwrap();
+    fs::write(&audio_path, wav(b"AUDIO_STREAM_MODIFIED_EXTERNALLY")).unwrap();
     let changed_err = rt.approve_curate_draft_at("draft-imm", &report.approval_hash, "cmd-2", Instant::now());
     assert_eq!(changed_err, Err(RemoteCurateError::ExternalFileChanged));
 
@@ -225,7 +225,8 @@ fn immutable_approval_duplicate_commit_and_external_file_change_rejection() {
 
     // Verify original audio stream bytes are preserved intact
     let written_bytes = fs::read(&audio_path).unwrap();
-    assert!(written_bytes.starts_with(b"AUDIO_STREAM_MODIFIED_EXTERNALLY"));
+    assert_eq!(cadence_core_lib::curation::tag_writer::payload_digest(&written_bytes,lofty::file::FileType::Wav).unwrap(),
+        cadence_core_lib::curation::tag_writer::payload_digest(&wav(b"AUDIO_STREAM_MODIFIED_EXTERNALLY"),lofty::file::FileType::Wav).unwrap());
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -257,6 +258,8 @@ fn playback_and_cooldown_gates_defer_disk_writes_and_recover_across_restart() {
         .unwrap();
 
         let report = rt.dry_run_curate_draft_at("draft-gate", base_time).unwrap();
+        let receipt=rt.approve_curate_draft_at("draft-gate",&report.approval_hash,"cmd-approve-1",base_time).unwrap();
+        job_id=receipt.job_id.clone();
         // Start playback via /v1/core (admit first)
         rt.admit_tracks(&["trk-1".to_string()]).unwrap();
         let play_req = json!({
@@ -278,12 +281,8 @@ fn playback_and_cooldown_gates_defer_disk_writes_and_recover_across_restart() {
             Err(RemoteCurateError::TransportNotIdle)
         );
 
-        // Approval while playing is queued durably as ApprovedWaitingIdle without touching disk
-        let receipt = rt
-            .approve_curate_draft_at("draft-gate", &report.approval_hash, "cmd-approve-1", base_time)
-            .unwrap();
-        assert_eq!(receipt.status, CurateJobStatus::ApprovedWaitingIdle);
-        job_id = receipt.job_id.clone();
+        // Approval rereads files and must be rejected during active playback.
+        assert_eq!(rt.approve_curate_draft_at("draft-gate",&report.approval_hash,"cmd-blocked",base_time),Err(RemoteCurateError::TransportNotIdle));
 
         // Executing while playing defers cleanly
         let deferred = rt.execute_pending_curate_jobs_at(base_time).unwrap();
@@ -308,7 +307,7 @@ fn playback_and_cooldown_gates_defer_disk_writes_and_recover_across_restart() {
             .execute_pending_curate_jobs_at(stop_time + Duration::from_secs(10))
             .unwrap();
         assert_eq!(cooling[0].status, CurateJobStatus::CoolingDown);
-        assert_eq!(fs::read(&audio_path).unwrap(), b"PCM_FRAMES_123456");
+        assert_eq!(fs::read(&audio_path).unwrap(), wav(b"PCM_FRAMES_123456"));
 
         rt.shutdown().unwrap();
     }
@@ -357,4 +356,16 @@ fn shared_root_writer_exclusion_blocks_standalone_worker_on_core_leased_root() {
     // Core owner itself is permitted
     assert!(assert_local_worker_can_write_root(&db, &dir, "core-truenas-1").is_ok());
     let _ = fs::remove_dir_all(&dir);
+}
+
+fn wav(payload:&[u8])->Vec<u8>{
+    let mut data=b"RIFF".to_vec();
+    let padded=payload.len()+payload.len()%2;
+    data.extend_from_slice(&(36u32+padded as u32).to_le_bytes());
+    data.extend_from_slice(b"WAVEfmt ");data.extend_from_slice(&16u32.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&44100u32.to_le_bytes());data.extend_from_slice(&88200u32.to_le_bytes());
+    data.extend_from_slice(&2u16.to_le_bytes());data.extend_from_slice(&16u16.to_le_bytes());
+    data.extend_from_slice(b"data");data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    data.extend_from_slice(payload);if payload.len()%2!=0{data.push(0);}data
 }

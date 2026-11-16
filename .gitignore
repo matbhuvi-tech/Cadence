@@ -46,6 +46,7 @@ pwa/android/app/src/main/assets/public/
 pwa/android/capacitor-cordova-android-plugins/
 
 # Scratch & Temporary Testing Directories
+__pycache__/
 scratch/
 test-results/
 .playwright-cli/

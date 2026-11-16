@@ -124,6 +124,11 @@ pub fn ensure_schema(db: &AppDb) -> Result<(), RemoteCurateError> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS remote_curate_journal (
+            job_id TEXT PRIMARY KEY,
+            original_bytes BLOB NOT NULL,
+            result_bytes BLOB NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS core_writer_leases (
             root_path TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
@@ -214,6 +219,9 @@ pub fn save_draft(
         .transaction()
         .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
 
+    let applying: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM remote_curate_jobs WHERE draft_id=?1 AND status IN ('approved_waiting_idle','cooling_down','applying'))",params![input.draft_id],|r|r.get(0)).map_err(|e|RemoteCurateError::Database(e.to_string()))?;
+    if applying{return Err(RemoteCurateError::RevisionConflict);}
+
     let existing_rev: Option<i64> = tx
         .query_row(
             "SELECT revision FROM remote_curate_drafts WHERE draft_id = ?1",
@@ -285,15 +293,17 @@ pub fn dry_run_draft(
     let changes: Vec<CurateFieldChange> = serde_json::from_str(&changes_json)
         .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
     let file_path = resolve_track_file_path(db, &track_id)?;
-    let file_bytes = fs::read(&file_path).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
+    let source=authorized_target(db,&file_path)?;
+    let file_bytes = read_bounded(crate::core_runtime::library::handle_path(&source.source,&file_path)).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
     let file_sha256 = sha256_hex(&file_bytes);
     let approval_hash =
         compute_approval_hash(draft_id, draft_revision, &track_id, &file_sha256, &changes);
 
+    let writer_error = crate::curation::tag_writer::writable(&file_bytes).err().or_else(|| changes.iter().find_map(|c| crate::curation::tag_writer::key(&c.field).err()));
     let block_reason = if read_only {
         Some("Apply is unavailable because the Core music root is mounted read-only; drafts remain saved for review.".to_string())
     } else {
-        None
+        writer_error
     };
 
     Ok(CurateDryRunReport {
@@ -302,7 +312,7 @@ pub fn dry_run_draft(
         track_id,
         approval_hash,
         read_only,
-        apply_available: !read_only,
+        apply_available: block_reason.is_none(),
         block_reason,
         file_sha256,
         file_size_bytes: file_bytes.len() as u64,
@@ -361,7 +371,10 @@ pub fn approve_draft(
     let changes: Vec<CurateFieldChange> = serde_json::from_str(&changes_json)
         .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
     let file_path = resolve_track_file_path(db, &track_id)?;
-    let live_bytes = fs::read(&file_path).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
+    let source=authorized_target(db,&file_path)?;
+    let live_bytes = read_bounded(crate::core_runtime::library::handle_path(&source.source,&file_path)).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
+    crate::curation::tag_writer::writable(&live_bytes).map_err(RemoteCurateError::PayloadVerificationFailed)?;
+    for change in &changes { crate::curation::tag_writer::key(&change.field).map_err(RemoteCurateError::PayloadVerificationFailed)?; }
     let live_sha = sha256_hex(&live_bytes);
     let live_approval_hash =
         compute_approval_hash(draft_id, draft_revision, &track_id, &live_sha, &changes);
@@ -485,6 +498,7 @@ pub fn execute_pending_jobs(
     read_only: bool,
 ) -> Result<Vec<CurateApprovalReceipt>, RemoteCurateError> {
     ensure_schema(db)?;
+    db.conn.lock().execute_batch("CREATE TABLE IF NOT EXISTS remote_curate_journal(job_id TEXT PRIMARY KEY,original_bytes BLOB NOT NULL,result_bytes BLOB NOT NULL)").map_err(|e|RemoteCurateError::Database(e.to_string()))?;
     if read_only {
         return Err(RemoteCurateError::ReadOnlyRoot(
             "Cannot execute Curate jobs while music root is mounted read-only.".into(),
@@ -497,8 +511,8 @@ pub fn execute_pending_jobs(
             .prepare(
                 "SELECT job_id, draft_id, track_id, approval_hash, expected_file_sha256, changes_json
                  FROM remote_curate_jobs
-                 WHERE status IN ('approved_waiting_idle', 'cooling_down')
-                 ORDER BY rowid ASC",
+                 WHERE status IN ('approved_waiting_idle', 'cooling_down', 'applying')
+                 ORDER BY rowid ASC LIMIT 1",
             )
             .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
         let rows = stmt
@@ -519,10 +533,14 @@ pub fn execute_pending_jobs(
 
     let mut receipts = Vec::with_capacity(pending.len());
     for (job_id, draft_id, track_id, approval_hash, expected_sha, changes_json) in pending {
-        let file_path = resolve_track_file_path(db, &track_id)?;
-        let original_bytes =
-            fs::read(&file_path).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
-        if sha256_hex(&original_bytes) != expected_sha {
+        let original_path = resolve_track_file_path(db, &track_id)?;
+        let target=match authorized_target(db,&original_path){Ok(t)=>t,Err(error)=>{mark_job_failed(db,&job_id,&format!("{error:?}"))?;continue;}};
+        let file_path=target.path.clone();
+        let disk_bytes = read_bounded(crate::core_runtime::library::handle_path(&target.source,&original_path)).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
+        let journal: Option<(Vec<u8>,Vec<u8>)> = db.conn.lock().query_row("SELECT original_bytes,result_bytes FROM remote_curate_journal WHERE job_id=?1",params![job_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|RemoteCurateError::Database(e.to_string()))?;
+        let original_bytes = journal.as_ref().map(|(original,_)|original.clone()).unwrap_or_else(||disk_bytes.clone());
+        let disk_valid = sha256_hex(&disk_bytes)==expected_sha || journal.as_ref().is_some_and(|(_,result)|sha256_hex(result)==sha256_hex(&disk_bytes));
+        if !disk_valid || sha256_hex(&original_bytes) != expected_sha {
             let conn = db.conn.lock();
             let _ = conn.execute(
                 "UPDATE remote_curate_jobs SET status = 'failed', error_message = 'external_file_changed', updated_at = CURRENT_TIMESTAMP WHERE job_id = ?1",
@@ -543,50 +561,46 @@ pub fn execute_pending_jobs(
         let changes: Vec<CurateFieldChange> = serde_json::from_str(&changes_json)
             .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
 
-        // Atomic write preserving original audio stream payload bytes + appending verified sidecar marker
-        let tmp_path = file_path.with_extension("cadence_tmp");
-        let marker = format!(
-            "\n/*CADENCE_CURATE_VERIFIED:{}:{}*/",
-            approval_hash,
-            changes
-                .iter()
-                .map(|c| format!("{}={}", c.field, c.after))
-                .collect::<Vec<_>>()
-                .join(";")
-        );
-        let mut next_bytes = original_bytes.clone();
-        next_bytes.extend_from_slice(marker.as_bytes());
-        fs::write(&tmp_path, &next_bytes).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
-        fs::rename(&tmp_path, &file_path).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
-
-        // Post-write verification: confirm audio payload prefix is bit-identical
-        let post_bytes =
-            fs::read(&file_path).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
-        if !post_bytes.starts_with(&original_bytes) {
-            return Err(RemoteCurateError::PayloadVerificationFailed(
-                "Audio stream payload changed unexpectedly during Curate commit.".into(),
-            ));
+        // Prepare real tags in RAM and verify exact payload hashes, container
+        // structure, codec properties and all changed fields before replacement.
+        let updates = changes.iter().map(|c| (c.field.clone(), c.after.clone())).collect::<Vec<_>>();
+        let next_bytes = match crate::curation::tag_writer::prepare(&original_bytes, &updates) {
+            Ok(bytes) => bytes,
+            Err(message) => {
+                mark_job_failed(db, &job_id, &message)?;
+                continue;
+            }
+        };
+        {
+            let conn = db.conn.lock();
+            conn.execute("INSERT OR REPLACE INTO remote_curate_journal(job_id,original_bytes,result_bytes) VALUES(?1,?2,?3)", params![job_id,original_bytes,next_bytes])
+                .map_err(|e|RemoteCurateError::Database(e.to_string()))?;
+        }
+        if let Err(error) = atomic_replace(&file_path, &next_bytes) {
+            let _ = atomic_replace(&file_path, &original_bytes);
+            mark_job_failed(db, &job_id, &format!("{error:?}"))?;
+            continue;
+        }
+        let post_bytes = read_no_follow(&file_path).map_err(|e| RemoteCurateError::Io(e.to_string()))?;
+        if sha256_hex(&post_bytes) != sha256_hex(&next_bytes) {
+            atomic_replace(&file_path, &original_bytes)?;
+            mark_job_failed(db, &job_id, "Post-write verification failed; original restored")?;
+            continue;
         }
 
-        // Apply metadata projection to SQLite tracks and mark job/draft Verified
+        let projection_result = (|| -> Result<(),RemoteCurateError> {
         let mut conn = db.conn.lock();
         let tx = conn
             .transaction()
             .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
         for ch in &changes {
-            if ch.field == "title" {
-                tx.execute(
-                    "UPDATE tracks SET title = ?2 WHERE id = ?1",
-                    params![&track_id, &ch.after],
-                )
-                .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
-            } else if ch.field == "artist" || ch.field == "artistCredit" {
-                tx.execute(
-                    "UPDATE tracks SET artist_credit = ?2 WHERE id = ?1",
-                    params![&track_id, &ch.after],
-                )
-                .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
-            }
+            let column = match ch.field.as_str() {
+                "title"=>"title", "artist"|"artistCredit"=>"artist_credit", "album"|"albumTitle"=>"album_title",
+                "albumArtist"=>"album_artist", "composer"|"composerName"=>"composer", "genre"=>"genre",
+                "originalAlbum"=>"original_album", "originalYear"=>"original_year", "lyrics"=>"lyrics",
+                _=>return Err(RemoteCurateError::PayloadVerificationFailed("Unsupported field".into())),
+            };
+            tx.execute(&format!("UPDATE tracks SET {column}=?2 WHERE id=?1"),params![track_id,ch.after]).map_err(|e|RemoteCurateError::Database(e.to_string()))?;
         }
         tx.execute(
             "UPDATE remote_curate_jobs SET status = 'verified', updated_at = CURRENT_TIMESTAMP WHERE job_id = ?1",
@@ -598,8 +612,17 @@ pub fn execute_pending_jobs(
             params![&draft_id],
         )
         .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
+        tx.execute("DELETE FROM remote_curate_journal WHERE job_id=?1",params![job_id]).map_err(|e|RemoteCurateError::Database(e.to_string()))?;
         tx.commit()
             .map_err(|e| RemoteCurateError::Database(e.to_string()))?;
+
+        Ok(())
+        })();
+        if let Err(error)=projection_result {
+            atomic_replace(&file_path,&original_bytes)?;
+            mark_job_failed(db,&job_id,&format!("Projection failed; original restored: {error:?}"))?;
+            continue;
+        }
 
         receipts.push(CurateApprovalReceipt {
             job_id,
@@ -675,4 +698,72 @@ pub fn assert_local_worker_can_write_root(
 
 pub fn status_label(status: CurateJobStatus) -> &'static str {
     status_to_str(status)
+}
+
+fn mark_job_failed(db: &AppDb, id: &str, message: &str) -> Result<(), RemoteCurateError> {
+    db.conn.lock().execute("UPDATE remote_curate_jobs SET status='failed',error_message=?2 WHERE job_id=?1",params![id,message]).map_err(|e|RemoteCurateError::Database(e.to_string()))?;
+    Ok(())
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), RemoteCurateError> {
+    use std::io::Write;
+    let name = format!(".cadence-tmp-{}",uuid::Uuid::new_v4());
+    let tmp = path.parent().ok_or_else(||RemoteCurateError::Io("Missing parent".into()))?.join(name);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(bytes)?;
+        file.set_permissions(open_no_follow(path)?.metadata()?.permissions())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp,path)?;
+        #[cfg(unix)]
+        fs::File::open(path.parent().unwrap())?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {let _ = fs::remove_file(&tmp);}
+    result.map_err(|e|RemoteCurateError::Io(e.to_string()))
+}
+
+struct AuthorizedTarget {
+    source: fs::File,
+    _parent: fs::File,
+    path: PathBuf,
+}
+
+fn authorized_target(db:&AppDb,path:&Path)->Result<AuthorizedTarget,RemoteCurateError>{
+    let roots={
+        let conn=db.conn.lock();
+        let configured:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_authorized_roots')",[],|r|r.get(0)).map_err(|e|RemoteCurateError::Database(e.to_string()))?;
+        if configured {
+            let mut stmt=conn.prepare("SELECT path FROM engine_authorized_roots").map_err(|e|RemoteCurateError::Database(e.to_string()))?;
+            let rows=stmt.query_map([],|r|Ok(PathBuf::from(r.get::<_,String>(0)?))).map_err(|e|RemoteCurateError::Database(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|RemoteCurateError::Database(e.to_string()))?;
+            rows
+        }else{vec![path.parent().ok_or_else(||RemoteCurateError::Io("Missing parent".into()))?.to_path_buf()]}
+    };
+    let source=crate::core_runtime::library::open_authorized(&roots,path).map_err(RemoteCurateError::Io)?;
+    if !source.metadata().map_err(|e|RemoteCurateError::Io(e.to_string()))?.is_file(){return Err(RemoteCurateError::Io("Not a regular file".into()));}
+    let parent_path=path.parent().ok_or_else(||RemoteCurateError::Io("Missing parent".into()))?;
+    let parent=crate::core_runtime::library::open_authorized(&roots,parent_path).map_err(RemoteCurateError::Io)?;
+    let anchored=crate::core_runtime::library::handle_path(&parent,parent_path).join(path.file_name().unwrap());
+    Ok(AuthorizedTarget{source,_parent:parent,path:anchored})
+}
+
+fn open_no_follow(path:&Path)->std::io::Result<fs::File>{
+    let mut options=fs::OpenOptions::new();options.read(true);
+    #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);}
+    options.open(path)
+}
+fn read_no_follow(path:&Path)->std::io::Result<Vec<u8>>{
+    use std::io::Read;
+    let mut file=open_no_follow(path)?;
+    let mut bytes=Vec::new();file.read_to_end(&mut bytes)?;Ok(bytes)
+}
+
+fn read_bounded(path:PathBuf)->std::io::Result<Vec<u8>>{
+    use std::io::Read;
+    const MAX:u64=256*1024*1024;
+    let file=fs::File::open(path)?;
+    if file.metadata()?.len()>MAX{return Err(std::io::Error::other("Curate source exceeds the 256 MiB bounded commit limit"));}
+    let mut bytes=Vec::new();file.take(MAX+1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64>MAX{return Err(std::io::Error::other("Curate source grew beyond the commit limit"));}Ok(bytes)
 }

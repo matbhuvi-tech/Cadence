@@ -450,14 +450,15 @@ fn send_raw_http(addr: SocketAddr, request: &str) -> (String, Vec<u8>) {
     (headers, body)
 }
 
-fn http_post_json(addr: SocketAddr, path: &str, payload: &Value) -> (u16, Value) {
+fn http_post_json(app_data: &std::path::Path, addr: SocketAddr, path: &str, payload: &Value) -> (u16, Value) {
+    let pairing_token=std::fs::read_to_string(app_data.join("pairing-token")).unwrap();
     let body_bytes = serde_json::to_vec(payload).unwrap();
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     let req = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {} HTTP/1.1\r\nx-cadence-token: {pairing_token}\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         path,
         addr,
         body_bytes.len()
@@ -857,6 +858,7 @@ fn layer2_catalog_pagination_225_tracks_and_memory_budget_not_ready() {
     .expect("boot DragonfishNode");
 
     let (st0, snap0) = http_post_json(
+        &ws.app_data_dir,
         node.control_listen_addr(),
         "/v1/core",
         &json!({
@@ -875,6 +877,7 @@ fn layer2_catalog_pagination_225_tracks_and_memory_budget_not_ready() {
         .to_string();
 
     let (st1, page1) = http_post_json(
+        &ws.app_data_dir,
         node.control_listen_addr(),
         "/v1/core",
         &json!({
@@ -1011,6 +1014,7 @@ fn layer2_restart_recovery_no_autoplay_or_stale_mutation_replay() {
     let lib_id = node1.identity().library_id.clone();
 
     let (_st, q_resp) = http_post_json(
+        &ws.app_data_dir,
         node1.control_listen_addr(),
         "/v1/core",
         &json!({
@@ -1038,6 +1042,7 @@ fn layer2_restart_recovery_no_autoplay_or_stale_mutation_replay() {
     assert_eq!(node2.identity().engine_id, eng_id);
 
     let (_st, snap2) = http_post_json(
+        &ws.app_data_dir,
         node2.control_listen_addr(),
         "/v1/core",
         &json!({
@@ -1136,6 +1141,7 @@ fn stage_p1_bug_a_identity_preservation_in_core_catalog_projection() {
     )
     .unwrap();
     let (_st, snap) = http_post_json(
+        &ws.app_data_dir,
         node2.control_listen_addr(),
         "/v1/core",
         &json!({

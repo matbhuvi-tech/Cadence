@@ -524,8 +524,16 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             }),
             headroom_bytes: config.headroom_bytes,
         };
-        let rt = HeadlessCoreRuntime::open_with_platform(headless_cfg, renderer, probe, locker)
+        let mut rt = HeadlessCoreRuntime::open_with_platform(headless_cfg, renderer, probe, locker)
             .map_err(DragonfishError::Runtime)?;
+        rt.set_music_read_only(config.music_read_only);
+        let browse_roots = std::env::var_os("CADENCE_BROWSE_ROOTS")
+            .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![config.music_mount_dir.clone()]);
+        rt.configure_library(browse_roots).map_err(DragonfishError::Runtime)?;
+        let pairing_token = load_pairing_token(&config.app_data_dir)?;
+        let tls_config=parse_tls(&tls_cert.cert_pem,Path::new(&tls_cert.key_pem_path))?;
+        let allow_plaintext_tests=config.allow_loopback_for_tests && std::env::var("CADENCE_TEST_TLS").as_deref()!=Ok("true");
         if let Ok(loaded_meta) = load_track_media_meta(&db_path) {
             if let Ok(mut guard) = track_meta.lock() {
                 *guard = loaded_meta;
@@ -558,6 +566,9 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
                     control_listen_addr.port(),
                     media_port,
                     music_ro,
+                    pairing_token,
+                    tls_config,
+                    allow_plaintext_tests,
                 );
             })
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
@@ -797,10 +808,20 @@ fn create_versioned_backup_at(
 /// Performs a local HTTP `/healthz` readiness check for container `HEALTHCHECK` probes.
 pub fn probe_healthcheck(control_port: u16) -> Result<(), String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], control_port));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-        .map_err(|e| format!("failed to connect to {}: {}", addr, e))?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e|e.to_string())?;
+    let _=tcp.set_read_timeout(Some(Duration::from_secs(2)));
+    let _=tcp.set_write_timeout(Some(Duration::from_secs(2)));
+    let plain=std::env::var("CADENCE_ALLOW_LOOPBACK").as_deref()==Ok("true") && std::env::var("CADENCE_TEST_TLS").as_deref()!=Ok("true");
+    let mut stream:Box<dyn ControlIo>=if plain{Box::new(tcp)}else{
+        let data=std::env::var("CADENCE_APP_DATA_DIR").unwrap_or_else(|_|"/var/lib/cadence".into());
+        let pem=std::fs::read(Path::new(&data).join("tls-cert.pem")).map_err(|e|e.to_string())?;
+        let mut roots=rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut pem.as_slice()){roots.add(cert.map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;}
+        let cfg=rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().map_err(|e|e.to_string())?.with_root_certificates(roots).with_no_client_auth();
+        let name=rustls::pki_types::ServerName::try_from("localhost").map_err(|e|e.to_string())?;
+        let conn=rustls::ClientConnection::new(Arc::new(cfg),name).map_err(|e|e.to_string())?;
+        Box::new(rustls::StreamOwned::new(conn,tcp))
+    };
     let req = format!(
         "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
         control_port
@@ -1008,41 +1029,24 @@ fn load_or_create_tls_certificate(
     if meta_path.is_file() && cert_pem_path.is_file() && key_pem_path.is_file() {
         let raw = std::fs::read_to_string(&meta_path)
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
-        let persisted: PersistedTlsCertificate = serde_json::from_str(&raw)
+        let mut persisted: PersistedTlsCertificate = serde_json::from_str(&raw)
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
-        return Ok(persisted);
+        if parse_tls(&persisted.cert_pem,&key_pem_path).is_ok() {
+            if let Some(Ok(cert))=rustls_pemfile::certs(&mut persisted.cert_pem.as_bytes()).next(){
+                persisted.sha256_fingerprint=hex_encode(&Sha256::digest(cert.as_ref()));
+            }
+            write_atomic_file(&meta_path,&serde_json::to_vec_pretty(&persisted).map_err(|e|DragonfishError::StatePersistence(e.to_string()))?)?;
+            return Ok(persisted);
+        }
     }
 
-    let seed = format!(
-        "{}:{}:{}:{}",
-        identity.engine_id,
-        identity.library_id,
-        advertised_ip,
-        uuid::Uuid::new_v4()
-    );
-    let mut cert_hasher = Sha256::new();
-    cert_hasher.update(b"cadence-dragonfish-cert:");
-    cert_hasher.update(seed.as_bytes());
-    let cert_digest = cert_hasher.finalize();
-    let cert_b64 = hex_encode(&cert_digest);
-
-    let mut key_hasher = Sha256::new();
-    key_hasher.update(b"cadence-dragonfish-key:");
-    key_hasher.update(seed.as_bytes());
-    let key_digest = key_hasher.finalize();
-    let key_b64 = hex_encode(&key_digest);
-
-    let cert_pem = format!(
-        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
-        cert_b64
-    );
-    let key_pem = format!(
-        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
-        key_b64
-    );
+    let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(vec![advertised_ip.to_string(), "127.0.0.1".into(), "localhost".into()])
+        .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
+    let cert_pem=cert.pem();
+    let key_pem=key_pair.serialize_pem();
 
     let mut fp_hasher = Sha256::new();
-    fp_hasher.update(cert_pem.as_bytes());
+    fp_hasher.update(cert.der().as_ref());
     let sha256_fingerprint = hex_encode(&fp_hasher.finalize());
 
     write_atomic_file(&cert_pem_path, cert_pem.as_bytes())?;
@@ -1085,10 +1089,24 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
     control_port: u16,
     media_port: u16,
     music_read_only: bool,
+    pairing_token: String,
+    tls_config: Arc<rustls::ServerConfig>,
+    allow_plaintext_tests: bool,
 ) {
+    let mut event_clients:Vec<ControlConnection>=Vec::new();
+    let mut last_heartbeat=std::time::Instant::now();
     while !stop_flag.load(Ordering::Acquire) {
+        // Bounded event-driven SSE subscribers share this control dispatcher;
+        // no extra worker or progress polling is required. Slow readers drop.
+        let events=runtime.lock().map(|mut rt|rt.take_library_events()).unwrap_or_default();
+        let heartbeat=last_heartbeat.elapsed()>=Duration::from_secs(10);
+        if heartbeat {last_heartbeat=std::time::Instant::now();}
+        if !events.is_empty() || heartbeat {
+            let payload=if events.is_empty(){": keepalive\n\n".to_string()}else{events.iter().map(|e|format!("event: engine\ndata: {e}\n\n")).collect::<String>()};
+            event_clients.retain_mut(|client|client.write_all(payload.as_bytes()).and_then(|_|client.flush()).is_ok());
+        }
         match listener.accept() {
-            Ok((mut stream, _)) => {
+            Ok((stream, peer)) => {
                 if stop_flag.load(Ordering::Acquire) {
                     break;
                 }
@@ -1096,6 +1114,8 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+                let tls=if allow_plaintext_tests && peer.ip().is_loopback(){None}else{match rustls::ServerConnection::new(Arc::clone(&tls_config)){Ok(c)=>Some(c),Err(_)=>continue}};
+                let mut stream=ControlConnection{tcp:stream,tls};
 
                 let mut buf = vec![0u8; 64 * 1024];
                 let mut total = 0usize;
@@ -1153,6 +1173,22 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                 let method = parts.next().unwrap_or("");
                 let path = parts.next().unwrap_or("");
 
+                // Authenticate before dispatch, filesystem resolution or media
+                // admission. Query-string credentials are deliberately unsupported.
+                if path.starts_with("/v1/") && method != "OPTIONS" {
+                    let headers = req_str.split("\r\n\r\n").next().unwrap_or_default();
+                    let supplied: Vec<&str> = headers.lines().filter_map(|line| {
+                        let (name,value)=line.split_once(':')?;
+                        if name.eq_ignore_ascii_case("x-cadence-token") {Some(value.trim())}
+                        else if name.eq_ignore_ascii_case("authorization") {value.trim().strip_prefix("Bearer ")}
+                        else {None}
+                    }).collect();
+                    if supplied.len()!=1 || !secret_matches(supplied[0],&pairing_token) {
+                        write_json_response(&mut stream,401,"Unauthorized",&json!({"ok":false,"error":{"code":"unauthorized"}}));
+                        continue;
+                    }
+                }
+
                 if method == "OPTIONS" {
                     let header = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-cadence-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(header.as_bytes());
@@ -1173,6 +1209,30 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                         "musicReadOnly": music_read_only,
                     });
                     write_json_response(&mut stream, 200, "OK", &payload);
+                } else if method == "GET" && path == "/v1/events" {
+                    if event_clients.len()>=4{write_json_response(&mut stream,429,"Too Many Requests",&json!({"ok":false}));}
+                    else {
+                        let header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: keep-alive\r\n\r\n: connected\n\n";
+                        if stream.write_all(header.as_bytes()).and_then(|_|stream.flush()).is_ok(){
+                            let _=stream.tcp.set_nonblocking(true);
+                            event_clients.push(stream);
+                            continue;
+                        }
+                    }
+                } else if method == "GET" && path.starts_with("/v1/artwork/") {
+                    let id=path.trim_start_matches("/v1/artwork/");
+                    let result=runtime.lock().map_err(|_|"Unavailable".to_string()).and_then(|mut rt|rt.artwork_at(id,std::time::Instant::now()));
+                    match result {
+                        Ok((etag,bytes))=>{
+                            let etag=format!("\"{etag}\"");
+                            let not_modified=req_str.lines().filter_map(|l|l.split_once(':')).any(|(k,v)|k.eq_ignore_ascii_case("if-none-match")&&v.trim()==etag);
+                            let (status,reason,size)=if not_modified{(304,"Not Modified",0)}else{(200,"OK",bytes.len())};
+                            let header=format!("HTTP/1.1 {status} {reason}\r\nContent-Type: image/jpeg\r\nContent-Length: {size}\r\nETag: {etag}\r\nCache-Control: private, max-age=3600\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: ETag\r\nConnection: close\r\n\r\n");
+                            let _=stream.write_all(header.as_bytes());
+                            if !not_modified {let _=stream.write_all(&bytes);}
+                        }
+                        Err(error)=>write_json_response(&mut stream,if error=="deferred_until_idle"{503}else{404},"Unavailable",&json!({"ok":false,"error":{"code":error}})),
+                    }
                 } else if method == "POST" && path == "/v1/core" {
                     let body_bytes = if let Some(idx) = buf[..total]
                         .windows(4)
@@ -1205,8 +1265,10 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                         &json!({ "ok": false, "error": "not_found" }),
                     );
                 }
+                stream.finish();
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Ok(mut rt)=runtime.lock(){let _=rt.library_step_at(std::time::Instant::now());}
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => {
@@ -1356,7 +1418,7 @@ fn run_reconcile_loop<P: PlatformProbe, L: MemoryLocker>(
     }
 }
 
-fn write_json_response(stream: &mut TcpStream, status: u16, reason: &str, body: &Value) {
+fn write_json_response(stream: &mut impl Write, status: u16, reason: &str, body: &Value) {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
     let header = format!(
         "HTTP/1.1 {} {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-cadence-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1402,6 +1464,34 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(&mut s, "{:02x}", b);
     }
     s
+}
+
+fn secret_matches(supplied: &str, expected: &str) -> bool {
+    let left=Sha256::digest(supplied.as_bytes());
+    let right=Sha256::digest(expected.as_bytes());
+    left.iter().zip(right).fold(0u8,|diff,(a,b)|diff | (a^b))==0
+}
+
+fn load_pairing_token(app_data: &Path) -> Result<String, DragonfishError> {
+    if let Ok(value)=std::env::var("CADENCE_PAIRING_TOKEN") {
+        if value.len()<32 || value.len()>256 || !value.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_') {
+            return Err(DragonfishError::StatePersistence("CADENCE_PAIRING_TOKEN must contain 32–256 URL-safe random characters".into()));
+        }
+        return Ok(value);
+    }
+    let path=app_data.join("pairing-token");
+    if path.exists(){
+        let value=std::fs::read_to_string(path).map_err(|e|DragonfishError::StatePersistence(e.to_string()))?;
+        if value.len()<32 || value.len()>256 || !value.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return Err(DragonfishError::StatePersistence("Invalid persisted pairing token".into()));}
+        return Ok(value);
+    }
+    let value=format!("{}{}",uuid::Uuid::new_v4().simple(),uuid::Uuid::new_v4().simple());
+    use std::fs::OpenOptions;
+    let mut options=OpenOptions::new();options.write(true).create_new(true);
+    #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+    let mut file=options.open(path).map_err(|e|DragonfishError::StatePersistence(e.to_string()))?;
+    file.write_all(value.as_bytes()).and_then(|_|file.sync_all()).map_err(|e|DragonfishError::StatePersistence(e.to_string()))?;
+    Ok(value)
 }
 
 /// Validates that the TrueNAS Dragonfish `Dockerfile` enforces a headless `linux/amd64`
@@ -1466,4 +1556,27 @@ pub fn validate_dragonfish_custom_app_yaml(yaml_text: &str) -> Result<(), Dragon
         }
     }
     Ok(())
+}
+
+trait ControlIo: Read+Write {}
+impl<T:Read+Write> ControlIo for T {}
+
+struct ControlConnection {tcp:TcpStream,tls:Option<rustls::ServerConnection>}
+impl Read for ControlConnection {
+    fn read(&mut self,buf:&mut[u8])->std::io::Result<usize>{match &mut self.tls{Some(tls)=>rustls::Stream::new(tls,&mut self.tcp).read(buf),None=>self.tcp.read(buf)}}
+}
+impl Write for ControlConnection {
+    fn write(&mut self,buf:&[u8])->std::io::Result<usize>{match &mut self.tls{Some(tls)=>rustls::Stream::new(tls,&mut self.tcp).write(buf),None=>self.tcp.write(buf)}}
+    fn flush(&mut self)->std::io::Result<()>{match &mut self.tls{Some(tls)=>rustls::Stream::new(tls,&mut self.tcp).flush(),None=>self.tcp.flush()}}
+}
+impl ControlConnection {
+    fn finish(&mut self){if let Some(tls)=&mut self.tls{tls.send_close_notify();let _=rustls::Stream::new(tls,&mut self.tcp).flush();}}
+}
+fn parse_tls(pem:&str,key_path:&Path)->Result<Arc<rustls::ServerConfig>,DragonfishError>{
+    let error=|e:String|DragonfishError::StatePersistence(format!("Invalid TLS identity: {e}"));
+    let certs=rustls_pemfile::certs(&mut pem.as_bytes()).collect::<std::result::Result<Vec<_>,_>>().map_err(|e|error(e.to_string()))?;
+    let key=std::fs::read(key_path).map_err(|e|error(e.to_string()))?;
+    let key=rustls_pemfile::private_key(&mut key.as_slice()).map_err(|e|error(e.to_string()))?.ok_or_else(||error("Private key missing".into()))?;
+    let cfg=rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().map_err(|e|error(e.to_string()))?.with_no_client_auth().with_single_cert(certs,key).map_err(|e|error(e.to_string()))?;
+    Ok(Arc::new(cfg))
 }
