@@ -19,11 +19,16 @@ Library roots must not overlap persistent app data. Linux requires `openat2`
 including symlinks targeting another otherwise authorized directory.
 
 Mount separate datasets at `/music/master` and `/music/rajafans` to browse and scan
-both beneath `/music`; examples are included in Compose. In the Custom App YAML,
+both beneath `/music` (or mount extra roots such as `/music-share2` and list them colon-separated in `CADENCE_BROWSE_ROOTS`); examples are included in Compose. In the Custom App YAML,
 add one `hostPath` volume and `volumeMount` for each submount, retaining
-`readOnly: true`. Real tag commits require **both** `CADENCE_MUSIC_READ_ONLY=false`
-and write access on the specific mount. This repository change does not deploy or
-grant production write access.
+`readOnly: true` for playback-only deployments.
+
+> **Important — Write Permission Required for Curate Tag Writing:**  
+> By default, `cadence-core` mounts `/music` read-only (`:ro` + `CADENCE_MUSIC_READ_ONLY=true`). Playback, library browsing, AI/provider lookup, and saving Curate drafts/dry-runs work in read-only mode, **but writing embedded tags back to audio files requires ALL three:**
+> 1. Mount the music volume read-write (`:rw`),
+> 2. Set `-e CADENCE_MUSIC_READ_ONLY=false`, and
+> 3. Grant UID/GID `568:568` (`apps`) read + write ACLs on the host dataset.
+> *(Supported write containers: `FLAC`, `WAV`, `MP3`, `MP4/M4A`, `AIFF`; DSD `.dsf`/`.dff` tags and folder/file renames remain read-only.)*
 
 Run the disposable regression harness from the repository root:
 
@@ -57,8 +62,44 @@ for supported operations, writer limits and release gates.
 
 ## Build OCI `linux/amd64` Image
 
+### 1. Transfer build files from Windows to TrueNAS
+Avoid `scp -r src-tauri` because `src-tauri/target/` contains multi-GB Windows build artifacts. Package only the files needed by `Dockerfile` and copy the archive to TrueNAS:
+
+```powershell
+tar -cf cadence-core-src.tar deploy/truenas-dragonfish src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs src-tauri/src
+scp cadence-core-src.tar <user>@<truenas-ip>:~/
+```
+
+On TrueNAS:
+
+```bash
+mkdir -p ~/cadence-core-build && tar -xf ~/cadence-core-src.tar -C ~/cadence-core-build && cd ~/cadence-core-build
+```
+
+### 2. Build and run the container
+
 ```bash
 docker build --platform linux/amd64 -f deploy/truenas-dragonfish/Dockerfile -t cadence-core:0.1.0 .
+```
+
+Example `docker run` (read-only playback; replace `:ro` with `:rw` and add `-e CADENCE_MUSIC_READ_ONLY=false` if enabling Curate tag writes):
+
+```bash
+sudo docker run -d --name cadence-core --restart unless-stopped \
+  --network host --user 568:568 \
+  --cap-drop ALL --cap-add IPC_LOCK --ulimit memlock=-1:-1 \
+  --security-opt no-new-privileges:true --memory=4g \
+  -e CADENCE_ADVERTISED_IP=<TRUENAS_WIRED_LAN_IP> \
+  -e CADENCE_LABEL="Music Room Core" \
+  -v "/mnt/pool/cadence-core-data:/var/lib/cadence:rw" \
+  -v "/mnt/pool/Music:/music:ro" \
+  cadence-core:0.1.0 --dragonfish
+```
+
+Retrieve the generated `x-cadence-token` pairing secret for Cadence Desktop:
+
+```bash
+sudo docker exec cadence-core cat /var/lib/cadence/pairing-token
 ```
 
 ## Pre-Upgrade Backup & Rollback

@@ -200,6 +200,17 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          {engine?.state.musicReadOnly === true && (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-500/30 bg-amber-950/30 px-4 py-3 text-xs text-amber-200 leading-relaxed"
+            >
+              <strong className="font-semibold text-amber-100">Read-Only Media Mount:</strong>{' '}
+              Playback, library browsing, and Curate drafts work, but writing embedded metadata tags to audio files requires mounting the media volume read-write (<code className="font-mono text-amber-100">:rw</code>), setting{' '}
+              <code className="font-mono text-amber-100">CADENCE_MUSIC_READ_ONLY=false</code>, and granting UID/GID <code className="font-mono text-amber-100">568:568</code> write access on the Engine host.
+            </div>
+          )}
+
           {isAddingFolder && engineClient && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
