@@ -444,6 +444,34 @@ export function parseCoreRequest(value: unknown, expected: Readonly<EngineContex
   return object as CoreRequest
 }
 
+export interface EngineSmbSupportStatus {
+  supported: boolean
+  reason?: string | null
+  versions: string[]
+}
+
+export interface EngineNetworkShareRecord {
+  id: string
+  server: string
+  share: string
+  mountPath: string
+  displayName: string
+  username?: string | null
+  smbVersion?: string | null
+  readOnly: boolean
+  mounted: boolean
+}
+
+export interface AddEngineSmbShareInput {
+  server: string
+  share: string
+  username?: string
+  password?: string
+  smbVersion?: string
+  readOnly?: boolean
+  displayName?: string
+}
+
 /** Ignore server prose: it can contain owner-only paths, SQL or credentials. */
 export function unwrapCoreReply(value: unknown, expected: Readonly<EngineContext>): unknown {
   const object = record(boundedCopy(value))

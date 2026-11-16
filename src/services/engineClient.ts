@@ -4,6 +4,7 @@ import {
   CoreServiceError,
   parseCoreCatalogPage,
   parseCoreV2Descriptor,
+  type AddEngineSmbShareInput,
   type CoreCatalogTrack,
   type CoreDescriptor,
   type CoreErrorCode,
@@ -11,9 +12,11 @@ import {
   type EngineEventRecord,
   type EngineFolderRecord,
   type EngineFsBrowseResult,
+  type EngineNetworkShareRecord,
   type EnginePlaylistDetail,
   type EnginePlaylistSummary,
   type EngineScanStatus,
+  type EngineSmbSupportStatus,
 } from '../core/coreProtocol'
 import type {
   RemoteCurateApprovalReceipt,
@@ -66,6 +69,10 @@ export interface EngineClient {
   removeFolder(folderId: string): Promise<void>
   scanFolders(input?: { folderId?: string; forceFull?: boolean }): Promise<EngineScanStatus>
   getScanStatus(): Promise<EngineScanStatus>
+  getSmbStatus(): Promise<EngineSmbSupportStatus>
+  listSmbShares(): Promise<EngineNetworkShareRecord[]>
+  addSmbShare(input: AddEngineSmbShareInput): Promise<EngineNetworkShareRecord>
+  removeSmbShare(shareId: string): Promise<void>
   listPlaylists(): Promise<EnginePlaylistSummary[]>
   getPlaylist(playlistId: string): Promise<EnginePlaylistDetail>
   createPlaylist(title: string, description?: string): Promise<EnginePlaylistDetail>
@@ -242,6 +249,32 @@ export function createEngineClient(
       }),
 
     getScanStatus: () => call<EngineScanStatus>('folders.scan.status'),
+
+    getSmbStatus: () => call<EngineSmbSupportStatus>('shares.status'),
+
+    listSmbShares: async () => {
+      const res = await call<{ shares: EngineNetworkShareRecord[] }>('shares.list')
+      return res.shares ?? []
+    },
+
+    addSmbShare: async (input) => {
+      const res = await call<{ share: EngineNetworkShareRecord }>('shares.add', {
+        server: input.server,
+        share: input.share,
+        ...(input.username ? { username: input.username } : {}),
+        ...(input.password ? { password: input.password } : {}),
+        ...(input.smbVersion && input.smbVersion !== 'auto'
+          ? { smbVersion: input.smbVersion }
+          : {}),
+        readOnly: input.readOnly ?? true,
+        ...(input.displayName ? { displayName: input.displayName } : {}),
+      })
+      return res.share
+    },
+
+    removeSmbShare: async (shareId) => {
+      await call<{ removed: boolean }>('shares.remove', { shareId })
+    },
 
     listPlaylists: async () => {
       const res = await call<{ playlists: EnginePlaylistSummary[] }>('playlists.list')

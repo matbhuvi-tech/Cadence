@@ -310,6 +310,13 @@ impl Library {
         if op == "engine.events" {
             return Ok(json!({"events":self.take_events()}));
         }
+        if op == "shares.status" {
+            return Ok(crate::core_runtime::smb::status_json());
+        }
+        if op == "shares.list" {
+            let shares = crate::core_runtime::smb::list_shares(&self.db)?;
+            return Ok(json!({"shares": shares}));
+        }
         if !idle {
             return Err("deferred_until_idle".into());
         }
@@ -482,6 +489,53 @@ impl Library {
                 let mut stmt=conn.prepare("SELECT draft_id,track_id,revision,status,changes_json FROM remote_curate_drafts ORDER BY updated_at DESC LIMIT 4096").map_err(|e|e.to_string())?;
                 let records=stmt.query_map([],|r|Ok(json!({"draftId":r.get::<_,String>(0)?,"trackId":r.get::<_,String>(1)?,"revision":r.get::<_,i64>(2)?,"status":r.get::<_,String>(3)?,"changes":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(Value::Null)}))).map_err(|e|e.to_string())?.collect::<std::result::Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
                 Ok(json!({"drafts":records}))
+            }
+            "shares.add" => {
+                let server = required(req, "server")?.to_string();
+                let share = required(req, "share")?.to_string();
+                let username = req.get("username").and_then(Value::as_str).map(str::to_string);
+                let password = req.get("password").and_then(Value::as_str).map(str::to_string);
+                let smb_version = req.get("smbVersion").and_then(Value::as_str).map(str::to_string);
+                let read_only = req.get("readOnly").and_then(Value::as_bool).unwrap_or(true);
+                let display_name = req.get("displayName").and_then(Value::as_str).map(str::to_string);
+                let record = crate::core_runtime::smb::add_and_mount_share(
+                    &self.db,
+                    crate::core_runtime::smb::AddShareInput {
+                        server,
+                        share,
+                        username,
+                        password,
+                        smb_version,
+                        read_only,
+                        display_name,
+                    },
+                )?;
+                let mount_pb = PathBuf::from(&record.mount_path);
+                if !self.roots.contains(&mount_pb) {
+                    self.roots.push(mount_pb.clone());
+                    let _ = self.db.conn.lock().execute(
+                        "INSERT OR IGNORE INTO engine_authorized_roots VALUES(?1)",
+                        params![mount_pb.to_string_lossy()],
+                    );
+                }
+                self.browse_cache.clear();
+                self.events.lock().unwrap().push_back(json!({"event": "catalog.changed"}));
+                Ok(json!({"share": record}))
+            }
+            "shares.remove" => {
+                let share_id = required(req, "shareId")?;
+                let removed_mount = crate::core_runtime::smb::remove_and_unmount_share(&self.db, share_id)?;
+                if let Some(ref mount_str) = removed_mount {
+                    let mount_pb = PathBuf::from(mount_str);
+                    self.roots.retain(|r| r != &mount_pb);
+                    let _ = self.db.conn.lock().execute(
+                        "DELETE FROM engine_authorized_roots WHERE path=?1",
+                        params![mount_str],
+                    );
+                    self.browse_cache.clear();
+                    self.events.lock().unwrap().push_back(json!({"event": "catalog.changed"}));
+                }
+                Ok(json!({"removed": removed_mount.is_some()}))
             }
             _ => Err("unsupported_capability".into()),
         }

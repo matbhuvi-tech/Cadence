@@ -24,7 +24,10 @@ LABEL org.opencontainers.image.title="cadence-core" \
       org.opencontainers.image.version="${CADENCE_VERSION}" \
       org.opencontainers.image.description="Headless Cadence Core for TrueNAS SCALE Dragonfish 24.04"
 
-RUN groupadd -g 568 apps \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cifs-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 568 apps \
     && useradd -u 568 -g 568 -d /var/lib/cadence -s /usr/sbin/nologin -M apps \
     && mkdir -p /var/lib/cadence /music /tmp \
     && chown -R 568:568 /var/lib/cadence /music

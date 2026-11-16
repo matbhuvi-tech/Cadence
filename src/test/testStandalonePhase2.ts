@@ -308,3 +308,69 @@ test('Phase 2: deriveCanonicalArtistsFromCatalog works purely in-memory', () => 
   assert.ok(artists.some((a) => a.name === 'Ilaiyaraaja' && a.roles.includes('Composer')))
   assert.ok(artists.some((a) => a.name === 'S. Janaki'))
 })
+
+test('Phase 2: EngineClient invokes v2 SMB share status/list/add/remove endpoints', async () => {
+  const seen: Array<{ operation: string; body: Record<string, unknown> }> = []
+  const client = createEngineClient(
+    {
+      engineId: 'core_1',
+      libraryId: 'lib_1',
+      baseUrl: 'https://192.168.1.6:4040',
+    },
+    async (_target, body) => {
+      const req = body as Record<string, unknown>
+      const op = String(req.operation)
+      seen.push({ operation: op, body: req })
+      if (op === 'shares.status') {
+        return {
+          ok: true,
+          data: { supported: true, reason: null, versions: ['auto', '3.1.1', '3.0'] },
+        }
+      }
+      if (op === 'shares.list') {
+        return { ok: true, data: { shares: [] } }
+      }
+      if (op === 'shares.add') {
+        return {
+          ok: true,
+          data: {
+            share: {
+              id: 'smb_1',
+              server: '192.168.1.10',
+              share: 'Lossless',
+              mountPath: '/tmp/cadence-mounts/smb_1',
+              displayName: '//192.168.1.10/Lossless',
+              username: 'mathan',
+              smbVersion: '3.1.1',
+              readOnly: true,
+              mounted: true,
+            },
+          },
+        }
+      }
+      if (op === 'shares.remove') {
+        return { ok: true, data: { removed: true } }
+      }
+      throw new Error(`Unexpected op: ${op}`)
+    },
+  )
+
+  const status = await client.getSmbStatus()
+  assert.equal(status.supported, true)
+  assert.deepEqual(await client.listSmbShares(), [])
+  const added = await client.addSmbShare({
+    server: '192.168.1.10',
+    share: 'Lossless',
+    username: 'mathan',
+    password: 'pw',
+    smbVersion: '3.1.1',
+    readOnly: true,
+  })
+  assert.equal(added.id, 'smb_1')
+  assert.equal(seen[2].body.password, 'pw')
+  await client.removeSmbShare('smb_1')
+  assert.deepEqual(
+    seen.map((s) => s.operation),
+    ['shares.status', 'shares.list', 'shares.add', 'shares.remove'],
+  )
+})

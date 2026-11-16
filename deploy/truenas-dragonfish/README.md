@@ -102,6 +102,21 @@ Retrieve the generated `x-cadence-token` pairing secret for Cadence Desktop:
 sudo docker exec cadence-core cat /var/lib/cadence/pairing-token
 ```
 
+### 3. (Optional) Enable Runtime SMB Share Mounting in the UI
+By default, the container runs rootless (`--user 568:568`) with `--cap-drop ALL --cap-add IPC_LOCK`. If you want to mount remote SMB/CIFS shares at runtime from **Engine Storage & Library Folders**, the image includes `cifs-utils` (`mount.cifs`), and you must start the container with `root` + `SYS_ADMIN` + `DAC_READ_SEARCH` (keeping `IPC_LOCK`):
+
+```bash
+sudo docker run -d --name cadence-core --restart unless-stopped \
+  --network host --user 0:0 \
+  --cap-add IPC_LOCK --cap-add SYS_ADMIN --cap-add DAC_READ_SEARCH \
+  --ulimit memlock=-1:-1 --memory=4g \
+  -e CADENCE_ADVERTISED_IP=<TRUENAS_WIRED_LAN_IP> \
+  -e CADENCE_LABEL="Music Room Core" \
+  -v "/mnt/pool/cadence-core-data:/var/lib/cadence:rw" \
+  -v "/mnt/pool/Music:/music:ro" \
+  cadence-core:0.1.0 --dragonfish
+```
+
 ## Pre-Upgrade Backup & Rollback
 
 Create an atomic `VACUUM INTO` snapshot + identity/certificate backup before changing image tags:

@@ -6,6 +6,7 @@ pub mod dragonfish;
 pub mod migration;
 pub mod library;
 pub mod platform;
+pub mod smb;
 pub mod upnp_session;
 
 pub use platform::{
@@ -514,7 +515,13 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         }
         let db = self.db.as_ref().ok_or(RuntimeError::Closed)?.clone();
         curate::ensure_schema(&db).map_err(|e| RuntimeError::Database(format!("{e:?}")))?;
-        let library = library::Library::open(db, roots).map_err(RuntimeError::Database)?;
+        let mut all_roots = roots;
+        for smb_root in smb::remount_persisted_shares(&db) {
+            if !all_roots.contains(&smb_root) {
+                all_roots.push(smb_root);
+            }
+        }
+        let library = library::Library::open(db, all_roots).map_err(RuntimeError::Database)?;
         let extras=library.enriched_tracks().map_err(RuntimeError::Database)?;
         self.catalog_extras=self.track_db_ids.iter().filter_map(|(public,raw)|extras.get(raw).map(|e|(public.clone(),e.clone()))).collect();
         let remaining=library.recovery_cooldown().map_err(RuntimeError::Database)?;
@@ -575,7 +582,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             project_track_tokens(&mut response,&self.public_track_ids);
             return response;
         }
-        if operation.starts_with("fs.") || operation.starts_with("folders.") || operation.starts_with("playlists.") || operation.starts_with("releases.split.") || operation=="engine.events" || operation=="curate.draft.list" {
+        if operation.starts_with("fs.") || operation.starts_with("folders.") || operation.starts_with("shares.") || operation.starts_with("playlists.") || operation.starts_with("releases.split.") || operation=="engine.events" || operation=="curate.draft.list" {
             let idle=self.ensure_storage_idle_at(now).is_ok();
             if operation=="playlists.setTracks"{if let Some(ids)=request["trackIds"].as_array_mut(){for id in ids{if let Some(raw)=id.as_str().and_then(|id|self.track_db_ids.get(id)){*id=json!(raw);}}}}
             return match self.library.as_mut().ok_or("Library unavailable".to_string()).and_then(|lib|lib.request(&operation,&request,idle)) {
