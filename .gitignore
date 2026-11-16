@@ -18,6 +18,8 @@ dist/
 dist-ssr/
 *.tsbuildinfo
 *.local
+*.local.ps1
+cadence-core-src.tar
 
 # Rust & Tauri build outputs
 src-tauri/target/
@@ -27,6 +29,8 @@ target/
 .env
 .env.local
 .env.*.local
+*.local.ps1
+cadence-core-src.tar
 *.env
 !.env.example
 *.key
