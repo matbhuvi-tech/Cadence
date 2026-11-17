@@ -591,8 +591,10 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.track_files.get(public_id)
     }
 
-    pub fn set_output(&mut self, output: Output) {
+    pub fn set_output(&mut self, output: Output) -> Result<(), ErrorCode> {
+        self.owner.set_output(output.clone())?;
         self.config.output = Some(output);
+        Ok(())
     }
 
     pub fn set_music_read_only(&mut self, read_only: bool) {

@@ -740,7 +740,7 @@ fn selected_output_is_reflected_in_authoritative_session_snapshot() {
     ).expect("open runtime");
     let before = runtime.request(&wire(json!({"operation": "session.snapshot"})));
     assert_eq!(before["data"]["output"]["id"], "rs130-main");
-    runtime.set_output(Output { id: "upnp_rose_67".into(), label: "ROSE-67".into(), transport: "upnp".into() });
+    runtime.set_output(Output { id: "upnp_rose_67".into(), label: "ROSE-67".into(), transport: "upnp".into() }).expect("select output");
     let after = runtime.request(&wire(json!({"operation": "session.snapshot"})));
     assert_eq!(after["data"]["output"]["id"], "upnp_rose_67");
     assert_eq!(after["data"]["output"]["label"], "ROSE-67");

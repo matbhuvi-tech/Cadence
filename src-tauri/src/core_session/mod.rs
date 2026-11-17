@@ -261,6 +261,23 @@ impl<R: Renderer> SessionOwner<R> {
         self.durations = durations;
         Ok(())
     }
+    /// Update the output projection on the serialized control path.
+    pub fn set_output(&mut self, output: Output) -> Result<()> {
+        token(&output.id)?;
+        text(&output.label)?;
+        ensure(matches!(output.transport.as_str(), "upnp" | "wasapi" | "system_default"))?;
+        if self.config.output.as_ref().is_some_and(|current|
+            current.id == output.id && current.label == output.label && current.transport == output.transport
+        ) {
+            return Ok(());
+        }
+        let session = self.session.get_mut().map_err(|_| ErrorCode::Unavailable)?;
+        ensure(session.state.revision < MAX_REVISION)?;
+        session.state.revision += 1;
+        self.config.output = Some(output);
+        Ok(())
+    }
+
     /// Catalog is an immutable, already prepared in-memory projection. Loading it
     /// and admitting/locking media remain the future platform owner's responsibility.
     pub fn new(config: SessionConfig, catalog: Vec<CatalogTrack>, renderer: R) -> Result<Self> {

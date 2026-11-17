@@ -378,8 +378,10 @@ impl WindowsEngineNode {
                                     label: target_id.to_string(),
                                     transport: "wasapi".into(),
                                 });
-                            rt.set_output(out.clone());
-                            Some(json!({ "ok": true, "data": { "output": out } }))
+                            match rt.set_output(out.clone()) {
+                                Ok(()) => Some(json!({ "ok": true, "data": { "output": out } })),
+                                Err(_) => Some(json!({ "ok": false, "error": { "code": "not_ready" } })),
+                            }
                         }
                         Err(e) => Some(
                             json!({ "ok": false, "error": { "code": "invalid_payload", "message": e } }),
