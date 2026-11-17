@@ -1,5 +1,11 @@
 # Issues
 
+- [#43](https://github.com/matbhuvi-tech/Cadence/issues/43): Album artwork missing or stale after import and scans. Initial Windows Engine fixes and remaining cases are tracked in `reports/album-artwork-tdd.md`.
+
+- Album artwork missing, stale, or incorrect after catalogue import and quick/full scans: source audit recorded in [reports/album-art-import-scan-audit.md](reports/album-art-import-scan-audit.md). Initial Windows Engine fixes and TDD evidence are tracked in GitHub issue #43.
+- Windows Engine full scan failed after 422 items because nine WAV files contain malformed RIFF INFO metadata. Reproduction, tolerant WAV fallback, metadata preservation, and clearer error reporting are tracked in GitHub issue #43 and `reports/scan-failure-tdd.md`.
+- Before/after catalogue diagnostics: three read-only entry points and usage instructions in [tools/README.md](tools/README.md), with temporary-fixture regression tests in `scripts/qa/test_catalogue_diagnostics.py`. Does not change Cadence import/scan behavior.
+
 - [#8](https://github.com/matbhuvi-tech/Cadence/issues/8): Completed Curate album reopens with an obsolete draft; saved Apple evidence is absent from the reconciliation view. Includes a selected-album memory snapshot for diagnosis.
 - [#17](https://github.com/matbhuvi-tech/Cadence/issues/17): Fix Queue drawer layout truncation, hover overflow and align with Cadence Golden Yellow theme.
 - [#21](https://github.com/matbhuvi-tech/Cadence/issues/21): Desktop Now Playing stuck on initial track and desynchronized from audio engine and mobile remote.

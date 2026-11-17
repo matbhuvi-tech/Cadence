@@ -107,53 +107,53 @@ export interface CoreSnapshot {
 
 export type CoreClientCommand =
   | {
-      operation: 'playback.control';
-      action: 'play';
-      trackId: string;
-      forceTakeover?: boolean;
-      commandId: string;
-      expectedRevision: number;
-    }
+    operation: 'playback.control';
+    action: 'play';
+    trackId: string;
+    forceTakeover?: boolean;
+    commandId: string;
+    expectedRevision: number;
+  }
   | {
-      operation: 'playback.control';
-      action: 'pause' | 'resume' | 'stop';
-      commandId: string;
-      expectedRevision: number;
-    }
+    operation: 'playback.control';
+    action: 'pause' | 'resume' | 'stop';
+    commandId: string;
+    expectedRevision: number;
+  }
   | {
-      operation: 'playback.control';
-      action: 'seek';
-      positionSeconds: number;
-      commandId: string;
-      expectedRevision: number;
-    }
+    operation: 'playback.control';
+    action: 'seek';
+    positionSeconds: number;
+    commandId: string;
+    expectedRevision: number;
+  }
   | {
-      operation: 'queue.replace';
-      entries: { entryId: string; trackId: string }[];
-      commandId: string;
-      expectedRevision: number;
-    }
+    operation: 'queue.replace';
+    entries: { entryId: string; trackId: string }[];
+    commandId: string;
+    expectedRevision: number;
+  }
   | {
-      operation: 'queue.control';
-      action: 'next' | 'previous';
-      commandId: string;
-      expectedRevision: number;
-    }
+    operation: 'queue.control';
+    action: 'next' | 'previous';
+    commandId: string;
+    expectedRevision: number;
+  }
   | {
-      operation: 'queue.control';
-      action: 'jump';
-      entryId: string;
-      commandId: string;
-      expectedRevision: number;
-    }
+    operation: 'queue.control';
+    action: 'jump';
+    entryId: string;
+    commandId: string;
+    expectedRevision: number;
+  }
   | {
-      operation: 'queue.control';
-      action: 'modes';
-      repeat: 'off' | 'one' | 'all';
-      shuffle: boolean;
-      commandId: string;
-      expectedRevision: number;
-    };
+    operation: 'queue.control';
+    action: 'modes';
+    repeat: 'off' | 'one' | 'all';
+    shuffle: boolean;
+    commandId: string;
+    expectedRevision: number;
+  };
 
 export class CoreClientError extends Error {
   readonly code: CoreErrorCode;
@@ -471,16 +471,16 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
     activeDevice: snapshot.output?.label ?? null,
     streamInfo: activeItem
       ? {
-          filePath: activeItem.id,
-          title: activeItem.title,
-          artist: activeItem.artist,
-          album: activeItem.album,
-          durationSecs: activeItem.durationSecs,
-          format: activeItem.format || 'FLAC',
-          sampleRate: activeItem.sampleRate,
-          bitDepth: activeItem.bitDepth,
-          isHighRes: activeItem.isHighRes,
-        }
+        filePath: activeItem.id,
+        title: activeItem.title,
+        artist: activeItem.artist,
+        album: activeItem.album,
+        durationSecs: activeItem.durationSecs,
+        format: activeItem.format || 'FLAC',
+        sampleRate: activeItem.sampleRate,
+        bitDepth: activeItem.bitDepth,
+        isHighRes: activeItem.isHighRes,
+      }
       : null,
   };
 
