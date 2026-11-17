@@ -17,9 +17,8 @@ export function createEngineOutputsClient(profile: SavedCoreProfile, post: Post)
     if (result.ok !== true || !result.data || typeof result.data !== 'object' || Array.isArray(result.data)) throw new Error('Engine output request failed')
     return result.data as Record<string, unknown>
   }
-  return {
-    async list(): Promise<EngineOutput[]> {
-      const data = await request('outputs.list')
+  async function outputs(operation: string): Promise<EngineOutput[]> {
+      const data = await request(operation)
       if (!Array.isArray(data.outputs) || data.outputs.length > 256) throw new Error('Invalid engine output list')
       return data.outputs.map((value: unknown) => {
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid engine output')
@@ -27,7 +26,10 @@ export function createEngineOutputsClient(profile: SavedCoreProfile, post: Post)
         if (typeof output.id !== 'string' || !output.id || output.id.length > 512 || typeof output.displayName !== 'string' || !output.displayName || !['upnp', 'wasapi', 'system_default'].includes(String(output.transport)) || typeof output.isAvailable !== 'boolean') throw new Error('Invalid engine output')
         return { id: output.id, displayName: output.displayName, transport: output.transport as EngineOutput['transport'], isAvailable: output.isAvailable }
       })
-    },
+  }
+  return {
+    list: () => outputs('outputs.list'),
+    scan: () => outputs('outputs.scan'),
     async select(id: string): Promise<void> {
       if (!id || id.length > 512) throw new Error('Invalid output ID')
       await request('output.select', { outputId: id })

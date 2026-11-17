@@ -305,6 +305,16 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
               </div>
             </div>
 
+            <button type="button" disabled={engineOutputBusy || activeCoreSnapshot?.playback.activity !== 'idle'}
+              className="text-left text-xs text-[#D4AF37] disabled:opacity-50"
+              onClick={() => {
+                if (!outputClient) return
+                setEngineOutputBusy(true)
+                setEngineOutputError(null)
+                void outputClient.scan().then(setEngineOutputs)
+                  .catch(() => setEngineOutputError('Scan failed. Stop playback and wait 30 seconds, then try again.'))
+                  .finally(() => setEngineOutputBusy(false))
+              }}>Scan for UPnP renderers</button>
             <div className="flex flex-col gap-2" aria-label="Playback engine outputs">
               {engineOutputBusy && <span className="text-xs text-[#8E8E93]">Loading outputs…</span>}
               {engineOutputError && <span role="alert" className="text-xs text-rose-300">{engineOutputError}</span>}

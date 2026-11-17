@@ -347,7 +347,7 @@ impl WindowsEngineNode {
             let op = req.get("operation").and_then(Value::as_str)?;
             let req_engine = req.get("engineId").and_then(Value::as_str);
             let req_lib = req.get("libraryId").and_then(Value::as_str);
-            if matches!(op, "outputs.list" | "output.select" | "player.volume" | "player.purity")
+            if matches!(op, "outputs.list" | "outputs.scan" | "output.select" | "player.volume" | "player.purity")
                 && (req_engine != Some(expected_engine_id.as_str())
                     || req_lib != Some(expected_library_id.as_str()))
             {
@@ -357,6 +357,23 @@ impl WindowsEngineNode {
                 "outputs.list" => {
                     let list = audio_for_ops.list_audio_endpoints();
                     Some(json!({ "ok": true, "data": { "outputs": list } }))
+                }
+                "outputs.scan" => {
+                    if !rt.output_discovery_is_allowed() {
+                        return Some(json!({ "ok": false, "error": { "code": "not_ready" } }));
+                    }
+                    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                        Ok(runtime) => runtime,
+                        Err(_) => return Some(json!({ "ok": false, "error": { "code": "unavailable" } })),
+                    };
+                    let manager = audio_for_ops.get_upnp_manager();
+                    let result = runtime.block_on(async {
+                        tokio::time::timeout(Duration::from_secs(6), manager.discover_devices()).await
+                    });
+                    if result.is_err() {
+                        return Some(json!({ "ok": false, "error": { "code": "unavailable" } }));
+                    }
+                    Some(json!({ "ok": true, "data": { "outputs": audio_for_ops.list_audio_endpoints() } }))
                 }
                 "output.select" => {
                     if !rt.output_selection_is_idle() {

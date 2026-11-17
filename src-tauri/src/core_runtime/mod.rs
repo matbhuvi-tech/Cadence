@@ -591,6 +591,10 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.track_files.get(public_id)
     }
 
+    pub fn output_discovery_is_allowed(&self) -> bool {
+        self.ensure_storage_idle_at(Instant::now()).is_ok()
+    }
+
     pub fn output_selection_is_idle(&self) -> bool {
         self.owner.activity() == "idle"
     }
