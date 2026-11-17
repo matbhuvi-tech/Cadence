@@ -124,13 +124,17 @@ def ensure_docker(truenas=False):
         raise InstallError('Docker Compose v2 is unavailable after installation.')
 
 
-def docker_prefix():
+def docker_prefix(truenas=False):
     if subprocess.run(['docker', 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
         return ['docker']
     print('Checking Docker access with administrator privileges...')
     prefix = privileged(['docker'])
     if subprocess.run([*prefix, 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-        raise InstallError('Docker is not running or is inaccessible. Start the Docker service and rerun this installer.')
+        if not truenas and shutil.which('systemctl'):
+            print('Starting the Docker service...')
+            run(privileged(['systemctl', 'start', 'docker']))
+        if subprocess.run([*prefix, 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            raise InstallError('Docker is not running or is inaccessible. Start the Docker service and rerun this installer.')
     return prefix
 
 
@@ -176,7 +180,7 @@ def main():
             raise InstallError('The TrueNAS app already exists. Use the upgrade guide; it was not changed.')
     compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/compose.yml')
     ensure_docker(truenas)
-    docker = docker_prefix()
+    docker = docker_prefix(truenas)
     if not truenas:
         existing = run([*docker, 'ps', '-a', '--filter', 'label=com.docker.compose.project=cadence-playback-engine', '--format', '{{.ID}}'], capture_output=True, text=True)
         if existing.stdout.strip():
