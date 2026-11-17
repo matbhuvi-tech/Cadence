@@ -30,3 +30,13 @@ test('selection succeeds only when the snapshot confirms the selected output', a
   const client = createEngineOutputsClient(profile, async () => ({ ok: true, data: { output: { id: 'upnp_uuid_rose', label: 'ROSE-67', transport: 'upnp' } } }))
   await client.selectAndConfirm('upnp:uuid:rose', async () => ({ id: 'upnp_uuid_rose' }))
 })
+
+test('scan requests a fresh engine output inventory', async () => {
+  const requests: Record<string, unknown>[] = []
+  const client = createEngineOutputsClient(profile, async (_profile, request) => {
+    requests.push(request)
+    return { ok: true, data: { outputs: [{ id: 'upnp:uuid:rose', displayName: 'ROSE-67', transport: 'upnp', isAvailable: true }] } }
+  })
+  assert.equal((await client.scan())[0].displayName, 'ROSE-67')
+  assert.equal(requests[0].operation, 'outputs.scan')
+})
