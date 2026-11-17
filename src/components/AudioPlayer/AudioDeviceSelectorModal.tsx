@@ -317,8 +317,8 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
                     if (!outputClient) return
                     setEngineOutputBusy(true)
                     setEngineOutputError(null)
-                    void outputClient.select(output.id).then(() => engine.coreRefreshSnapshot())
-                      .catch(() => setEngineOutputError('Unable to select this output.'))
+                    void outputClient.selectAndConfirm(output.id, async () => (await engine.coreRefreshSnapshot())?.output ?? null)
+                      .catch((error: unknown) => setEngineOutputError(error instanceof Error ? error.message : 'Unable to select this output.'))
                       .finally(() => setEngineOutputBusy(false))
                   }}>
                   {decodeHtmlEntities(output.displayName)}{!output.isAvailable ? ' · Unavailable' : ''}

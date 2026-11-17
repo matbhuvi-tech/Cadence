@@ -32,5 +32,13 @@ export function createEngineOutputsClient(profile: SavedCoreProfile, post: Post)
       if (!id || id.length > 512) throw new Error('Invalid output ID')
       await request('output.select', { outputId: id })
     },
+    async selectAndConfirm(id: string, refresh: () => Promise<{ id: string } | null>): Promise<void> {
+      if (!id || id.length > 512) throw new Error('Invalid output ID')
+      const data = await request('output.select', { outputId: id })
+      const selected = data.output
+      if (!selected || typeof selected !== 'object' || Array.isArray(selected) || typeof (selected as Record<string, unknown>).id !== 'string') throw new Error('Engine did not confirm the selected output.')
+      const snapshot = await refresh()
+      if (!snapshot || snapshot.id !== (selected as { id: string }).id) throw new Error('Engine did not confirm the selected output. Update or restart the playback engine and try again.')
+    },
   }
 }
