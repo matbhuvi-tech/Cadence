@@ -2,7 +2,7 @@
 set -eu
 
 # Release automation substitutes the tag in the published copy.
-release_tag='__CADENCE_RELEASE_TAG__'
+release_tag='v0.1.0-rc.2'
 case "$release_tag" in
   __CADENCE_RELEASE_*) release_tag='' ;;
   *) export CADENCE_INSTALLER_RELEASE="$release_tag" ;;
@@ -32,9 +32,32 @@ trap 'rm -rf -- "$temp_dir"' EXIT HUP INT TERM
 echo 'Downloading the installer from the latest Cadence release...'
 if [ -n "$release_tag" ]; then
   installer_url="https://github.com/matbhuvi-tech/Cadence/releases/download/$release_tag/install.py"
+  curl --fail --location --silent --show-error --output "$temp_dir/install.py" \
+    "$installer_url"
 else
   installer_url='https://github.com/matbhuvi-tech/Cadence/releases/latest/download/install.py'
+  if ! curl --fail --location --silent --output "$temp_dir/install.py" "$installer_url"; then
+    release_tag=$(python3 -c '
+import json, urllib.request
+req = urllib.request.Request(
+    "https://api.github.com/repos/matbhuvi-tech/Cadence/releases?per_page=10",
+    headers={"Accept": "application/vnd.github+json", "User-Agent": "cadence-installer"},
+)
+with urllib.request.urlopen(req, timeout=15) as resp:
+    releases = json.load(resp)
+for rel in releases:
+    if not rel.get("draft") and rel.get("tag_name"):
+        print(rel["tag_name"])
+        break
+')
+    if [ -z "$release_tag" ]; then
+      echo 'Could not find a published Cadence release.' >&2
+      exit 1
+    fi
+    export CADENCE_INSTALLER_RELEASE="$release_tag"
+    installer_url="https://github.com/matbhuvi-tech/Cadence/releases/download/$release_tag/install.py"
+    curl --fail --location --silent --show-error --output "$temp_dir/install.py" \
+      "$installer_url"
+  fi
 fi
-curl --fail --location --silent --show-error --output "$temp_dir/install.py" \
-  "$installer_url"
 python3 "$temp_dir/install.py"
