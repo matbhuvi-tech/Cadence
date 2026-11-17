@@ -1573,6 +1573,22 @@ impl UpnpManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ssdp_collects_response_after_initial_quiet_period() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let destination = listener.local_addr().unwrap();
+            let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let send = async move {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                sender.send_to(b"HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.1/rose\r\n\r\n", destination).await.unwrap();
+            };
+            let (locations, _) = tokio::join!(super::collect_ssdp_locations(&listener, std::time::Duration::from_millis(700)), send);
+            assert_eq!(locations, vec!["http://127.0.0.1/rose"]);
+        });
+    }
+
     use super::*;
 
     #[test]
