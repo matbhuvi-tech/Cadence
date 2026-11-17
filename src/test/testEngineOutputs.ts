@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { createEngineOutputsClient } from '../services/engineOutputs'
+
+const profile = { engineId: 'engine', libraryId: 'library', label: 'Engine', baseUrl: 'https://engine', musicRoots: [] }
+test('lists outputs and selects the exact advertised ID', async () => {
+  const requests: Record<string, unknown>[] = []
+  const client = createEngineOutputsClient(profile, async (_profile, request) => {
+    requests.push(request)
+    return request.operation === 'outputs.list'
+      ? { ok: true, data: { outputs: [{ id: 'upnp:uuid:rose', displayName: 'ROSE-67', transport: 'upnp', isAvailable: true }] } }
+      : { ok: true, data: { output: { id: 'upnp_uuid_rose', label: 'ROSE-67', transport: 'upnp' } } }
+  })
+  const outputs = await client.list()
+  assert.equal(outputs[0].id, 'upnp:uuid:rose')
+  await client.select(outputs[0].id)
+  assert.deepEqual(requests.map(r => r.operation), ['outputs.list', 'output.select'])
+  assert.equal(requests[1].outputId, 'upnp:uuid:rose')
+})
+test('rejects malformed engine responses', async () => {
+  const client = createEngineOutputsClient(profile, async () => ({ ok: true, data: { outputs: [{ id: 7 }] } }))
+  await assert.rejects(client.list())
+})
