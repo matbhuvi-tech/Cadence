@@ -237,3 +237,13 @@
 - **Verification command:** `npx tsx --tsconfig tsconfig.app.json --test src/test/testCurateArtworkFallback.ts src/test/testLibraryLocalMetadata.ts src/test/testCurateDraft.ts src/test/testCurateCommit.ts src/test/testCurateCommitOutcomes.ts`
 - **Build:** `npm run build` passed cleanly (including PWA build, TypeScript check `tsc -b`, and Vite production bundle). `npx oxlint` passed with 0 errors.
 - **Status:** Verified and Fixed. Merged into main in e4afefa, NSIS installer build passed on 2026-11-06.
+
+## Portable Playback Engine distribution
+
+- Request: portable Linux daemon, AMD64/ARM64 images, Compose, GHCR automation, modern TrueNAS guidance, and persistence, upgrades and rollback documentation.
+- Status: implementation ready for user verification; live TrueNAS and physical renderer validation pending.
+
+## Guided Playback Engine installation
+
+- Request: an interactive installer with suggested network address and release, prerequisite setup, and automatic engine installation on Linux and TrueNAS.
+- Status: automated checks in progress; live NAS and first-release publication remain to be verified.

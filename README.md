@@ -31,6 +31,8 @@
 
 <br/>
 
+For the standalone Linux Playback Engine, see the [installation and recovery guide](deploy/playback-engine/README.md).
+
 <p align="center">
   <img src="docs/cadence-screenshots.jpg" alt="Cadence Multi-Screen Overview — Desktop Catalog, Curate Cockpit, Album View, Now Playing, and Mobile Remote PWA" width="100%" />
 </p>

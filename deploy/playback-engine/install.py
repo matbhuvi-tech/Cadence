@@ -156,7 +156,7 @@ def main():
         raise InstallError('On TrueNAS, run this installer from the system shell as root (or use sudo).')
     print('\nCadence Playback Engine setup\nPress Enter to accept a suggested value. Your music is mounted read-only.\n')
     try:
-        suggested_tag = latest_release()
+        suggested_tag = os.environ.get('CADENCE_INSTALLER_RELEASE') or latest_release()
     except InstallError as exc:
         print(exc)
         suggested_tag = ''

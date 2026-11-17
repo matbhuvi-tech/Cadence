@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+# Release automation substitutes the tag in the published copy.
+release_tag='__CADENCE_RELEASE_TAG__'
+case "$release_tag" in
+  __CADENCE_RELEASE_*) release_tag='' ;;
+  *) export CADENCE_INSTALLER_RELEASE="$release_tag" ;;
+esac
+
 echo 'Cadence Playback Engine setup'
 if ! command -v python3 >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
   if [ ! -f /etc/debian_version ] || ! command -v apt-get >/dev/null 2>&1 || command -v midclt >/dev/null 2>&1; then
@@ -23,6 +30,11 @@ fi
 temp_dir=$(mktemp -d)
 trap 'rm -rf -- "$temp_dir"' EXIT HUP INT TERM
 echo 'Downloading the installer from the latest Cadence release...'
+if [ -n "$release_tag" ]; then
+  installer_url="https://github.com/matbhuvi-tech/Cadence/releases/download/$release_tag/install.py"
+else
+  installer_url='https://github.com/matbhuvi-tech/Cadence/releases/latest/download/install.py'
+fi
 curl --fail --location --silent --show-error --output "$temp_dir/install.py" \
-  https://github.com/matbhuvi-tech/Cadence/releases/latest/download/install.py
+  "$installer_url"
 python3 "$temp_dir/install.py"

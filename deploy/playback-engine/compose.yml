@@ -1,0 +1,34 @@
+services:
+  playback-engine:
+    image: ${CADENCE_IMAGE:?Set CADENCE_IMAGE to a published version or digest}
+    restart: unless-stopped
+    network_mode: host
+    user: "568:568"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [IPC_LOCK]
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 4g
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    environment:
+      CADENCE_ADVERTISED_IP: ${CADENCE_ADVERTISED_IP:?Set the host LAN IPv4 address}
+      CADENCE_LABEL: ${CADENCE_LABEL:-Cadence Playback Engine}
+      CADENCE_BROWSE_ROOTS: /music
+      CADENCE_MUSIC_READ_ONLY: "true"
+    volumes:
+      - type: bind
+        source: ${CADENCE_HOST_DATA_DIR:?Set an existing writable data directory}
+        target: /var/lib/cadence
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CADENCE_HOST_MUSIC_DIR:?Set an existing music directory}
+        target: /music
+        read_only: true
+        bind:
+          create_host_path: false
