@@ -253,3 +253,10 @@
 - Requested: standalone privileged capture workflow producing a renderer-specific pacing JSON for playback engine platforms.
 - Branch: `feat/renderer-pacer-calibration`.
 - Status: experimental manual-capture CLI and candidate profile; hardware validation, automatic playback control, privilege orchestration and packaged multi-platform releases remain open. See `tools/renderer-calibration/README.md`.
+
+## GitHub #44: Windows engine selected output and playback readiness
+
+- Link: https://github.com/matbhuvi-tech/Cadence/issues/44
+- Branch: `fix/44-windows-engine-output-state`.
+- Observed: RS130 is discovered and output selection returns success, but session snapshot continues to report the startup output; Windows playback attempts returned `not_ready`.
+- Progress: session-owner output projection now updates with the selected output and advances the revision. Focused regression and headless/session tests pass. Desktop remote-output selection and the separate playback admission failure remain unresolved; installed engine has not been updated or validated.
