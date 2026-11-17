@@ -21,3 +21,12 @@ test('rejects malformed engine responses', async () => {
   const client = createEngineOutputsClient(profile, async () => ({ ok: true, data: { outputs: [{ id: 7 }] } }))
   await assert.rejects(client.list())
 })
+
+test('selection reports when the engine snapshot does not confirm the chosen output', async () => {
+  const client = createEngineOutputsClient(profile, async () => ({ ok: true, data: { output: { id: 'upnp_uuid_rose', label: 'ROSE-67', transport: 'upnp' } } }))
+  await assert.rejects(client.selectAndConfirm('upnp:uuid:rose', async () => ({ id: 'system_default' })), /did not confirm/i)
+})
+test('selection succeeds only when the snapshot confirms the selected output', async () => {
+  const client = createEngineOutputsClient(profile, async () => ({ ok: true, data: { output: { id: 'upnp_uuid_rose', label: 'ROSE-67', transport: 'upnp' } } }))
+  await client.selectAndConfirm('upnp:uuid:rose', async () => ({ id: 'upnp_uuid_rose' }))
+})
