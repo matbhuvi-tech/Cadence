@@ -1646,11 +1646,11 @@ async function run(): Promise<void> {
       name: 'Confirming RS130 takeover plays requested track and syncs PAUSED_PLAYBACK RelTime',
       status:
         rsAfterConfirm.soapCalls.some((c) => c.action === 'SetAVTransportURI') &&
-        rsAfterConfirm.soapCalls.some((c) => c.action === 'Play') &&
-        rsAfterConfirm.currentUri.includes(`:${mediaPort}/media/`) &&
-        takeoverSnap.playback?.owner === 'core' &&
-        pausedSyncSnap.playback?.activity === 'paused' &&
-        Math.round(pausedSyncSnap.playback?.positionSeconds ?? 0) === 81
+          rsAfterConfirm.soapCalls.some((c) => c.action === 'Play') &&
+          rsAfterConfirm.currentUri.includes(`:${mediaPort}/media/`) &&
+          takeoverSnap.playback?.owner === 'core' &&
+          pausedSyncSnap.playback?.activity === 'paused' &&
+          Math.round(pausedSyncSnap.playback?.positionSeconds ?? 0) === 81
           ? 'PASS'
           : 'FAIL',
       correlationId: activeCid,
@@ -1680,8 +1680,8 @@ async function run(): Promise<void> {
       name: 'Restart Core yields idle recovery without mutation replay & enforces 503 deferred artwork while paused',
       status:
         pausedArtRes.status === 503 &&
-        postRestartSnap.data?.playback?.activity === 'idle' &&
-        mutationsAfterRestart === mutationsBeforeRestart
+          postRestartSnap.data?.playback?.activity === 'idle' &&
+          mutationsAfterRestart === mutationsBeforeRestart
           ? 'PASS'
           : 'FAIL',
       correlationId: activeCid,
@@ -1742,7 +1742,7 @@ async function run(): Promise<void> {
         await desktopCdp.evaluate(`
           const stackBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Technical Diagnostics Stack'));
           if (stackBtn) stackBtn.click();
-        `).catch(() => {})
+        `).catch(() => { })
         await desktopCdp.captureScreenshot(path.join(RESULTS_DIR, 'debug-error-desktop.png'))
         const txt = await desktopCdp.evaluate<string>(`document.body?.innerText?.slice(0, 2000) || ''`)
         console.error('[E2E] Desktop DOM on error:\n' + txt)

@@ -63,9 +63,8 @@ const NowPlayingScrubber: React.FC<{
 
   return (
     <div
-      className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 group/scrub ${
-        !hasTrack ? 'opacity-30 pointer-events-none' : ''
-      }`}
+      className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 group/scrub ${!hasTrack ? 'opacity-30 pointer-events-none' : ''
+        }`}
       onClick={(e) => {
         if (!hasTrack) return
         const rect = e.currentTarget.getBoundingClientRect()
@@ -112,9 +111,8 @@ const CoreScrubberBar: React.FC<{
 
   return (
     <div
-      className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 ${
-        !hasTrack ? 'opacity-30 pointer-events-none' : ''
-      }`}
+      className={`absolute -top-[1.5px] left-4 right-4 h-[3px] hover:h-[5px] bg-white/[0.08] hover:bg-white/[0.18] rounded-full overflow-hidden cursor-pointer transition-[height,background-color] duration-150 ${!hasTrack ? 'opacity-30 pointer-events-none' : ''
+        }`}
       onClick={(e) => {
         if (!hasTrack || durationSeconds <= 0) return
         const rect = e.currentTarget.getBoundingClientRect()
@@ -287,8 +285,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   const fallbackDuration = effectiveTrack?.durationSeconds || effectiveTrack?.duration || 0
   const resolvedRelease = isCoreActive
     ? (effectiveTrack?.releaseId
-        ? engine?.coreCatalogReleases.find((r) => r.id === effectiveTrack.releaseId) ?? null
-        : null)
+      ? engine?.coreCatalogReleases.find((r) => r.id === effectiveTrack.releaseId) ?? null
+      : null)
     : (currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null))
   const rawCoverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
   const coverUrl = useResolvedMediaUrl(rawCoverUrl)
@@ -425,9 +423,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             <button
               onClick={handleToggleShuffle}
               title={effectiveShuffle ? 'Shuffle On' : 'Shuffle Off'}
-              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-                effectiveShuffle ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
-              }`}
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${effectiveShuffle ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
+                }`}
             >
               <Shuffle className="w-3.5 h-3.5" />
             </button>
@@ -467,9 +464,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             <button
               onClick={handleToggleRepeat}
               title={`Repeat: ${effectiveRepeat.toUpperCase()}`}
-              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-                effectiveRepeat !== 'off' ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
-              }`}
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${effectiveRepeat !== 'off' ? 'text-[#D4AF37]' : 'text-[#636366] hover:text-[#8E8E93]'
+                }`}
             >
               {effectiveRepeat === 'one' ? (
                 <Repeat1 className="w-3.5 h-3.5" />
@@ -496,13 +492,12 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               onClick={() => onOpenEngineSettings?.()}
               aria-label={`Playback engine: ${engineLabel}${!engineConnected ? ' (Disconnected)' : ''}`}
               title={`Playback engine: ${engineLabel}${!engineConnected ? ' — Disconnected' : ''}`}
-              className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] font-medium transition-all cursor-pointer shrink-0 ${
-                isCoreActive
-                  ? engineConnected
-                    ? 'bg-[#D4AF37]/12 border-[#D4AF37]/35 text-[#F5F5F7]'
-                    : 'bg-rose-500/12 border-rose-500/35 text-rose-200'
-                  : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
-              }`}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] font-medium transition-all cursor-pointer shrink-0 ${isCoreActive
+                ? engineConnected
+                  ? 'bg-[#D4AF37]/12 border-[#D4AF37]/35 text-[#F5F5F7]'
+                  : 'bg-rose-500/12 border-rose-500/35 text-rose-200'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
+                }`}
             >
               <Server className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span className="hidden xl:inline max-w-[90px] truncate">{engineLabel}</span>
@@ -529,14 +524,13 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                   isPurityMode
                     ? 'Volume locked in Bit-Perfect Purity Mode (Unity Gain)'
                     : isMuted
-                    ? 'Unmute'
-                    : 'Mute'
+                      ? 'Unmute'
+                      : 'Mute'
                 }
-                className={`p-1 rounded transition-colors ${
-                  isPurityMode
-                    ? 'text-amber-400 opacity-80 cursor-not-allowed'
-                    : 'text-[#8E8E93] hover:text-white cursor-pointer'
-                }`}
+                className={`p-1 rounded transition-colors ${isPurityMode
+                  ? 'text-amber-400 opacity-80 cursor-not-allowed'
+                  : 'text-[#8E8E93] hover:text-white cursor-pointer'
+                  }`}
               >
                 {isPurityMode ? (
                   <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
@@ -554,11 +548,10 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 value={isPurityMode ? 1 : isMuted ? 0 : volume}
                 disabled={isPurityMode}
                 onChange={(e) => setVolume(Number(e.target.value))}
-                className={`transport-volume-slider w-14 h-1 rounded-lg appearance-none transition-all ${
-                  isPurityMode
-                    ? 'bg-amber-400/40 accent-amber-400 cursor-not-allowed'
-                    : 'bg-white/[0.15] accent-white cursor-pointer'
-                }`}
+                className={`transport-volume-slider w-14 h-1 rounded-lg appearance-none transition-all ${isPurityMode
+                  ? 'bg-amber-400/40 accent-amber-400 cursor-not-allowed'
+                  : 'bg-white/[0.15] accent-white cursor-pointer'
+                  }`}
                 title={
                   isPurityMode
                     ? 'Bit-Perfect Unity Gain (0 dB Lock): Adjust volume on analog preamplifier/DAC.'
@@ -602,11 +595,10 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             <button
               onClick={() => toggleRightSidebar('queue')}
               title={`Now Playing Queue (⌘U / Q) • ${upcomingTracks.length} upcoming`}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all cursor-pointer select-none ${
-                isRightSidebarOpen && rightSidebarTab === 'queue'
-                  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-semibold shadow-sm shadow-emerald-500/20'
-                  : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
-              }`}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all cursor-pointer select-none ${isRightSidebarOpen && rightSidebarTab === 'queue'
+                ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-semibold shadow-sm shadow-emerald-500/20'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
+                }`}
             >
               <ListMusic className="w-3.5 h-3.5 text-emerald-400" />
               <span className="transport-secondary-label">Queue</span>
@@ -621,11 +613,10 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             <button
               onClick={() => toggleRightSidebar('playlists')}
               title="Curated Audiophile Playlists"
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all cursor-pointer select-none ${
-                isRightSidebarOpen && rightSidebarTab === 'playlists'
-                  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-semibold shadow-sm shadow-emerald-500/20'
-                  : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
-              }`}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all cursor-pointer select-none ${isRightSidebarOpen && rightSidebarTab === 'playlists'
+                ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-semibold shadow-sm shadow-emerald-500/20'
+                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
+                }`}
             >
               <Disc3 className="w-3.5 h-3.5 text-emerald-400" />
               <span className="transport-secondary-label">Playlists</span>
@@ -672,8 +663,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                   {isEndpointUnavailable
                     ? 'Audio Signal Path · Unavailable'
                     : signalDesc.isProvenBitPerfect
-                    ? 'UPnP Raw Signal Path'
-                    : 'Audio Signal Path Telemetry'}
+                      ? 'UPnP Raw Signal Path'
+                      : 'Audio Signal Path Telemetry'}
                 </span>
               </span>
               <button
@@ -795,11 +786,10 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 <button
                   type="button"
                   onClick={() => toggleGapless()}
-                  className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-semibold transition-all cursor-pointer ${
-                    isGapless
-                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                      : 'bg-white/5 text-neutral-400 border border-white/10'
-                  }`}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-semibold transition-all cursor-pointer ${isGapless
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                    : 'bg-white/5 text-neutral-400 border border-white/10'
+                    }`}
                 >
                   {isGapless ? 'ENABLED' : 'DISABLED'}
                 </button>

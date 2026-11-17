@@ -395,14 +395,14 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               placeholder={
-  viewMode === 'virtual_table'
-    ? 'Filter tracks (⌘F)...'
-    : activeCoverTab === 'artists'
-    ? 'Filter artists (⌘F)...'
-    : activeCoverTab === 'composers'
-    ? 'Filter composers (⌘F)...'
-    : 'Filter in-place (⌘F)...'
-}
+                viewMode === 'virtual_table'
+                  ? 'Filter tracks (⌘F)...'
+                  : activeCoverTab === 'artists'
+                    ? 'Filter artists (⌘F)...'
+                    : activeCoverTab === 'composers'
+                      ? 'Filter composers (⌘F)...'
+                      : 'Filter in-place (⌘F)...'
+              }
               className={`pl-8 pr-7 py-1 rounded-lg bg-white/[0.04] hover:bg-white/[0.07] border border-white/[0.08] focus:border-[#D4AF37]/50 text-xs text-white placeholder:text-[#636366] focus:outline-none min-w-0 transition-all font-sans truncate ${tier === 'wide' ? 'w-44' : tier === 'compact' ? 'w-32' : 'w-24 focus:w-40'}`}
             />
             {searchQuery && (
@@ -460,17 +460,15 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                 })
               }
               aria-pressed={Boolean(facets.favoritesOnly)}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-                facets.favoritesOnly
-                  ? 'bg-[#F43F5E]/15 border-[#F43F5E]/40 text-[#FDA4AF] shadow-sm'
-                  : 'bg-white/[0.04] border-white/[0.08] text-[#8E8E93] hover:text-white hover:border-white/15'
-              }`}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${facets.favoritesOnly
+                ? 'bg-[#F43F5E]/15 border-[#F43F5E]/40 text-[#FDA4AF] shadow-sm'
+                : 'bg-white/[0.04] border-white/[0.08] text-[#8E8E93] hover:text-white hover:border-white/15'
+                }`}
               title={facets.favoritesOnly ? 'Show all albums' : 'Filter by favorite albums'}
             >
               <Heart
-                className={`w-3.5 h-3.5 ${
-                  facets.favoritesOnly ? 'text-[#F43F5E] fill-[#F43F5E]' : ''
-                }`}
+                className={`w-3.5 h-3.5 ${facets.favoritesOnly ? 'text-[#F43F5E] fill-[#F43F5E]' : ''
+                  }`}
               />
               <span>Favorites</span>
             </button>
@@ -493,11 +491,10 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                 <button
                   onClick={() => onAlbumDisplayModeChange?.('album_first')}
                   title="Show Metadata Album Name prominently"
-                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-all cursor-pointer flex items-center gap-1 ${
-                    albumDisplayMode === 'album_first'
-                      ? 'bg-white/[0.1] text-white font-medium'
-                      : 'text-[#8E8E93] hover:text-white'
-                  }`}
+                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-all cursor-pointer flex items-center gap-1 ${albumDisplayMode === 'album_first'
+                    ? 'bg-white/[0.1] text-white font-medium'
+                    : 'text-[#8E8E93] hover:text-white'
+                    }`}
                 >
                   <Music className="w-3 h-3 text-[#D4AF37]" />
                   <span className="hidden xl:inline">Album First</span>
@@ -506,11 +503,10 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                 <button
                   onClick={() => onAlbumDisplayModeChange?.('folder_first')}
                   title="Show Physical Folder Name prominently"
-                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-all cursor-pointer flex items-center gap-1 ${
-                    albumDisplayMode === 'folder_first'
-                      ? 'bg-white/[0.1] text-white font-medium'
-                      : 'text-[#8E8E93] hover:text-white'
-                  }`}
+                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-all cursor-pointer flex items-center gap-1 ${albumDisplayMode === 'folder_first'
+                    ? 'bg-white/[0.1] text-white font-medium'
+                    : 'text-[#8E8E93] hover:text-white'
+                    }`}
                 >
                   <Folder className="w-3 h-3 text-cyan-400" />
                   <span className="hidden xl:inline">Folder First</span>
@@ -554,11 +550,10 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                 <button
                   key={era}
                   onClick={() => onFacetChange?.({ ...facets, era: facets.era === era ? undefined : era })}
-                  className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${
-                    facets.era === era
-                      ? 'bg-[#D4AF37] text-black font-semibold shadow-sm'
-                      : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
-                  }`}
+                  className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${facets.era === era
+                    ? 'bg-[#D4AF37] text-black font-semibold shadow-sm'
+                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                    }`}
                 >
                   {era}
                 </button>
@@ -588,11 +583,10 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                   <button
                     key={f.val}
                     onClick={() => onFacetChange?.({ ...facets, format: isFormatActive ? undefined : f.val })}
-                    className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${
-                      isFormatActive
-                        ? 'bg-white text-black font-semibold shadow-sm'
-                        : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
-                    }`}
+                    className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${isFormatActive
+                      ? 'bg-white text-black font-semibold shadow-sm'
+                      : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                      }`}
                   >
                     <span className={f.color}>{f.label}</span>
                   </button>
@@ -614,11 +608,10 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                     <button
                       key={lang}
                       onClick={() => onFacetChange?.({ ...facets, language: isLangActive ? undefined : lang })}
-                      className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${
-                        isLangActive
-                          ? 'bg-[#10B981] text-black font-semibold shadow-sm'
-                          : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
-                      }`}
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer ${isLangActive
+                        ? 'bg-[#10B981] text-black font-semibold shadow-sm'
+                        : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                        }`}
                     >
                       {lang}
                     </button>
@@ -641,16 +634,14 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                     reviewStatus: facets.reviewStatus === 'staged' ? undefined : 'staged',
                   })
                 }
-                className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 ${
-                  facets.reviewStatus === 'staged'
-                    ? 'bg-amber-400 text-black font-semibold shadow-sm'
-                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
-                }`}
+                className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 ${facets.reviewStatus === 'staged'
+                  ? 'bg-amber-400 text-black font-semibold shadow-sm'
+                  : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                  }`}
               >
                 <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    facets.reviewStatus === 'staged' ? 'bg-black' : 'bg-amber-400'
-                  }`}
+                  className={`w-1.5 h-1.5 rounded-full ${facets.reviewStatus === 'staged' ? 'bg-black' : 'bg-amber-400'
+                    }`}
                 />
                 <span>Staged for Review ({stagedAlbumsCount})</span>
               </button>
@@ -662,11 +653,10 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
                     favoritesOnly: facets.favoritesOnly ? undefined : true,
                   })
                 }
-                className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 ${
-                  facets.favoritesOnly
-                    ? 'bg-[#F43F5E] text-white font-semibold shadow-sm'
-                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
-                }`}
+                className={`px-2.5 py-1 rounded-full text-xs font-mono transition-all cursor-pointer flex items-center gap-1.5 ${facets.favoritesOnly
+                  ? 'bg-[#F43F5E] text-white font-semibold shadow-sm'
+                  : 'bg-white/[0.04] hover:bg-white/[0.08] text-[#8E8E93] hover:text-white border border-white/[0.05]'
+                  }`}
               >
                 <Heart className={`w-3 h-3 ${facets.favoritesOnly ? 'fill-white' : 'text-[#F43F5E]'}`} />
                 <span>Favorites Only</span>
@@ -841,30 +831,30 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
             {viewMode === 'cover_grid' && (
               <div className="w-full h-full max-w-[2560px] mx-auto flex flex-col min-h-0">
                 <AlbumCoverGrid
-                releases={releases}
-                tracks={tracks}
-                selectedTrackId={selectedTrackId}
-                onSelectTrack={onSelectTrack}
-                onInspectRelease={onInspectRelease}
-                onCustomizeRelease={onCustomizeRelease}
-                onUpdateReleaseDetails={onUpdateReleaseDetails}
-                onOpenBatchDiff={onOpenBatchDiff}
-                activeTab={activeCoverTab}
-                onActiveTabChange={setActiveCoverTab}
-                sortBy={coverSortBy}
-                onSortByChange={setCoverSortBy}
-                cardSize={coverCardSize}
-                onCardSizeChange={setCoverCardSize}
-                hideSubHeader={true}
-                selectedAlbumId={selectedAlbumId}
-                onSelectAlbumId={onSelectAlbumId}
-                selectedArtist={selectedArtist}
-                onSelectArtist={onSelectArtist}
-                selectedComposer={selectedComposer}
-                onSelectComposer={onSelectComposer}
-                splitReleaseIds={splitReleaseIds}
-                onToggleReleaseSplit={onToggleReleaseSplit}
-              />
+                  releases={releases}
+                  tracks={tracks}
+                  selectedTrackId={selectedTrackId}
+                  onSelectTrack={onSelectTrack}
+                  onInspectRelease={onInspectRelease}
+                  onCustomizeRelease={onCustomizeRelease}
+                  onUpdateReleaseDetails={onUpdateReleaseDetails}
+                  onOpenBatchDiff={onOpenBatchDiff}
+                  activeTab={activeCoverTab}
+                  onActiveTabChange={setActiveCoverTab}
+                  sortBy={coverSortBy}
+                  onSortByChange={setCoverSortBy}
+                  cardSize={coverCardSize}
+                  onCardSizeChange={setCoverCardSize}
+                  hideSubHeader={true}
+                  selectedAlbumId={selectedAlbumId}
+                  onSelectAlbumId={onSelectAlbumId}
+                  selectedArtist={selectedArtist}
+                  onSelectArtist={onSelectArtist}
+                  selectedComposer={selectedComposer}
+                  onSelectComposer={onSelectComposer}
+                  splitReleaseIds={splitReleaseIds}
+                  onToggleReleaseSplit={onToggleReleaseSplit}
+                />
               </div>
             )}
 
@@ -910,22 +900,22 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
             {viewMode === 'virtual_table' && (
               <div className="w-full h-full max-w-[2000px] mx-auto flex flex-col min-h-0">
                 <VirtualDataTable
-                tracks={tracks}
-                releases={releases}
-                albumDisplayMode={albumDisplayMode}
-                selectedTrackId={selectedTrackId}
-                onSelectTrack={onSelectTrack}
-                selectedTrackIds={selectedTrackIds}
-                onToggleTrackSelection={onToggleTrackSelection}
-                onSelectAll={onSelectAllTracks}
-                onOpenMultiEdit={() => setIsMultiEditOpen(true)}
-                onOpenBatchDiff={onOpenBatchDiff}
-                onOpenBatchAi={onOpenBatchAi}
-                onOpenSidecar={onOpenSidecar}
-                onCustomizeRelease={onCustomizeRelease}
-                onInspectRelease={onInspectRelease}
-                onUpdateReleaseDetails={onUpdateReleaseDetails}
-              />
+                  tracks={tracks}
+                  releases={releases}
+                  albumDisplayMode={albumDisplayMode}
+                  selectedTrackId={selectedTrackId}
+                  onSelectTrack={onSelectTrack}
+                  selectedTrackIds={selectedTrackIds}
+                  onToggleTrackSelection={onToggleTrackSelection}
+                  onSelectAll={onSelectAllTracks}
+                  onOpenMultiEdit={() => setIsMultiEditOpen(true)}
+                  onOpenBatchDiff={onOpenBatchDiff}
+                  onOpenBatchAi={onOpenBatchAi}
+                  onOpenSidecar={onOpenSidecar}
+                  onCustomizeRelease={onCustomizeRelease}
+                  onInspectRelease={onInspectRelease}
+                  onUpdateReleaseDetails={onUpdateReleaseDetails}
+                />
               </div>
             )}
 
