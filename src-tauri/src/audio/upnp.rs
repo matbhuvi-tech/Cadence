@@ -347,6 +347,29 @@ pub struct UpnpPlaybackState {
     pub duration_secs: f64,
 }
 
+async fn collect_ssdp_locations(socket: &UdpSocket, window: Duration) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut buf = [0u8; 4096];
+    let mut locations = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, _))) => {
+                let response = String::from_utf8_lossy(&buf[..len]);
+                for line in response.lines() {
+                    if let Some((name, value)) = line.split_once(':') {
+                        let location = value.trim();
+                        if name.eq_ignore_ascii_case("location") && !location.is_empty() && locations.len() < 128 && !locations.iter().any(|known| known == location) {
+                            locations.push(location.to_string());
+                        }
+                    }
+                }
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    locations
+}
+
 pub struct UpnpManager {
     devices: Arc<Mutex<Vec<UpnpDevice>>>,
     active_device: Arc<Mutex<Option<UpnpDevice>>>,
@@ -900,29 +923,8 @@ impl UpnpManager {
                            ST: ssdp:all\r\n\r\n";
         let _ = socket.send_to(msearch_all.as_bytes(), "239.255.255.250:1900").await;
 
-        let mut buf = [0u8; 4096];
-        let start = std::time::Instant::now();
-        let mut locations = Vec::new();
-
-        while start.elapsed() < Duration::from_millis(1500) {
-            match timeout(Duration::from_millis(300), socket.recv_from(&mut buf)).await {
-                Ok(Ok((len, _addr))) => {
-                    let resp = String::from_utf8_lossy(&buf[..len]);
-                    for line in resp.lines() {
-                        let lower = line.to_lowercase();
-                        if lower.starts_with("location:") {
-                            if let Some(loc) = line.splitn(2, ':').nth(1) {
-                                let loc_str = loc.trim().to_string();
-                                if !locations.contains(&loc_str) {
-                                    locations.push(loc_str);
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => break,
-            }
-        }
+        // MX=2 permits replies throughout the entire response window.
+        let mut locations = collect_ssdp_locations(&socket, Duration::from_millis(2200)).await;
 
         // Also include locations of previously discovered devices so that transient Wi-Fi multicast drops don't lose them
         {
