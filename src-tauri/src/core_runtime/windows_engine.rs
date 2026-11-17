@@ -641,6 +641,8 @@ fn copy_cached_artwork_from_legacy(legacy_db_path: &Path, target_db: &Path) -> R
     use sha2::{Digest, Sha256};
     let src = Connection::open(legacy_db_path).map_err(|e| e.to_string())?;
     let dst = Connection::open(target_db).map_err(|e| e.to_string())?;
+    dst.execute_batch("CREATE TABLE IF NOT EXISTS engine_artwork (release_id TEXT PRIMARY KEY, etag TEXT NOT NULL, jpeg BLOB NOT NULL);")
+        .map_err(|e| e.to_string())?;
     let Ok(mut stmt) = src.prepare(
         "SELECT id, cache_path FROM artwork_cache_state WHERE entity_type='release' AND status='cached' AND cache_path IS NOT NULL",
     ) else {
@@ -655,10 +657,12 @@ fn copy_cached_artwork_from_legacy(legacy_db_path: &Path, target_db: &Path) -> R
             if !bytes.is_empty() {
                 let hash = format!("{:x}", Sha256::digest(&bytes));
                 let etag = format!("art_{}", &hash[..16]);
-                let _ = dst.execute(
+                dst.execute(
                     "INSERT INTO engine_artwork(release_id, etag, jpeg) VALUES(?1, ?2, ?3) ON CONFLICT(release_id) DO UPDATE SET etag=excluded.etag, jpeg=excluded.jpeg",
                     rusqlite::params![release_id, etag, bytes],
-                );
+                ).map_err(|e| e.to_string())?;
+                dst.execute("UPDATE tracks SET has_embedded_art=1 WHERE release_id=?1", rusqlite::params![release_id])
+                    .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -855,5 +859,7 @@ mod tests {
         let conn = Connection::open(engine_dir.join("cadence.db")).unwrap();
         let bytes: Vec<u8> = conn.query_row("SELECT jpeg FROM engine_artwork WHERE release_id='r'", [], |r| r.get(0)).unwrap();
         assert_eq!(bytes, b"cached-image");
+        let advertised: bool = conn.query_row("SELECT has_embedded_art FROM tracks WHERE id='t'", [], |r| r.get(0)).unwrap();
+        assert!(advertised, "migrated artwork must be advertised to the catalogue");
     }
 }
