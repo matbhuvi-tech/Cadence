@@ -38,3 +38,27 @@ class CalibrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CaptureTests(unittest.TestCase):
+    def test_extracts_sender_data_and_receiver_zero_window(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        output = "100\t10.0.0.1\t10.0.0.2\t18890\t40000\t0\t1000\t\t\t\t\n101\t10.0.0.2\t10.0.0.1\t40000\t18890\t0\t0\t\t\t1\t0\n"
+        with patch.object(calibration.subprocess, 'run', return_value=SimpleNamespace(stdout=output)):
+            rows = calibration.extract_rows('tshark', 'test.pcapng', '10.0.0.1', '10.0.0.2', 18890)
+        self.assertEqual(rows[0]['length'], 1000)
+        self.assertTrue(rows[1]['zero_window'])
+
+    def test_rejects_incomplete_or_wrong_rate(self):
+        rows = [{"time": t, "length": 1, "retransmission": False, "zero_window": False, "window": 0} for t in [0, 31]]
+        with self.assertRaises(ValueError):
+            calibration.analyze(rows, 1000, 30)
+
+    def test_existing_output_is_not_overwritten(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'existing.json'
+            output.write_text('keep')
+            result = calibration.main(['--interface', '1', '--sender', '192.168.1.1', '--renderer', '192.168.1.2', '--udn', 'uuid:test', '--output', str(output)])
+            self.assertEqual(result, 1)
+            self.assertEqual(output.read_text(), 'keep')
