@@ -40,3 +40,8 @@ test('scan requests a fresh engine output inventory', async () => {
   assert.equal((await client.scan())[0].displayName, 'ROSE-67')
   assert.equal(requests[0].operation, 'outputs.scan')
 })
+
+test('scan explains when an older engine does not support the operation', async () => {
+  const client = createEngineOutputsClient(profile, async () => ({ ok: false, error: { code: 'invalid_payload' } }))
+  await assert.rejects(client.scan(), /update.*engine/i)
+})
