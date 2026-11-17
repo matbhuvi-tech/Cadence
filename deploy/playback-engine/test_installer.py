@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -55,6 +56,43 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaises(installer.InstallError):
                 installer.ensure_fresh(target)
             self.assertEqual((target / '.env').read_text(), 'existing')
+
+    def test_linux_first_install_uses_release_and_starts_compose(self):
+        import os
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / 'music').mkdir()
+            (root / 'data').mkdir()
+            result = types.SimpleNamespace(stdout='', returncode=0)
+            answers = ['', '', str(root / 'music'), str(root / 'data')]
+            with mock.patch.object(installer.sys, 'platform', 'linux'), \
+                 mock.patch.object(os, 'uname', return_value=types.SimpleNamespace(machine='x86_64'), create=True), \
+                 mock.patch.dict(os.environ, {'SUDO_USER': ''}), \
+                 mock.patch.dict(sys.modules, {'pwd': types.SimpleNamespace()}), \
+                 mock.patch.object(pathlib.Path, 'home', return_value=root), \
+                 mock.patch.object(installer, 'latest_release', return_value='v1.2.3'), \
+                 mock.patch.object(installer, 'default_ip', return_value='192.168.1.12'), \
+                 mock.patch.object(installer, 'fetch', return_value='services: {}'), \
+                 mock.patch.object(installer, 'ensure_docker'), \
+                 mock.patch.object(installer, 'docker_prefix', return_value=['docker']), \
+                 mock.patch.object(installer, 'run', return_value=result) as run, \
+                 mock.patch('builtins.input', side_effect=answers):
+                installer.main()
+            env = (root / 'cadence-playback-engine' / '.env').read_text()
+            self.assertIn('cadence-playback-engine:v1.2.3', env)
+            self.assertIn('192.168.1.12', env)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertTrue(any(cmd[-1:] == ['pull'] for cmd in commands))
+            self.assertTrue(any(cmd[-5:] == ['up', '-d', '--wait', '--wait-timeout', '120'] for cmd in commands))
+            self.assertTrue(any('test -r /music' in cmd[-1] for cmd in commands))
+
+    def test_truenas_never_installs_system_packages(self):
+        with mock.patch.object(installer.shutil, 'which', return_value=None), \
+             mock.patch.object(installer, 'run') as run:
+            with self.assertRaises(installer.InstallError):
+                installer.ensure_docker(truenas=True)
+            run.assert_not_called()
 
 
 if __name__ == '__main__':
