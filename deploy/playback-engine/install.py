@@ -250,7 +250,10 @@ def local_compose(music):
         print(f'Using Compose template alongside installer: {nearby}')
     else:
         tag = os.environ.get('CADENCE_ACTIVE_TAG')
-        compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/compose.yml')
+        try:
+            compose = fetch(f'https://github.com/{REPOSITORY}/releases/download/{tag}/compose.yml')
+        except InstallError:
+            compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/compose.yml')
         if 'SYS_ADMIN' not in compose or 'CADENCE_MUSIC_READ_ONLY: "false"' not in compose:
             raise InstallError('The published Compose template does not support dynamic read/write SMB. '
                                'Publish the updated Compose and Docker image together, or run the '

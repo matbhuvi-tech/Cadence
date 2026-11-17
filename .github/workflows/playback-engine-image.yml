@@ -50,4 +50,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/cadence-installer"
           python3 -c 'import os,pathlib; p=pathlib.Path("deploy/playback-engine/install.sh"); pathlib.Path(os.environ["RUNNER_TEMP"],"cadence-installer","install.sh").write_text(p.read_text().replace("__CADENCE_RELEASE_TAG__",os.environ["RELEASE_TAG"]))'
-          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/cadence-installer/install.sh" deploy/playback-engine/install.py
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/cadence-installer/install.sh" \
+            deploy/playback-engine/install.py \
+            deploy/playback-engine/compose.yml \
+            --clobber
