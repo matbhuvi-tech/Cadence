@@ -730,3 +730,22 @@ fn headless_dependency_tree_excludes_gui_and_local_audio_crates() {
     }
 }
 
+
+#[test]
+fn selected_output_is_reflected_in_authoritative_session_snapshot() {
+    let ws = TempWorkspace::create("selected_output_snapshot");
+    let mut runtime = HeadlessCoreRuntime::open_with_platform(
+        default_config(ws.db_path.clone()), RecordingRenderer::default(),
+        generous_probe(), FakeLocker::new(true),
+    ).expect("open runtime");
+    let before = runtime.request(&wire(json!({"operation": "session.snapshot"})));
+    assert_eq!(before["data"]["output"]["id"], "rs130-main");
+    runtime.set_output(Output { id: "upnp_rose_67".into(), label: "ROSE-67".into(), transport: "upnp".into() });
+    let after = runtime.request(&wire(json!({"operation": "session.snapshot"})));
+    assert_eq!(after["data"]["output"]["id"], "upnp_rose_67");
+    assert_eq!(after["data"]["output"]["label"], "ROSE-67");
+    assert_eq!(after["data"]["revision"], 1);
+    runtime.shutdown().unwrap();
+    drop(runtime);
+    std::fs::remove_dir_all(&ws.dir).unwrap();
+}
