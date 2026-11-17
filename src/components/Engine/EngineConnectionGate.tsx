@@ -2,7 +2,6 @@ import React, { useState } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
-  KeyRound,
   Loader2,
   Plus,
   RefreshCw,
@@ -13,7 +12,7 @@ import {
 } from 'lucide-react'
 import { useEngineController } from '../../context/EngineControllerContext'
 import { CadenceLogo } from '../common/CadenceLogo'
-import { formatCoreFingerprint, type SavedCoreProfile } from '../../services/coreControllerTransport'
+import { type SavedCoreProfile } from '../../services/coreControllerTransport'
 
 export const EngineConnectionGate: React.FC = () => {
   const engine = useEngineController()
@@ -21,9 +20,6 @@ export const EngineConnectionGate: React.FC = () => {
 
   const [addressInput, setAddressInput] = useState('')
   const [labelInput, setLabelInput] = useState('')
-  const [tokenInput, setTokenInput] = useState('')
-  const [fingerprintInput, setFingerprintInput] = useState('')
-  const [trustInsecure, setTrustInsecure] = useState(true)
   const [showManualForm, setShowManualForm] = useState(() => state.savedCores.length === 0)
 
   const handleProbe = async (e: React.FormEvent) => {
@@ -32,9 +28,7 @@ export const EngineConnectionGate: React.FC = () => {
     await engine.probeAndStageAddress({
       baseUrl: addressInput.trim(),
       label: labelInput.trim() || undefined,
-      pairingToken: tokenInput.trim() || undefined,
-      certFingerprint: fingerprintInput.trim() || undefined,
-      trustInsecure,
+      trustInsecure: true,
     })
   }
 
@@ -140,9 +134,6 @@ export const EngineConnectionGate: React.FC = () => {
                     </div>
                     <p className="text-[11px] font-mono text-white/45 mt-1 truncate">
                       {profile.baseUrl}
-                      {profile.certFingerprint
-                        ? ` · TLS ${formatCoreFingerprint(profile.certFingerprint).slice(0, 19)}…`
-                        : ''}
                     </p>
                   </div>
 
@@ -196,19 +187,11 @@ export const EngineConnectionGate: React.FC = () => {
                     onClick={() => {
                       setAddressInput(node.baseUrl)
                       setLabelInput(node.label)
-                      if (node.certFingerprint) setFingerprintInput(node.certFingerprint)
-                      if (node.pairingToken) {
-                        setTokenInput(node.pairingToken)
-                        void engine.probeAndStageAddress({
-                          baseUrl: node.baseUrl,
-                          label: node.label,
-                          pairingToken: node.pairingToken,
-                          certFingerprint: node.certFingerprint,
-                          trustInsecure: !node.certFingerprint,
-                        })
-                      } else {
-                        setShowManualForm(true)
-                      }
+                      void engine.probeAndStageAddress({
+                        baseUrl: node.baseUrl,
+                        label: node.label,
+                        trustInsecure: true,
+                      })
                     }}
                     className="rounded-lg border border-emerald-400/35 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/25 cursor-pointer"
                   >
@@ -236,11 +219,6 @@ export const EngineConnectionGate: React.FC = () => {
                   {state.stagedCandidate.profile.baseUrl} · Output:{' '}
                   {state.stagedCandidate.snapshot.output?.label ?? 'Unassigned'}
                 </p>
-                {state.stagedCandidate.profile.certFingerprint && (
-                  <p className="text-[11px] font-mono text-[#D4AF37]/90">
-                    Pinned TLS SHA-256: {formatCoreFingerprint(state.stagedCandidate.profile.certFingerprint)}
-                  </p>
-                )}
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -292,24 +270,7 @@ export const EngineConnectionGate: React.FC = () => {
                 />
               </div>
 
-              <div>
-                <label htmlFor="gate-token-input" className="block text-[11px] font-medium text-white/60 mb-1">
-                  Pairing Token
-                </label>
-                <div className="relative">
-                  <KeyRound className="w-3.5 h-3.5 text-white/35 absolute left-2.5 top-2.5" />
-                  <input
-                    id="gate-token-input"
-                    type="password"
-                    value={tokenInput}
-                    onChange={(e) => setTokenInput(e.target.value)}
-                    placeholder="x-cadence-token"
-                    className="w-full rounded-lg border border-white/10 bg-black/50 pl-8 pr-3 py-2 text-xs text-white placeholder-white/30 focus:border-[#D4AF37]/50 focus:outline-none font-mono"
-                  />
-                </div>
-              </div>
-
-              <div>
+              <div className="sm:col-span-2">
                 <label htmlFor="gate-label-input" className="block text-[11px] font-medium text-white/60 mb-1">
                   Display Name (optional)
                 </label>
@@ -323,37 +284,13 @@ export const EngineConnectionGate: React.FC = () => {
                 />
               </div>
 
-              <div className="sm:col-span-2">
-                <label htmlFor="gate-fingerprint-input" className="block text-[11px] font-medium text-white/60 mb-1">
-                  Pinned TLS SHA-256 Fingerprint (optional on first probe)
-                </label>
-                <input
-                  id="gate-fingerprint-input"
-                  type="text"
-                  value={fingerprintInput}
-                  onChange={(e) => setFingerprintInput(e.target.value)}
-                  placeholder="64 hex chars (auto-captured on initial handshake)"
-                  className="w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-xs text-white placeholder-white/30 focus:border-[#D4AF37]/50 focus:outline-none font-mono"
-                />
-              </div>
-
-              <div className="sm:col-span-2 flex items-center justify-between gap-3 pt-1">
-                <label className="inline-flex items-center gap-2 text-[11px] text-white/65 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={trustInsecure}
-                    onChange={(e) => setTrustInsecure(e.target.checked)}
-                    className="rounded border-white/20 bg-black/40 accent-[#D4AF37]"
-                  />
-                  <span>Trust self-signed LAN certificate for initial probe</span>
-                </label>
-
+              <div className="sm:col-span-2 flex items-center justify-end gap-3 pt-1">
                 <button
                   type="submit"
                   disabled={state.isBusy || !addressInput.trim()}
                   className="rounded-lg bg-white/10 border border-white/15 px-4 py-2 text-xs font-semibold text-white hover:bg-white/15 cursor-pointer disabled:opacity-50"
                 >
-                  {state.isBusy ? 'Checking…' : 'Verify & Pair'}
+                  {state.isBusy ? 'Checking…' : 'Verify & Connect'}
                 </button>
               </div>
             </form>

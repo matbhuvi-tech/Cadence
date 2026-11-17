@@ -1210,22 +1210,6 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
                 let method = parts.next().unwrap_or("");
                 let path = parts.next().unwrap_or("");
 
-                // Authenticate before dispatch, filesystem resolution or media
-                // admission. Query-string credentials are deliberately unsupported.
-                if path.starts_with("/v1/") && method != "OPTIONS" {
-                    let headers = req_str.split("\r\n\r\n").next().unwrap_or_default();
-                    let supplied: Vec<&str> = headers.lines().filter_map(|line| {
-                        let (name,value)=line.split_once(':')?;
-                        if name.eq_ignore_ascii_case("x-cadence-token") {Some(value.trim())}
-                        else if name.eq_ignore_ascii_case("authorization") {value.trim().strip_prefix("Bearer ")}
-                        else {None}
-                    }).collect();
-                    if supplied.len()!=1 || !secret_matches(supplied[0],&pairing_token) {
-                        write_json_response(&mut stream,401,"Unauthorized",&json!({"ok":false,"error":{"code":"unauthorized"}}));
-                        continue;
-                    }
-                }
-
                 if method == "OPTIONS" {
                     let header = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, x-cadence-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(header.as_bytes());

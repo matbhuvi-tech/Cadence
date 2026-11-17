@@ -112,8 +112,11 @@ def truenas_music_picker():
             print(f'  {i}. {path.name}/')
         print('  s. Select this folder' if current != root else '  s. Select (unavailable at /mnt)')
         print('  u. Up one level')
+        print('  0. Skip local folder (add SMB shares in Cadence later)')
         print('  m. Enter an absolute path manually')
         choice = input('Choose a number, s, u, or m: ').strip().lower()
+        if choice == '0':
+            return ''
         if choice.isdigit() and 1 <= int(choice) <= len(children):
             current = children[int(choice) - 1]
         elif choice == 'u':
@@ -134,10 +137,85 @@ def truenas_music_picker():
 
 
 def suggested_truenas_data_path(music):
-    """Recommend a separate directory at the selected pool root."""
-    relative = Path(music).resolve().relative_to(Path('/mnt'))
-    pool = relative.parts[0]
+    """Suggest an isolated dataset directory even if no local music is selected."""
+    if music:
+        pool = Path(music).resolve().relative_to('/mnt').parts[0]
+    else:
+        pools = sorted((p for p in Path('/mnt').iterdir()
+                        if p.is_dir() and p.name not in
+                        ('ix-applications', 'ix-apps', '.system')),
+                       key=lambda p: p.name.casefold())
+        if not pools:
+            return ''
+        print('Storage pools:')
+        for idx, item in enumerate(pools, 1):
+            print(f'  {idx}. {item}')
+        selected = prompt('Storage pool number', '1',
+                          lambda value: value.isdigit() and 1 <= int(value) <= len(pools))
+        pool = pools[int(selected) - 1].name
     return str(Path('/mnt') / pool / 'cadence-data')
+
+
+def test_as_cadence(directory, mode):
+    """Verify actual uid 568 access, including ACLs, without broad chmod/chown."""
+    probe = r'''import os, sys, uuid
+path, mode = sys.argv[1:]
+if mode == 'read':
+    with os.scandir(path) as entries:
+        next(entries, None)
+else:
+    name = os.path.join(path, '.cadence-write-probe-' + uuid.uuid4().hex)
+    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    os.unlink(name)
+'''
+    def become_cadence():
+        os.setgroups([])
+        os.setgid(568)
+        os.setuid(568)
+    completed = subprocess.run([sys.executable, '-c', probe, str(directory), mode],
+                               preexec_fn=become_cadence, capture_output=True, text=True)
+    return completed.returncode == 0, completed.stderr.strip()
+
+
+def check_permissions(data_path, music):
+    success, error = test_as_cadence(data_path, 'write')
+    if not success:
+        raise InstallError(f'Cadence UID 568 cannot write to {data_path}: {error}. '
+                           'Choose a dedicated cadence-data directory, or grant UID 568 '
+                           'write permission using the TrueNAS ACL editor. '
+                           'No existing directory permissions were changed.')
+    if music:
+        success, error = test_as_cadence(music, 'read')
+        if not success:
+            raise InstallError(f'Cadence UID 568 cannot read {music}: {error}. '
+                               'Grant UID 568 read/traverse permissions using the TrueNAS ACL editor.')
+
+
+def local_compose(music):
+    """Use matching local Compose when supplied; optional local music volume."""
+    nearby = Path(__file__).resolve().with_name('compose.yml')
+    if nearby.is_file():
+        compose = nearby.read_text(encoding='utf-8')
+        print(f'Using Compose template alongside installer: {nearby}')
+    else:
+        tag = os.environ.get('CADENCE_ACTIVE_TAG')
+        compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/compose.yml')
+        if 'SYS_ADMIN' not in compose or 'CADENCE_MUSIC_READ_ONLY: "false"' not in compose:
+            raise InstallError('The published Compose template does not support dynamic read/write SMB. '
+                               'Publish the updated Compose and Docker image together, or run the '
+                               'updated install.py and compose.yml from the same directory.')
+    if not music:
+        pattern = r'(?m)^      # LOCAL_MUSIC_VOLUME_START\n.*?^      # LOCAL_MUSIC_VOLUME_END\n'
+        compose, count = re.subn(pattern, '', compose, flags=re.DOTALL)
+        if not count:
+            raise InstallError('This Compose template requires a local music directory. '
+                               'Use the updated compose.yml alongside install.py.')
+    else:
+        compose = compose.replace('      # LOCAL_MUSIC_VOLUME_START\n', '')
+        compose = compose.replace('      # LOCAL_MUSIC_VOLUME_END\n', '')
+    return compose
+
 
 
 def privileged(args):
@@ -201,7 +279,8 @@ def main():
     truenas = bool(shutil.which('midclt') and (Path('/etc/truenas-release').exists() or Path('/etc/version').exists()))
     if truenas and os.geteuid() != 0:
         raise InstallError('On TrueNAS, run this installer from the system shell as root (or use sudo).')
-    print('\nCadence Playback Engine setup\nPress Enter to accept a suggested value. Your music is mounted read-only.\n')
+    print('\nCadence Playback Engine setup\nPress Enter to accept suggestions.\n'
+          'Local music is optional; SMB shares can be added inside Cadence with read/write access.\n')
     try:
         suggested_tag = os.environ.get('CADENCE_INSTALLER_RELEASE') or latest_release()
     except InstallError as exc:
@@ -209,17 +288,23 @@ def main():
         suggested_tag = ''
     tag = prompt('Release tag', suggested_tag, valid_tag, 'Enter a valid published release tag, such as v1.2.3.')
     address = prompt('This machine’s LAN IPv4 address', default_ip(), valid_address, 'Enter a reachable LAN IPv4 address (not loopback or link-local).')
-    music = truenas_music_picker() if truenas else prompt('Existing folder containing your music', '', lambda s: Path(s).is_absolute() and Path(s).is_dir(), 'Enter an absolute path to an existing folder.')
+    if truenas:
+        music = truenas_music_picker()
+    else:
+        music = prompt('Existing local music folder (type - for none)', '-',
+                       lambda value: value == '-' or (Path(value).is_absolute() and Path(value).is_dir()))
+        music = '' if music == '-' else music
     sudo_user = os.environ.get('SUDO_USER')
     import pwd
     home = Path(pwd.getpwnam(sudo_user).pw_dir) if sudo_user else Path.home()
     default_data = suggested_truenas_data_path(music) if truenas else '/var/lib/cadence'
     if truenas:
         print(f'Recommended persistent engine data directory: {default_data}')
-    data = prompt('Persistent engine data folder', default_data, lambda s: Path(s).is_absolute(), 'Enter an absolute folder path.')
-    if not paths_separate(data, music):
+    data = prompt('Persistent engine data folder', default_data, lambda value: Path(value).is_absolute(), 'Enter an absolute folder path.')
+    if music and not paths_separate(data, music):
         raise InstallError('The data and music folders must be separate and must not contain one another.')
-    if truenas and (Path('/mnt') not in Path(data).resolve().parents or Path('/mnt') not in Path(music).resolve().parents):
+    if truenas and (Path('/mnt') not in Path(data).resolve().parents or
+                    (music and Path('/mnt') not in Path(music).resolve().parents)):
         raise InstallError('On TrueNAS choose data and music paths beneath /mnt on persistent storage.')
     destination = Path(data).parent / 'cadence-installation' if truenas else home / 'cadence-playback-engine'
     ensure_fresh(destination)
@@ -227,9 +312,19 @@ def main():
         existing = run(['midclt', 'call', 'app.query', json.dumps([['id', '=', APP]])], capture_output=True, text=True)
         if json.loads(existing.stdout):
             raise InstallError('The TrueNAS app already exists. Use the upgrade guide; it was not changed.')
-    compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/compose.yml')
+    os.environ['CADENCE_ACTIVE_TAG'] = tag
+    compose = local_compose(music)
     ensure_docker(truenas)
     docker = docker_prefix(truenas)
+    # Verify the selected published image actually contains the CIFS helper before creating the app.
+    print('Checking the published engine image for dynamic SMB support...')
+    run([*docker, 'pull', f'{IMAGE}:{tag}'])
+    cifs_check = subprocess.run([*docker, 'run', '--rm', '--entrypoint', '/bin/sh',
+                                 f'{IMAGE}:{tag}', '-c', 'command -v mount.cifs >/dev/null'],
+                                capture_output=True, text=True)
+    if cifs_check.returncode:
+        raise InstallError('The selected release image does not include mount.cifs. '
+                           'Build and publish the updated Dockerfile before installing this release.')
     if not truenas:
         existing = run([*docker, 'ps', '-a', '--filter', 'label=com.docker.compose.project=cadence-playback-engine', '--format', '{{.ID}}'], capture_output=True, text=True)
         if existing.stdout.strip():
@@ -243,10 +338,11 @@ def main():
         run(privileged(['chown', '568:568', str(data_path)]))
     if not data_path.is_dir():
         raise InstallError('The engine data path is not a directory.')
+    check_permissions(data_path, music)
     compose_file = destination / 'compose.yml'
     compose_file.write_text(compose, encoding='utf-8')
     write_env(destination / '.env', {'CADENCE_IMAGE': f'{IMAGE}:{tag}', 'CADENCE_ADVERTISED_IP': address,
-              'CADENCE_HOST_DATA_DIR': str(data_path.resolve()), 'CADENCE_HOST_MUSIC_DIR': str(Path(music).resolve()),
+              'CADENCE_HOST_DATA_DIR': str(data_path.resolve()), 'CADENCE_HOST_MUSIC_DIR': str(Path(music).resolve()) if music else '',
               'CADENCE_LABEL': 'Cadence Playback Engine'})
     command = [*docker, 'compose', '-p', APP, '--project-directory', str(destination), '-f', str(compose_file)]
     run([*command, 'config', '--quiet'])
@@ -254,20 +350,19 @@ def main():
         result = run([*command, 'config', '--format', 'json'], capture_output=True, text=True)
         print('Creating the app in TrueNAS. Apps storage must already be configured.')
         create_truenas_app(compose_file, result.stdout)
-        print('Installed. Open Apps in TrueNAS to check the app status and logs.')
+        print('App submitted to TrueNAS. Confirm it is Running and Healthy in Apps.')
     else:
         print('Downloading the release and starting the Playback Engine...')
         run([*command, 'pull'])
         try:
             run([*command, 'run', '--rm', '--no-deps', '--entrypoint', '/bin/sh', 'playback-engine',
-                 '-c', 'test -r /music && test -x /music && test -w /var/lib/cadence'])
+                 '-c', 'test -w /var/lib/cadence'])
         except subprocess.CalledProcessError as exc:
             raise InstallError('The engine cannot access the folders. Give UID/GID 568 read/search access to music and write access to data, including their parent folders.') from exc
         run([*command, 'up', '-d', '--wait', '--wait-timeout', '120'])
         print(f'Engine is ready. Check status with: cd "{destination}" && docker compose -p {APP} ps')
     print(f'Engine address: https://{address}:4040')
-    print(f'Pairing token is stored in {data_path / "pairing-token"}. Keep it private.')
-    print('If startup fails, check the app logs and grant UID/GID 568 access to both folders.')
+    print('If startup fails, check Apps > Cadence > Logs. Do not chmod or chown your entire library.')
 
 
 if __name__ == '__main__':

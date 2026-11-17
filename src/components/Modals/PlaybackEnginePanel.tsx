@@ -15,7 +15,7 @@ import {
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { useOptionalAudioPlayer } from '../../context/AudioPlayerContext'
 import { getEndpointDisplayName } from '../../core/endpointRouting'
-import { formatCoreFingerprint, type SavedCoreProfile } from '../../services/coreControllerTransport'
+import { type SavedCoreProfile } from '../../services/coreControllerTransport'
 
 interface PlaybackEnginePanelProps {
   onEngineActivated?: () => void
@@ -27,9 +27,6 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
 
   const [addressInput, setAddressInput] = useState('')
   const [labelInput, setLabelInput] = useState('')
-  const [tokenInput, setTokenInput] = useState('')
-  const [fingerprintInput, setFingerprintInput] = useState('')
-  const [trustInsecure, setTrustInsecure] = useState(false)
   const [rootsDraft, setRootsDraft] = useState('')
   const [showConnectForm, setShowConnectForm] = useState(false)
 
@@ -67,9 +64,7 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
     await engine.probeAndStageAddress({
       baseUrl: addressInput.trim(),
       label: labelInput.trim() || undefined,
-      pairingToken: tokenInput.trim() || undefined,
-      certFingerprint: fingerprintInput.trim() || undefined,
-      trustInsecure,
+      trustInsecure: true,
       musicRoots: roots,
     })
   }
@@ -282,8 +277,6 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
                   onClick={() => {
                     setAddressInput(node.baseUrl)
                     setLabelInput(node.label)
-                    setFingerprintInput(node.certFingerprint ?? '')
-                    if (node.pairingToken) setTokenInput(node.pairingToken)
                   }}
                   className="w-full flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-xs hover:border-[#D4AF37]/40 cursor-pointer"
                 >
@@ -324,45 +317,6 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label htmlFor="core-token-input" className="block text-[11px] text-white/70 mb-1">
-                  Pairing PIN / Token
-                </label>
-                <input
-                  id="core-token-input"
-                  type="text"
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="e.g. 4829"
-                  className="w-full rounded-lg border border-white/15 bg-black/50 px-3 py-1.5 text-xs font-mono text-white placeholder-white/30 focus:border-[#D4AF37] focus:outline-none"
-                />
-              </div>
-              <div>
-                <label htmlFor="core-fp-input" className="block text-[11px] text-white/70 mb-1">
-                  TLS SHA-256 Fingerprint (optional pin)
-                </label>
-                <input
-                  id="core-fp-input"
-                  type="text"
-                  value={fingerprintInput}
-                  onChange={(e) => setFingerprintInput(e.target.value)}
-                  placeholder="Verify peer certificate fingerprint"
-                  className="w-full rounded-lg border border-white/15 bg-black/50 px-3 py-1.5 text-xs font-mono text-white placeholder-white/30 focus:border-[#D4AF37] focus:outline-none"
-                />
-              </div>
-            </div>
-
-            <label className="flex items-center gap-2 text-[11px] text-white/70 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={trustInsecure}
-                onChange={(e) => setTrustInsecure(e.target.checked)}
-                className="rounded border-white/20 bg-black/60 accent-[#D4AF37]"
-              />
-              <span>Allow unverified local LAN certificate / HTTP for Dragonfish setup</span>
-            </label>
-
             <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
@@ -402,11 +356,6 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
               <div className="text-[11px] text-white/75">
                 Audio output: {staged.snapshot.output?.label ?? 'None configured'}
               </div>
-              {staged.profile.certFingerprint && (
-                <div className="text-[10px] font-mono text-white/55">
-                  TLS Pin: {formatCoreFingerprint(staged.profile.certFingerprint)}
-                </div>
-              )}
             </div>
           </div>
 
