@@ -835,4 +835,25 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn fresh_legacy_migration_preserves_cached_release_artwork() {
+        let root = temp_dir("migrate-art");
+        let source = root.join("legacy.db");
+        let engine_dir = root.join("engine-data");
+        let image = root.join("cached.jpg");
+        std::fs::write(&image, b"cached-image").unwrap();
+        {
+            let db = crate::db::AppDb::new(source.clone()).unwrap();
+            let conn = db.conn.lock();
+            conn.execute("INSERT INTO storage_mounts(id,name,mount_path,mount_type,file_system,last_seen_timestamp) VALUES ('m','Music','C:\\Music','local_disk','ntfs',CURRENT_TIMESTAMP)", []).unwrap();
+            conn.execute("INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,created_at) VALUES ('r','Album','C:\\Music','Album','Artist',CURRENT_TIMESTAMP)", []).unwrap();
+            conn.execute("INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,file_size,mtime,title,artist_credit,album_title,duration_secs,format,created_at) VALUES ('t','r','m','C:\\Music','Album','C:\\Music\\track.flac','track.flac',1,1,'Track','Artist','Album',1,'FLAC',CURRENT_TIMESTAMP)", []).unwrap();
+            conn.execute("INSERT INTO artwork_cache_state(id,entity_type,source_path,cache_path,status,checked_at) VALUES ('r','release','C:\\Music',?1,'cached',CURRENT_TIMESTAMP)", rusqlite::params![image.to_string_lossy()]).unwrap();
+        }
+        migrate_legacy_desktop_db(&source, &engine_dir).unwrap();
+        let conn = Connection::open(engine_dir.join("cadence.db")).unwrap();
+        let bytes: Vec<u8> = conn.query_row("SELECT jpeg FROM engine_artwork WHERE release_id='r'", [], |r| r.get(0)).unwrap();
+        assert_eq!(bytes, b"cached-image");
+    }
 }
