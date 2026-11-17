@@ -2202,12 +2202,25 @@ impl Renderer for UpnpBridgeRenderer {
             }
             RendererAction::Stop => {
                 self.paused_flag.store(false, Ordering::Release);
+                // A local session alone does not establish current ownership: another
+                // controller may have replaced the renderer URI since reconciliation.
+                let owned_uri = self.active_session.lock().ok().and_then(|guard| {
+                    guard.as_ref().map(|session| session.stream_url.clone())
+                });
+                let still_owned = owned_uri.as_deref().is_some_and(|uri| {
+                    query_renderer_state(&self.device.control_url).is_ok_and(|state| {
+                        state.current_uri == uri
+                            && matches!(state.transport_state.as_str(), "PLAYING" | "PAUSED_PLAYBACK" | "TRANSITIONING")
+                    })
+                });
                 if let Ok(mut guard) = self.active_session.lock() {
                     if let Some(old) = guard.take() {
                         old.cancelled.store(true, Ordering::Release);
                     }
                 }
-                let _ = send_simple_avtransport_action(&self.device.control_url, "Stop", "");
+                if still_owned {
+                    let _ = send_simple_avtransport_action(&self.device.control_url, "Stop", "");
+                }
                 Ok(())
             }
         }

@@ -950,7 +950,8 @@ fn bounded_concurrency_disconnects_and_qualified_avtransport_reconciliation() {
     // 5. Post-restart reconciliation: inspects renderer without seizing or sending Play/Stop
     let calls_before_restart_check = rs130.state.lock().unwrap().soap_calls.len();
     let probe_state = session_rt.reconcile_after_restart().unwrap();
-    assert_eq!(probe_state.transport_state, "STOPPED");
+    assert_eq!(probe_state.transport_state, "PLAYING");
+    assert_eq!(probe_state.current_uri, "http://other-controller:9000/ hijack.flac");
     let calls_after = rs130.state.lock().unwrap().soap_calls[calls_before_restart_check..].to_vec();
     assert!(calls_after
         .iter()
