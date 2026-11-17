@@ -93,6 +93,53 @@ def prompt(label, default='', check=None, error='Please enter a valid value.'):
         print(error)
 
 
+def truenas_music_picker():
+    """Browse mounted TrueNAS pools/datasets without shell quoting."""
+    root = Path('/mnt')
+    excluded = {'ix-applications', 'ix-apps', '.system', 'iocage'}
+    current = root
+    while True:
+        try:
+            children = sorted(
+                (p for p in current.iterdir() if p.is_dir() and p.name not in excluded),
+                key=lambda p: p.name.casefold(),
+            )
+        except OSError as exc:
+            print(f'Cannot list {current}: {exc}')
+            children = []
+        print(f'\nMusic directory browser — {current}')
+        for i, path in enumerate(children, 1):
+            print(f'  {i}. {path.name}/')
+        print('  s. Select this folder' if current != root else '  s. Select (unavailable at /mnt)')
+        print('  u. Up one level')
+        print('  m. Enter an absolute path manually')
+        choice = input('Choose a number, s, u, or m: ').strip().lower()
+        if choice.isdigit() and 1 <= int(choice) <= len(children):
+            current = children[int(choice) - 1]
+        elif choice == 'u':
+            current = current.parent if current != root else root
+        elif choice == 's' and current != root:
+            print(f'Selected music folder: {current}')
+            return str(current)
+        elif choice == 'm':
+            raw = input('Absolute music directory (no quotes needed): ').strip()
+            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+                raw = raw[1:-1]
+            candidate = Path(raw)
+            if candidate.is_absolute() and candidate.is_dir() and root in candidate.resolve().parents:
+                return str(candidate.resolve())
+            print('Enter an existing directory under /mnt.')
+        else:
+            print('Invalid selection.')
+
+
+def suggested_truenas_data_path(music):
+    """Recommend a separate directory at the selected pool root."""
+    relative = Path(music).resolve().relative_to(Path('/mnt'))
+    pool = relative.parts[0]
+    return str(Path('/mnt') / pool / 'cadence-data')
+
+
 def privileged(args):
     return args if os.geteuid() == 0 else ['sudo', *args]
 
@@ -162,11 +209,13 @@ def main():
         suggested_tag = ''
     tag = prompt('Release tag', suggested_tag, valid_tag, 'Enter a valid published release tag, such as v1.2.3.')
     address = prompt('This machine’s LAN IPv4 address', default_ip(), valid_address, 'Enter a reachable LAN IPv4 address (not loopback or link-local).')
-    music = prompt('Existing folder containing your music', '', lambda s: Path(s).is_absolute() and Path(s).is_dir(), 'Enter an absolute path to an existing folder.')
+    music = truenas_music_picker() if truenas else prompt('Existing folder containing your music', '', lambda s: Path(s).is_absolute() and Path(s).is_dir(), 'Enter an absolute path to an existing folder.')
     sudo_user = os.environ.get('SUDO_USER')
     import pwd
     home = Path(pwd.getpwnam(sudo_user).pw_dir) if sudo_user else Path.home()
-    default_data = '' if truenas else '/var/lib/cadence'
+    default_data = suggested_truenas_data_path(music) if truenas else '/var/lib/cadence'
+    if truenas:
+        print(f'Recommended persistent engine data directory: {default_data}')
     data = prompt('Persistent engine data folder', default_data, lambda s: Path(s).is_absolute(), 'Enter an absolute folder path.')
     if not paths_separate(data, music):
         raise InstallError('The data and music folders must be separate and must not contain one another.')
