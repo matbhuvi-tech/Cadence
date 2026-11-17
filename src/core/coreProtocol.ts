@@ -73,11 +73,17 @@ export interface EngineScanStatus {
   folderId?: string
   path?: string
   processed?: number
+  errorCount?: number
   imported?: number
   skipped?: number
-  errors?: string[]
+  errors?: Array<string | EngineScanError>
   forceFull?: boolean
   deferred?: boolean
+}
+
+export interface EngineScanError {
+  path: string
+  message: string
 }
 
 export interface EnginePlaylistSummary {

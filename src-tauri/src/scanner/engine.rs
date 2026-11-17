@@ -625,6 +625,7 @@ impl ScannerController {
                         channels: Option<u16>,
                         tag: Option<lofty::tag::Tag>,
                     },
+                    TagParseFailed(String),
                     Failed(String),
                 }
 
@@ -635,6 +636,12 @@ impl ScannerController {
                     .to_lowercase();
 
                 let media_probe = match crate::scanner::media::inspect(path, &ext_lower) {
+                    Ok(parsed) if parsed.tag_parse_error.is_some() => MediaProbe::TagParseFailed(
+                        format!(
+                            "WAV tags were skipped after RIFF metadata parsing failed: {}",
+                            parsed.tag_parse_error.unwrap_or_default()
+                        ),
+                    ),
                     Ok(parsed) => MediaProbe::Parsed {
                         duration_secs: parsed.duration,
                         sample_rate: parsed.sample_rate,
@@ -654,6 +661,24 @@ impl ScannerController {
                         channels,
                         tag,
                     } => Some((duration_secs, sample_rate, bit_depth, channels, tag)),
+                    MediaProbe::TagParseFailed(err_msg) => {
+                        skipped_errors += 1;
+                        let conn = db.conn.lock();
+                        let _ = DbOperations::add_skipped_file(
+                            &conn,
+                            &DbSkippedFile {
+                                id: format!("skip-{}", uuid::Uuid::new_v4().simple()),
+                                file_path: path_str.clone(),
+                                file_name: file_name.clone(),
+                                category: "metadata_parse".to_string(),
+                                diagnostic_error: format!("Lofty WAV tag parser error: {}", err_msg),
+                                timestamp: Utc::now().to_rfc3339(),
+                                is_ignored: false,
+                                mtime,
+                            },
+                        );
+                        None
+                    }
                     MediaProbe::Failed(err_msg) => {
                         if trk_sidecar.title.is_some() || trk_sidecar.album.is_some() {
                             // Recovered from track sidecar when container tag probe fails.

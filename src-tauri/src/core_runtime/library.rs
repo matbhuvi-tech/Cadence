@@ -120,6 +120,7 @@ impl Library {
             scan["status"] = json!("queued");
             scan["processed"] = json!(0);
             scan["errors"] = json!([]);
+            scan["errorCount"] = json!(0);
         }
         let mut library = Self {
             db,
@@ -152,7 +153,7 @@ impl Library {
                     .iter()
                     .map(|(id, path)| json!({"id":id,"path":path}))
                     .collect::<Vec<_>>();
-                library.scan = json!({"status":"queued","folderId":jobs[0].0,"path":jobs[0].1,"roots":roots,"processed":0,"errors":[],"forceFull":false});
+                library.scan = json!({"status":"queued","folderId":jobs[0].0,"path":jobs[0].1,"roots":roots,"processed":0,"errorCount":0,"errors":[],"forceFull":false});
                 library.pending = jobs.into();
                 library
                     .db
@@ -423,7 +424,7 @@ impl Library {
                     .collect::<Vec<_>>();
                 self.pending = roots.into();
                 let (id, path) = self.pending.front().unwrap();
-                self.scan = json!({"status":"queued","folderId":id,"path":path,"processed":0,"errors":[],"forceFull":req["forceFull"].as_bool().unwrap_or(false),"roots":root_jobs});
+                self.scan = json!({"status":"queued","folderId":id,"path":path,"processed":0,"errorCount":0,"errors":[],"forceFull":req["forceFull"].as_bool().unwrap_or(false),"roots":root_jobs});
                 conn.execute("DELETE FROM engine_scan_seen", [])
                     .map_err(|e| e.to_string())?;
                 drop(stmt);
@@ -633,6 +634,7 @@ impl Library {
         self.scan["status"] = json!("running");
         let result = self.scan_path(&folder_id, &path);
         if let Err(error) = result {
+            self.scan["errorCount"] = json!(self.scan["errorCount"].as_u64().unwrap_or(0) + 1);
             let errors = self.scan["errors"]
                 .as_array_mut()
                 .ok_or("Invalid scan state")?;
@@ -642,9 +644,8 @@ impl Library {
         }
         self.scan["processed"] = json!(self.scan["processed"].as_u64().unwrap_or(0) + 1);
         if self.pending.is_empty() {
-            let failed = self.scan["errors"]
-                .as_array()
-                .is_some_and(|v| !v.is_empty());
+            let failed = self.scan["errorCount"].as_u64().unwrap_or(0) > 0
+                || self.scan["errors"].as_array().is_some_and(|v| !v.is_empty());
             self.scan["status"] = json!(if failed { "failed" } else { "completed" });
             if !failed {
                 if let Some(roots) = self.scan["roots"].as_array() {
@@ -764,6 +765,19 @@ impl Library {
             }
         }
         let parsed = media::inspect(&handle_path(&file, path), &extension)?;
+        if parsed.tag_parse_error.is_some() {
+            if let Some((track_id, _, _, _)) = &existing {
+                self.db
+                    .conn
+                    .lock()
+                    .execute(
+                        "INSERT OR IGNORE INTO engine_scan_seen VALUES(?1,?2)",
+                        params![folder_id, track_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+        }
         let dir = path.parent().ok_or("Missing parent")?;
         let folder_name = dir.file_name().unwrap_or_default().to_string_lossy();
         let title = if parsed.title.is_empty() {
@@ -1166,5 +1180,40 @@ mod artwork_regression_tests {
         lib.scan_path("w", &wav).unwrap();
         let new: String = lib.db.conn.lock().query_row("SELECT etag FROM engine_artwork", [], |r| r.get(0)).unwrap();
         assert_ne!(old, new, "updated artwork should replace the cached cover");
+    }
+
+    #[test]
+    fn malformed_wav_info_keeps_existing_metadata_and_counts_track_as_seen() {
+        let (_root, mut lib, wav) = fixture();
+        lib.scan_path("w", &wav).unwrap();
+        let original_title: String = lib
+            .db
+            .conn
+            .lock()
+            .query_row("SELECT title FROM tracks", [], |row| row.get(0))
+            .unwrap();
+
+        let mut bytes = std::fs::read(&wav).unwrap();
+        let mut bad_info = b"LIST".to_vec();
+        bad_info.extend_from_slice(&14u32.to_le_bytes());
+        bad_info.extend_from_slice(b"INFOINAM");
+        bad_info.extend_from_slice(&2u32.to_le_bytes());
+        bad_info.extend_from_slice(&[0xFF, 0xFE]);
+        bytes.extend_from_slice(&bad_info);
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        std::fs::write(&wav, bytes).unwrap();
+
+        lib.scan_path("w", &wav).unwrap();
+
+        let conn = lib.db.conn.lock();
+        let current_title: String = conn
+            .query_row("SELECT title FROM tracks", [], |row| row.get(0))
+            .unwrap();
+        let seen_count: i64 = conn
+            .query_row("SELECT count(*) FROM engine_scan_seen", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(current_title, original_title);
+        assert_eq!(seen_count, 1);
     }
 }

@@ -1,4 +1,5 @@
 //! Shared native container inspection, used by headless library indexing.
+use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{Accessor, ItemKey, Tag};
 use std::path::Path;
@@ -12,10 +13,11 @@ pub struct MediaMetadata {
     pub bit_depth: Option<u8>,
     pub channels: Option<u16>,
     pub tag: Option<Tag>,
+    pub tag_parse_error: Option<String>,
 }
 
 pub fn inspect(path: &Path, extension: &str) -> Result<MediaMetadata, String> {
-    let (duration, sample_rate, bit_depth, channels, tag) =
+    let (duration, sample_rate, bit_depth, channels, tag, tag_parse_error) =
         if matches!(extension, "dsf" | "dff" | "dsdiff") {
             let parsed =
                 super::dsd::probe_dsd_as(path, extension).ok_or("Invalid DSD container")?;
@@ -25,14 +27,25 @@ pub fn inspect(path: &Path, extension: &str) -> Result<MediaMetadata, String> {
                 parsed.bit_depth,
                 parsed.channels,
                 parsed.tag,
+                None,
             )
         } else {
-            let parsed = lofty::probe::Probe::open(path)
-                .map_err(|e| e.to_string())?
-                .guess_file_type()
-                .map_err(|e| e.to_string())?
-                .read()
-                .map_err(|e| e.to_string())?;
+            let parse = |read_tags| {
+                lofty::probe::Probe::open(path)
+                    .map_err(|error| error.to_string())?
+                    .options(ParseOptions::new().read_tags(read_tags))
+                    .guess_file_type()
+                    .map_err(|error| error.to_string())?
+                    .read()
+                    .map_err(|error| error.to_string())
+            };
+            let (parsed, tag_parse_error) = match parse(true) {
+                Ok(parsed) => (parsed, None),
+                Err(original_error) if extension == "wav" => {
+                    (parse(false).map_err(|_| original_error.clone())?, Some(original_error))
+                }
+                Err(error) => return Err(error),
+            };
             let props = parsed.properties();
             (
                 props.duration().as_secs_f64(),
@@ -40,6 +53,7 @@ pub fn inspect(path: &Path, extension: &str) -> Result<MediaMetadata, String> {
                 props.bit_depth(),
                 props.channels().map(u16::from),
                 parsed.primary_tag().or_else(|| parsed.first_tag()).cloned(),
+                tag_parse_error,
             )
         };
     let title = tag
@@ -63,6 +77,7 @@ pub fn inspect(path: &Path, extension: &str) -> Result<MediaMetadata, String> {
         bit_depth,
         channels,
         tag,
+        tag_parse_error,
     })
 }
 
@@ -136,12 +151,16 @@ mod tests {
     fn malformed_riff_info_does_not_prevent_wav_technical_metadata_import() {
         let file = TempFile::new(&wav_with_unterminated_info_value());
 
-        let metadata = inspect(&file.0, "wav").expect(
-            "a malformed optional RIFF INFO value must not make the WAV unscannable",
-        );
+        let metadata = inspect(&file.0, "wav")
+            .expect("a malformed optional RIFF INFO value must not make the WAV unscannable");
 
         assert_eq!(metadata.sample_rate, Some(44_100));
         assert_eq!(metadata.bit_depth, Some(16));
         assert_eq!(metadata.channels, Some(2));
+        assert!(metadata.tag_parse_error.is_some());
+        assert!(
+            metadata.tag.is_none(),
+            "broken INFO tags should be ignored on fallback"
+        );
     }
 }

@@ -17,6 +17,7 @@ import type {
   EngineScanStatus,
   EngineSmbSupportStatus,
 } from '../../core/coreProtocol'
+import { formatEngineScanSummary } from '../../core/scanStatus'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { EngineFolderBrowser } from '../Engine/EngineFolderBrowser'
 import { formatEngineDisplayPath, isSmbBackedPath } from '../../utils/enginePathDisplay'
@@ -266,10 +267,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                 <Clock className="w-3.5 h-3.5 text-white/40" />
                 <span className="text-white/40">Scan:</span>
                 <span className="font-mono text-white">
-                  {scanStatus.status}
-                  {typeof scanStatus.processed === 'number' && scanStatus.processed > 0
-                    ? ` (${scanStatus.processed})`
-                    : ''}
+                  {formatEngineScanSummary(scanStatus)}
                   {scanStatus.deferred ? ' · paused during playback/cooldown' : ''}
                 </span>
               </div>
@@ -320,6 +318,26 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
             </button>
           </div>
         </div>
+
+        {scanStatus?.status === 'failed' && (scanStatus.errors?.length ?? 0) > 0 && (
+          <details className="border-b border-rose-400/20 bg-rose-950/20 px-6 py-3 text-xs">
+            <summary className="cursor-pointer font-medium text-rose-200">
+              View retained error details ({scanStatus.errors?.length})
+            </summary>
+            <ul className="mt-2 max-h-40 space-y-2 overflow-y-auto text-white/70">
+              {scanStatus.errors?.map((error, index) => {
+                const path = typeof error === 'string' ? null : error.path
+                const message = typeof error === 'string' ? error : error.message
+                return (
+                  <li key={`${path ?? 'error'}-${index}`} className="break-all">
+                    <span className="text-rose-200">{message}</span>
+                    {path && <div className="mt-0.5 font-mono text-[10px] text-white/50">{path}</div>}
+                  </li>
+                )
+              })}
+            </ul>
+          </details>
+        )}
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
