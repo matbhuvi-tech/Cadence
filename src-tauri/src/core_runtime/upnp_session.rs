@@ -2034,6 +2034,7 @@ pub struct RestartProbeSnapshot {
 
 pub(crate) struct UpnpBridgeRenderer {
     pub(crate) device: Rs130DeviceDescriptor,
+    pub(crate) established_uri: Option<String>,
     pub(crate) pacer_config: CorePacerConfig,
     pub(crate) media_server_addr: SocketAddr,
     pub(crate) advertised_ip: Ipv4Addr,
@@ -2149,8 +2150,11 @@ impl Renderer for UpnpBridgeRenderer {
                     *guard = Some(session);
                 }
 
+                self.established_uri = None;
                 send_set_avtransport_uri_and_play(&self.device.control_url, &stream_url, &meta)
-                    .map_err(|_| RendererError)
+                    .map_err(|_| RendererError)?;
+                self.established_uri = Some(stream_url);
+                Ok(())
             }
             RendererAction::Pause => {
                 self.paused_flag.store(true, Ordering::Release);
@@ -2204,9 +2208,7 @@ impl Renderer for UpnpBridgeRenderer {
                 self.paused_flag.store(false, Ordering::Release);
                 // A local session alone does not establish current ownership: another
                 // controller may have replaced the renderer URI since reconciliation.
-                let owned_uri = self.active_session.lock().ok().and_then(|guard| {
-                    guard.as_ref().map(|session| session.stream_url.clone())
-                });
+                let owned_uri = self.established_uri.take();
                 let still_owned = owned_uri.as_deref().is_some_and(|uri| {
                     query_renderer_state(&self.device.control_url).is_ok_and(|state| {
                         state.current_uri == uri
@@ -2274,6 +2276,7 @@ impl<P: PlatformProbe, L: MemoryLocker> UpnpSessionRuntime<P, L> {
 
         let bridge = UpnpBridgeRenderer {
             device: upnp_config.target_device.clone(),
+            established_uri: None,
             pacer_config: upnp_config.pacer_config,
             media_server_addr: media_server.listen_addr(),
             advertised_ip: media_server.advertised_ip,

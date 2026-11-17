@@ -247,6 +247,7 @@ impl DragonfishRenderer {
             let (_profile_id, pacer_config) = self.renderer_profiles.resolve_for_device(&device);
             self.bridge = Some(UpnpBridgeRenderer {
                 device,
+                established_uri: None,
                 pacer_config,
                 media_server_addr: self.media_server_addr,
                 advertised_ip: self.advertised_ip,
@@ -501,6 +502,7 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             let (_profile_id, pacer_config) = renderer_profiles.resolve_for_device(&device);
             UpnpBridgeRenderer {
                 device,
+                established_uri: None,
                 pacer_config,
                 media_server_addr: media_server.listen_addr(),
                 advertised_ip: media_server.advertised_ip_addr(),
