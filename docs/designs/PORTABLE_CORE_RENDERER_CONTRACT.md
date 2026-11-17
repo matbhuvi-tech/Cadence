@@ -15,6 +15,11 @@ The URI check and Stop are separate UPnP requests: another controller can replac
 the transport between them. This is not atomic and cannot guarantee protection
 against concurrent external controllers. Persistent general UDN selection, fresh
 takeover validation and three-state capability handling are not yet implemented.
+The preliminary Sink protocol-info classifier exists and has a focused unit test,
+but it is not connected to discovery, selection or admission. The legacy RS130
+profile is derived from the TrueNAS/RS130 DSD256 and CD capture observations
+described in `core_runtime/upnp_session.rs`; this does not establish capability
+evidence for other renderers.
 
 The original 22 tests and two ownership tests passed serially on Windows. One
 parallel run failed while reading an HTTP response in the concurrency fixture.
@@ -66,8 +71,8 @@ are pending.
 
 ## Playback boundary and outstanding work
 
-`HeadlessCoreRuntime::shutdown` unconditionally dispatches `RendererAction::Stop`.
-`UpnpBridgeRenderer::apply` sends UPnP Stop even when no Core media session exists.
+`HeadlessCoreRuntime::shutdown` dispatches `RendererAction::Stop`, but the bridge now
+verifies the established URI before sending UPnP Stop as described above.
 `DragonfishRenderer::apply` resolves and binds a device on Play, and the current
 descriptor's `supports_extension` reports DSD support for all devices. Changing
 selection without addressing these dispatch paths would risk stopping external
