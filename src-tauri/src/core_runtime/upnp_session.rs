@@ -1375,6 +1375,29 @@ fn query_socket_tcp_info(_stream: &StdTcpStream) -> Option<CoreTcpSample> {
     None
 }
 
+/// Evidence from ConnectionManager Sink protocolInfo. Unknown is distinct from a
+/// specific list that excludes DSD; wildcard or malformed entries cannot prove exclusion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DsdCapability { Supported, Unsupported, Unknown }
+
+pub fn dsd_capability_from_sink_protocol_info(sink: Option<&str>) -> DsdCapability {
+    let Some(sink) = sink.filter(|s| !s.trim().is_empty()) else { return DsdCapability::Unknown };
+    let mut unknown = false;
+    for entry in sink.split(',') {
+        let fields: Vec<_> = entry.trim().split(':').collect();
+        if fields.len() != 4 || fields[2].trim().is_empty() {
+            unknown = true;
+            continue;
+        }
+        let mime = fields[2].trim().to_ascii_lowercase();
+        if matches!(mime.as_str(), "audio/x-dsd" | "audio/dsd" | "audio/x-dsf" | "audio/dsf" | "audio/x-dff" | "audio/dff") {
+            return DsdCapability::Supported;
+        }
+        if mime.contains('*') { unknown = true; }
+    }
+    if unknown { DsdCapability::Unknown } else { DsdCapability::Unsupported }
+}
+
 /// Qualified UPnP MediaRenderer descriptor (specifically targeting HiFi ROSE RS130).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rs130DeviceDescriptor {
