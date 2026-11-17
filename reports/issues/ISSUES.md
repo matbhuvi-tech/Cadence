@@ -247,3 +247,9 @@
 
 - Request: an interactive installer with suggested network address and release, prerequisite setup, and automatic engine installation on Linux and TrueNAS.
 - Status: automated checks in progress; live NAS and first-release publication remain to be verified.
+
+## Feature: UPnP renderer pacing calibration
+
+- Requested: standalone privileged capture workflow producing a renderer-specific pacing JSON for playback engine platforms.
+- Branch: `feat/renderer-pacer-calibration`.
+- Status: experimental manual-capture CLI and candidate profile; hardware validation, automatic playback control, privilege orchestration and packaged multi-platform releases remain open. See `tools/renderer-calibration/README.md`.

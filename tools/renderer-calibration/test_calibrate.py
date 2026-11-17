@@ -61,5 +61,19 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertEqual(output.read_text(), 'keep')
 
+
+class WorkflowTests(unittest.TestCase):
+    def test_two_capture_workflow_writes_scoped_candidate(self):
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'profile.json'
+            sample = {"duration_seconds": 40, "unique_payload_bytes": 10000, "max_lead_ms": 1600, "first_flow_event_seconds": None, "retransmissions": 0, "zero_windows": 0}
+            with patch('builtins.input', return_value=''), patch.object(calibration, 'capture') as capture, patch.object(calibration, 'extract_rows', return_value=[]), patch.object(calibration, 'analyze', return_value=sample):
+                status = calibration.main(['--interface', '1', '--sender', '192.168.1.1', '--renderer', '192.168.1.2', '--udn', 'uuid:test', '--output', str(output)])
+            self.assertEqual(status, 0)
+            self.assertEqual(capture.call_count, 2)
+            self.assertEqual(__import__('json').loads(output.read_text())['profiles'][0]['matcher']['udn'], 'uuid:test')
+
 if __name__ == "__main__":
     unittest.main()
