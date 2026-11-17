@@ -37,6 +37,9 @@ def analyze(rows, bitrate, minimum_seconds):
             max_lead = max(max_lead, 1000 * (total / bitrate - elapsed))
     if total <= 0:
         raise ValueError("capture has no unique sender payload")
+    observed_rate = total / (rows[-1]["time"] - origin)
+    if not 0.8 * bitrate <= observed_rate <= 1.5 * bitrate:
+        raise ValueError("capture rate is inconsistent with the selected test format")
     return {"duration_seconds": round(rows[-1]["time"] - origin, 3),
             "unique_payload_bytes": total, "max_lead_ms": round(max_lead),
             "first_flow_event_seconds": first_event, "retransmissions": retransmissions,
@@ -62,7 +65,7 @@ def extract_rows(tshark, capture, sender, receiver, port):
     fields = ["frame.time_epoch", "ip.src", "ip.dst", "tcp.srcport", "tcp.dstport", "tcp.stream",
               "tcp.len", "tcp.analysis.retransmission", "tcp.analysis.fast_retransmission",
               "tcp.analysis.zero_window", "tcp.window_size"]
-    args = [tshark, "-n", "-r", str(capture), "-Y", "tcp", "-T", "fields", "-E", "separator=\t"]
+    args = [tshark, "-n", "-r", str(capture), "-Y", "tcp", "-T", "fields", "-E", "separator=/t"]
     for field in fields:
         args.extend(["-e", field])
     result = subprocess.run(args, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")

@@ -36,8 +36,6 @@ class CalibrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             calibration.make_profile("", {}, {})
 
-if __name__ == "__main__":
-    unittest.main()
 
 class CaptureTests(unittest.TestCase):
     def test_extracts_sender_data_and_receiver_zero_window(self):
@@ -62,3 +60,6 @@ class CaptureTests(unittest.TestCase):
             result = calibration.main(['--interface', '1', '--sender', '192.168.1.1', '--renderer', '192.168.1.2', '--udn', 'uuid:test', '--output', str(output)])
             self.assertEqual(result, 1)
             self.assertEqual(output.read_text(), 'keep')
+
+if __name__ == "__main__":
+    unittest.main()
