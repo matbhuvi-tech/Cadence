@@ -197,7 +197,18 @@ export const EngineConnectionGate: React.FC = () => {
                       setAddressInput(node.baseUrl)
                       setLabelInput(node.label)
                       if (node.certFingerprint) setFingerprintInput(node.certFingerprint)
-                      setShowManualForm(true)
+                      if (node.pairingToken) {
+                        setTokenInput(node.pairingToken)
+                        void engine.probeAndStageAddress({
+                          baseUrl: node.baseUrl,
+                          label: node.label,
+                          pairingToken: node.pairingToken,
+                          certFingerprint: node.certFingerprint,
+                          trustInsecure: !node.certFingerprint,
+                        })
+                      } else {
+                        setShowManualForm(true)
+                      }
                     }}
                     className="rounded-lg border border-emerald-400/35 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/25 cursor-pointer"
                   >

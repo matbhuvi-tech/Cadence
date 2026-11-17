@@ -86,6 +86,16 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
   }, [engineClient])
 
   useEffect(() => {
+    setEngineFolders([])
+    setScanStatus(null)
+    setSmbSupport(null)
+    setSmbShares([])
+    setIsAddingFolder(false)
+    setIsAddingSmb(false)
+    setSmbError(null)
+  }, [engineClient])
+
+  useEffect(() => {
     if (isOpen && engineClient) {
       void refreshEngineStorage()
     }
@@ -288,15 +298,17 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
               <RotateCw className="w-3.5 h-3.5" />
               <span>Scan All</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setIsAddingSmb((prev) => !prev)}
-              disabled={!engineClient}
-              className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 text-white/85 font-medium text-xs flex items-center gap-1.5 transition-colors border border-white/[0.08] cursor-pointer"
-            >
-              <Server className="w-3.5 h-3.5 text-[#D4AF37]" />
-              <span>{isAddingSmb ? 'Hide SMB Form' : 'Add SMB Share'}</span>
-            </button>
+            {smbSupport?.supported !== false && (
+              <button
+                type="button"
+                onClick={() => setIsAddingSmb((prev) => !prev)}
+                disabled={!engineClient}
+                className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 text-white/85 font-medium text-xs flex items-center gap-1.5 transition-colors border border-white/[0.08] cursor-pointer"
+              >
+                <Server className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span>{isAddingSmb ? 'Hide SMB Form' : 'Add SMB Share'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setIsAddingFolder((prev) => !prev)}
@@ -311,7 +323,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {isAddingSmb && engineClient && (
+          {isAddingSmb && smbSupport?.supported !== false && engineClient && (
             <form
               onSubmit={(e) => void handleMountSmb(e)}
               className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 space-y-3"
@@ -409,8 +421,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                   disabled={
                     isMountingSmb ||
                     !smbServer.trim() ||
-                    !smbShare.trim() ||
-                    smbSupport?.supported === false
+                    !smbShare.trim()
                   }
                   className="px-3.5 py-1.5 rounded-lg bg-[#D4AF37] hover:bg-[#E0BE52] disabled:opacity-40 text-black font-semibold text-xs cursor-pointer"
                 >

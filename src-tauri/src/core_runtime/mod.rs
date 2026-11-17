@@ -8,6 +8,8 @@ pub mod library;
 pub mod platform;
 pub mod smb;
 pub mod upnp_session;
+#[cfg(feature = "engine-audio")]
+pub mod windows_engine;
 
 pub use platform::{
     normalize_linux_getsockopt_sndbuf, normalize_linux_setsockopt_sndbuf, parse_cgroup_limit_bytes,
@@ -502,6 +504,18 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         false
     }
 
+    pub fn db(&self) -> Option<&AppDb> {
+        self.db.as_ref()
+    }
+
+    pub fn track_file_path(&self, public_id: &str) -> Option<&PathBuf> {
+        self.track_files.get(public_id)
+    }
+
+    pub fn set_output(&mut self, output: Output) {
+        self.config.output = Some(output);
+    }
+
     pub fn set_music_read_only(&mut self, read_only: bool) {
         self.music_read_only = read_only;
     }
@@ -511,7 +525,10 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         let data_root=self.config.db_path.parent().ok_or_else(||RuntimeError::Database("Missing app-data root".into()))?.canonicalize().map_err(|e|RuntimeError::Database(e.to_string()))?;
         for root in &roots {
             let root=root.canonicalize().map_err(|e|RuntimeError::Database(e.to_string()))?;
-            if root.starts_with(&data_root) || data_root.starts_with(&root){return Err(RuntimeError::Database("Browse roots and persistent app data must not overlap".into()));}
+            let is_volume_root = root.parent().is_none();
+            if root.starts_with(&data_root) || (!is_volume_root && data_root.starts_with(&root)) {
+                return Err(RuntimeError::Database("Browse roots and persistent app data must not overlap".into()));
+            }
         }
         let db = self.db.as_ref().ok_or(RuntimeError::Closed)?.clone();
         curate::ensure_schema(&db).map_err(|e| RuntimeError::Database(format!("{e:?}")))?;

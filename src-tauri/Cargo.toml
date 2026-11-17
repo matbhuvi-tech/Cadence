@@ -19,6 +19,11 @@ required-features = ["desktop"]
 name = "cadence-headless"
 path = "src/bin/cadence_headless.rs"
 
+[[bin]]
+name = "cadence-engine"
+path = "src/bin/cadence_engine.rs"
+required-features = ["engine-audio"]
+
 [[test]]
 name = "curate_identity"
 path = "tests/curate_identity.rs"
@@ -37,7 +42,22 @@ required-features = ["desktop"]
 [features]
 default = ["desktop", "bundled-sqlite"]
 bundled-sqlite = ["rusqlite/bundled"]
+engine-audio = [
+    "bundled-sqlite",
+    "dep:tokio",
+    "dep:socket2",
+    "dep:reqwest",
+    "dep:rodio",
+    "dep:cpal",
+    "dep:symphonia",
+    "dep:walkdir",
+    "dep:rusty-chromaprint",
+    "dep:local-ip-address",
+    "dep:mdns-sd",
+    "dep:windows",
+]
 desktop = [
+    "engine-audio",
     "bundled-sqlite",
     "dep:tauri",
     "dep:tauri-build",
@@ -131,14 +151,18 @@ windows = { version = "0.54", optional = true, features = [
 ] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security_Cryptography",
     "Win32_Media",
     "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

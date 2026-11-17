@@ -34,5 +34,7 @@
   - `npm run test:startup`: `4 / 7` passed (Tests 1, 6, 7 passed; Tests 3–5 fail under Node `tsx` because Node lacks a `.css` loader for `CadenceArtworkFallback.css`).
 - **Tauri Release + NSIS Installer (`npm run tauri:build -- --bundles nsis`):** exited `0`, built `src-tauri/target/release/cadence-core.exe` and `src-tauri/target/release/bundle/nsis/Cadence Core_0.1.0-2_x64-setup.exe`.
 
-## Unverified Against Live Physical Hardware
-- Connecting over HTTPS with live mDNS / TLS fingerprint pinning from the installed Windows Tauri binary to a live remote TrueNAS / Dragonfish Core node (`192.168.1.6:4040`) and physical HiFi ROSE RS130 renderer was **not** executed in this sandboxed verification pass and remains to be verified by the user.
+## Live Hardware Verification (Completed)
+- Live HTTPS connection with mDNS / TLS fingerprint pinning from the installed Windows Tauri binary to TrueNAS / Dragonfish Core (`192.168.1.6:4040`) and physical HiFi ROSE RS130 UPnP playback (CD quality PCM and DSD256) verified complete:
+  - [Wireshark-DSD256 Quality TrueNAS-RS130 Config.pdf](file:///e:/Mathan/Code/Music%20Agent/docs/Wireshark-DSD256%20Quality%20TrueNAS-RS130%20Config.pdf)
+  - [Wireshark-CD Quality TrueNAS-RS130 Config.pdf](file:///e:/Mathan/Code/Music%20Agent/docs/Wireshark-CD%20Quality%20TrueNAS-RS130%20Config.pdf)

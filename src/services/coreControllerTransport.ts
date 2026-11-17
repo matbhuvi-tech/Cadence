@@ -53,6 +53,7 @@ export interface DiscoveredCoreNode {
   baseUrl: string
   certFingerprint?: string
   pinnedRs130Udn?: string | null
+  pairingToken?: string
 }
 
 export interface StagedCoreCandidate {

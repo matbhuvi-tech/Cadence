@@ -155,17 +155,6 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
                 <span>Reconnect</span>
               </button>
             )}
-            {isCoreActive && engine && (
-              <button
-                type="button"
-                onClick={() => void engine.requestSwitchToLocal()}
-                disabled={isBusy}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-white hover:bg-white/[0.12] cursor-pointer disabled:opacity-50"
-              >
-                <Laptop className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>{!isConnected ? 'Choose engine (This PC)' : 'Switch to This PC'}</span>
-              </button>
-            )}
           </div>
         </div>
 
@@ -194,7 +183,7 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
           <div>
             <h2 className="text-sm font-semibold text-white">Playback Engines</h2>
             <p className="text-xs text-white/50">
-              This PC remains available at all times. Pairing or discovering a Core never interrupts local playback.
+              Select a Playback Engine or pair a new Core on your NAS or PC.
             </p>
           </div>
           <button
@@ -208,39 +197,6 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
         </div>
 
         <div className="space-y-2">
-          {/* Standalone This PC option */}
-          <div
-            className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 ${
-              !isCoreActive
-                ? 'border-[#D4AF37]/45 bg-[#D4AF37]/[0.06]'
-                : 'border-white/[0.08] bg-white/[0.02]'
-            }`}
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              <Laptop className="h-4 w-4 text-emerald-400 shrink-0" aria-hidden="true" />
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-white">This PC</div>
-                <div className="text-[11px] text-white/55">
-                  Standalone Windows library, local DACs, and UPnP outputs
-                </div>
-              </div>
-            </div>
-            {!isCoreActive ? (
-              <span className="rounded-full border border-[#D4AF37]/40 bg-[#D4AF37]/15 px-2.5 py-0.5 text-[10px] font-medium text-[#D4AF37]">
-                Active
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => void engine?.requestSwitchToLocal()}
-                disabled={isBusy}
-                className="rounded-lg border border-white/15 bg-white/[0.06] px-2.5 py-1 text-xs font-medium text-white hover:bg-white/[0.12] cursor-pointer"
-              >
-                Use This PC
-              </button>
-            )}
-          </div>
-
           {/* Saved Core profiles */}
           {savedCores.map((core) => {
             const selected =
@@ -327,6 +283,7 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
                     setAddressInput(node.baseUrl)
                     setLabelInput(node.label)
                     setFingerprintInput(node.certFingerprint ?? '')
+                    if (node.pairingToken) setTokenInput(node.pairingToken)
                   }}
                   className="w-full flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-xs hover:border-[#D4AF37]/40 cursor-pointer"
                 >

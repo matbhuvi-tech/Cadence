@@ -582,6 +582,8 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
                     pairing_token,
                     tls_config,
                     allow_plaintext_tests,
+                    true,
+                    None,
                 );
             })
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
@@ -984,7 +986,7 @@ fn validate_preflight_memory_and_lock<P: PlatformProbe>(
     Ok(())
 }
 
-fn load_or_create_identity(
+pub(crate) fn load_or_create_identity(
     config: &DragonfishConfig,
 ) -> Result<PersistedNodeIdentity, DragonfishError> {
     let id_path = config.app_data_dir.join("node-identity.json");
@@ -1030,7 +1032,7 @@ fn load_or_create_identity(
     Ok(identity)
 }
 
-fn load_or_create_tls_certificate(
+pub(crate) fn load_or_create_tls_certificate(
     config: &DragonfishConfig,
     advertised_ip: Ipv4Addr,
     identity: &PersistedNodeIdentity,
@@ -1091,9 +1093,12 @@ fn load_or_create_tls_certificate(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
+pub(crate) type ExtraV1OpHandler<R, P, L> =
+    Arc<dyn Fn(&Value, &mut HeadlessCoreRuntime<R, P, L>) -> Option<Value> + Send + Sync>;
+
+pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: MemoryLocker>(
     listener: TcpListener,
-    runtime: Arc<Mutex<HeadlessCoreRuntime<DragonfishRenderer, P, L>>>,
+    runtime: Arc<Mutex<HeadlessCoreRuntime<R, P, L>>>,
     shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
     stop_flag: Arc<AtomicBool>,
     identity: PersistedNodeIdentity,
@@ -1105,6 +1110,8 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
     pairing_token: String,
     tls_config: Arc<rustls::ServerConfig>,
     allow_plaintext_tests: bool,
+    admit_to_arena: bool,
+    extra_op_handler: Option<ExtraV1OpHandler<R, P, L>>,
 ) {
     let mut event_clients:Vec<ControlConnection>=Vec::new();
     let mut last_heartbeat=std::time::Instant::now();
@@ -1257,12 +1264,24 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
                     };
                     let resp_val = match runtime.lock() {
                         Ok(mut rt) => {
-                            if rt.is_external_playback_blocking_play(body_bytes) {
+                            if let Some(handled) = extra_op_handler.as_ref().and_then(|handler| {
+                                serde_json::from_slice::<Value>(body_bytes)
+                                    .ok()
+                                    .and_then(|parsed| handler(&parsed, &mut rt))
+                            }) {
+                                handled
+                            } else if rt.is_external_playback_blocking_play(body_bytes) {
                                 rt.request(body_bytes)
-                            } else if let Err(err_val) =
-                                admit_requested_tracks_for_v1_command(&mut rt, &shared_buffers, body_bytes)
-                            {
-                                err_val
+                            } else if admit_to_arena {
+                                if let Err(err_val) = admit_requested_tracks_for_v1_command(
+                                    &mut rt,
+                                    &shared_buffers,
+                                    body_bytes,
+                                ) {
+                                    err_val
+                                } else {
+                                    rt.request(body_bytes)
+                                }
                             } else {
                                 rt.request(body_bytes)
                             }
@@ -1294,8 +1313,8 @@ fn run_control_listener_loop<P: PlatformProbe, L: MemoryLocker>(
     }
 }
 
-fn admit_requested_tracks_for_v1_command<P: PlatformProbe, L: MemoryLocker>(
-    rt: &mut HeadlessCoreRuntime<DragonfishRenderer, P, L>,
+fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: MemoryLocker>(
+    rt: &mut HeadlessCoreRuntime<R, P, L>,
     shared_buffers: &Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
     body_bytes: &[u8],
 ) -> Result<(), Value> {
@@ -1485,7 +1504,7 @@ fn secret_matches(supplied: &str, expected: &str) -> bool {
     left.iter().zip(right).fold(0u8,|diff,(a,b)|diff | (a^b))==0
 }
 
-fn load_pairing_token(app_data: &Path) -> Result<String, DragonfishError> {
+pub(crate) fn load_pairing_token(app_data: &Path) -> Result<String, DragonfishError> {
     if let Ok(value)=std::env::var("CADENCE_PAIRING_TOKEN") {
         if value.len()<32 || value.len()>256 || !value.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_') {
             return Err(DragonfishError::StatePersistence("CADENCE_PAIRING_TOKEN must contain 32–256 URL-safe random characters".into()));
@@ -1585,7 +1604,7 @@ impl Write for ControlConnection {
 impl ControlConnection {
     fn finish(&mut self){if let Some(tls)=&mut self.tls{tls.send_close_notify();let _=rustls::Stream::new(tls,&mut self.tcp).flush();}}
 }
-fn parse_tls(pem:&str,key_path:&Path)->Result<Arc<rustls::ServerConfig>,DragonfishError>{
+pub(crate) fn parse_tls(pem:&str,key_path:&Path)->Result<Arc<rustls::ServerConfig>,DragonfishError>{
     let error=|e:String|DragonfishError::StatePersistence(format!("Invalid TLS identity: {e}"));
     let certs=rustls_pemfile::certs(&mut pem.as_bytes()).collect::<std::result::Result<Vec<_>,_>>().map_err(|e|error(e.to_string()))?;
     let key=std::fs::read(key_path).map_err(|e|error(e.to_string()))?;

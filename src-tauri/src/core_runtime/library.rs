@@ -246,7 +246,13 @@ impl Library {
     pub fn browse(&mut self, path: Option<&str>, idle: bool) -> Result<Value> {
         let Some(path) = path else {
             return Ok(
-                json!({"entries":self.roots.iter().map(|p| json!({"name":p.file_name().unwrap_or_default().to_string_lossy(),"path":p,"isDir":true,"readable":true,"isWatched":false})).collect::<Vec<_>>(),"cached":true}),
+                json!({"entries":self.roots.iter().map(|p| {
+                    let name = p.file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| p.to_string_lossy().into_owned());
+                    json!({"name":name,"path":p,"isDir":true,"readable":true,"isWatched":false})
+                }).collect::<Vec<_>>(),"cached":true}),
             );
         };
         let path = PathBuf::from(path);
@@ -1035,4 +1041,51 @@ fn epoch_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Enumerates browseable Windows drive roots (`C:\`, `E:\`, etc.) and any
+/// persisted UNC/storage mount roots from `cadence.db`.
+#[cfg(windows)]
+pub fn windows_default_browse_roots(db: &AppDb) -> Vec<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    const DRIVE_REMOTE: u32 = 4;
+
+    let mut roots = Vec::new();
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 0..26u8 {
+        if (mask & (1u32 << i)) == 0 {
+            continue;
+        }
+        let letter = (b'A' + i) as char;
+        let root_str = format!("{}:\\", letter);
+        let wide: Vec<u16> = root_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let drive_type = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        if matches!(drive_type, DRIVE_FIXED | DRIVE_REMOTE | DRIVE_REMOVABLE) {
+            let p = PathBuf::from(&root_str);
+            if p.exists() {
+                roots.push(p);
+            }
+        }
+    }
+
+    if let Some(conn) = db.conn.try_lock() {
+        if let Ok(mut stmt) = conn.prepare("SELECT folder_path FROM watched_folders") {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                for path_str in rows.flatten() {
+                    let p = PathBuf::from(path_str);
+                    if !roots.iter().any(|r| p.starts_with(r)) {
+                        roots.push(p);
+                    }
+                }
+            }
+        }
+    }
+    roots
+}
+
+#[cfg(not(windows))]
+pub fn windows_default_browse_roots(_db: &AppDb) -> Vec<PathBuf> {
+    Vec::new()
 }

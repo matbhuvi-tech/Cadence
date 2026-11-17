@@ -1,4 +1,4 @@
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "engine-audio"))]
 pub mod audio;
 #[cfg(feature = "desktop")]
 pub mod commands;

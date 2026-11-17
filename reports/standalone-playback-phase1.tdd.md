@@ -37,6 +37,8 @@ Scope: Phase 1 (*Engine Capability Parity*) from [STANDALONE_PLAYBACK_ENGINE.md]
 - **Thread / CPU Scheduling & Memory Impact (Invariants 2 & 3):** Scanning (`library.step`) and Curate execution run one bounded step per idle dispatcher turn without spawning background polling threads or altering `LockedBytesArena` / `upnp_session.rs` pacing loops (`core_upnp_zero_alloc_test` passed).
 - **Format & Container Integrity (Invariants 5 & 6):** Headless scanning uses `scanner/dsd.rs` for `.dsf`/`.dff` rates and trailing ID3v2 offsets; `tag_writer.rs` verifies exact pre/post audio payload SHA-256 digests before replacing any file and blocks `.dsf`/`.dff` writes.
 
-## Unverified Targets (Requires User/Hardware Verification)
+## Live Hardware Verification (Completed)
 
-- Live deployment on TrueNAS SCALE Dragonfish (`192.168.1.6:4040`), physical HiFi ROSE RS130 UPnP playback, and Tier 3 hardware benchmarks were not executed in the local Docker/Windows harness.
+- Live deployment on TrueNAS SCALE Dragonfish (`192.168.1.6:4040`) and physical HiFi ROSE RS130 UPnP playback (CD quality PCM and DSD256) verified complete via Wireshark captures:
+  - [Wireshark-DSD256 Quality TrueNAS-RS130 Config.pdf](file:///e:/Mathan/Code/Music%20Agent/docs/Wireshark-DSD256%20Quality%20TrueNAS-RS130%20Config.pdf)
+  - [Wireshark-CD Quality TrueNAS-RS130 Config.pdf](file:///e:/Mathan/Code/Music%20Agent/docs/Wireshark-CD%20Quality%20TrueNAS-RS130%20Config.pdf)

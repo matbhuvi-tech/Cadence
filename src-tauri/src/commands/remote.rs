@@ -36,6 +36,8 @@ pub struct DiscoveredCoreEndpoint {
     pub base_url: String,
     pub cert_fingerprint: Option<String>,
     pub pinned_rs130_udn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -555,6 +557,7 @@ pub async fn discover_core_nodes() -> Result<Vec<DiscoveredCoreEndpoint>, String
                             pinned_rs130_udn: props
                                 .get_property_val_str("rs130Udn")
                                 .map(|s| s.to_string()),
+                            pairing_token: None,
                         });
                     }
                 }
@@ -564,10 +567,65 @@ pub async fn discover_core_nodes() -> Result<Vec<DiscoveredCoreEndpoint>, String
             }
         }
         let _ = daemon.shutdown();
+        if let Some(local_ep) = probe_localhost_windows_engine() {
+            if let Some(existing) = results
+                .iter_mut()
+                .find(|r| r.engine_id == local_ep.engine_id || r.base_url == local_ep.base_url)
+            {
+                if existing.pairing_token.is_none() {
+                    existing.pairing_token = local_ep.pairing_token;
+                }
+                if existing.cert_fingerprint.is_none() {
+                    existing.cert_fingerprint = local_ep.cert_fingerprint;
+                }
+            } else {
+                results.insert(0, local_ep);
+            }
+        }
         results
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
+    let data_dir = if let Ok(explicit) = std::env::var("CADENCE_DATA_DIR") {
+        let trimmed = explicit.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        std::path::PathBuf::from(trimmed)
+    } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        std::path::PathBuf::from(local_app_data).join("CadenceEngine")
+    } else {
+        return None;
+    };
+    let pairing_path = data_dir.join("localhost-pairing.json");
+    let raw = std::fs::read_to_string(pairing_path).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let base_url = parsed.get("baseUrl")?.as_str()?.to_string();
+    let host_port = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))?;
+    let addr: std::net::SocketAddr = host_port.parse().ok()?;
+    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_err() {
+        return None;
+    }
+    Some(DiscoveredCoreEndpoint {
+        engine_id: parsed.get("engineId")?.as_str()?.to_string(),
+        library_id: parsed.get("libraryId")?.as_str()?.to_string(),
+        label: parsed.get("label")?.as_str()?.to_string(),
+        base_url,
+        cert_fingerprint: parsed
+            .get("tlsFingerprintSha256")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        pinned_rs130_udn: None,
+        pairing_token: parsed
+            .get("token")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 #[cfg(test)]
