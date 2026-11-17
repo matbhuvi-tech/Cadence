@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Interactive, first-time installer for the Linux Playback Engine."""
+"""Interactive installer and repeatable redeployer for the Linux Playback Engine."""
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import shlex
+from datetime import datetime, timezone
 import shutil
 import socket
 import subprocess
@@ -44,9 +46,57 @@ def paths_separate(data, music):
     return a != b and a not in b.parents and b not in a.parents
 
 
-def ensure_fresh(directory):
-    if any((directory / name).exists() for name in ('.env', 'compose.yml')):
-        raise InstallError(f'An installation already exists at {directory}. Use the upgrade guide; no files were changed.')
+def read_env_values(path):
+    """Load values produced by write_env; never source .env as shell code."""
+    result = {}
+    if not path.exists():
+        return result
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        if not re.fullmatch(r'[A-Z][A-Z0-9_]*', key):
+            continue
+        try:
+            parts = shlex.split(value)
+        except ValueError as exc:
+            raise InstallError(f'Invalid existing settings in {path}: {exc}') from exc
+        result[key] = parts[0] if parts else ''
+    return result
+
+
+def find_existing_install(truenas, home):
+    """Locate our installer-managed deployment, without inspecting personal folders."""
+    if not truenas:
+        target = home / 'cadence-playback-engine'
+        return target if (target / '.env').is_file() and (target / 'compose.yml').is_file() else None
+    root = Path('/mnt')
+    candidates = []
+    for pool in root.iterdir():
+        if not pool.is_dir() or pool.name.startswith('.'):
+            continue
+        target = pool / 'cadence-installation'
+        if (target / '.env').is_file() and (target / 'compose.yml').is_file():
+            candidates.append(target)
+    if len(candidates) > 1:
+        raise InstallError('Multiple Cadence installations were found. Select the intended pool manually; no changes made.')
+    return candidates[0] if candidates else None
+
+
+def backup_deployment_files(destination):
+    """Back up only installer-managed config; never modify user library data."""
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    backup = destination / f'backup-before-redeploy-{stamp}'
+    index = 1
+    while backup.exists():
+        backup = destination / f'backup-before-redeploy-{stamp}-{index}'
+        index += 1
+    backup.mkdir(mode=0o700)
+    for name in ('.env', 'compose.yml'):
+        if (destination / name).exists():
+            shutil.copy2(destination / name, backup / name)
+    print(f'Existing deployment configuration backed up to {backup}')
+    return backup
 
 
 def write_env(path, values):
@@ -142,8 +192,8 @@ def suggested_truenas_data_path(music):
         pool = Path(music).resolve().relative_to('/mnt').parts[0]
     else:
         pools = sorted((p for p in Path('/mnt').iterdir()
-                        if p.is_dir() and p.name not in
-                        ('ix-applications', 'ix-apps', '.system')),
+                        if p.is_dir() and not p.name.startswith('.') and p.name not in
+                        ('ix-applications', 'ix-apps', '.system', 'iocage')),
                        key=lambda p: p.name.casefold())
         if not pools:
             return ''
@@ -263,11 +313,28 @@ def docker_prefix(truenas=False):
     return prefix
 
 
-def create_truenas_app(compose_path, resolved_json):
-    del compose_path
+def deploy_truenas_app(resolved_json, existing):
     config = json.loads(resolved_json)
-    payload = {'app_name': APP, 'custom_app': True, 'custom_compose_config': config}
-    run(['midclt', 'call', '--job', 'app.create', json.dumps(payload)])
+    if existing:
+        print('Updating existing Cadence TrueNAS app (same release tag allowed).')
+        run(['midclt', 'call', '--job', 'app.update', APP,
+             json.dumps({'custom_compose_config': config})])
+    else:
+        print('Creating Cadence TrueNAS app.')
+        payload = {'app_name': APP, 'custom_app': True, 'custom_compose_config': config}
+        run(['midclt', 'call', '--job', 'app.create', json.dumps(payload)])
+
+
+def truenas_app_exists():
+    response = run(['midclt', 'call', 'app.query', json.dumps([['id', '=', APP]])],
+                   capture_output=True, text=True)
+    apps = json.loads(response.stdout)
+    if len(apps) > 1:
+        raise InstallError('Ambiguous TrueNAS Cadence app query returned multiple entries.')
+    if apps and not apps[0].get('custom_app', False):
+        raise InstallError('An app with the Cadence name exists but is not a custom app; refusing to replace it.')
+    return bool(apps)
+
 
 
 def main():
@@ -279,39 +346,64 @@ def main():
     truenas = bool(shutil.which('midclt') and (Path('/etc/truenas-release').exists() or Path('/etc/version').exists()))
     if truenas and os.geteuid() != 0:
         raise InstallError('On TrueNAS, run this installer from the system shell as root (or use sudo).')
+    import pwd
+    sudo_user = os.environ.get('SUDO_USER')
+    home = Path(pwd.getpwnam(sudo_user).pw_dir) if sudo_user else Path.home()
+    existing_dir = find_existing_install(truenas, home)
+    existing_env = read_env_values(existing_dir / '.env') if existing_dir else {}
+    existing_app = truenas_app_exists() if truenas else False
+    if existing_app and not existing_dir:
+        raise InstallError('TrueNAS Cadence app exists but its installer-managed configuration was not found. '
+                           'Refusing to overwrite an unknown installation.')
     print('\nCadence Playback Engine setup\nPress Enter to accept suggestions.\n'
           'Local music is optional; SMB shares can be added inside Cadence with read/write access.\n')
+    if existing_dir:
+        print(f'Existing deployment found: {existing_dir}')
+        print('This run will update/redeploy it, including when using the SAME release tag.')
+        confirmation = input('Update this installation, preserving its data paths? [Y/n]: ').strip().lower()
+        if confirmation not in ('', 'y', 'yes'):
+            raise InstallError('Cancelled; no changes made.')
     try:
-        suggested_tag = os.environ.get('CADENCE_INSTALLER_RELEASE') or latest_release()
+        suggested_tag = (os.environ.get('CADENCE_INSTALLER_RELEASE') or
+                         existing_env.get('CADENCE_IMAGE', '').removeprefix(IMAGE + ':') or
+                         latest_release())
     except InstallError as exc:
         print(exc)
         suggested_tag = ''
     tag = prompt('Release tag', suggested_tag, valid_tag, 'Enter a valid published release tag, such as v1.2.3.')
-    address = prompt('This machine’s LAN IPv4 address', default_ip(), valid_address, 'Enter a reachable LAN IPv4 address (not loopback or link-local).')
-    if truenas:
-        music = truenas_music_picker()
+    address = prompt('This machine’s LAN IPv4 address',
+                     existing_env.get('CADENCE_ADVERTISED_IP') or default_ip(), valid_address,
+                     'Enter a reachable LAN IPv4 address (not loopback or link-local).')
+    if existing_dir:
+        music = existing_env.get('CADENCE_HOST_MUSIC_DIR', '')
+        data = existing_env.get('CADENCE_HOST_DATA_DIR', '')
+        if not data or not Path(data).is_absolute():
+            raise InstallError('Existing installation has no valid data directory; stopping to protect its state.')
+        if music and not Path(music).is_dir():
+            raise InstallError(f'Previously configured music directory is missing: {music}')
+        print(f'Keeping existing music directory: {music or "none (SMB-only)"}')
+        print(f'Keeping existing persistent data directory: {data}')
+        destination = existing_dir
     else:
-        music = prompt('Existing local music folder (type - for none)', '-',
-                       lambda value: value == '-' or (Path(value).is_absolute() and Path(value).is_dir()))
-        music = '' if music == '-' else music
-    sudo_user = os.environ.get('SUDO_USER')
-    import pwd
-    home = Path(pwd.getpwnam(sudo_user).pw_dir) if sudo_user else Path.home()
-    default_data = suggested_truenas_data_path(music) if truenas else '/var/lib/cadence'
-    if truenas:
-        print(f'Recommended persistent engine data directory: {default_data}')
-    data = prompt('Persistent engine data folder', default_data, lambda value: Path(value).is_absolute(), 'Enter an absolute folder path.')
+        if truenas:
+            music = truenas_music_picker()
+        else:
+            music = prompt('Existing local music folder (type - for none)', '-',
+                           lambda value: value == '-' or (Path(value).is_absolute() and Path(value).is_dir()))
+            music = '' if music == '-' else music
+        default_data = suggested_truenas_data_path(music) if truenas else '/var/lib/cadence'
+        if truenas:
+            print(f'Recommended persistent engine data directory: {default_data}')
+        data = prompt('Persistent engine data folder', default_data,
+                      lambda value: Path(value).is_absolute(), 'Enter an absolute folder path.')
+        destination = Path(data).parent / 'cadence-installation' if truenas else home / 'cadence-playback-engine'
+        if (destination / '.env').exists() or (destination / 'compose.yml').exists():
+            raise InstallError(f'Unexpected installation at {destination}; rerun after checking its identity.')
     if music and not paths_separate(data, music):
         raise InstallError('The data and music folders must be separate and must not contain one another.')
     if truenas and (Path('/mnt') not in Path(data).resolve().parents or
                     (music and Path('/mnt') not in Path(music).resolve().parents)):
         raise InstallError('On TrueNAS choose data and music paths beneath /mnt on persistent storage.')
-    destination = Path(data).parent / 'cadence-installation' if truenas else home / 'cadence-playback-engine'
-    ensure_fresh(destination)
-    if truenas:
-        existing = run(['midclt', 'call', 'app.query', json.dumps([['id', '=', APP]])], capture_output=True, text=True)
-        if json.loads(existing.stdout):
-            raise InstallError('The TrueNAS app already exists. Use the upgrade guide; it was not changed.')
     os.environ['CADENCE_ACTIVE_TAG'] = tag
     compose = local_compose(music)
     ensure_docker(truenas)
@@ -325,10 +417,10 @@ def main():
     if cifs_check.returncode:
         raise InstallError('The selected release image does not include mount.cifs. '
                            'Build and publish the updated Dockerfile before installing this release.')
-    if not truenas:
+    if not truenas and not existing_dir:
         existing = run([*docker, 'ps', '-a', '--filter', 'label=com.docker.compose.project=cadence-playback-engine', '--format', '{{.ID}}'], capture_output=True, text=True)
         if existing.stdout.strip():
-            raise InstallError('A Cadence Playback Engine Compose installation already exists. Use the upgrade guide; it was not changed.')
+            raise InstallError('A Cadence Compose deployment exists but its managed configuration was not found.')
     destination.mkdir(parents=True, exist_ok=True)
     data_path = Path(data)
     if not data_path.exists():
@@ -340,16 +432,25 @@ def main():
         raise InstallError('The engine data path is not a directory.')
     check_permissions(data_path, music)
     compose_file = destination / 'compose.yml'
+    backup_dir = backup_deployment_files(destination) if existing_dir else None
     compose_file.write_text(compose, encoding='utf-8')
     write_env(destination / '.env', {'CADENCE_IMAGE': f'{IMAGE}:{tag}', 'CADENCE_ADVERTISED_IP': address,
               'CADENCE_HOST_DATA_DIR': str(data_path.resolve()), 'CADENCE_HOST_MUSIC_DIR': str(Path(music).resolve()) if music else '',
               'CADENCE_LABEL': 'Cadence Playback Engine'})
     command = [*docker, 'compose', '-p', APP, '--project-directory', str(destination), '-f', str(compose_file)]
-    run([*command, 'config', '--quiet'])
+    try:
+        run([*command, 'config', '--quiet'])
+    except Exception:
+        if backup_dir:
+            for name in ('.env', 'compose.yml'):
+                old = backup_dir / name
+                if old.exists():
+                    shutil.copy2(old, destination / name)
+        raise
     if truenas:
         result = run([*command, 'config', '--format', 'json'], capture_output=True, text=True)
-        print('Creating the app in TrueNAS. Apps storage must already be configured.')
-        create_truenas_app(compose_file, result.stdout)
+        print('Submitting Cadence configuration to TrueNAS. Apps storage must already be configured.')
+        deploy_truenas_app(result.stdout, existing_app)
         print('App submitted to TrueNAS. Confirm it is Running and Healthy in Apps.')
     else:
         print('Downloading the release and starting the Playback Engine...')
@@ -359,8 +460,10 @@ def main():
                  '-c', 'test -w /var/lib/cadence'])
         except subprocess.CalledProcessError as exc:
             raise InstallError('The engine cannot access the folders. Give UID/GID 568 read/search access to music and write access to data, including their parent folders.') from exc
-        run([*command, 'up', '-d', '--wait', '--wait-timeout', '120'])
+        run([*command, 'up', '-d', '--force-recreate' if existing_dir else '--remove-orphans', '--wait', '--wait-timeout', '120'])
         print(f'Engine is ready. Check status with: cd "{destination}" && docker compose -p {APP} ps')
+    if backup_dir:
+        print(f'Previous installer configuration: {backup_dir}')
     print(f'Engine address: https://{address}:4040')
     print('If startup fails, check Apps > Cadence > Logs. Do not chmod or chown your entire library.')
 
