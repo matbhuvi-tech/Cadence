@@ -1,5 +1,8 @@
 import importlib.util
+import os
 import pathlib
+import shutil
+import subprocess
 import tempfile
 import types
 import unittest
@@ -31,6 +34,25 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("CADENCE_HOST_MUSIC_DIR='/music/John\\'s $ records'", data)
             self.assertIn("CADENCE_LABEL='Music #1'", data)
 
+    @unittest.skipUnless(shutil.which('docker') and not (os.name == 'posix' and shutil.which('docker').lower().endswith('.exe')) and subprocess.run(['docker', 'compose', 'version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0, 'Native Docker Compose unavailable')
+    def test_compose_reads_special_characters_literally(self):
+        import json
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            env_file = pathlib.Path(d) / '.env'
+            values = {'CADENCE_HOST_MUSIC_DIR': "/music/John's $ records", 'CADENCE_LABEL': 'Music #1',
+                      'CADENCE_HOST_DATA_DIR': '/data', 'CADENCE_IMAGE': 'example/test:v1',
+                      'CADENCE_ADVERTISED_IP': '192.168.1.12'}
+            installer.write_env(env_file, values)
+            env = {k: v for k, v in os.environ.items() if k not in values}
+            result = subprocess.run(['docker', 'compose', '--env-file', str(env_file), '-f',
+                                     str(path.with_name('compose.yml')), 'config', '--format', 'json'],
+                                    capture_output=True, text=True, check=True, env=env)
+            service = json.loads(result.stdout)['services']['playback-engine']
+            self.assertEqual(service['environment']['CADENCE_LABEL'], 'Music #1')
+            # Compose escapes dollar signs when emitting a configuration for reuse.
+            self.assertEqual(service['volumes'][1]['source'], "/music/John's $$ records")
+
     def test_paths_must_not_overlap(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
@@ -42,7 +64,7 @@ class InstallerTests(unittest.TestCase):
         with mock.patch.object(installer, 'run') as run:
             installer.create_truenas_app('/tmp/compose.yml', '{"services":{}}')
             args = run.call_args.args[0]
-            self.assertEqual(args[:4], ['midclt', 'call', '-job', 'app.create'])
+            self.assertEqual(args[:4], ['midclt', 'call', '--job', 'app.create'])
             import json
             payload = json.loads(args[4])
             self.assertEqual(payload['app_name'], 'cadence-playback-engine')

@@ -138,7 +138,7 @@ def create_truenas_app(compose_path, resolved_json):
     del compose_path
     config = json.loads(resolved_json)
     payload = {'app_name': APP, 'custom_app': True, 'custom_compose_config': config}
-    run(['midclt', 'call', '-job', 'app.create', json.dumps(payload)])
+    run(['midclt', 'call', '--job', 'app.create', json.dumps(payload)])
 
 
 def main():
