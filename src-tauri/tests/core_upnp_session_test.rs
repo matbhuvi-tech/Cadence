@@ -16,7 +16,8 @@
 use cadence_core_lib::core_runtime::upnp_session::{
      inspect_rs130_description, parse_dsf_header_bytes, validate_advertised_lan_ip,
     CoreMediaServer, CorePacerConfig, Rs130DeviceDescriptor, TransportReport, UpnpSessionConfig,
-    UpnpSessionRuntime, MAX_CORE_PREROLL_BYTES, MAX_CORE_STEADY_SNDBUF_BYTES,
+    UpnpSessionRuntime, DsdCapability, dsd_capability_from_sink_protocol_info,
+    MAX_CORE_PREROLL_BYTES, MAX_CORE_STEADY_SNDBUF_BYTES,
 };
 use cadence_core_lib::core_runtime::{
     CgroupMemoryLimits, HeadlessConfig, HostMemoryLimits, MemoryLocker, PlatformLimits,
@@ -33,6 +34,14 @@ use std::time::Duration;
 
 struct FakeLocker {
     locked_bytes: AtomicUsize,
+}
+
+#[test]
+fn dsd_capability_distinguishes_explicit_evidence_from_unknown() {
+    assert_eq!(dsd_capability_from_sink_protocol_info(None), DsdCapability::Unknown);
+    assert_eq!(dsd_capability_from_sink_protocol_info(Some("http-get:*:*:*")), DsdCapability::Unknown);
+    assert_eq!(dsd_capability_from_sink_protocol_info(Some("http-get:*:audio/flac:*")), DsdCapability::Unsupported);
+    assert_eq!(dsd_capability_from_sink_protocol_info(Some("http-get:*:audio/x-dsd:*")), DsdCapability::Supported);
 }
 
 impl FakeLocker {
