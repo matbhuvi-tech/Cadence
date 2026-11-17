@@ -591,6 +591,10 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.track_files.get(public_id)
     }
 
+    pub fn output_selection_is_idle(&self) -> bool {
+        self.owner.activity() == "idle"
+    }
+
     pub fn set_output(&mut self, output: Output) -> Result<(), ErrorCode> {
         self.owner.set_output(output.clone())?;
         self.config.output = Some(output);

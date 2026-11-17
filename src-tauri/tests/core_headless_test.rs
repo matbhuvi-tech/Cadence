@@ -259,6 +259,7 @@ fn temp_db_startup_projects_catalog_runs_v1_protocol_and_shuts_down_cleanly() {
     })));
     assert_eq!(play_resp["ok"], true, "{play_resp}");
     assert_eq!(play_resp["data"]["playback"]["activity"], "loading");
+    assert!(!runtime.output_selection_is_idle(), "output selection must be disabled while loading");
 
     runtime.shutdown().expect("clean shutdown");
     assert_eq!(runtime.retained_locked_bytes(), 0);

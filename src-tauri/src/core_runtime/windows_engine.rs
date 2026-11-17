@@ -359,6 +359,9 @@ impl WindowsEngineNode {
                     Some(json!({ "ok": true, "data": { "outputs": list } }))
                 }
                 "output.select" => {
+                    if !rt.output_selection_is_idle() {
+                        return Some(json!({ "ok": false, "error": { "code": "not_ready" } }));
+                    }
                     let target_id = req
                         .get("outputId")
                         .or_else(|| req.get("id"))
@@ -366,7 +369,10 @@ impl WindowsEngineNode {
                         .unwrap_or_default();
                     let list = audio_for_ops.list_audio_endpoints();
                     let upnp_devices = audio_for_ops.get_upnp_manager().get_devices();
-                    let chosen = list.iter().find(|e| e.id == target_id).cloned();
+                    let chosen = list.iter().find(|e| e.id == target_id && e.is_available).cloned();
+                    if chosen.is_none() {
+                        return Some(json!({ "ok": false, "error": { "code": "invalid_payload" } }));
+                    }
                     let endpoint = AudioEndpoint::from_legacy_string(target_id, &upnp_devices);
                     match audio_for_ops.set_audio_endpoint(endpoint) {
                         Ok(()) => {

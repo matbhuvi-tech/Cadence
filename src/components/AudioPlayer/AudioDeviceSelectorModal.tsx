@@ -1,7 +1,10 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { Speaker, X, Check, RefreshCw, Radio, ShieldCheck, Wifi, Loader2, AlertTriangle } from 'lucide-react'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
+import { createEngineOutputsClient, type EngineOutput } from '../../services/engineOutputs'
+import { createFetchHttpCoreBridge } from '../../services/coreControllerTransport'
+import { tauriBridge } from '../../services/tauriBridge'
 import {
   AudioEndpoint,
   AudioEndpointInfo,
@@ -52,6 +55,27 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
   const activeCoreSnapshot = engine?.activeCoreSnapshot ?? null
 
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [engineOutputs, setEngineOutputs] = useState<EngineOutput[]>([])
+  const [engineOutputError, setEngineOutputError] = useState<string | null>(null)
+  const [engineOutputBusy, setEngineOutputBusy] = useState(false)
+  const profile = engine?.state.activeProfile ?? null
+  const outputClient = useMemo(() => {
+    if (!profile) return null
+    const fetchBridge = createFetchHttpCoreBridge()
+    return createEngineOutputsClient(profile, (target, request) =>
+      tauriBridge.isTauri() ? tauriBridge.coreControlRequest(target, request) : fetchBridge.postCoreRequest(target, request))
+  }, [profile])
+
+  useEffect(() => {
+    if (!isOpen || !isCoreActive || !outputClient) return
+    let current = true
+    setEngineOutputBusy(true)
+    setEngineOutputError(null)
+    void outputClient.list().then(outputs => { if (current) setEngineOutputs(outputs) })
+      .catch(() => { if (current) { setEngineOutputs([]); setEngineOutputError('Unable to load engine outputs.') } })
+      .finally(() => { if (current) setEngineOutputBusy(false) })
+    return () => { current = false }
+  }, [isOpen, isCoreActive, outputClient])
 
   // Segregate typed endpoints strictly by transport (never by friendly-name substrings)
   const { hardwareEndpoints, networkEndpoints, selectedUnavailable } = useMemo(() => {
@@ -281,9 +305,26 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
               </div>
             </div>
 
-            <p className="text-xs text-[#8E8E93] leading-relaxed">
-              Audio output is routed directly by Cadence Core. Windows local audio devices and local UPnP streamers are inactive while Core is selected.
-            </p>
+            <div className="flex flex-col gap-2" aria-label="Playback engine outputs">
+              {engineOutputBusy && <span className="text-xs text-[#8E8E93]">Loading outputs…</span>}
+              {engineOutputError && <span role="alert" className="text-xs text-rose-300">{engineOutputError}</span>}
+              {activeCoreSnapshot?.playback.activity !== 'idle' && <span className="text-xs text-[#8E8E93]">Stop playback to change output.</span>}
+              {engineOutputs.map(output => (
+                <button key={output.id} type="button"
+                  disabled={engineOutputBusy || !output.isAvailable || activeCoreSnapshot?.playback.activity !== 'idle'}
+                  className="p-3 rounded-xl border border-white/10 text-left text-xs text-white disabled:opacity-50"
+                  onClick={() => {
+                    if (!outputClient) return
+                    setEngineOutputBusy(true)
+                    setEngineOutputError(null)
+                    void outputClient.select(output.id).then(() => engine.coreRefreshSnapshot())
+                      .catch(() => setEngineOutputError('Unable to select this output.'))
+                      .finally(() => setEngineOutputBusy(false))
+                  }}>
+                  {decodeHtmlEntities(output.displayName)}{!output.isAvailable ? ' · Unavailable' : ''}
+                </button>
+              ))}
+            </div>
 
             <div className="flex items-center justify-between gap-3 pt-1">
               <button
