@@ -1,8 +1,8 @@
 # Standalone Playback Engine & Engine-First Frontend Architecture
 
-**Status:** Proposed Design Specification (Supersedes the dual-DB *This PC + Optional Core* model in [OPTIONAL_LINUX_CORE.md](./OPTIONAL_LINUX_CORE.md))  
-**Branch:** `feat/standalone-playback-engine`  
-**Updated:** 2026-11-16
+**Status:** Implemented (Phases 1–3 Complete; supersedes the dual-DB *This PC + Optional Core* model in [OPTIONAL_LINUX_CORE.md](./OPTIONAL_LINUX_CORE.md))  
+**Branch:** `feat/windows-playback-engine` (merged to `main`)  
+**Updated:** 2026-11-17
 
 ---
 
