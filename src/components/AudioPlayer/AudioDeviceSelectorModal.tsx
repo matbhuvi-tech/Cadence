@@ -312,7 +312,7 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
                 setEngineOutputBusy(true)
                 setEngineOutputError(null)
                 void outputClient.scan().then(setEngineOutputs)
-                  .catch(() => setEngineOutputError('Scan failed. Stop playback and wait 30 seconds, then try again.'))
+                  .catch((error: unknown) => setEngineOutputError(error instanceof Error ? error.message : 'Unable to scan engine outputs.'))
                   .finally(() => setEngineOutputBusy(false))
               }}>Scan for UPnP renderers</button>
             <div className="flex flex-col gap-2" aria-label="Playback engine outputs">

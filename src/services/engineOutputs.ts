@@ -14,7 +14,13 @@ export function createEngineOutputsClient(profile: SavedCoreProfile, post: Post)
     const response = await post(profile, { protocolVersion: 2, engineId: profile.engineId, libraryId: profile.libraryId, operation, ...extra })
     if (!response || typeof response !== 'object' || Array.isArray(response)) throw new Error('Invalid engine response')
     const result = response as Record<string, unknown>
-    if (result.ok !== true || !result.data || typeof result.data !== 'object' || Array.isArray(result.data)) throw new Error('Engine output request failed')
+    if (result.ok !== true) {
+      const error = result.error && typeof result.error === 'object' ? result.error as Record<string, unknown> : {}
+      if (operation === 'outputs.scan' && error.code === 'invalid_payload') throw new Error('This playback engine does not support scanning. Update the engine and try again.')
+      if (operation === 'outputs.scan' && error.code === 'not_ready') throw new Error('Stop playback and wait 30 seconds before scanning.')
+      throw new Error('The playback engine could not complete the output request.')
+    }
+    if (!result.data || typeof result.data !== 'object' || Array.isArray(result.data)) throw new Error('Invalid engine response')
     return result.data as Record<string, unknown>
   }
   async function outputs(operation: string): Promise<EngineOutput[]> {
