@@ -991,6 +991,44 @@ fn shutdown_does_not_stop_an_external_renderer_without_a_core_session() {
 }
 
 #[test]
+fn shutdown_stops_only_a_verified_current_core_uri() {
+    for scenario in ["owned", "replaced", "ambiguous"] {
+        let fx = Phase5Fixture::create(scenario);
+        let renderer = FakeRs130Simulator::start("uuid:rs130-main");
+        let desc = inspect_rs130_description(&renderer.description_url(), Some("uuid:rs130-main")).unwrap();
+        let mut runtime = UpnpSessionRuntime::open_with_platform(
+            HeadlessConfig {
+                db_path: fx.db_path.clone(), engine_id: "truenas-core".into(),
+                library_id: "main-library".into(), label: "Core".into(),
+                output: Some(Output { id: "rs130-main".into(), label: "RS130".into(), transport: "upnp".into() }),
+                headroom_bytes: 16 * 1024 * 1024,
+            },
+            UpnpSessionConfig {
+                bind_addr: "127.0.0.1:0".parse().unwrap(), advertised_ip: "127.0.0.1".into(),
+                allow_loopback_advertise: true, max_concurrent_streams: 1,
+                pacer_config: CorePacerConfig::fast_for_tests(), target_device: desc,
+            }, GenerousProbe, FakeLocker::new(),
+        ).unwrap();
+        runtime.admit_tracks(&["trk-pcm-1".to_string()]).unwrap();
+        assert_eq!(runtime.request(&wire(json!({
+            "operation": "playback.control", "action": "play", "trackId": "trk-pcm-1",
+            "commandId": "play", "expectedRevision": 0
+        })))["ok"], true);
+        {
+            let mut state = renderer.state.lock().unwrap();
+            match scenario {
+                "replaced" => state.current_uri = "http://other.example/external".into(),
+                "ambiguous" => state.current_uri.clear(),
+                _ => {}
+            }
+        }
+        runtime.shutdown().unwrap();
+        let state = renderer.state.lock().unwrap();
+        assert_eq!(state.soap_calls.iter().any(|call| call.action == "Stop"), scenario == "owned", "{scenario}");
+    }
+}
+
+#[test]
 fn mid_stream_stop_cancellation_and_bounded_retry_renderer_loss_quarantine() {
     let fx = Phase5Fixture::create("mid_stream_cancel_and_loss");
     let rs130 = FakeRs130Simulator::start("uuid:rs130-main");
