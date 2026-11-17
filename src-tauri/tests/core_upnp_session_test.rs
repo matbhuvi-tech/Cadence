@@ -351,11 +351,11 @@ fn send_raw_http(addr: std::net::SocketAddr, request: &str) -> (String, Vec<u8>)
         .unwrap();
     stream.write_all(request.as_bytes()).unwrap();
     let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw);
+    let read_result = stream.read_to_end(&mut raw);
     let sep = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .expect("HTTP header separator");
+        .unwrap_or_else(|| panic!("HTTP header separator missing: read={read_result:?}, received={raw:?}"));
     let headers = String::from_utf8_lossy(&raw[..sep]).to_string();
     let body = raw[sep + 4..].to_vec();
     (headers, body)
@@ -872,10 +872,14 @@ fn bounded_concurrency_disconnects_and_qualified_avtransport_reconciliation() {
     std::thread::sleep(Duration::from_millis(30));
 
     // Second concurrent connection must be rejected with 503 Service Unavailable
-    let (hdr_503, _) = send_raw_http(
-        media_addr,
-        &format!("GET {} HTTP/1.1\r\nHost: localhost\r\n\r\n", path_1),
-    );
+    // The listener rejects this connection before reading an HTTP request. Do
+    // not send unread bytes: closing with unread input can reset TCP on Windows
+    // and truncate the 503 response before the client observes it.
+    let mut excess = TcpStream::connect(media_addr).unwrap();
+    excess.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut rejected = Vec::new();
+    excess.read_to_end(&mut rejected).unwrap();
+    let hdr_503 = String::from_utf8_lossy(&rejected);
     assert!(
         hdr_503.starts_with("HTTP/1.1 503"),
         "excess concurrent connection must return 503: {}",

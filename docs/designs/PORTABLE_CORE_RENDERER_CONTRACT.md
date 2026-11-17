@@ -17,8 +17,11 @@ against concurrent external controllers. Persistent general UDN selection, fresh
 takeover validation and three-state capability handling are not yet implemented.
 
 The original 22 tests and two ownership tests passed serially on Windows. One
-parallel run failed while reading an HTTP response in the concurrency fixture;
-its reliability is under investigation. Linux and hardware acceptance are pending.
+parallel run failed while reading an HTTP response in the concurrency fixture.
+The rejected connection had unread request bytes, producing a Windows TCP reset
+and a truncated 503. The fixture now sends no request on the connection rejected
+before request parsing; 20 parallel suite runs passed. Linux and hardware acceptance
+are pending.
 
 ## Contract
 
