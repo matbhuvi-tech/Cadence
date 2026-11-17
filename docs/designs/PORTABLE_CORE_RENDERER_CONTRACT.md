@@ -28,6 +28,31 @@ and a truncated 503. The fixture now sends no request on the connection rejected
 before request parsing; 20 parallel suite runs passed. Linux and hardware acceptance
 are pending.
 
+## Slice 1 implemented: authenticated renderer discovery
+
+`renderer.discover` (v1, additive) is served by `core_runtime/renderer_discovery.rs`
+behind the existing `/v1/` token check. The request is a closed field set
+(`protocolVersion`, `operation`, `engineId`, `libraryId`, optional `requestId`); it
+accepts no URL or address. One bounded SSDP search is run on request only. Each
+`LOCATION` must be an IPv4 literal equal to the datagram source and private or
+link-local; redirects are refused; responses (128 KiB), datagrams, candidates (16) and
+total time (4 s) are bounded; DOCTYPE/ENTITY is rejected; control URLs must stay on the
+same `ip:port`. Renderers are identified by validated UDN (duplicates collapsed) and
+must expose AVTransport. Capability evidence is read-only ConnectionManager
+`GetProtocolInfo` only (no AVTransport action can be built by the module) and is
+reported per `pcm`/`dsd` as `supported`, `unsupported` or `unknown`; no evidence is
+`unknown`. Controllers never receive addresses or URLs.
+
+Temporary policy, to be re-evaluated with performance data: discovery is refused with
+`discovery_deferred` (`reason`: `playback_active`, `cooldown_active` or `rate_limited`,
+with `retryAfterMs` where applicable) while Loading, Playing or Paused, during the
+30-second post-playback cooldown, and within 5 s of the previous run. Discovery holds
+the runtime lock for at most the bounded duration while idle. It runs on the control
+thread with no new threads, priorities, timers or locked memory. `DragonfishRenderer::apply`,
+`supports_extension`, the pacer and the audio path are untouched; the Slice 1 result is
+not yet used for selection or admission. The Windows desktop engine does not install a
+discovery backend yet. Selection (Slice 2) will hard-reject while not idle.
+
 ## Contract
 
 - Authenticated controllers request bounded, explicit discovery; responses identify

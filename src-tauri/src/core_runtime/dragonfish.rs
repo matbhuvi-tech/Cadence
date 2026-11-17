@@ -542,6 +542,11 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
         let mut rt = HeadlessCoreRuntime::open_with_platform(headless_cfg, renderer, probe, locker)
             .map_err(DragonfishError::Runtime)?;
         rt.set_music_read_only(config.music_read_only);
+        // Explicit, authenticated-on-request renderer discovery. Hermetic (loopback) test
+        // nodes never emit LAN multicast.
+        rt.set_renderer_discovery(Box::new(
+            super::renderer_discovery::SsdpRendererDiscovery::system(config.allow_loopback_for_tests),
+        ));
         let browse_roots = std::env::var_os("CADENCE_BROWSE_ROOTS")
             .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
             .unwrap_or_else(|| vec![config.music_mount_dir.clone()]);
@@ -651,6 +656,16 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
 
     pub fn media_listen_addr(&self) -> SocketAddr {
         self.media_server.listen_addr()
+    }
+
+    /// Test seam: replaces the renderer-discovery backend of the running node.
+    pub fn set_renderer_discovery_for_test(
+        &self,
+        discovery: Box<dyn super::renderer_discovery::RendererDiscovery>,
+    ) {
+        if let Ok(mut rt) = self.runtime.lock() {
+            rt.set_renderer_discovery(discovery);
+        }
     }
 
     /// Guard verifying whether writes to `/music` are allowed.

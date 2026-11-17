@@ -6,6 +6,7 @@ pub mod dragonfish;
 pub mod migration;
 pub mod library;
 pub mod platform;
+pub mod renderer_discovery;
 pub mod smb;
 pub mod upnp_session;
 #[cfg(feature = "engine-audio")]
@@ -99,6 +100,8 @@ pub struct HeadlessCoreRuntime<
     curate_pending: bool,
     track_db_ids: HashMap<String,String>,
     public_track_ids: HashMap<String,String>,
+    renderer_discovery: Option<Box<dyn renderer_discovery::RendererDiscovery>>,
+    last_discovery_at: Option<Instant>,
 }
 
 impl<R: Renderer> HeadlessCoreRuntime<R, SystemPlatformProbe, SystemMemoryLocker> {
@@ -159,7 +162,80 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             curate_pending: false,
             track_db_ids,
             public_track_ids,
+            renderer_discovery: None,
+            last_discovery_at: None,
         })
+    }
+
+    /// Installs the explicit renderer-discovery backend (`renderer.discover`).
+    /// Without one the operation reports `discovery_unavailable`.
+    pub fn set_renderer_discovery(&mut self, discovery: Box<dyn renderer_discovery::RendererDiscovery>) {
+        self.renderer_discovery = Some(discovery);
+    }
+
+    /// `renderer.discover` (v1, authenticated by the control listener). Read-only: it
+    /// never issues a playback transport command. Temporary policy: refused while the
+    /// transport is not idle and during the 30-second post-playback cooldown, and
+    /// spaced by `MIN_DISCOVERY_INTERVAL`.
+    fn handle_renderer_discover_at(&mut self, parsed: &Value, now: Instant) -> Value {
+        let fail = |code: &str, extra: Value| {
+            let mut error = json!({ "code": code });
+            if let (Some(e), Some(x)) = (error.as_object_mut(), extra.as_object()) {
+                e.extend(x.clone());
+            }
+            json!({ "ok": false, "error": error })
+        };
+        if parsed.get("protocolVersion").and_then(Value::as_u64) != Some(1) {
+            return fail("incompatible_protocol", json!({}));
+        }
+        // Closed field set: the API takes no URLs, addresses or other free-form input.
+        let allowed = ["protocolVersion", "operation", "engineId", "libraryId", "requestId"];
+        let object = parsed.as_object();
+        let well_formed = object.is_some_and(|o| {
+            o.keys().all(|k| allowed.contains(&k.as_str()))
+                && o.get("requestId").map_or(true, |v| v.as_str().is_some_and(|s| s.len() <= 64))
+                && o.get("engineId").map_or(true, |v| v.as_str() == Some(self.config.engine_id.as_str()))
+                && o.get("libraryId").map_or(true, |v| v.as_str() == Some(self.config.library_id.as_str()))
+        });
+        if !well_formed {
+            return fail("invalid_payload", json!({}));
+        }
+        if self.renderer_discovery.is_none() {
+            return fail("discovery_unavailable", json!({}));
+        }
+        match self.ensure_storage_idle_at(now) {
+            Ok(()) => {}
+            Err(RuntimeError::TransportNotIdle) => {
+                return fail("discovery_deferred", json!({ "reason": "playback_active" }))
+            }
+            Err(RuntimeError::CooldownActive { remaining_ms }) => {
+                return fail(
+                    "discovery_deferred",
+                    json!({ "reason": "cooldown_active", "retryAfterMs": remaining_ms }),
+                )
+            }
+            Err(_) => return fail("not_ready", json!({})),
+        }
+        if let Some(last) = self.last_discovery_at {
+            let elapsed = now.saturating_duration_since(last);
+            if elapsed < renderer_discovery::MIN_DISCOVERY_INTERVAL {
+                let retry = (renderer_discovery::MIN_DISCOVERY_INTERVAL - elapsed).as_millis() as u64;
+                return fail(
+                    "discovery_deferred",
+                    json!({ "reason": "rate_limited", "retryAfterMs": retry.max(1) }),
+                );
+            }
+        }
+        self.last_discovery_at = Some(now);
+        let report = match self.renderer_discovery.as_mut() {
+            Some(discovery) => discovery.discover(),
+            None => return fail("discovery_unavailable", json!({})),
+        };
+        let mut data = report.to_json();
+        if let (Some(d), Some(id)) = (data.as_object_mut(), parsed.get("requestId")) {
+            d.insert("requestId".into(), id.clone());
+        }
+        json!({ "ok": true, "data": data })
     }
 
     /// Verifies that the persistent Core SQLite connection is operating in WAL mode.
@@ -326,6 +402,9 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
                     return self.request_v2_at(parsed, now);
                 }
                 if let Some(op) = parsed.get("operation").and_then(Value::as_str) {
+                    if op == "renderer.discover" {
+                        return self.handle_renderer_discover_at(&parsed, now);
+                    }
                     if op.starts_with("curate.") {
                         if parsed["protocolVersion"].as_u64()!=Some(1){return json!({"ok":false,"error":{"code":"incompatible_protocol"}});}
                         return self.handle_curate_request_at(&parsed, now);
