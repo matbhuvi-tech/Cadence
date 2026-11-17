@@ -745,6 +745,13 @@ impl Library {
                 .as_ref()
                 .is_some_and(|(_, _, m, size)| *m == mtime && *size == metadata.len() as i64)
         {
+            let has_art: bool = self.db.conn.lock().query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_artwork WHERE release_id=?1)",
+                params![existing.as_ref().unwrap().1], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            let folder_has_art = path.parent().map(|dir| ["cover.jpg", "cover.png", "folder.jpg", "folder.png", "front.jpg"]
+                .iter().any(|name| self.open_path(&dir.join(name)).is_ok())).unwrap_or(false);
+            if has_art && !folder_has_art {
             self.db
                 .conn
                 .lock()
@@ -754,6 +761,7 @@ impl Library {
                 )
                 .map_err(|e| e.to_string())?;
             return Ok(());
+            }
         }
         let parsed = media::inspect(&handle_path(&file, path), &extension)?;
         let dir = path.parent().ok_or("Missing parent")?;
@@ -790,9 +798,9 @@ impl Library {
         let disc = tag.and_then(|t| t.disk());
         let original_album = tag.and_then(crate::scanner::dsd::extract_original_album);
         let original_year = tag.and_then(crate::scanner::dsd::extract_original_year);
-        let art = tag
+        let jpeg = tag
             .and_then(|t| t.pictures().first())
-            .map(|p| p.data().to_vec())
+            .and_then(|p| compress_art(p.data()).ok())
             .or_else(|| {
                 [
                     "cover.jpg",
@@ -808,10 +816,9 @@ impl Library {
                     f.take((MAX_ART_BYTES + 1) as u64)
                         .read_to_end(&mut data)
                         .ok()?;
-                    (data.len() <= MAX_ART_BYTES).then_some(data)
+                    if data.len() <= MAX_ART_BYTES { compress_art(&data).ok() } else { None }
                 })
             });
-        let jpeg = art.and_then(|b| compress_art(&b).ok());
         let mut conn = self.db.conn.lock();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mount: String = tx
