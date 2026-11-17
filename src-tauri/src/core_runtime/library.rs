@@ -1089,3 +1089,62 @@ pub fn windows_default_browse_roots(db: &AppDb) -> Vec<PathBuf> {
 pub fn windows_default_browse_roots(_db: &AppDb) -> Vec<PathBuf> {
     Vec::new()
 }
+
+#[cfg(test)]
+mod artwork_regression_tests {
+    use super::*;
+
+    fn fixture() -> (PathBuf, Library, PathBuf) {
+        let root = std::env::temp_dir().join(format!("cadence-art-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let wav = root.join("track.wav");
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&44100u32.to_le_bytes());
+        bytes.extend_from_slice(&88200u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        std::fs::write(&wav, bytes).unwrap();
+        let db = AppDb::new(root.join("catalog.db")).unwrap();
+        {
+            let conn = db.conn.lock();
+            conn.execute("INSERT INTO storage_mounts(id,name,mount_path,mount_type,file_system,last_seen_timestamp) VALUES('m','test',?1,'local_disk','ntfs',CURRENT_TIMESTAMP)", params![root.to_string_lossy()]).unwrap();
+            conn.execute("INSERT INTO watched_folders(id,mount_id,folder_path,display_name,scan_mode) VALUES('w','m',?1,'test','manual')", params![root.to_string_lossy()]).unwrap();
+        }
+        let lib = Library::open(db, vec![root.clone()]).unwrap();
+        (root, lib, wav)
+    }
+
+    fn cover(path: &Path, color: [u8; 3]) {
+        image::RgbImage::from_pixel(3, 3, image::Rgb(color)).save(path).unwrap();
+    }
+
+    #[test]
+    fn quick_scan_discovers_added_folder_cover_for_unchanged_track() {
+        let (root, mut lib, wav) = fixture();
+        lib.scan_path("w", &wav).unwrap();
+        cover(&root.join("cover.png"), [255, 0, 0]);
+        lib.scan_path("w", &wav).unwrap();
+        let conn = lib.db.conn.lock();
+        let count: i64 = conn.query_row("SELECT count(*) FROM engine_artwork", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "quick scan must rebuild missing artwork");
+    }
+
+    #[test]
+    fn invalid_first_folder_image_falls_back_to_valid_image() {
+        let (root, mut lib, wav) = fixture();
+        std::fs::write(root.join("cover.jpg"), b"invalid").unwrap();
+        cover(&root.join("folder.png"), [0, 255, 0]);
+        lib.scan_path("w", &wav).unwrap();
+        let conn = lib.db.conn.lock();
+        let count: i64 = conn.query_row("SELECT count(*) FROM engine_artwork", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "invalid candidate must not hide a valid folder image");
+    }
+}
