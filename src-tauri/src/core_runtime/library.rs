@@ -752,15 +752,15 @@ impl Library {
             let folder_has_art = path.parent().map(|dir| ["cover.jpg", "cover.png", "folder.jpg", "folder.png", "front.jpg"]
                 .iter().any(|name| self.open_path(&dir.join(name)).is_ok())).unwrap_or(false);
             if has_art && !folder_has_art {
-            self.db
-                .conn
-                .lock()
-                .execute(
-                    "INSERT OR IGNORE INTO engine_scan_seen VALUES(?1,?2)",
-                    params![folder_id, existing.as_ref().unwrap().0],
-                )
-                .map_err(|e| e.to_string())?;
-            return Ok(());
+                self.db
+                    .conn
+                    .lock()
+                    .execute(
+                        "INSERT OR IGNORE INTO engine_scan_seen VALUES(?1,?2)",
+                        params![folder_id, existing.as_ref().unwrap().0],
+                    )
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
             }
         }
         let parsed = media::inspect(&handle_path(&file, path), &extension)?;
@@ -1153,5 +1153,18 @@ mod artwork_regression_tests {
         let conn = lib.db.conn.lock();
         let count: i64 = conn.query_row("SELECT count(*) FROM engine_artwork", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 1, "invalid candidate must not hide a valid folder image");
+    }
+
+    #[test]
+    fn quick_scan_updates_changed_folder_cover() {
+        let (root, mut lib, wav) = fixture();
+        let image = root.join("cover.png");
+        cover(&image, [255, 0, 0]);
+        lib.scan_path("w", &wav).unwrap();
+        let old: String = lib.db.conn.lock().query_row("SELECT etag FROM engine_artwork", [], |r| r.get(0)).unwrap();
+        cover(&image, [0, 0, 255]);
+        lib.scan_path("w", &wav).unwrap();
+        let new: String = lib.db.conn.lock().query_row("SELECT etag FROM engine_artwork", [], |r| r.get(0)).unwrap();
+        assert_ne!(old, new, "updated artwork should replace the cached cover");
     }
 }
