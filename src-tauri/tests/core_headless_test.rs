@@ -415,6 +415,24 @@ fn strict_admission_rejects_over_budget_and_lock_failures_without_windowed_or_pa
 }
 
 #[test]
+fn evicting_an_admitted_track_keeps_its_pages_locked_until_the_last_reader_drops() {
+    let ws = TempWorkspace::create("shared_lock_lifetime");
+    let files = HashMap::from([("track".to_string(), ws.song_a_path.clone())]);
+    let locker = FakeLocker::new(true);
+    let mut arena = LockedBytesArena::new(generous_probe(), locker.clone(), 0);
+    arena.admit_files(&files, &["track".to_string()]).unwrap();
+    let reader = arena.get_shared_buffer("track").unwrap();
+
+    arena.clear();
+    assert!(!arena.is_admitted("track"));
+    assert_eq!(locker.unlock_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(reader.len(), 64 * 1024);
+    drop(reader);
+    assert_eq!(locker.unlock_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(locker.locked_bytes.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_cooldown() {
     let ws = TempWorkspace::create("silence_cooldown");
     let renderer = RecordingRenderer::default();

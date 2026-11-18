@@ -16,9 +16,12 @@ pub use platform::{
     normalize_linux_getsockopt_sndbuf, normalize_linux_setsockopt_sndbuf, parse_cgroup_limit_bytes,
     parse_cpuset_list, parse_meminfo_bytes, parse_proc_status_cap_ipc_lock,
     parse_zfs_arc_reclaimable_bytes, partition_truenas_cpus, AdmissionError, CgroupMemoryLimits,
-    CpuPartition, HostMemoryLimits, LockedBytesArena, MemoryLocker, PlatformLimits, PlatformProbe,
+    CpuPartition, HostMemoryLimits, LockedBytesArena, LockedTrack, MemoryLocker, PlatformLimits, PlatformProbe,
     SystemMemoryLocker, SystemPlatformProbe, DEFAULT_CONTAINER_HEADROOM_BYTES,
 };
+
+#[cfg(feature = "engine-audio")]
+pub(crate) use platform::LockedTrackReader;
 
 use crate::core_session::{
     CatalogTrack, ErrorCode, ExternalPlaybackInfo, Output, Renderer, RendererAction, RendererError,
@@ -29,7 +32,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+
+type SharedTrackBuffers = Arc<Mutex<HashMap<String, Weak<LockedTrack>>>>;
 use std::time::{Duration, Instant};
 
 /// Mandatory post-playback storage-bus silence window (30 seconds).
@@ -256,7 +261,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.arena.available_budget_bytes()
     }
 
-    pub fn shared_track_buffer(&self, track_id: &str) -> Option<Arc<Vec<u8>>> {
+    pub fn shared_track_buffer(&self, track_id: &str) -> Option<Arc<LockedTrack>> {
         self.arena.get_shared_buffer(track_id)
     }
 
@@ -267,7 +272,8 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         &mut self,
         track_ids: &[String],
         keep_ids: &HashSet<String>,
-    ) -> Result<Vec<(String, Arc<Vec<u8>>)>, RuntimeError> {
+        require_storage_idle: bool,
+    ) -> Result<Vec<(String, Arc<LockedTrack>)>, RuntimeError> {
         const MAX_WINDOW_TRACKS: usize = 4;
         let mut bounded: Vec<String> = Vec::with_capacity(MAX_WINDOW_TRACKS);
         for id in track_ids {
@@ -289,6 +295,9 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
 
         let needs_load = bounded.iter().any(|id| !self.arena.is_admitted(id));
         if needs_load {
+            if require_storage_idle {
+                self.ensure_storage_idle_at(Instant::now())?;
+            }
             if self.arena.admit_files(&self.track_files, &bounded).is_err() {
                 self.arena.retain_keys(&retain_set);
                 if let Ok(mut admitted) = self.renderer.admitted_ids.lock() {
@@ -304,6 +313,13 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
                         admitted.insert(id.clone());
                     }
                 }
+            }
+        }
+
+        if require_storage_idle {
+            self.arena.retain_keys(&retain_set);
+            if let Ok(mut admitted) = self.renderer.admitted_ids.lock() {
+                admitted.retain(|id| retain_set.contains(id));
             }
         }
 
@@ -436,6 +452,19 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         let was_active = self.current_activity() != "idle";
         let applied = self.owner.on_renderer_event(event)?;
         if applied {self.track_activity_change(was_active,now);}
+        Ok(applied)
+    }
+
+    #[cfg(feature = "engine-audio")]
+    fn on_windows_renderer_completed(&mut self, token: RunToken) -> Result<bool, ErrorCode> {
+        let was_active = self.current_activity() != "idle";
+        let applied = self.owner.on_renderer_event_with_admission(
+            RendererEvent::Completed(token),
+            |id| self.arena.is_admitted(id),
+        )?;
+        if applied {
+            self.track_activity_change(was_active, Instant::now());
+        }
         Ok(applied)
     }
 

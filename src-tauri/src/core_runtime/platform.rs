@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Mandatory safety headroom (64 MiB default) reserved inside a container or host
 /// for the executable, SQLite cache, and kernel TCP send buffers.
@@ -44,7 +46,7 @@ impl PlatformProbe for SystemPlatformProbe {
     }
 }
 
-pub trait MemoryLocker: Send + Sync {
+pub trait MemoryLocker: Send + Sync + 'static {
     /// Pre-faults all pages in `data` and pins them in physical RAM (`mlock` / `VirtualLock`).
     fn lock_and_prefault(&self, data: &mut [u8]) -> bool;
     /// Unpins previously locked pages (`munlock` / `VirtualUnlock`).
@@ -129,12 +131,54 @@ impl AdmissionError {
     }
 }
 
-/// Strict RAM arena holding pre-faulted, page-locked media bytes with RAII unlock on drop.
+/// Owns a page lock for as long as any renderer or HTTP response uses the bytes.
+pub struct LockedTrack {
+    storage: Vec<u8>,
+    bytes: Range<usize>,
+    path: PathBuf,
+    locker: Arc<dyn MemoryLocker>,
+}
+
+impl LockedTrack {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.storage[self.bytes.clone()]
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(feature = "engine-audio")]
+pub(crate) struct LockedTrackReader(pub(crate) Arc<LockedTrack>);
+
+#[cfg(feature = "engine-audio")]
+impl AsRef<[u8]> for LockedTrackReader {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl Drop for LockedTrack {
+    fn drop(&mut self) {
+        self.locker.unlock(self.as_slice());
+    }
+}
+
+/// Strict RAM arena holding pre-faulted, page-locked media bytes.
 pub struct LockedBytesArena<P: PlatformProbe = SystemPlatformProbe, L: MemoryLocker = SystemMemoryLocker> {
     probe: P,
-    locker: L,
+    locker: Arc<L>,
     headroom_bytes: u64,
-    buffers: HashMap<String, std::sync::Arc<Vec<u8>>>,
+    buffers: HashMap<String, Arc<LockedTrack>>,
     retained_bytes: u64,
 }
 
@@ -142,7 +186,7 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
     pub fn new(probe: P, locker: L, headroom_bytes: u64) -> Self {
         Self {
             probe,
-            locker,
+            locker: Arc::new(locker),
             headroom_bytes,
             buffers: HashMap::new(),
             retained_bytes: 0,
@@ -162,8 +206,7 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
     }
 
     /// Returns a zero-copy reference-counted handle to the page-locked track buffer.
-    /// The underlying heap allocation address never moves when wrapped in `Arc<Vec<u8>>`.
-    pub fn get_shared_buffer(&self, track_id: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+    pub fn get_shared_buffer(&self, track_id: &str) -> Option<Arc<LockedTrack>> {
         self.buffers.get(track_id).cloned()
     }
 
@@ -221,6 +264,9 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
                 .ok_or_else(|| AdmissionError::TrackNotFound(id.clone()))?;
             let meta = std::fs::metadata(path).map_err(|e| AdmissionError::IoError(e.to_string()))?;
             let len = meta.len();
+            if !meta.is_file() || len == 0 {
+                return Err(AdmissionError::IoError("Track is not a nonempty regular file".into()));
+            }
             requested_bytes = requested_bytes.saturating_add(len);
             to_load.push((id.clone(), path.clone(), len));
         }
@@ -251,30 +297,24 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
             });
         }
 
-        let mut newly_locked: Vec<(String, Vec<u8>)> = Vec::with_capacity(to_load.len());
+        let mut newly_locked = Vec::with_capacity(to_load.len());
         for (id, path, expected_len) in to_load {
-            let mut data = match read_media_file_hygienic(&path, expected_len as usize) {
-                Ok(buf) => buf,
-                Err(e) => {
-                    for (_, locked_buf) in &newly_locked {
-                        self.locker.unlock(locked_buf);
-                    }
-                    return Err(AdmissionError::IoError(e.to_string()));
-                }
-            };
-            if !self.locker.lock_and_prefault(&mut data) {
-                drop(data);
-                for (_, locked_buf) in &newly_locked {
-                    self.locker.unlock(locked_buf);
-                }
+            let (mut storage, bytes) = read_media_file_hygienic(&path, expected_len as usize)
+                .map_err(|e| AdmissionError::IoError(e.to_string()))?;
+            if !self.locker.lock_and_prefault(&mut storage[bytes.clone()]) {
                 return Err(AdmissionError::LockUnavailable);
             }
-            newly_locked.push((id, data));
+            newly_locked.push((id, Arc::new(LockedTrack {
+                storage,
+                bytes,
+                path,
+                locker: self.locker.clone(),
+            })));
         }
 
         for (id, data) in newly_locked {
             self.retained_bytes = self.retained_bytes.saturating_add(data.len() as u64);
-            self.buffers.insert(id, std::sync::Arc::new(data));
+            self.buffers.insert(id, data);
         }
 
         Ok(())
@@ -289,16 +329,13 @@ impl<P: PlatformProbe, L: MemoryLocker> LockedBytesArena<P, L> {
             .collect();
         for id in remove_ids {
             if let Some(buf) = self.buffers.remove(&id) {
-                self.locker.unlock(buf.as_slice());
                 self.retained_bytes = self.retained_bytes.saturating_sub(buf.len() as u64);
             }
         }
     }
 
     pub fn clear(&mut self) {
-        for (_, buf) in self.buffers.drain() {
-            self.locker.unlock(buf.as_slice());
-        }
+        self.buffers.clear();
         self.retained_bytes = 0;
     }
 }
@@ -468,13 +505,29 @@ pub const fn normalize_linux_getsockopt_sndbuf(raw_kernel_sndbuf_bytes: usize) -
     raw_kernel_sndbuf_bytes / 2
 }
 
-fn read_media_file_hygienic(path: &Path, capacity: usize) -> std::io::Result<Vec<u8>> {
+// Give each Windows track exclusive ownership of every page it locks. VirtualLock
+// does not count multiple locks on a shared heap page.
+fn read_media_file_hygienic(path: &Path, len: usize) -> std::io::Result<(Vec<u8>, Range<usize>)> {
+    let (allocation_len, page_size) = if cfg!(windows) {
+        const PAGE_SIZE: usize = 4096; // Supported Windows x86_64 target.
+        let allocation_len = len.checked_add(2 * (PAGE_SIZE - 1)).ok_or_else(|| {
+            std::io::Error::other("Track allocation exceeds the addressable size")
+        })?;
+        (allocation_len, PAGE_SIZE)
+    } else {
+        (len, 1)
+    };
+    let mut storage = Vec::new();
+    storage.try_reserve_exact(allocation_len).map_err(std::io::Error::other)?;
+    storage.resize(allocation_len, 0);
+    let start = storage.as_ptr().align_offset(page_size);
+    let bytes = start..start + len;
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
 
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOATIME)
             .open(path)
@@ -482,25 +535,29 @@ fn read_media_file_hygienic(path: &Path, capacity: usize) -> std::io::Result<Vec
 
         let fd = file.as_raw_fd();
         unsafe {
-            let _ = libc::posix_fadvise(fd, 0, capacity as libc::off_t, libc::POSIX_FADV_SEQUENTIAL);
+            let _ = libc::posix_fadvise(fd, 0, len as libc::off_t, libc::POSIX_FADV_SEQUENTIAL);
         }
-        let mut data = Vec::with_capacity(capacity);
-        (&file).read_to_end(&mut data)?;
-        data.shrink_to_fit();
+        read_exact_track(&mut file, &mut storage[bytes.clone()])?;
         unsafe {
-            let _ = libc::posix_fadvise(fd, 0, data.len() as libc::off_t, libc::POSIX_FADV_DONTNEED);
+            let _ = libc::posix_fadvise(fd, 0, len as libc::off_t, libc::POSIX_FADV_DONTNEED);
         }
-        return Ok(data);
+        Ok((storage, bytes))
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         let mut file = std::fs::File::open(path)?;
-        let mut data = Vec::with_capacity(capacity);
-        file.read_to_end(&mut data)?;
-        data.shrink_to_fit();
-        Ok(data)
+        read_exact_track(&mut file, &mut storage[bytes.clone()])?;
+        Ok((storage, bytes))
     }
+}
+
+fn read_exact_track(file: &mut std::fs::File, bytes: &mut [u8]) -> std::io::Result<()> {
+    file.read_exact(bytes)?;
+    if file.read(&mut [0])? != 0 {
+        return Err(std::io::Error::other("Track length changed during admission"));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -590,7 +647,12 @@ fn os_unlock_memory(data: &[u8]) {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "engine-audio"))]
+fn os_lock_memory(data: &[u8]) -> bool {
+    crate::audio::stream_tuning::lock_raw_slice(data)
+}
+
+#[cfg(all(windows, not(feature = "engine-audio")))]
 fn os_lock_memory(data: &[u8]) -> bool {
     use std::ffi::c_void;
     use windows_sys::Win32::System::Memory::VirtualLock;
@@ -608,7 +670,12 @@ fn os_lock_memory(data: &[u8]) -> bool {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "engine-audio"))]
+fn os_unlock_memory(data: &[u8]) {
+    crate::audio::stream_tuning::unlock_raw_slice(data);
+}
+
+#[cfg(all(windows, not(feature = "engine-audio")))]
 fn os_unlock_memory(data: &[u8]) {
     use std::ffi::c_void;
     use windows_sys::Win32::System::Memory::VirtualUnlock;

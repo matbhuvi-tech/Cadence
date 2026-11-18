@@ -19,6 +19,7 @@
 //!    `cadence.db`, `node-identity.json`, and `tls-cert.json`, blocks incompatible future
 //!    schemas, and restores matching backups cleanly on rollback.
 
+use super::SharedTrackBuffers;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -223,7 +224,7 @@ struct DragonfishRenderer {
     advertised_ip: Ipv4Addr,
     active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
     paused_flag: Arc<AtomicBool>,
-    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    shared_buffers: SharedTrackBuffers,
     track_meta: Arc<Mutex<HashMap<String, TrackMediaMeta>>>,
     db_path: PathBuf,
 }
@@ -589,7 +590,7 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
                     pairing_token,
                     tls_config,
                     allow_plaintext_tests,
-                    true,
+                    false,
                     None,
                 );
             })
@@ -1116,7 +1117,7 @@ pub(crate) type ExtraV1OpHandler<R, P, L> =
 pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: MemoryLocker>(
     listener: TcpListener,
     runtime: Arc<Mutex<HeadlessCoreRuntime<R, P, L>>>,
-    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    shared_buffers: SharedTrackBuffers,
     stop_flag: Arc<AtomicBool>,
     identity: PersistedNodeIdentity,
     tls_cert: PersistedTlsCertificate,
@@ -1127,7 +1128,7 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
     pairing_token: String,
     tls_config: Arc<rustls::ServerConfig>,
     allow_plaintext_tests: bool,
-    admit_to_arena: bool,
+    require_idle_admission: bool,
     extra_op_handler: Option<ExtraV1OpHandler<R, P, L>>,
 ) {
     let mut event_clients:Vec<ControlConnection>=Vec::new();
@@ -1273,18 +1274,17 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
                                 handled
                             } else if rt.is_external_playback_blocking_play(body_bytes) {
                                 rt.request(body_bytes)
-                            } else if admit_to_arena {
+                            } else {
                                 if let Err(err_val) = admit_requested_tracks_for_v1_command(
                                     &mut rt,
                                     &shared_buffers,
                                     body_bytes,
+                                    require_idle_admission,
                                 ) {
                                     err_val
                                 } else {
                                     rt.request(body_bytes)
                                 }
-                            } else {
-                                rt.request(body_bytes)
                             }
                         }
                         Err(_) => json!({ "ok": false, "error": { "code": "not_ready" } }),
@@ -1316,8 +1316,9 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
 
 fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: MemoryLocker>(
     rt: &mut HeadlessCoreRuntime<R, P, L>,
-    shared_buffers: &Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    shared_buffers: &SharedTrackBuffers,
     body_bytes: &[u8],
+    require_idle_admission: bool,
 ) -> Result<(), Value> {
     let Ok(parsed) = serde_json::from_slice::<Value>(body_bytes) else {
         return Ok(());
@@ -1325,6 +1326,14 @@ fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: Memor
     let Some(op) = parsed.get("operation").and_then(Value::as_str) else {
         return Ok(());
     };
+    if require_idle_admission
+        && (parsed["protocolVersion"].as_f64() != Some(1.0)
+            || parsed["engineId"].as_str() != Some(rt.config.engine_id.as_str())
+            || parsed["libraryId"].as_str() != Some(rt.config.library_id.as_str())
+            || (op == "queue.replace" && rt.current_activity() != "idle"))
+    {
+        return Ok(());
+    }
     let mut ids_to_admit: Vec<String> = Vec::new();
     let mut keep_ids: HashSet<String> = HashSet::new();
 
@@ -1335,7 +1344,12 @@ fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: Memor
             ids_to_admit.push(tid.to_string());
             keep_ids.insert(tid.to_string());
         }
-        if let Some(next_id) = rt.peek_next_queue_track_id() {
+        let next_id = if require_idle_admission {
+            parsed["trackId"].as_str().and_then(|id| rt.owner.successor_for_track(id))
+        } else {
+            rt.peek_next_queue_track_id()
+        };
+        if let Some(next_id) = next_id {
             keep_ids.insert(next_id.clone());
             ids_to_admit.push(next_id);
         }
@@ -1354,7 +1368,7 @@ fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: Memor
         }
         if let Some(current_id) = rt.current_queue_track_id() {
             keep_ids.insert(current_id.clone());
-            if ids_to_admit.is_empty() {
+            if !require_idle_admission && ids_to_admit.is_empty() {
                 ids_to_admit.push(current_id);
             }
         }
@@ -1383,7 +1397,7 @@ fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: Memor
     }
 
     let (admitted, effective_keep) =
-        match rt.admit_tracks_for_explicit_user_play(&ids_to_admit, &keep_ids) {
+        match rt.admit_tracks_for_explicit_user_play(&ids_to_admit, &keep_ids, require_idle_admission) {
             Ok(bufs) => (bufs, keep_ids),
             Err(_) if ids_to_admit.len() > 1 => {
                 // Fall back to admitting only the immediate primary track if lookahead exceeds locked-RAM headroom.
@@ -1394,7 +1408,7 @@ fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: Memor
                     primary_keep.insert(current_id);
                 }
                 let bufs = rt
-                    .admit_tracks_for_explicit_user_play(&primary_only, &primary_keep)
+                    .admit_tracks_for_explicit_user_play(&primary_only, &primary_keep, require_idle_admission)
                     .map_err(|_| json!({ "ok": false, "error": { "code": "not_ready" } }))?;
                 (bufs, primary_keep)
             }
@@ -1405,7 +1419,7 @@ fn admit_requested_tracks_for_v1_command<R: Renderer, P: PlatformProbe, L: Memor
     if let Ok(mut guard) = shared_buffers.lock() {
         guard.retain(|id, _| effective_keep.contains(id) || admitted.iter().any(|(a, _)| a == id));
         for (id, buf) in admitted {
-            guard.insert(id, buf);
+            guard.insert(id, Arc::downgrade(&buf));
         }
     }
     Ok(())
@@ -1417,7 +1431,7 @@ fn run_reconcile_loop<P: PlatformProbe, L: MemoryLocker>(
     active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
     paused_flag: Arc<AtomicBool>,
     control_url_ref: Arc<Mutex<Option<String>>>,
-    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    shared_buffers: SharedTrackBuffers,
 ) {
     let mut consecutive_failures: u32 = 0;
     while !stop_flag.load(Ordering::Acquire) {

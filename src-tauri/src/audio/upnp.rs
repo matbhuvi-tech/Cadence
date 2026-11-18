@@ -14,6 +14,7 @@ use tokio::time::timeout;
 use super::stream_tuning::{self, LockedBuffer, StreamingThreadGuard};
 use super::upnp_pacer::{PacerConfig, SynchronousPacer, UpnpPacingMetrics};
 pub use super::upnp_pacer::UpnpPacingSnapshot;
+use crate::core_runtime::LockedTrack;
 use crate::diag_log;
 use crate::diagnostics::{self, DiagCategory};
 
@@ -21,6 +22,7 @@ use crate::diagnostics::{self, DiagCategory};
 enum BufferMode {
     /// Entire file pre-loaded into page-locked RAM. Storage is idle during playback.
     WholeTrack(LockedBuffer),
+    AdmittedTrack(Arc<LockedTrack>),
     /// File exceeds the RAM budget: served from page-locked read-ahead windows.
     /// Storage wakes briefly once per window instead of reading continuously.
     Windowed { window_bytes: u64 },
@@ -60,38 +62,49 @@ struct StreamSource {
 }
 
 impl StreamSource {
-    fn prepare(path: &Path, duration_secs: f64, user_limit_mb: u64) -> Result<Self, String> {
-        let len = std::fs::metadata(path)
-            .map_err(|e| format!("Cannot stat stream file: {}", e))?
-            .len();
-
-        let budget = stream_tuning::effective_budget_bytes(user_limit_mb);
-        let window_bytes = stream_tuning::window_bytes_for_budget(budget);
-
-        let mode = if len > 0 && len <= budget {
-            match LockedBuffer::load(path) {
-                Ok(buf) => {
-                    eprintln!(
-                        "[Cadence UPnP Streamer] Whole-track buffer: {:.1} MB in RAM (page-locked: {}, budget {:.0} MB).",
-                        len as f64 / 1_048_576.0,
-                        buf.is_locked(),
-                        budget as f64 / 1_048_576.0
-                    );
-                    BufferMode::WholeTrack(buf)
-                }
-                Err(e) => {
-                    eprintln!("[Cadence UPnP Streamer] Whole-track load failed ({}), using windowed read-ahead.", e);
-                    BufferMode::Windowed { window_bytes }
-                }
-            }
+    fn prepare_source(
+        path: &Path,
+        duration_secs: f64,
+        user_limit_mb: u64,
+        admitted: Option<Arc<LockedTrack>>,
+    ) -> Result<Self, String> {
+        let (len, mode) = if let Some(track) = admitted {
+            (track.len() as u64, BufferMode::AdmittedTrack(track))
         } else {
-            eprintln!(
-                "[Cadence UPnP Streamer] {:.1} MB exceeds RAM budget ({:.0} MB): windowed read-ahead, {:.0} MB windows.",
-                len as f64 / 1_048_576.0,
-                budget as f64 / 1_048_576.0,
-                window_bytes as f64 / 1_048_576.0
-            );
-            BufferMode::Windowed { window_bytes }
+            let len = std::fs::metadata(path)
+                .map_err(|e| format!("Cannot stat stream file: {}", e))?
+                .len();
+
+            let budget = stream_tuning::effective_budget_bytes(user_limit_mb);
+            let window_bytes = stream_tuning::window_bytes_for_budget(budget);
+
+            let mode = if len > 0 && len <= budget {
+                match LockedBuffer::load(path) {
+                    Ok(buf) => {
+                        eprintln!(
+                            "[Cadence UPnP Streamer] Whole-track buffer: {:.1} MB in RAM (page-locked: {}, budget {:.0} MB).",
+                            len as f64 / 1_048_576.0,
+                            buf.is_locked(),
+                            budget as f64 / 1_048_576.0
+                        );
+                        BufferMode::WholeTrack(buf)
+                    }
+                    Err(e) => {
+                        eprintln!("[Cadence UPnP Streamer] Whole-track load failed ({}), using windowed read-ahead.", e);
+                        BufferMode::Windowed { window_bytes }
+                    }
+                }
+            } else {
+                eprintln!(
+                    "[Cadence UPnP Streamer] {:.1} MB exceeds RAM budget ({:.0} MB): windowed read-ahead, {:.0} MB windows.",
+                    len as f64 / 1_048_576.0,
+                    budget as f64 / 1_048_576.0,
+                    window_bytes as f64 / 1_048_576.0
+                );
+                BufferMode::Windowed { window_bytes }
+            };
+
+            (len, mode)
         };
 
         let ext = path
@@ -104,7 +117,10 @@ impl StreamSource {
         // Node B --> D: On-the-fly DSF sniffing & Bitrate Sanity Check
         // If file is DSF, directly inspect fixed-offset 80-byte header to recover true 1-bit clock and duration
         let dsf_info = if ext == "dsf" {
-            stream_tuning::parse_dsf_header(path)
+            match &mode {
+                BufferMode::AdmittedTrack(track) => stream_tuning::parse_dsf_header_bytes(track.as_slice()),
+                _ => stream_tuning::parse_dsf_header(path),
+            }
         } else {
             None
         };
@@ -435,6 +451,7 @@ impl UpnpManager {
             Some(src) => {
                 let file_mb = Some(src.len as f64 / 1_048_576.0);
                 match &src.mode {
+                    BufferMode::AdmittedTrack(_) => ("whole_track", file_mb, None, Some(true)),
                     BufferMode::WholeTrack(buf) => ("whole_track", file_mb, None, Some(buf.is_locked())),
                     BufferMode::Windowed { window_bytes } => ("windowed", file_mb, Some(to_mb(*window_bytes)), None),
                 }
@@ -568,7 +585,7 @@ impl UpnpManager {
 
         let snapshot = source_ref.lock().clone();
         let source = match snapshot {
-            Some(s) if matches!(s.mode, BufferMode::WholeTrack(_)) || s.path.exists() => s,
+            Some(s) if matches!(s.mode, BufferMode::WholeTrack(_) | BufferMode::AdmittedTrack(_)) || s.path.exists() => s,
             _ => {
                 diag_log!(DiagCategory::UpnpLifecycle, 0, 0, 0, "upnp_http_error", "status=404 reason=no_active_stream");
                 let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
@@ -722,32 +739,35 @@ impl UpnpManager {
             playback_paused,
         );
 
-        match &source.mode {
-            BufferMode::WholeTrack(ram) => {
-                // Zero-copy, zero-allocation: write fixed-size slices of the locked buffer.
-                let body = &ram.as_slice()[start as usize..=end as usize];
-                if !Self::write_paced_chunks(
-                    &mut stream,
-                    body,
-                    start,
-                    &source,
-                    track_audio_progress,
-                    &mut pacer,
-                ) {
-                    return;
-                }
+        let whole_track = match &source.mode {
+            BufferMode::WholeTrack(ram) => Some(ram.as_slice()),
+            BufferMode::AdmittedTrack(track) => Some(track.as_slice()),
+            BufferMode::Windowed { .. } => None,
+        };
+
+        if let Some(ram) = whole_track {
+            // Zero-copy, zero-allocation: write fixed-size slices of the locked buffer.
+            let body = &ram[start as usize..=end as usize];
+            if !Self::write_paced_chunks(
+                &mut stream,
+                body,
+                start,
+                &source,
+                track_audio_progress,
+                &mut pacer,
+            ) {
+                return;
             }
-            BufferMode::Windowed { window_bytes } => {
-                Self::stream_windowed_sync(
-                    &mut stream,
-                    &source,
-                    start,
-                    end,
-                    *window_bytes,
-                    track_audio_progress,
-                    &mut pacer,
-                );
-            }
+        } else if let BufferMode::Windowed { window_bytes } = &source.mode {
+            Self::stream_windowed_sync(
+                &mut stream,
+                &source,
+                start,
+                end,
+                *window_bytes,
+                track_audio_progress,
+                &mut pacer,
+            );
         }
         let _ = stream.flush();
     }
@@ -1161,6 +1181,20 @@ impl UpnpManager {
         artist: &str,
         album: &str,
     ) -> Result<(), String> {
+        self.play_source_on_device(target_udn, file_path, duration_secs, title, artist, album, None)
+            .await
+    }
+
+    pub(crate) async fn play_source_on_device(
+        &self,
+        target_udn: &str,
+        file_path: &Path,
+        duration_secs: f64,
+        title: &str,
+        artist: &str,
+        album: &str,
+        admitted: Option<Arc<LockedTrack>>,
+    ) -> Result<(), String> {
         let device = self
             .devices
             .lock()
@@ -1175,7 +1209,7 @@ impl UpnpManager {
             })?;
         *self.active_device.lock() = Some(device.clone());
 
-        self.play_file_with_device(device, file_path, duration_secs, title, artist, album)
+        self.play_file_with_device(device, file_path, duration_secs, title, artist, album, admitted)
             .await
     }
 
@@ -1196,7 +1230,7 @@ impl UpnpManager {
                 "No active UPnP audio streamer selected. Please select your network streamer in Audio Outputs.".to_string()
             })?;
 
-        self.play_file_with_device(device, file_path, duration_secs, title, artist, album)
+        self.play_file_with_device(device, file_path, duration_secs, title, artist, album, None)
             .await
     }
 
@@ -1208,6 +1242,7 @@ impl UpnpManager {
         title: &str,
         artist: &str,
         album: &str,
+        admitted: Option<Arc<LockedTrack>>,
     ) -> Result<(), String> {
 
         eprintln!(
@@ -1237,7 +1272,7 @@ impl UpnpManager {
         let reset_existing = {
             let guard = self.current_stream.lock();
             if let Some(s) = guard.as_ref() {
-                if s.path == file_path && matches!(s.mode, BufferMode::WholeTrack(_)) {
+                if admitted.is_none() && s.path == file_path && matches!(s.mode, BufferMode::WholeTrack(_)) {
                     s.has_streamed_audio.store(false, Ordering::Release);
                     s.last_audio_end_offset.store(0, Ordering::Release);
                     true
@@ -1252,7 +1287,7 @@ impl UpnpManager {
             // Release the previous track's buffer first so peak RAM isn't old + new.
             *self.current_stream.lock() = None;
             let limit_mb = self.buffer_limit_mb.load(Ordering::SeqCst);
-            let source = StreamSource::prepare(file_path, duration_secs, limit_mb)?;
+            let source = StreamSource::prepare_source(file_path, duration_secs, limit_mb, admitted)?;
             *self.current_stream.lock() = Some(Arc::new(source));
         }
 

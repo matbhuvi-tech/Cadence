@@ -2,7 +2,7 @@
 //!
 //! Invariants enforced:
 //! 1. **Zero Disk I/O during playback:** serves exclusively from pre-admitted, page-locked
-//!    `Arc<Vec<u8>>` slices in `LockedBytesArena`. Sony `.dsf` 80-byte headers are parsed
+//!    `Arc<LockedTrack>` slices in `LockedBytesArena`. Sony `.dsf` 80-byte headers are parsed
 //!    directly from locked RAM. No windowed-read or pageable fallback exists.
 //! 2. **Opaque Session Capabilities:** each `RunToken` mints an unguessable `/media/cap_<uuid>.<ext>`
 //!    URL exposing no file paths or track IDs. Superseded tokens immediately return `404`/`410`
@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::{LockedTrack, SharedTrackBuffers};
 use super::{
     HeadlessConfig, HeadlessCoreRuntime, MemoryLocker, PlatformProbe, RuntimeError,
     SystemMemoryLocker, SystemPlatformProbe,
@@ -1629,7 +1630,7 @@ pub(crate) struct ActiveMediaSession {
     pub(crate) capability_path: String,
     pub(crate) stream_url: String,
     pub(crate) run_token: Mutex<RunToken>,
-    pub(crate) buffer: Arc<Vec<u8>>,
+    pub(crate) buffer: Arc<LockedTrack>,
     pub(crate) content_type: &'static str,
     pub(crate) realtime_bytes_per_sec: Option<f64>,
     pub(crate) preroll_bytes: u64,
@@ -2063,7 +2064,7 @@ pub(crate) struct UpnpBridgeRenderer {
     pub(crate) advertised_ip: Ipv4Addr,
     pub(crate) active_session: Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
     pub(crate) paused_flag: Arc<AtomicBool>,
-    pub(crate) shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    pub(crate) shared_buffers: SharedTrackBuffers,
     pub(crate) track_meta: Arc<Mutex<HashMap<String, TrackMediaMeta>>>,
 }
 
@@ -2075,7 +2076,7 @@ impl Renderer for UpnpBridgeRenderer {
                     .shared_buffers
                     .lock()
                     .ok()
-                    .and_then(|g| g.get(&entry.track_id).cloned())
+                    .and_then(|g| g.get(&entry.track_id).and_then(std::sync::Weak::upgrade))
                     .ok_or(RendererError)?;
                 let meta = self
                     .track_meta
@@ -2260,7 +2261,7 @@ pub struct UpnpSessionRuntime<
     inner: HeadlessCoreRuntime<UpnpBridgeRenderer, P, L>,
     media_server: CoreMediaServer,
     device: Rs130DeviceDescriptor,
-    shared_buffers: Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    shared_buffers: SharedTrackBuffers,
     consecutive_failures: u32,
 }
 
@@ -2332,7 +2333,7 @@ impl<P: PlatformProbe, L: MemoryLocker> UpnpSessionRuntime<P, L> {
         if let Ok(mut map) = self.shared_buffers.lock() {
             for id in track_ids {
                 if let Some(buf) = self.inner.shared_track_buffer(id) {
-                    map.insert(id.clone(), buf);
+                    map.insert(id.clone(), Arc::downgrade(&buf));
                 }
             }
         }
@@ -2412,7 +2413,7 @@ pub(crate) fn apply_reconcile_probe_to_runtime<R: Renderer, P: PlatformProbe, L:
     rt: &mut HeadlessCoreRuntime<R, P, L>,
     active_session_ref: &Arc<Mutex<Option<Arc<ActiveMediaSession>>>>,
     paused_flag: &Arc<AtomicBool>,
-    shared_buffers: &Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>,
+    shared_buffers: &SharedTrackBuffers,
     active_session: Option<&Arc<ActiveMediaSession>>,
     probe_result: Result<RestartProbeSnapshot, String>,
     consecutive_failures: &mut u32,
@@ -2518,12 +2519,12 @@ pub(crate) fn apply_reconcile_probe_to_runtime<R: Renderer, P: PlatformProbe, L:
                     let mut keep = HashSet::new();
                     keep.insert(next_id.clone());
                     if let Ok(admitted) =
-                        rt.admit_tracks_for_explicit_user_play(&[next_id], &keep)
+                        rt.admit_tracks_for_explicit_user_play(&[next_id], &keep, false)
                     {
                         if let Ok(mut guard) = shared_buffers.lock() {
                             guard.retain(|id, _| keep.contains(id));
                             for (id, buf) in admitted {
-                                guard.insert(id, buf);
+                                guard.insert(id, Arc::downgrade(&buf));
                             }
                         }
                     }

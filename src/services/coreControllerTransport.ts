@@ -253,7 +253,12 @@ export function createFetchHttpCoreBridge(): HttpCoreTransportBridge {
     async postCoreRequest(profile, req) {
       const base = normalizeCoreBaseUrl(profile.baseUrl)
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 15000)
+      const admitsTrack =
+        req.operation === 'queue.replace' ||
+        (req.operation === 'playback.control' && req.action === 'play') ||
+        (req.operation === 'queue.control' && req.action !== 'modes')
+      // The Windows engine can synchronously admit large DSD files from NAS while idle.
+      const timer = setTimeout(() => controller.abort(), admitsTrack ? 180_000 : 15_000)
       try {
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
@@ -428,6 +433,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
   let activeCoreProfile: SavedCoreProfile | null = null
   let disposed = false
   let commandQueue: Promise<void> = Promise.resolve()
+  let commandInFlight = false
   let passiveSyncTimer: ReturnType<typeof setInterval> | null = null
   let passiveSyncInFlight = false
   let loadingSettleTimer: ReturnType<typeof setTimeout> | null = null
@@ -448,7 +454,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     if (disposed || attempt > MAX_LOADING_SETTLE_ATTEMPTS || typeof setTimeout !== 'function') return
     loadingSettleTimer = setTimeout(() => {
       loadingSettleTimer = null
-      if (disposed || !activeCoreService) return
+      if (disposed || commandInFlight || !activeCoreService) return
       const currentView = controller.getView()
       if (
         currentView.session.active.kind !== 'core' ||
@@ -486,7 +492,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     stopPassiveSync()
     if (disposed || typeof setInterval !== 'function') return
     passiveSyncTimer = setInterval(() => {
-      if (disposed || passiveSyncInFlight || !activeCoreService) return
+      if (disposed || commandInFlight || passiveSyncInFlight || !activeCoreService) return
       const currentView = controller.getView()
       if (currentView.session.active.kind !== 'core') {
         stopPassiveSync()
@@ -778,6 +784,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       releaseLock = resolve
     })
     await prevLock
+    commandInFlight = true
     try {
       const sendWithCurrentRevision = async (): Promise<CoreSnapshot> => {
         const beforeView = controller.getView()
@@ -893,6 +900,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       emit()
       throw err
     } finally {
+      commandInFlight = false
       releaseLock()
     }
   }

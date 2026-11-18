@@ -269,3 +269,7 @@
 - Windows engine: live QA on the installed engine with Dorothy track trk-45900611ec07 reproduced queue.replace returning not_ready while idle and leaving the queue empty.
 - Rose-67: Core reconciliation queries the renderer every five seconds when no session is active; physical sleep impact remains unverified.
 - Status: open; safe locked-memory admission and idle takeover detection need implementation and integrated validation.
+
+- Windows track admission is implemented on `fix/46-windows-track-admission`. The engine admits whole tracks to locked RAM while idle and shares those bytes with WASAPI and UPnP. Failed admission leaves the queue intact. New uncached tracks require an idle engine and the existing 30-second cooldown. The desktop allows up to three minutes for commands that may admit tracks from NAS.
+- Release QA passed with a 44.1 kHz WAV on WASAPI and the 806 MiB Dorothy DSF on the physical ROSE-67. The DSF queued and started in approximately 42 seconds with an advancing session position. The WASAPI transition check played the cached next track and rejected an uncached transition during playback and cooldown. The installed engine was restored after testing.
+- The Windows HTTP admission, lock lifetime, and targeted Core and desktop tests passed. Both NSIS installers built. Full audio-path resource profiling and user verification are pending. Renderer idle sleep remains open under #46.

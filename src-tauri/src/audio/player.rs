@@ -18,6 +18,7 @@ use super::wasapi_exclusive::{
     self, PreloadAdmissionConfig, WasapiExclusiveSession, WasapiExclusiveTelemetrySnapshot,
     WasapiPreloadError,
 };
+use crate::core_runtime::{LockedTrack, LockedTrackReader};
 use crate::diag_log;
 use crate::diagnostics::{self, DiagCategory, HygieneState};
 
@@ -475,6 +476,7 @@ fn diag_cmd_end(cmd: &str, meta: CmdMeta, started_at: Option<Instant>, error: Op
 enum AudioWorkerMsg {
     Play {
         file_path: String,
+        admitted: Option<Arc<LockedTrack>>,
         meta: CmdMeta,
         responder: Sender<Result<AudioStreamInfo, String>>,
     },
@@ -639,6 +641,7 @@ impl AudioEngine {
             let mut saved_user_volume: f32 = 1.0;
             let mut purity_mode: bool = false;
             let mut current_info: Option<AudioStreamInfo> = None;
+            let mut playing_admitted_track = false;
             let mut current_stream_rate: Option<u32> = initial_config
                 .as_ref()
                 .map(|c| c.sample_rate().0)
@@ -705,12 +708,13 @@ impl AudioEngine {
                         let _ = responder.send(purity_mode);
                     }
 
-                    AudioWorkerMsg::Play { file_path, meta, responder } => {
+                    AudioWorkerMsg::Play { file_path, admitted, meta, responder } => {
                         let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "Play", meta);
                         is_loading_worker.store(true, Ordering::Release);
                         loading_cancel_worker.store(false, Ordering::Release);
                         let _loading_guard = LoadingGuard(&is_loading_worker);
                         let prev_file = current_file.clone();
+                        playing_admitted_track = false;
 
                         let is_prev_dsd = current_info.as_ref().map(|i| {
                             i.format.to_uppercase().contains("DSD") || i.format.to_uppercase().contains("DSF") || i.format.to_uppercase().contains("DFF")
@@ -743,7 +747,7 @@ impl AudioEngine {
                         is_paused = false;
 
                         let path = Path::new(&file_path);
-                        if !path.exists() {
+                        if admitted.is_none() && !path.exists() {
                             let err = format!("File does not exist: {}", file_path);
                             diag_log!(DiagCategory::PlaybackLifecycle, meta.id, 0, 0, "play_failed", "reason=file_missing path={}", file_path);
                             diag_cmd_end("Play", meta, cmd_t0, Some(&err));
@@ -751,7 +755,7 @@ impl AudioEngine {
                             continue;
                         }
 
-                        let info_res = Self::inspect_audio_file(path);
+                        let info_res = Self::inspect_audio_source(path, admitted.as_deref());
                         let stream_info = match info_res {
                             Ok(i) => i,
                             Err(e) => {
@@ -852,7 +856,7 @@ impl AudioEngine {
                                 let upnp_res = match rt {
                                     Ok(runtime) => runtime.block_on(async {
                                         upnp_clone
-                                            .play_file_on_device(&udn, &target_path, track_duration, &title, &artist, &album)
+                                            .play_source_on_device(&udn, &target_path, track_duration, &title, &artist, &album, admitted.clone())
                                             .await
                                     }),
                                     Err(e) => Err(format!("Tokio runtime error: {}", e)),
@@ -870,6 +874,7 @@ impl AudioEngine {
                                         is_upnp_active = true;
                                         active_backend_endpoint = Some(selected);
                                         current_file = Some(file_path.clone());
+                                        playing_admitted_track = admitted.is_some();
                                         duration = Duration::from_secs_f64(stream_info.duration_secs);
                                         playback_start = Some(Instant::now());
                                         accumulated_position = Duration::ZERO;
@@ -974,10 +979,11 @@ impl AudioEngine {
                                 std::thread::sleep(Duration::from_millis(effective_settle_ms));
                             }
 
-                            let preload_res = wasapi_exclusive::decode_file_to_ram(
+                            let preload_res = wasapi_exclusive::decode_source_to_ram(
                                 path,
                                 &preload_admission,
                                 Some(&loading_cancel_worker),
+                                admitted.clone(),
                             );
 
                             let preloaded = match preload_res {
@@ -1025,6 +1031,7 @@ impl AudioEngine {
                                     last_exclusive_telemetry = session.snapshot_telemetry();
                                     exclusive_session = Some(session);
                                     current_file = Some(file_path.clone());
+                                    playing_admitted_track = admitted.is_some();
                                     duration = Duration::from_secs_f64(if decoded_dur_secs > 0.0 {
                                         decoded_dur_secs
                                     } else {
@@ -1277,7 +1284,7 @@ impl AudioEngine {
                         } else {
                             None
                         };
-                        let ram_hit = mem_data.is_some();
+                        let ram_hit = admitted.is_some() || mem_data.is_some();
                         staged_next_file = None;
 
                         let handle = stream_handle.as_ref().unwrap();
@@ -1343,7 +1350,17 @@ impl AudioEngine {
                         let effective_vol = if purity_mode { 1.0 } else { volume };
                         new_sink.set_volume(effective_vol);
 
-                        if let Some(bytes) = mem_data {
+                        if let Some(track) = admitted.as_ref() {
+                            match Decoder::new(Cursor::new(LockedTrackReader(Arc::clone(track)))) {
+                                Ok(source) => new_sink.append(source),
+                                Err(e) => {
+                                    let err = format!("Decoder failed for admitted stream: {}", e);
+                                    diag_cmd_end("Play", meta, cmd_t0, Some(&err));
+                                    let _ = responder.send(Err(err));
+                                    continue;
+                                }
+                            }
+                        } else if let Some(bytes) = mem_data {
                             eprintln!("[Cadence AudioEngine] Playing track directly from pinned RAM buffer (Zero Disk I/O).");
                             match Decoder::new(Cursor::new(bytes)) {
                                 Ok(src) => new_sink.append(src),
@@ -1386,6 +1403,7 @@ impl AudioEngine {
                         active_backend_endpoint = Some(local_selected);
                         sink = Some(new_sink);
                         current_file = Some(file_path.clone());
+                        playing_admitted_track = admitted.is_some();
                         duration = Duration::from_secs_f64(stream_info.duration_secs);
                         playback_start = Some(Instant::now());
                         accumulated_position = Duration::ZERO;
@@ -1511,6 +1529,7 @@ impl AudioEngine {
                         accumulated_position = Duration::ZERO;
                         is_paused = false;
                         current_file = None;
+                        playing_admitted_track = false;
                         is_upnp_active = false;
                         if is_playing_worker.load(Ordering::Relaxed) || is_paused_worker.load(Ordering::Relaxed) {
                             *stopped_at_worker.lock() = Some(Instant::now());
@@ -1542,7 +1561,14 @@ impl AudioEngine {
                                 target_pos.as_secs_f64()
                             );
                         } else if !is_upnp_active && active_backend_endpoint.as_ref() == Some(&selected_endpoint) {
-                            if let (Some(fp), Some(handle)) = (current_file.as_ref(), stream_handle.as_ref()) {
+                            if playing_admitted_track {
+                                if let Some(s) = sink.as_ref() {
+                                    if s.try_seek(target_pos).is_ok() {
+                                        accumulated_position = target_pos;
+                                        playback_start = (!is_paused).then(Instant::now);
+                                    }
+                                }
+                            } else if let (Some(fp), Some(handle)) = (current_file.as_ref(), stream_handle.as_ref()) {
                                 let path = Path::new(fp);
                                 if let Ok(file) = File::open(path) {
                                     let reader = BufReader::new(file);
@@ -1591,6 +1617,16 @@ impl AudioEngine {
 
                     AudioWorkerMsg::SetEndpoint { endpoint, source, meta, responder } => {
                         let cmd_t0 = diag_cmd_begin(&pending_cmds_worker, "SetEndpoint", meta);
+                        if playing_admitted_track {
+                            if is_playing_worker.load(Ordering::Acquire) || is_paused {
+                                let error = "Stop playback before switching outputs".to_string();
+                                diag_cmd_end("SetEndpoint", meta, cmd_t0, Some(&error));
+                                let _ = responder.send(Err(error));
+                                continue;
+                            }
+                            playing_admitted_track = false;
+                            current_file = None;
+                        }
                         let prev_endpoint = selected_endpoint.clone();
                         let inventory = EndpointInventory::from_host(&upnp_worker_ref);
                         selected_endpoint = endpoint.clone();
@@ -2298,6 +2334,19 @@ impl AudioEngine {
     }
 
     pub fn play_track(&self, file_path: &str) -> Result<AudioStreamInfo, String> {
+        self.play_source(file_path.to_string(), None)
+    }
+
+    pub(crate) fn play_admitted_track(&self, track: Arc<LockedTrack>) -> Result<AudioStreamInfo, String> {
+        let file_path = track.path().to_str().ok_or("Track path is not valid UTF-8")?;
+        self.play_source(file_path.to_string(), Some(track))
+    }
+
+    fn play_source(
+        &self,
+        file_path: String,
+        admitted: Option<Arc<LockedTrack>>,
+    ) -> Result<AudioStreamInfo, String> {
         // Signal any in-progress Loading decode on the worker thread to abort immediately
         self.loading_cancel_atomic.store(true, Ordering::Release);
         // Let the current scan operation finish before audio starts. The scanner cannot begin
@@ -2307,7 +2356,8 @@ impl AudioEngine {
         let meta = self.enqueue_cmd("Play");
         self.tx
             .send(AudioWorkerMsg::Play {
-                file_path: file_path.to_string(),
+                file_path,
+                admitted,
                 meta,
                 responder: resp_tx,
             })
@@ -2605,7 +2655,12 @@ impl AudioEngine {
             .map(|i| (i.channels as u32, i.sample_rate, i.duration_secs))
     }
 
+    #[cfg(test)]
     fn inspect_audio_file(path: &Path) -> Result<AudioStreamInfo, String> {
+        Self::inspect_audio_source(path, None)
+    }
+
+    fn inspect_audio_source(path: &Path, admitted: Option<&LockedTrack>) -> Result<AudioStreamInfo, String> {
         let extension = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -2615,7 +2670,13 @@ impl AudioEngine {
         let is_dsd = extension == "DSF" || extension == "DFF";
 
         if is_dsd {
-            if let Some(dsd) = crate::scanner::dsd::probe_dsd_file(path) {
+            let dsd = match admitted {
+                Some(track) => crate::scanner::dsd::probe_dsd_reader(
+                    &mut Cursor::new(track.as_slice()), track.len() as u64, &extension,
+                ),
+                None => crate::scanner::dsd::probe_dsd_file(path),
+            };
+            if let Some(dsd) = dsd {
                 let tag = dsd.tag.as_ref();
                 let sample_rate = dsd.sample_rate;
                 let bit_depth = dsd.bit_depth.or(Some(1));
@@ -2647,9 +2708,11 @@ impl AudioEngine {
         }
 
         // Attempt reading via Lofty
-        let probe_res = Probe::open(path)
-            .ok()
-            .and_then(|p| p.read().ok());
+        let probe_res = match admitted {
+            Some(track) => Probe::new(Cursor::new(track.as_slice()))
+                .guess_file_type().ok().and_then(|p| p.read().ok()),
+            None => Probe::open(path).ok().and_then(|p| p.read().ok()),
+        };
 
         if let Some(probe) = probe_res {
             let properties = probe.properties();
@@ -2690,7 +2753,12 @@ impl AudioEngine {
             eprintln!("[Cadence AudioEngine] Lofty tag read bypassed for '{}', extracting fallback metadata.", path.display());
 
             let (channels, sample_rate, duration_secs) = if extension == "DSF" {
-                Self::parse_dsf_header(path).unwrap_or((2, 11289600, 0.0))
+                let header = match admitted {
+                    Some(track) => super::stream_tuning::parse_dsf_header_bytes(track.as_slice())
+                        .map(|h| (u32::from(h.channels), h.sample_rate, h.duration_secs)),
+                    None => Self::parse_dsf_header(path),
+                };
+                header.unwrap_or((2, 11289600, 0.0))
             } else if extension == "DFF" {
                 (2, 2822400, 0.0)
             } else {

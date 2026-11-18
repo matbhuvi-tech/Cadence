@@ -30,7 +30,8 @@ def main():
         body = json.dumps({**base, 'operation': operation, **fields}).encode()
         req = urllib.request.Request(pairing['baseUrl'] + '/v1/core', data=body,
                                      headers={'Content-Type': 'application/json', 'x-cadence-token': pairing['token']})
-        with urllib.request.urlopen(req, context=context, timeout=30) as response:
+        admits_track = operation == 'queue.replace' or (operation == 'playback.control' and fields.get('action') == 'play')
+        with urllib.request.urlopen(req, context=context, timeout=180 if admits_track else 30) as response:
             return json.load(response)
 
     def checked(operation, **fields):
