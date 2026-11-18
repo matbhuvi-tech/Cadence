@@ -53,8 +53,7 @@ struct StreamSource {
     chunk_bytes: usize,
     /// Byte offset where ID3v2 / album artwork metadata begins (if known).
     metadata_offset: Option<u64>,
-    /// Bounded initial headroom target in ms for `InitialFill` (default: 1200 ms).
-    initial_lead_target_ms: u64,
+    pacer_config: PacerConfig,
     /// Monotonic audio payload progress across sequential HTTP Range connections.
     has_streamed_audio: AtomicBool,
     last_audio_end_offset: AtomicU64,
@@ -67,6 +66,7 @@ impl StreamSource {
         duration_secs: f64,
         user_limit_mb: u64,
         admitted: Option<Arc<LockedTrack>>,
+        pacer_config: PacerConfig,
     ) -> Result<Self, String> {
         let (len, mode) = if let Some(track) = admitted {
             (track.len() as u64, BufferMode::AdmittedTrack(track))
@@ -168,9 +168,9 @@ impl StreamSource {
             let sndbuf = stream_tuning::calculate_sndbuf_bytes(realtime);
             let fast_start = stream_tuning::calculate_fast_start_sndbuf_bytes(realtime);
             let chunk_sz = stream_tuning::calculate_pacing_chunk_bytes(realtime);
-            // Cap pre-roll burst to MAX_PREROLL_BYTES (2 MB) to prevent FIFO bufferbloat
+            // Bound the unpaced startup burst before paced initial fill.
             let raw_preroll = (realtime * stream_tuning::PREROLL_SECS) as u64;
-            let preroll = raw_preroll.min(stream_tuning::MAX_PREROLL_BYTES);
+            let preroll = raw_preroll.min(pacer_config.max_preroll_bytes);
 
             eprintln!(
                 "[Cadence UPnP Streamer] Format: {} | Audio Bitrate: {:.1} KB/s ({:.2} Mbps) | State 1 Ramp-Up: {:.1} KB/s ({:.2}x) | State 2 Step-Down: {:.1} KB/s ({:.2}x) | Fast-Start: {} KB | SO_SNDBUF: {} KB | Chunk: {} KB",
@@ -178,9 +178,9 @@ impl StreamSource {
                 realtime / 1024.0,
                 (realtime * 8.0) / 1_000_000.0,
                 initial_pace / 1024.0,
-                stream_tuning::RAMP_UP_MULTIPLIER,
+                pacer_config.initial_fill_multiplier,
                 steady_pace / 1024.0,
-                stream_tuning::BACKPRESSURE_STEPDOWN_MULTIPLIER,
+                pacer_config.initial_overfeed_multiplier,
                 preroll / 1024,
                 sndbuf / 1024,
                 chunk_sz / 1024
@@ -200,12 +200,6 @@ impl StreamSource {
             None
         };
 
-        let initial_lead_target_ms = std::env::var("CADENCE_INITIAL_LEAD_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|ms| ms.clamp(150, 2500))
-            .unwrap_or_else(|| PacerConfig::default().initial_lead_target_ms);
-
         Ok(Self {
             path: path.to_path_buf(),
             content_type: content_type_for(path),
@@ -218,7 +212,7 @@ impl StreamSource {
             fast_start_sndbuf_bytes,
             chunk_bytes,
             metadata_offset,
-            initial_lead_target_ms,
+            pacer_config,
             has_streamed_audio: AtomicBool::new(false),
             last_audio_end_offset: AtomicU64::new(0),
             mode,
@@ -306,6 +300,30 @@ pub struct UpnpDevice {
 }
 
 impl UpnpDevice {
+    fn pacer_config(&self, force_generic: bool, initial_lead_ms: Option<u64>) -> PacerConfig {
+        let is_rs130 = !force_generic
+            && [Some(self.friendly_name.as_str()), self.model_name.as_deref(), self.model_description.as_deref()]
+                .into_iter()
+                .flatten()
+                .flat_map(|field| field.split(|c: char| !c.is_ascii_alphanumeric()))
+                .any(|word| word.eq_ignore_ascii_case("rs130"));
+        let mut config = PacerConfig::default();
+        if is_rs130 {
+            config.max_preroll_bytes = 512 * 1024;
+            config.initial_fill_lead_ms = config.initial_lead_target_ms as i64;
+            config.initial_overfeed_multiplier = 1.0;
+            config.max_overfeed_multiplier = 1.0;
+            config.soft_ceiling_floor = 1.0;
+        }
+        if let Some(ms) = initial_lead_ms {
+            config.initial_lead_target_ms = ms.clamp(150, 2500);
+            if is_rs130 {
+                config.initial_fill_lead_ms = config.initial_lead_target_ms as i64;
+            }
+        }
+        config
+    }
+
     /// Calculate priority score: Dedicated audiophile network streamers score high (> 100),
     /// generic audio renderers score normal (50),
     /// displays/monitors/TVs score low (< 0).
@@ -725,10 +743,8 @@ impl UpnpManager {
             source.last_audio_end_offset.store(start, Ordering::Release);
         }
 
-        let mut config = PacerConfig::default();
-        config.initial_lead_target_ms = source.initial_lead_target_ms;
         let mut pacer = SynchronousPacer::with_config(
-            config,
+            source.pacer_config,
             source.realtime_bytes_per_sec,
             source.preroll_bytes,
             source.sndbuf_bytes,
@@ -1266,13 +1282,19 @@ impl UpnpManager {
 
         self.playback_paused.store(false, Ordering::Release);
         self.pacing_metrics.reset_for_stream();
+        let force_generic = std::env::var("CADENCE_UPNP_PACING").as_deref() == Ok("generic");
+        let initial_lead_ms = std::env::var("CADENCE_INITIAL_LEAD_MS")
+            .ok()
+            .and_then(|value| value.parse().ok());
+        let pacer_config = device.pacer_config(force_generic, initial_lead_ms);
 
         // Pre-load the untouched file into page-locked RAM before the renderer
         // starts pulling, so storage is idle for the duration of playback.
         let reset_existing = {
             let guard = self.current_stream.lock();
             if let Some(s) = guard.as_ref() {
-                if admitted.is_none() && s.path == file_path && matches!(s.mode, BufferMode::WholeTrack(_)) {
+                if admitted.is_none() && s.path == file_path && s.pacer_config == pacer_config
+                    && matches!(s.mode, BufferMode::WholeTrack(_)) {
                     s.has_streamed_audio.store(false, Ordering::Release);
                     s.last_audio_end_offset.store(0, Ordering::Release);
                     true
@@ -1287,7 +1309,7 @@ impl UpnpManager {
             // Release the previous track's buffer first so peak RAM isn't old + new.
             *self.current_stream.lock() = None;
             let limit_mb = self.buffer_limit_mb.load(Ordering::SeqCst);
-            let source = StreamSource::prepare_source(file_path, duration_secs, limit_mb, admitted)?;
+            let source = StreamSource::prepare_source(file_path, duration_secs, limit_mb, admitted, pacer_config)?;
             *self.current_stream.lock() = Some(Arc::new(source));
         }
 
