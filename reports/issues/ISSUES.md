@@ -1,5 +1,11 @@
 # Issue Log
 
+## GitHub #29 — Windows RS130 DSD256 stuttering over Wi-Fi
+
+- Branch: `fix/29-windows-rs130-pacing`. Windows now selects a built-in RS130 profile from the renderer description. It caps RS130 pre-roll at 512 KiB, targets a 1.2-second initial lead and cruises at 1.000×. Set `CADENCE_UPNP_PACING=generic` before launching the engine to compare with the prior policy on the same network. Profile selection requires no JSON file.
+- Regression evidence. The profile-selection test failed to compile before the helper existed (`7f4e928)), then all 14 UPnP tests and all 75 optimized Windows engine library tests passed with the implementation (`3aac430`). The Windows Engine NSIS installer built successfully. Coverage percentage was not measured.
+- Hardware evidence. The existing QA client reached the installed engine and found a paused session. The queue and process were preserved. Physical Wi-Fi DSD256 and PCM listening, track transitions, and resource and network measurements remain pending. The QA client verifies playback start but cannot detect audible stutter.
+
 ## GitHub #42: Linux Core DSD256 stuttering caused by `tcpi_rcv_space` substituted for `tcpi_snd_wnd` in `CorePacer`
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/42
