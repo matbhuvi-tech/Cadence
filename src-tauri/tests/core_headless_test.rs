@@ -259,6 +259,7 @@ fn temp_db_startup_projects_catalog_runs_v1_protocol_and_shuts_down_cleanly() {
     })));
     assert_eq!(play_resp["ok"], true, "{play_resp}");
     assert_eq!(play_resp["data"]["playback"]["activity"], "loading");
+    assert!(!runtime.output_selection_is_idle(), "output selection must be disabled while loading");
 
     runtime.shutdown().expect("clean shutdown");
     assert_eq!(runtime.retained_locked_bytes(), 0);
@@ -411,6 +412,24 @@ fn strict_admission_rejects_over_budget_and_lock_failures_without_windowed_or_pa
     assert_eq!(failing_locker.locked_bytes.load(Ordering::SeqCst), 0);
 
     let _ = std::fs::remove_dir_all(&ws.dir);
+}
+
+#[test]
+fn evicting_an_admitted_track_keeps_its_pages_locked_until_the_last_reader_drops() {
+    let ws = TempWorkspace::create("shared_lock_lifetime");
+    let files = HashMap::from([("track".to_string(), ws.song_a_path.clone())]);
+    let locker = FakeLocker::new(true);
+    let mut arena = LockedBytesArena::new(generous_probe(), locker.clone(), 0);
+    arena.admit_files(&files, &["track".to_string()]).unwrap();
+    let reader = arena.get_shared_buffer("track").unwrap();
+
+    arena.clear();
+    assert!(!arena.is_admitted("track"));
+    assert_eq!(locker.unlock_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(reader.len(), 64 * 1024);
+    drop(reader);
+    assert_eq!(locker.unlock_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(locker.locked_bytes.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -730,3 +749,22 @@ fn headless_dependency_tree_excludes_gui_and_local_audio_crates() {
     }
 }
 
+
+#[test]
+fn selected_output_is_reflected_in_authoritative_session_snapshot() {
+    let ws = TempWorkspace::create("selected_output_snapshot");
+    let mut runtime = HeadlessCoreRuntime::open_with_platform(
+        default_config(ws.db_path.clone()), RecordingRenderer::default(),
+        generous_probe(), FakeLocker::new(true),
+    ).expect("open runtime");
+    let before = runtime.request(&wire(json!({"operation": "session.snapshot"})));
+    assert_eq!(before["data"]["output"]["id"], "rs130-main");
+    runtime.set_output(Output { id: "upnp_rose_67".into(), label: "ROSE-67".into(), transport: "upnp".into() }).expect("select output");
+    let after = runtime.request(&wire(json!({"operation": "session.snapshot"})));
+    assert_eq!(after["data"]["output"]["id"], "upnp_rose_67");
+    assert_eq!(after["data"]["output"]["label"], "ROSE-67");
+    assert_eq!(after["data"]["revision"], 1);
+    runtime.shutdown().unwrap();
+    drop(runtime);
+    std::fs::remove_dir_all(&ws.dir).unwrap();
+}

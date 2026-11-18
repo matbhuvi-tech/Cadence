@@ -1,0 +1,3 @@
+# Windows output-state regression evidence
+
+The reproduced user journey selects a renderer and reads a session snapshot. RED: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --test core_headless_test selected_output_is_reflected_in_authoritative_session_snapshot` failed with `rs130-main` instead of `upnp_rose_67` at commit `e3e0cef`. GREEN: the same command passed with the control-plane change at `c8b652c`. The full `core_headless_test` (8 tests) and `core_session_test` (24 tests) also passed. Coverage percentage, installed Windows engine, UI picker, real playback and hardware qualification were not verified. Issue #44 remains open.

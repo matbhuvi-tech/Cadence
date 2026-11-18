@@ -31,6 +31,7 @@
 //!      boundaries or on caller query threads).
 
 use std::fs::File;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -50,11 +51,12 @@ use symphonia::core::codecs::{
 };
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use super::stream_tuning::{self, StreamingThreadGuard};
+use crate::core_runtime::{LockedTrack, LockedTrackReader};
 use crate::diag_log;
 use crate::diagnostics::DiagCategory;
 
@@ -415,6 +417,15 @@ pub fn decode_file_to_ram(
     admission: &PreloadAdmissionConfig,
     cancel_token: Option<&AtomicBool>,
 ) -> Result<PreloadedPcmTrack, WasapiPreloadError> {
+    decode_source_to_ram(path, admission, cancel_token, None)
+}
+
+pub(crate) fn decode_source_to_ram(
+    path: &Path,
+    admission: &PreloadAdmissionConfig,
+    cancel_token: Option<&AtomicBool>,
+    admitted: Option<Arc<LockedTrack>>,
+) -> Result<PreloadedPcmTrack, WasapiPreloadError> {
     let t0 = Instant::now();
 
     if let Some(tok) = cancel_token {
@@ -437,11 +448,14 @@ pub fn decode_file_to_ram(
         ));
     }
 
-    let file = File::open(path).map_err(|e| {
-        WasapiPreloadError::DecodeFailed(format!("Failed to open '{}': {}", path.display(), e))
-    })?;
-
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let strict_lock = admitted.is_some();
+    let source: Box<dyn MediaSource> = match admitted {
+        Some(track) => Box::new(Cursor::new(LockedTrackReader(track))),
+        None => Box::new(File::open(path).map_err(|e| {
+            WasapiPreloadError::DecodeFailed(format!("Failed to open '{}': {}", path.display(), e))
+        })?),
+    };
+    let mss = MediaSourceStream::new(source, Default::default());
     let mut hint = Hint::new();
     if !ext.is_empty() {
         hint.with_extension(&ext);
@@ -668,11 +682,17 @@ pub fn decode_file_to_ram(
     prefault_pages(&mut pcm_bytes);
     let prefault_duration_us = tf0.elapsed().as_micros() as u64;
 
-    let is_virtual_locked = if admission.virtual_lock_enabled {
+    let is_virtual_locked = if strict_lock || admission.virtual_lock_enabled {
         stream_tuning::lock_raw_slice(&pcm_bytes)
     } else {
         false
     };
+
+    if strict_lock && !is_virtual_locked {
+        return Err(WasapiPreloadError::AdmissionRejected(
+            "Could not lock decoded PCM in physical RAM".into(),
+        ));
+    }
 
     Ok(PreloadedPcmTrack {
         data: pcm_bytes,
@@ -1291,14 +1311,18 @@ mod win_exclusive {
                 let total_samples = track.total_frames * (track.channels as usize);
                 let mut widened = Vec::new();
                 if widened.try_reserve_exact(total_samples * 4).is_ok() {
-                    if track.is_virtual_locked {
-                        stream_tuning::unlock_raw_slice(&track.data);
-                        track.is_virtual_locked = false;
-                    }
                     for chunk in track.data.chunks_exact(2) {
                         widened.extend_from_slice(&[0u8, 0u8, chunk[0], chunk[1]]);
                     }
                     prefault_pages(&mut widened);
+                    if track.is_virtual_locked {
+                        if !stream_tuning::lock_raw_slice(&widened) {
+                            return Err(WasapiPreloadError::AdmissionRejected(
+                                "Could not lock widened PCM in physical RAM".into(),
+                            ));
+                        }
+                        stream_tuning::unlock_raw_slice(&track.data);
+                    }
                     track.data = widened;
                     track.format = NativePcmFormat::I24InI32Msb;
                     track.frame_stride_bytes = (track.channels as usize) * 4;

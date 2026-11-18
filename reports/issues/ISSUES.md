@@ -247,3 +247,29 @@
 
 - Request: an interactive installer with suggested network address and release, prerequisite setup, and automatic engine installation on Linux and TrueNAS.
 - Status: automated checks in progress; live NAS and first-release publication remain to be verified.
+
+## Feature: UPnP renderer pacing calibration
+
+- Requested: standalone privileged capture workflow producing a renderer-specific pacing JSON for playback engine platforms.
+- Branch: `feat/renderer-pacer-calibration`.
+- Status: experimental manual-capture CLI and candidate profile; hardware validation, automatic playback control, privilege orchestration and packaged multi-platform releases remain open. See `tools/renderer-calibration/README.md`.
+
+## GitHub #44: Windows engine selected output and playback readiness
+
+- Link: https://github.com/matbhuvi-tech/Cadence/issues/44
+- Branch: `fix/44-windows-engine-output-state`.
+- Observed: RS130 is discovered and output selection returns success, but session snapshot continues to report the startup output; Windows playback attempts returned `not_ready`.
+- Progress: session-owner output projection now updates with the selected output and advances the revision. Focused regression and headless/session tests pass. Desktop remote-output selection and the separate playback admission failure remain unresolved; installed engine has not been updated or validated.
+- Admission investigation: the Windows control listener passes `admit_to_arena = false`, while `HeadlessCoreRuntime::rejects_unadmitted_target` and `SharedRenderer` require admission for catalog tracks. This source-level mismatch explains the observed `not_ready` response if the installed binary has the same code. Merely enabling Core admission duplicates the Windows renderer's file loading; bypassing admission leaves the Windows UPnP loader's pageable and windowed fallbacks in place, which can violate the workspace's strict memory and storage invariants. A shared, strictly locked buffer handoff needs design and testing before either change is safe.
+- Follow-up: desktop picker now requests the active engine's outputs when opened and allows an idle user to select an available output. The Windows engine rejects unavailable outputs and selection during active playback. `node --import tsx --test src/test/testEngineOutputs.ts`, `npm run build`, targeted Core tests and the `engine-audio` cargo check pass. The installed application and live RS130 UI have not been updated or tested. Track admission remains unresolved.
+- Live follow-up: the installed engine accepted ROSE-67 but reported `system_default` in its next snapshot. A temporary run of the rebuilt release engine selected a local WASAPI device and returned that device with revision 1; the installed process was restored. RS130 was not discovered during the bounded startup window, so the rebuilt engine's RS130 selection remains unverified. Picker now detects a mismatch and reports an explicit failure instead of silently showing the previous output. Python-free TS tests and `npm run build` pass. Windows engine release binary and NSIS installer were built; the `not_ready` track-admission issue is still unresolved.
+- Renderer discovery follow-up: fixed SSDP collection to wait through the 2-second response window, and added idle/cooldown-guarded `outputs.scan` plus a desktop scan button. A delayed-response regression test passes. Against the physical RS130, the temporary release engine scanned ROSE-67, selected its exact UDN, and reported ROSE-67 in the next snapshot. The installed engine was restored after testing; the new installer must still be installed by the user. Playback admission remains unresolved.
+
+## #46 — Renderer idle sleep and Windows engine playback
+- Windows engine: live QA on the installed engine with Dorothy track trk-45900611ec07 reproduced queue.replace returning not_ready while idle and leaving the queue empty.
+- Rose-67: Core reconciliation queries the renderer every five seconds when no session is active; physical sleep impact remains unverified.
+- Status: open; safe locked-memory admission and idle takeover detection need implementation and integrated validation.
+
+- Windows track admission is implemented on `fix/46-windows-track-admission`. The engine admits whole tracks to locked RAM while idle and shares those bytes with WASAPI and UPnP. Failed admission leaves the queue intact. New uncached tracks require an idle engine and the existing 30-second cooldown. The desktop allows up to three minutes for commands that may admit tracks from NAS.
+- Release QA passed with a 44.1 kHz WAV on WASAPI and the 806 MiB Dorothy DSF on the physical ROSE-67. The DSF queued and started in approximately 42 seconds with an advancing session position. The WASAPI transition check played the cached next track and rejected an uncached transition during playback and cooldown. The installed engine was restored after testing.
+- The Windows HTTP admission, lock lifetime, and targeted Core and desktop tests passed. Both NSIS installers built. Full audio-path resource profiling and user verification are pending. Renderer idle sleep remains open under #46.

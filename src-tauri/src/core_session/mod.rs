@@ -126,6 +126,12 @@ impl State {
             .and_then(|id| self.entries.iter().position(|entry| &entry.entry_id == id))
     }
 
+    fn index_for_track(&self, track_id: &str) -> Option<usize> {
+        self.current_index()
+            .filter(|&i| self.entries[i].track_id == track_id)
+            .or_else(|| self.entries.iter().position(|entry| entry.track_id == track_id))
+    }
+
     fn rebuild_order(&mut self) {
         self.order = (0..self.entries.len()).collect();
         if !self.shuffle {
@@ -261,6 +267,23 @@ impl<R: Renderer> SessionOwner<R> {
         self.durations = durations;
         Ok(())
     }
+    /// Update the output projection on the serialized control path.
+    pub fn set_output(&mut self, output: Output) -> Result<()> {
+        token(&output.id)?;
+        text(&output.label)?;
+        ensure(matches!(output.transport.as_str(), "upnp" | "wasapi" | "system_default"))?;
+        if self.config.output.as_ref().is_some_and(|current|
+            current.id == output.id && current.label == output.label && current.transport == output.transport
+        ) {
+            return Ok(());
+        }
+        let session = self.session.get_mut().map_err(|_| ErrorCode::Unavailable)?;
+        ensure(session.state.revision < MAX_REVISION)?;
+        session.state.revision += 1;
+        self.config.output = Some(output);
+        Ok(())
+    }
+
     /// Catalog is an immutable, already prepared in-memory projection. Loading it
     /// and admitting/locking media remain the future platform owner's responsibility.
     pub fn new(config: SessionConfig, catalog: Vec<CatalogTrack>, renderer: R) -> Result<Self> {
@@ -584,15 +607,7 @@ impl<R: Renderer> SessionOwner<R> {
                     next.external_playback = None;
                     next.ready = true;
                 }
-                let index = next
-                    .current_index()
-                    .filter(|&i| next.entries[i].track_id == *track)
-                    .or_else(|| {
-                        next.entries
-                            .iter()
-                            .position(|entry| entry.track_id == *track)
-                    });
-                let index = match index {
+                let index = match next.index_for_track(track) {
                     Some(index) => index,
                     None => {
                         ensure(next.entries.len() < MAX_QUEUE_ENTRIES)?;
@@ -667,6 +682,14 @@ impl<R: Renderer> SessionOwner<R> {
     /// Dispatch qualified renderer events independently of controller connections.
     /// Returns false for duplicate/late events, with no revision or renderer effect.
     pub fn on_renderer_event(&self, event: RendererEvent) -> Result<bool> {
+        self.on_renderer_event_with_admission(event, |_| true)
+    }
+
+    pub(crate) fn on_renderer_event_with_admission(
+        &self,
+        event: RendererEvent,
+        is_admitted: impl FnOnce(&str) -> bool,
+    ) -> Result<bool> {
         let mut session = self.session.lock().map_err(|_| ErrorCode::Unavailable)?;
         let token = match &event {
             RendererEvent::Started(t)
@@ -690,7 +713,19 @@ impl<R: Renderer> SessionOwner<R> {
                 if next.activity != Activity::Playing {
                     return Ok(false);
                 }
-                next.next(true)
+                let advance = next.next(true);
+                if let Some(RendererAction::Play { entry, .. }) = &advance {
+                    if !is_admitted(&entry.track_id) {
+                        // Preserve the current entry so Next can retry after idle admission.
+                        next = session.state.clone();
+                        next.stop();
+                        Some(RendererAction::Stop)
+                    } else {
+                        advance
+                    }
+                } else {
+                    advance
+                }
             }
             RendererEvent::Failed(_) => {
                 next.ready = false;
@@ -833,6 +868,15 @@ impl<R: Renderer> SessionOwner<R> {
             .current_index()
             .and_then(|idx| session.state.entries.get(idx))
             .map(|entry| entry.track_id.clone())
+    }
+
+    pub(crate) fn successor_for_track(&self, track_id: &str) -> Option<String> {
+        let session = self.session.lock().ok()?;
+        let state = &session.state;
+        let index = state.index_for_track(track_id)?;
+        let position = state.order.iter().position(|&i| i == index)?;
+        let next = state.order.get(position + 1)?;
+        Some(state.entries[*next].track_id.clone())
     }
 
     pub(crate) fn resolve_queue_transition_targets(

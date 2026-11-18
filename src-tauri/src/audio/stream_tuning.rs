@@ -174,7 +174,11 @@ pub fn parse_dsf_header(path: &Path) -> Option<DsfHeaderInfo> {
     let mut file = File::open(path).ok()?;
     let mut header = [0u8; 80];
     file.read_exact(&mut header).ok()?;
+    parse_dsf_header_bytes(&header)
+}
 
+pub(crate) fn parse_dsf_header_bytes(bytes: &[u8]) -> Option<DsfHeaderInfo> {
+    let header = bytes.get(..80)?;
     if &header[0..4] != b"DSD " || &header[28..32] != b"fmt " {
         return None;
     }

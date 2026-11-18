@@ -27,7 +27,7 @@ use crate::core_runtime::migration::{
     SnapshotImportResult,
 };
 use crate::core_runtime::{
-    HeadlessConfig, HeadlessCoreRuntime, DEFAULT_CONTAINER_HEADROOM_BYTES,
+    HeadlessConfig, HeadlessCoreRuntime, SharedTrackBuffers, DEFAULT_CONTAINER_HEADROOM_BYTES,
 };
 use crate::core_session::{Output, Renderer, RendererAction, RendererError, RendererEvent, RunToken};
 
@@ -141,22 +141,6 @@ fn detect_lan_ipv4() -> Option<String> {
     }
 }
 
-fn load_track_paths(db_path: &Path) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let Ok(conn) = Connection::open(db_path) else {
-        return map;
-    };
-    let Ok(mut stmt) = conn.prepare("SELECT id, file_path FROM tracks") else {
-        return map;
-    };
-    if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
-        for row in rows.flatten() {
-            map.insert(row.0, row.1);
-        }
-    }
-    map
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveRunState {
     token: Option<RunToken>,
@@ -165,28 +149,17 @@ pub(crate) struct ActiveRunState {
 
 pub struct WindowsEngineRenderer {
     audio: Arc<AudioEngine>,
-    db_path: PathBuf,
-    track_paths: HashMap<String, String>,
+    shared_buffers: SharedTrackBuffers,
     run_state: Arc<Mutex<ActiveRunState>>,
 }
 
 impl WindowsEngineRenderer {
-    pub(crate) fn new(audio: Arc<AudioEngine>, db_path: PathBuf, run_state: Arc<Mutex<ActiveRunState>>) -> Self {
-        let track_paths = load_track_paths(&db_path);
-        Self {
-            audio,
-            db_path,
-            track_paths,
-            run_state,
-        }
-    }
-
-    fn resolve_track_path(&mut self, track_id: &str) -> Option<String> {
-        if let Some(p) = self.track_paths.get(track_id) {
-            return Some(p.clone());
-        }
-        self.track_paths = load_track_paths(&self.db_path);
-        self.track_paths.get(track_id).cloned()
+    fn new(
+        audio: Arc<AudioEngine>,
+        shared_buffers: SharedTrackBuffers,
+        run_state: Arc<Mutex<ActiveRunState>>,
+    ) -> Self {
+        Self { audio, shared_buffers, run_state }
     }
 }
 
@@ -194,12 +167,9 @@ impl Renderer for WindowsEngineRenderer {
     fn apply(&mut self, action: &RendererAction) -> Result<(), RendererError> {
         match action {
             RendererAction::Play { entry, token } => {
-                let Some(path) = self.resolve_track_path(&entry.track_id) else {
-                    return Err(RendererError);
-                };
-                if self.audio.play_track(&path).is_err() {
-                    return Err(RendererError);
-                }
+                let track = self.shared_buffers.lock().map_err(|_| RendererError)?
+                    .get(&entry.track_id).and_then(std::sync::Weak::upgrade).ok_or(RendererError)?;
+                self.audio.play_admitted_track(track).map_err(|_| RendererError)?;
                 if let Ok(mut guard) = self.run_state.lock() {
                     guard.token = Some(token.clone());
                     guard.saw_active = false;
@@ -308,9 +278,10 @@ impl WindowsEngineNode {
             token: None,
             saw_active: false,
         }));
+        let shared_buffers = Arc::new(Mutex::new(HashMap::new()));
         let renderer = WindowsEngineRenderer::new(
             Arc::clone(&audio),
-            db_path.clone(),
+            Arc::clone(&shared_buffers),
             Arc::clone(&run_state),
         );
 
@@ -338,7 +309,6 @@ impl WindowsEngineNode {
 
         let runtime = Arc::new(Mutex::new(rt));
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let shared_buffers = Arc::new(Mutex::new(HashMap::new()));
 
         let audio_for_ops = Arc::clone(&audio);
         let expected_engine_id = identity.engine_id.clone();
@@ -347,7 +317,7 @@ impl WindowsEngineNode {
             let op = req.get("operation").and_then(Value::as_str)?;
             let req_engine = req.get("engineId").and_then(Value::as_str);
             let req_lib = req.get("libraryId").and_then(Value::as_str);
-            if matches!(op, "outputs.list" | "output.select" | "player.volume" | "player.purity")
+            if matches!(op, "outputs.list" | "outputs.scan" | "output.select" | "player.volume" | "player.purity")
                 && (req_engine != Some(expected_engine_id.as_str())
                     || req_lib != Some(expected_library_id.as_str()))
             {
@@ -358,7 +328,27 @@ impl WindowsEngineNode {
                     let list = audio_for_ops.list_audio_endpoints();
                     Some(json!({ "ok": true, "data": { "outputs": list } }))
                 }
+                "outputs.scan" => {
+                    if !rt.output_discovery_is_allowed() {
+                        return Some(json!({ "ok": false, "error": { "code": "not_ready" } }));
+                    }
+                    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                        Ok(runtime) => runtime,
+                        Err(_) => return Some(json!({ "ok": false, "error": { "code": "unavailable" } })),
+                    };
+                    let manager = audio_for_ops.get_upnp_manager();
+                    let result = runtime.block_on(async {
+                        tokio::time::timeout(Duration::from_secs(6), manager.discover_devices()).await
+                    });
+                    if result.is_err() {
+                        return Some(json!({ "ok": false, "error": { "code": "unavailable" } }));
+                    }
+                    Some(json!({ "ok": true, "data": { "outputs": audio_for_ops.list_audio_endpoints() } }))
+                }
                 "output.select" => {
+                    if !rt.output_selection_is_idle() {
+                        return Some(json!({ "ok": false, "error": { "code": "not_ready" } }));
+                    }
                     let target_id = req
                         .get("outputId")
                         .or_else(|| req.get("id"))
@@ -366,7 +356,10 @@ impl WindowsEngineNode {
                         .unwrap_or_default();
                     let list = audio_for_ops.list_audio_endpoints();
                     let upnp_devices = audio_for_ops.get_upnp_manager().get_devices();
-                    let chosen = list.iter().find(|e| e.id == target_id).cloned();
+                    let chosen = list.iter().find(|e| e.id == target_id && e.is_available).cloned();
+                    if chosen.is_none() {
+                        return Some(json!({ "ok": false, "error": { "code": "invalid_payload" } }));
+                    }
                     let endpoint = AudioEndpoint::from_legacy_string(target_id, &upnp_devices);
                     match audio_for_ops.set_audio_endpoint(endpoint) {
                         Ok(()) => {
@@ -378,8 +371,10 @@ impl WindowsEngineNode {
                                     label: target_id.to_string(),
                                     transport: "wasapi".into(),
                                 });
-                            rt.set_output(out.clone());
-                            Some(json!({ "ok": true, "data": { "output": out } }))
+                            match rt.set_output(out.clone()) {
+                                Ok(()) => Some(json!({ "ok": true, "data": { "output": out } })),
+                                Err(_) => Some(json!({ "ok": false, "error": { "code": "not_ready" } })),
+                            }
                         }
                         Err(e) => Some(
                             json!({ "ok": false, "error": { "code": "invalid_payload", "message": e } }),
@@ -433,7 +428,7 @@ impl WindowsEngineNode {
                     token_copy,
                     tls_config,
                     allow_plaintext_tests,
-                    false,
+                    true,
                     Some(extra_op_handler),
                 );
             })
@@ -546,7 +541,7 @@ fn run_windows_reconcile_loop<P, L>(
                 }
             }
             if let Some(tok) = completed_token {
-                let _ = rt.on_renderer_event(RendererEvent::Completed(tok));
+                let _ = rt.on_windows_renderer_completed(tok);
             }
         }
 
@@ -791,6 +786,77 @@ mod tests {
 
         node.shutdown();
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_http_queue_admits_existing_track_and_rejects_missing_track_atomically() {
+        let data_dir = temp_dir("queue");
+        let file = data_dir.join("available.wav");
+        std::fs::write(&file, vec![0; 64 * 1024]).unwrap();
+        {
+            let db = crate::db::AppDb::new(data_dir.join("cadence.db")).unwrap();
+            let conn = db.conn.lock();
+            let folder = data_dir.to_string_lossy();
+            conn.execute(
+                "INSERT INTO storage_mounts(id,name,mount_path,mount_type,file_system,last_seen_timestamp)
+                 VALUES ('m','Music',?1,'local_disk','ntfs',CURRENT_TIMESTAMP)",
+                [folder.as_ref()],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,created_at)
+                 VALUES ('r','Album',?1,'Album','Artist',CURRENT_TIMESTAMP)",
+                [folder.as_ref()],
+            ).unwrap();
+            for (id, path) in [("available", file), ("missing", data_dir.join("missing.wav"))] {
+                conn.execute(
+                    "INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,
+                     file_size,mtime,title,artist_credit,album_title,duration_secs,format,created_at)
+                     VALUES (?1,'r','m',?2,'Album',?3,?1,65536,1,?1,'Artist','Album',1,'WAV',CURRENT_TIMESTAMP)",
+                    rusqlite::params![id, folder, path.to_string_lossy()],
+                ).unwrap();
+            }
+        }
+        let mut node = WindowsEngineNode::bootstrap(WindowsEngineConfig {
+            app_data_dir: data_dir.clone(),
+            control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            advertised_ip: "127.0.0.1".into(),
+            allow_loopback_for_tests: true,
+            enable_mdns: false,
+            ..WindowsEngineConfig::default()
+        }).unwrap();
+
+        let request = |mut fields: Value| -> Value {
+            fields["protocolVersion"] = json!(1);
+            fields["engineId"] = json!(node.identity.engine_id);
+            fields["libraryId"] = json!(node.identity.library_id);
+            let body = fields.to_string();
+            let response = http_request(node.control_listen_addr, &format!(
+                "POST /v1/core HTTP/1.1\r\nHost: 127.0.0.1\r\nx-cadence-token: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                node.pairing_token, body.len(),
+            ));
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+        };
+
+        let initial = request(json!({"operation": "session.snapshot"}));
+        let accepted = request(json!({
+            "operation": "queue.replace", "commandId": "available-cmd",
+            "expectedRevision": initial["data"]["revision"],
+            "entries": [{"entryId": "available-entry", "trackId": "available"}],
+        }));
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        assert_eq!(accepted["data"]["queue"]["entries"][0]["trackId"], "available");
+
+        let rejected = request(json!({
+            "operation": "queue.replace", "commandId": "missing-cmd",
+            "expectedRevision": accepted["data"]["revision"],
+            "entries": [{"entryId": "missing-entry", "trackId": "missing"}],
+        }));
+        assert_eq!(rejected["error"]["code"], "not_ready", "{rejected}");
+        assert_eq!(request(json!({"operation": "session.snapshot"})), accepted);
+
+        node.shutdown();
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]

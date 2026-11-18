@@ -37,10 +37,20 @@ pub fn probe_dsd_file(path: &Path) -> Option<DsdProbeResult> {
 }
 
 pub fn probe_dsd_as(path: &Path, ext: &str) -> Option<DsdProbeResult> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    probe_dsd_reader(&mut file, len, ext)
+}
+
+pub(crate) fn probe_dsd_reader(
+    reader: &mut (impl Read + Seek),
+    len: u64,
+    ext: &str,
+) -> Option<DsdProbeResult> {
     if ext.eq_ignore_ascii_case("dsf") {
-        probe_dsf(path)
+        probe_dsf(reader, len)
     } else if ext.eq_ignore_ascii_case("dff") || ext.eq_ignore_ascii_case("dsdiff") {
-        probe_dff(path)
+        probe_dff(reader, len)
     } else {
         None
     }
@@ -114,9 +124,7 @@ fn parse_leading_year(raw: &str) -> Option<i32> {
     }
 }
 
-fn probe_dsf(path: &Path) -> Option<DsdProbeResult> {
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
+fn probe_dsf(file: &mut (impl Read + Seek), len: u64) -> Option<DsdProbeResult> {
     let mut header = [0u8; 92];
     file.read_exact(&mut header).ok()?;
     if &header[..4] != b"DSD " || &header[28..32] != b"fmt " || &header[80..84] != b"data" {
@@ -144,7 +152,7 @@ fn probe_dsf(path: &Path) -> Option<DsdProbeResult> {
         return None;
     }
     let tag = if metadata_offset > 0 {
-        read_id3v2_at_offset(path, metadata_offset, None)
+        read_id3v2_at_offset(file, len, metadata_offset, None)
     } else {
         None
     };
@@ -158,9 +166,7 @@ fn probe_dsf(path: &Path) -> Option<DsdProbeResult> {
     })
 }
 
-fn probe_dff(path: &Path) -> Option<DsdProbeResult> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
+fn probe_dff(file: &mut (impl Read + Seek), file_len: u64) -> Option<DsdProbeResult> {
     if file_len < 16 {
         return None;
     }
@@ -249,7 +255,7 @@ fn probe_dff(path: &Path) -> Option<DsdProbeResult> {
             }
             b"ID3 " => {
                 if id3_tag.is_none() {
-                    id3_tag = read_id3v2_at_offset(path, data_start, Some(chunk_size));
+                    id3_tag = read_id3v2_at_offset(file, file_len, data_start, Some(chunk_size));
                 }
             }
             _ => {}
@@ -263,7 +269,7 @@ fn probe_dff(path: &Path) -> Option<DsdProbeResult> {
 
     // Some DSDIFF taggers append a bare ID3v2 block immediately after the FRM8 container.
     if id3_tag.is_none() && form_end + 10 <= file_len {
-        id3_tag = read_id3v2_at_offset(path, form_end, None);
+        id3_tag = read_id3v2_at_offset(file, file_len, form_end, None);
     }
 
     if sample_rate.unwrap_or(0) == 0
@@ -329,9 +335,12 @@ fn parse_dff_snd_props(buf: &[u8], sample_rate: &mut Option<u32>, channels: &mut
 }
 
 /// Reads an ID3v2 tag starting at `offset` without touching surrounding audio bytes.
-fn read_id3v2_at_offset(path: &Path, offset: u64, max_len: Option<u64>) -> Option<Tag> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
+fn read_id3v2_at_offset(
+    file: &mut (impl Read + Seek),
+    file_len: u64,
+    offset: u64,
+    max_len: Option<u64>,
+) -> Option<Tag> {
     if offset.saturating_add(10) > file_len {
         return None;
     }

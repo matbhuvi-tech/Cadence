@@ -81,7 +81,7 @@ export interface EngineControllerContextValue {
   coreClearUpcomingQueue: () => Promise<void>
   coreReorderQueueEntry: (fromIndex: number, toIndex: number) => Promise<void>
   coreSetModes: (repeat: 'off' | 'one' | 'all', shuffle: boolean) => Promise<void>
-  coreRefreshSnapshot: () => Promise<void>
+  coreRefreshSnapshot: () => Promise<CoreSnapshot | null>
   coreRefreshCatalog: () => Promise<void>
   resolveCoreArtworkUrl: (rawReleaseId: string) => Promise<string | null>
   getCachedCoreArtworkUrl: (rawReleaseId: string) => string | null
@@ -803,9 +803,7 @@ export const EngineControllerProvider: React.FC<{
       },
       coreSetModes: (repeat, shuffle) =>
         exec({ operation: 'queue.control', action: 'modes', repeat, shuffle }),
-      coreRefreshSnapshot: async () => {
-        await store.refreshSnapshot()
-      },
+      coreRefreshSnapshot: () => store.refreshSnapshot(),
       coreRefreshCatalog: async () => {
         await store.refreshCatalog()
       },
