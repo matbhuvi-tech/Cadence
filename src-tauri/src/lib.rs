@@ -16,6 +16,8 @@ pub mod scanner;
 #[cfg(feature = "desktop")]
 use commands::artist_portrait::*;
 #[cfg(feature = "desktop")]
+use commands::audio::*;
+#[cfg(feature = "desktop")]
 use commands::diagnostics::*;
 #[cfg(feature = "desktop")]
 use commands::gemini_config::*;
@@ -230,6 +232,8 @@ pub fn run() {
             core_connect_events,
             core_disconnect_events,
             discover_core_nodes,
+            get_upnp_pacer_enabled,
+            set_upnp_pacer_enabled,
             // Diagnostics & Debug Logging commands
             get_debug_log_state,
             set_debug_logging,

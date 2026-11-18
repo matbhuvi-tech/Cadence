@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { Activity, KeyRound, Server, Settings, SlidersHorizontal, X } from 'lucide-react'
 import type { CatalogProblemSummary, PrioritySettings } from '../../core/curatePriorities'
 import { DebugDiagnosticsPanel } from '../CommandBar/DebugDiagnosticsPanel'
@@ -49,6 +50,14 @@ export const CadenceSettingsModal: React.FC<CadenceSettingsModalProps> = ({
     gemini: null,
   })
   const [activeTab, setActiveTab] = useState<CadenceSettingsTab>(initialTab)
+  const [pacerEnabled, setPacerEnabled] = useState<boolean>(true)
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'engine') return
+    invoke<boolean>('get_upnp_pacer_enabled')
+      .then((val) => setPacerEnabled(Boolean(val)))
+      .catch(() => {})
+  }, [isOpen, activeTab])
 
   useEffect(() => {
     if (isOpen) {
@@ -208,6 +217,37 @@ export const CadenceSettingsModal: React.FC<CadenceSettingsModalProps> = ({
               hidden={activeTab !== 'engine'}
             >
               <PlaybackEnginePanel />
+              <div className="mt-4 flex items-center justify-between gap-4 rounded-xl border border-white/[0.08] bg-black/35 p-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">UPnP Stream Pacer</h3>
+                  <p className="mt-0.5 text-xs text-white/50">
+                    Pace UPnP audio delivery to match real-time playback. Disable to stream unpaced via TCP flow control (useful for testing Wi-Fi buffer behavior).
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={pacerEnabled}
+                  onClick={() => {
+                    const next = !pacerEnabled
+                    setPacerEnabled(next)
+                    invoke<boolean>('set_upnp_pacer_enabled', { enabled: next })
+                      .then((val) => setPacerEnabled(Boolean(val)))
+                      .catch(() => setPacerEnabled(!next))
+                  }}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border transition-colors ${
+                    pacerEnabled
+                      ? 'border-amber-400/50 bg-amber-500/80'
+                      : 'border-white/15 bg-white/10'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      pacerEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
             </div>
 
             <div

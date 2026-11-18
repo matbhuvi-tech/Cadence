@@ -317,7 +317,7 @@ impl WindowsEngineNode {
             let op = req.get("operation").and_then(Value::as_str)?;
             let req_engine = req.get("engineId").and_then(Value::as_str);
             let req_lib = req.get("libraryId").and_then(Value::as_str);
-            if matches!(op, "outputs.list" | "outputs.scan" | "output.select" | "player.volume" | "player.purity")
+            if matches!(op, "outputs.list" | "outputs.scan" | "output.select" | "player.volume" | "player.purity" | "player.upnp_pacer")
                 && (req_engine != Some(expected_engine_id.as_str())
                     || req_lib != Some(expected_library_id.as_str()))
             {
@@ -398,6 +398,15 @@ impl WindowsEngineNode {
                             json!({ "ok": false, "error": { "code": "invalid_payload", "message": e } }),
                         ),
                     }
+                }
+                "player.upnp_pacer" => {
+                    let manager = audio_for_ops.get_upnp_manager();
+                    let actual = if let Some(enabled) = req.get("enabled").and_then(Value::as_bool) {
+                        manager.set_pacer_enabled(enabled)
+                    } else {
+                        manager.is_pacer_enabled()
+                    };
+                    Some(json!({ "ok": true, "data": { "pacerEnabled": actual } }))
                 }
                 _ => None,
             }

@@ -103,6 +103,60 @@ pub fn get_upnp_pacing_stats(engine: State<'_, AudioEngine>) -> UpnpPacingSnapsh
     engine.get_upnp_manager().get_pacing_stats()
 }
 
+async fn sync_windows_engine_upnp_pacer(enabled: Option<bool>) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        use crate::commands::remote::{core_control_request, CoreEndpointBridgeTarget};
+        use crate::core_runtime::windows_engine::{
+            default_windows_engine_data_dir, LocalhostPairingInfo,
+        };
+        let pairing_path = default_windows_engine_data_dir().join("localhost-pairing.json");
+        let raw = std::fs::read_to_string(pairing_path).ok()?;
+        let pairing: LocalhostPairingInfo = serde_json::from_str(&raw).ok()?;
+        let target = CoreEndpointBridgeTarget {
+            base_url: pairing.base_url,
+            pairing_token: Some(pairing.token),
+            cert_fingerprint: Some(pairing.tls_fingerprint_sha256),
+            trust_insecure: Some(false),
+        };
+        let mut payload = serde_json::json!({
+            "protocolVersion": 2,
+            "engineId": pairing.engine_id,
+            "libraryId": pairing.library_id,
+            "operation": "player.upnp_pacer",
+        });
+        if let Some(flag) = enabled {
+            payload["enabled"] = serde_json::Value::Bool(flag);
+        }
+        let resp = core_control_request(target, payload).await.ok()?;
+        resp.get("data")
+            .and_then(|d| d.get("pacerEnabled"))
+            .and_then(|v| v.as_bool())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        None
+    }
+}
+
+#[tauri::command]
+pub async fn get_upnp_pacer_enabled() -> bool {
+    if let Some(remote_val) = sync_windows_engine_upnp_pacer(None).await {
+        crate::audio::upnp::UPNP_PACER_ENABLED
+            .store(remote_val, std::sync::atomic::Ordering::Relaxed);
+        return remote_val;
+    }
+    crate::audio::upnp::UPNP_PACER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub async fn set_upnp_pacer_enabled(enabled: bool) -> bool {
+    crate::audio::upnp::UPNP_PACER_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    let _ = sync_windows_engine_upnp_pacer(Some(enabled)).await;
+    enabled
+}
+
 #[tauri::command]
 pub fn set_stream_buffer_limit(engine: State<'_, AudioEngine>, limit_mb: u64) -> StreamBufferInfo {
     engine.get_upnp_manager().set_buffer_limit_mb(limit_mb)

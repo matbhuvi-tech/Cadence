@@ -27,7 +27,7 @@ use crate::diag_log;
 use crate::diagnostics::DiagCategory;
 
 /// Tuning parameters for the receiver-backpressure-driven UPnP pacing controller.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PacerConfig {
     /// Reference initial lead target retained for contiguous-reconnect lead seeding & config compatibility.
     pub initial_lead_target_ms: u64,
@@ -73,6 +73,8 @@ pub struct PacerConfig {
     pub tcp_info_stale_ms: u64,
     /// Upper bound on uncertainty margin under fallback mode (`Uncertain`).
     pub uncertain_max_margin_ms: u64,
+    /// When true, steady-state locks to `initial_overfeed_multiplier` / cruise floor after fill or backoff.
+    pub lock_cruise_on_fill_or_backoff: bool,
 }
 
 impl Default for PacerConfig {
@@ -100,6 +102,37 @@ impl Default for PacerConfig {
             tcp_info_min_event_ms: 50,
             tcp_info_stale_ms: 750,
             uncertain_max_margin_ms: 250,
+            lock_cruise_on_fill_or_backoff: false,
+        }
+    }
+}
+
+impl From<crate::core_runtime::upnp_session::CorePacerConfig> for PacerConfig {
+    fn from(c: crate::core_runtime::upnp_session::CorePacerConfig) -> Self {
+        Self {
+            initial_lead_target_ms: c.initial_lead_target_ms,
+            initial_fill_multiplier: c.initial_fill_multiplier,
+            initial_fill_lead_ms: c.initial_fill_lead_ms,
+            initial_overfeed_multiplier: c.initial_overfeed_multiplier,
+            min_steady_multiplier: c.min_steady_multiplier,
+            drain_multiplier: c.drain_multiplier,
+            max_overfeed_multiplier: c.max_overfeed_multiplier,
+            ramp_interval_ms: c.ramp_interval_ms,
+            initial_ramp_step: c.initial_ramp_step,
+            fine_ramp_step: c.fine_ramp_step,
+            backoff_excess_factor: c.backoff_excess_factor,
+            soft_ceiling_floor: c.soft_ceiling_floor,
+            soft_ceiling_step: c.soft_ceiling_step,
+            soft_ceiling_relax_ms: c.soft_ceiling_relax_ms,
+            max_debt_ms: c.max_debt_ms,
+            stall_threshold_ms: c.stall_threshold_ms,
+            fast_write_ms: c.fast_write_ms,
+            flow_clear_ms: c.flow_clear_ms,
+            tcp_info_poll_ms: c.tcp_info_poll_ms,
+            tcp_info_min_event_ms: c.tcp_info_min_event_ms,
+            tcp_info_stale_ms: c.tcp_info_stale_ms,
+            uncertain_max_margin_ms: c.uncertain_max_margin_ms,
+            lock_cruise_on_fill_or_backoff: c.lock_cruise_on_fill_or_backoff,
         }
     }
 }
@@ -443,6 +476,8 @@ pub(crate) struct SynchronousPacer {
     active_pace_mult: f64,
     soft_ceiling_mult: f64,
     flow_strikes: u32,
+    rwin_reopened_since_strike: bool,
+    peak_lead_ms: i64,
     flow_suppressed_until: Option<Instant>,
     clean_window_anchor: Option<Instant>,
     ceiling_relax_anchor: Option<Instant>,
@@ -485,6 +520,8 @@ impl SynchronousPacer {
             active_pace_mult: 0.0,
             soft_ceiling_mult: 0.0,
             flow_strikes: 0,
+            rwin_reopened_since_strike: true,
+            peak_lead_ms: 0,
             flow_suppressed_until: None,
             clean_window_anchor: None,
             ceiling_relax_anchor: None,
@@ -577,6 +614,8 @@ impl SynchronousPacer {
             active_pace_mult: initial_mult,
             soft_ceiling_mult: config.max_overfeed_multiplier,
             flow_strikes: 0,
+            rwin_reopened_since_strike: true,
+            peak_lead_ms: 0,
             flow_suppressed_until: None,
             clean_window_anchor: if horizon_ready { Some(now) } else { None },
             ceiling_relax_anchor: if horizon_ready { Some(now) } else { None },
@@ -601,7 +640,10 @@ impl SynchronousPacer {
             self.metrics.bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
         }
 
-        if self.realtime_rate.is_none() || self.state == PacingState::Unpaced {
+        if self.realtime_rate.is_none()
+            || self.state == PacingState::Unpaced
+            || !super::upnp::UPNP_PACER_ENABLED.load(Ordering::Relaxed)
+        {
             return;
         }
 
@@ -717,6 +759,9 @@ impl SynchronousPacer {
             self.last_tcp_sample = Some(curr);
             self.last_tcp_sample_at = Some(now);
             self.baseline_open_snd_wnd = self.baseline_open_snd_wnd.max(curr.snd_wnd);
+            if curr.snd_wnd > 128 * 1024 {
+                self.rwin_reopened_since_strike = true;
+            }
             just_measured = true;
 
             if !self.is_metadata {
@@ -930,7 +975,8 @@ impl SynchronousPacer {
                     .last_tcp_sample
                     .map(|s| s.bytes_in_flight as u64)
                     .unwrap_or(0);
-                let unacked_bound = inflight.saturating_add(self.steady_sndbuf as u64);
+                let sndbuf_margin = (self.steady_sndbuf as u64).min(32 * 1024);
+                let unacked_bound = inflight.saturating_add(sndbuf_margin);
                 let lb = self.sent.saturating_sub(unacked_bound);
                 (lb, lb, unacked_bound.min(self.sent))
             }
@@ -983,7 +1029,7 @@ impl SynchronousPacer {
     }
 
     fn is_receiver_flow_control(&self, sample: TcpSocketSample, deltas: TcpSampleDeltas) -> bool {
-        let low_wnd_floor = (self.steady_sndbuf as u32).saturating_mul(2); // 64 KB
+        let low_wnd_floor = ((self.steady_sndbuf as u32).saturating_mul(2)).min(64 * 1024); // 64 KB cap
         let collapsed_from_baseline = self.baseline_open_snd_wnd >= 256 * 1024
             && sample.snd_wnd <= self.baseline_open_snd_wnd / 4
             && sample.snd_wnd <= 128 * 1024;
@@ -1029,8 +1075,19 @@ impl SynchronousPacer {
                         .congestion_events
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                // Deliberately keep `active_pace_mult` and clean ramp-up anchors untouched on Wi-Fi
-                // congestion while receiver TCP RWIN stays wide open, so overfeed refills quickly.
+                // If Wi-Fi congestion stalls delivery while receiver TCP RWIN is wide open (>128 KB),
+                // unlock any prior soft-ceiling clamp so overfeed immediately refills the lost cushion.
+                if !self.config.lock_cruise_on_fill_or_backoff
+                    && self.flow_strikes > 0
+                    && self.last_tcp_sample.is_some_and(|s| s.snd_wnd > 128 * 1024)
+                {
+                    self.soft_ceiling_mult = self.config.max_overfeed_multiplier;
+                    self.active_pace_mult = self
+                        .active_pace_mult
+                        .max(self.config.initial_overfeed_multiplier);
+                    self.flow_strikes = 0;
+                    self.rwin_reopened_since_strike = true;
+                }
                 diag_log!(
                     DiagCategory::UpnpLifecycle,
                     0,
@@ -1052,6 +1109,17 @@ impl SynchronousPacer {
                 if certainty == DeliveryCertainty::Uncertain && self.uncertain_slow_cluster >= 3 {
                     self.trigger_flow_backoff(now, lead_ms, "uncertain_cluster");
                 } else {
+                    if !self.config.lock_cruise_on_fill_or_backoff
+                        && self.flow_strikes > 0
+                        && self.last_tcp_sample.is_some_and(|s| s.snd_wnd > 128 * 1024)
+                    {
+                        self.soft_ceiling_mult = self.config.max_overfeed_multiplier;
+                        self.active_pace_mult = self
+                            .active_pace_mult
+                            .max(self.config.initial_overfeed_multiplier);
+                        self.flow_strikes = 0;
+                        self.rwin_reopened_since_strike = true;
+                    }
                     diag_log!(
                         DiagCategory::UpnpLifecycle,
                         0,
@@ -1076,8 +1144,17 @@ impl SynchronousPacer {
         if self.flow_suppressed_until.is_some_and(|t| now < t) {
             return;
         }
-
         let until = now + Duration::from_millis(self.config.flow_clear_ms);
+        if reason == "tcp_flow_control" && !self.rwin_reopened_since_strike {
+            // Receiver RWIN has not reopened (>128 KB) since the current full-buffer strike:
+            // extend relief drain without cascading strikes or crushing soft_ceiling_mult.
+            self.flow_suppressed_until = Some(until);
+            self.clean_window_anchor = Some(until);
+            self.ceiling_relax_anchor = Some(until);
+            return;
+        }
+        self.rwin_reopened_since_strike = false;
+
         self.flow_suppressed_until = Some(until);
         self.clean_window_anchor = Some(until);
         self.ceiling_relax_anchor = Some(until);
@@ -1172,6 +1249,20 @@ impl SynchronousPacer {
         }
 
         if self.state == PacingState::SteadyMaintain {
+            self.peak_lead_ms = self.peak_lead_ms.max(display_lead_ms);
+            if !self.config.lock_cruise_on_fill_or_backoff
+                && self.flow_strikes > 0
+                && self.peak_lead_ms >= 500
+                && self.last_tcp_sample.is_some_and(|s| s.snd_wnd > 128 * 1024)
+                && display_lead_ms + 400 < self.peak_lead_ms
+            {
+                self.soft_ceiling_mult = self.config.max_overfeed_multiplier;
+                self.active_pace_mult = self
+                    .active_pace_mult
+                    .max(self.config.initial_overfeed_multiplier);
+                self.flow_strikes = 0;
+                self.rwin_reopened_since_strike = true;
+            }
             self.maybe_step_up_while_clean(now, display_lead_ms);
         }
 
@@ -1188,6 +1279,9 @@ impl SynchronousPacer {
     }
 
     fn maybe_step_up_while_clean(&mut self, now: Instant, display_lead_ms: i64) {
+        if self.config.lock_cruise_on_fill_or_backoff {
+            return;
+        }
         let relax_dur = Duration::from_millis(self.config.soft_ceiling_relax_ms);
         let relax_anchor = *self.ceiling_relax_anchor.get_or_insert(now);
         if now.saturating_duration_since(relax_anchor) >= relax_dur {

@@ -53,8 +53,8 @@ struct StreamSource {
     chunk_bytes: usize,
     /// Byte offset where ID3v2 / album artwork metadata begins (if known).
     metadata_offset: Option<u64>,
-    /// Bounded initial headroom target in ms for `InitialFill` (default: 1200 ms).
-    initial_lead_target_ms: u64,
+    /// Resolved pacing configuration for the target renderer (`renderer-profiles.json`).
+    pacer_config: PacerConfig,
     /// Monotonic audio payload progress across sequential HTTP Range connections.
     has_streamed_audio: AtomicBool,
     last_audio_end_offset: AtomicU64,
@@ -67,6 +67,7 @@ impl StreamSource {
         duration_secs: f64,
         user_limit_mb: u64,
         admitted: Option<Arc<LockedTrack>>,
+        mut pacer_config: PacerConfig,
     ) -> Result<Self, String> {
         let (len, mode) = if let Some(track) = admitted {
             (track.len() as u64, BufferMode::AdmittedTrack(track))
@@ -200,11 +201,14 @@ impl StreamSource {
             None
         };
 
-        let initial_lead_target_ms = std::env::var("CADENCE_INITIAL_LEAD_MS")
+        if let Some(ms) = std::env::var("CADENCE_INITIAL_LEAD_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .map(|ms| ms.clamp(150, 2500))
-            .unwrap_or_else(|| PacerConfig::default().initial_lead_target_ms);
+        {
+            pacer_config.initial_lead_target_ms = ms;
+            pacer_config.initial_fill_lead_ms = ms as i64;
+        }
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -218,7 +222,7 @@ impl StreamSource {
             fast_start_sndbuf_bytes,
             chunk_bytes,
             metadata_offset,
-            initial_lead_target_ms,
+            pacer_config,
             has_streamed_audio: AtomicBool::new(false),
             last_audio_end_offset: AtomicU64::new(0),
             mode,
@@ -386,6 +390,8 @@ async fn collect_ssdp_locations(socket: &UdpSocket, window: Duration) -> Vec<Str
     locations
 }
 
+pub static UPNP_PACER_ENABLED: AtomicBool = AtomicBool::new(true);
+
 pub struct UpnpManager {
     devices: Arc<Mutex<Vec<UpnpDevice>>>,
     active_device: Arc<Mutex<Option<UpnpDevice>>>,
@@ -398,10 +404,23 @@ pub struct UpnpManager {
     discovery_gen: Arc<AtomicU64>,
     pacing_metrics: Arc<UpnpPacingMetrics>,
     playback_paused: Arc<AtomicBool>,
+    pacer_enabled: Arc<AtomicBool>,
+    renderer_profiles: crate::core_runtime::upnp_session::RendererPacerProfileFile,
 }
 
 impl UpnpManager {
     pub fn new() -> Self {
+        let profiles_dir = {
+            #[cfg(windows)]
+            {
+                crate::core_runtime::windows_engine::default_windows_engine_data_dir()
+            }
+            #[cfg(not(windows))]
+            {
+                std::path::PathBuf::from("/var/lib/cadence")
+            }
+        };
+        let renderer_profiles = Self::load_windows_renderer_profiles(&profiles_dir);
         let manager = Self {
             devices: Arc::new(Mutex::new(Vec::new())),
             active_device: Arc::new(Mutex::new(None)),
@@ -413,10 +432,62 @@ impl UpnpManager {
             discovery_gen: Arc::new(AtomicU64::new(0)),
             pacing_metrics: Arc::new(UpnpPacingMetrics::default()),
             playback_paused: Arc::new(AtomicBool::new(false)),
+            pacer_enabled: Arc::new(AtomicBool::new(true)),
+            renderer_profiles,
         };
 
         manager.ensure_http_server();
         manager
+    }
+
+    pub fn is_pacer_enabled(&self) -> bool {
+        UPNP_PACER_ENABLED.load(Ordering::Relaxed)
+    }
+
+    fn load_windows_renderer_profiles(
+        app_data_dir: &Path,
+    ) -> crate::core_runtime::upnp_session::RendererPacerProfileFile {
+        use crate::core_runtime::upnp_session::{
+            CorePacerConfig, RendererPacerMatch, RendererPacerProfile, RendererPacerProfileFile,
+            RENDERER_PROFILES_FILENAME,
+        };
+        let path = app_data_dir.join(RENDERER_PROFILES_FILENAME);
+        if path.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(parsed) = serde_json::from_str::<RendererPacerProfileFile>(&raw) {
+                    return parsed;
+                }
+            }
+        }
+        let defaults = RendererPacerProfileFile {
+            schema_version: 1,
+            default_profile: CorePacerConfig::default(),
+            profiles: vec![RendererPacerProfile {
+                id: "hifi-rose-rs130-wifi".into(),
+                description: "HiFi ROSE RS130 (Windows Wi-Fi): Adaptive overfeed (1.08x-1.12x) to fill renderer buffer, then RWIN-guided 1.000x cruise".into(),
+                learned_from_stress_test: true,
+                matcher: RendererPacerMatch {
+                    udn: None,
+                    all_keywords: Vec::new(),
+                    any_keywords: vec!["rs130".into(), "rose".into(), "citech".into()],
+                },
+                pacer_config: CorePacerConfig::default(),
+            }],
+        };
+        if app_data_dir.is_dir() {
+            if let Ok(bytes) = serde_json::to_vec_pretty(&defaults) {
+                let tmp = app_data_dir.join(format!("{}.tmp", RENDERER_PROFILES_FILENAME));
+                if std::fs::write(&tmp, &bytes).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            }
+        }
+        defaults
+    }
+
+    pub fn set_pacer_enabled(&self, enabled: bool) -> bool {
+        UPNP_PACER_ENABLED.store(enabled, Ordering::Relaxed);
+        enabled
     }
 
     pub fn get_pacing_stats(&self) -> UpnpPacingSnapshot {
@@ -483,6 +554,7 @@ impl UpnpManager {
         let current = Arc::clone(&self.current_stream);
         let pacing_metrics = Arc::clone(&self.pacing_metrics);
         let paused_flag = Arc::clone(&self.playback_paused);
+        let pacer_enabled_flag = Arc::clone(&self.pacer_enabled);
 
         std::thread::Builder::new()
             .name("cadence-upnp-listener".into())
@@ -527,6 +599,7 @@ impl UpnpManager {
                                 let source_ref = Arc::clone(&current);
                                 let metrics_ref = Arc::clone(&pacing_metrics);
                                 let paused_ref = Arc::clone(&paused_flag);
+                                let pacer_enabled_ref = Arc::clone(&pacer_enabled_flag);
                                 std::thread::Builder::new()
                                     .name("cadence-paced-stream".into())
                                     .spawn(move || {
@@ -535,6 +608,7 @@ impl UpnpManager {
                                             source_ref,
                                             metrics_ref,
                                             paused_ref,
+                                            pacer_enabled_ref,
                                         );
                                     })
                                     .expect("failed to spawn dedicated paced streaming thread");
@@ -554,6 +628,7 @@ impl UpnpManager {
         source_ref: Arc<Mutex<Option<Arc<StreamSource>>>>,
         pacing_metrics: Arc<UpnpPacingMetrics>,
         playback_paused: Arc<AtomicBool>,
+        pacer_enabled: Arc<AtomicBool>,
     ) {
         // Register this dedicated OS thread with Windows MMCSS Pro Audio, pin off Core 0/1,
         // and lock 1 ms timer resolution. Reverts cleanly on drop (even upon early socket broken-pipe).
@@ -725,16 +800,14 @@ impl UpnpManager {
             source.last_audio_end_offset.store(start, Ordering::Release);
         }
 
-        let mut config = PacerConfig::default();
-        config.initial_lead_target_ms = source.initial_lead_target_ms;
         let mut pacer = SynchronousPacer::with_config(
-            config,
+            source.pacer_config,
             source.realtime_bytes_per_sec,
             source.preroll_bytes,
             source.sndbuf_bytes,
             is_contiguous_reconnect,
             is_range_continuation,
-            is_metadata_request,
+            is_metadata_request || !UPNP_PACER_ENABLED.load(Ordering::Relaxed),
             pacing_metrics,
             playback_paused,
         );
@@ -1266,13 +1339,36 @@ impl UpnpManager {
 
         self.playback_paused.store(false, Ordering::Release);
         self.pacing_metrics.reset_for_stream();
+        let desc = crate::core_runtime::upnp_session::Rs130DeviceDescriptor {
+            udn: device.id.clone(),
+            friendly_name: device.friendly_name.clone(),
+            model_name: device.model_name.clone(),
+            model_description: device.model_description.clone(),
+            manufacturer: None,
+            description_url: device.location.clone(),
+            control_url: device.control_url.clone(),
+        };
+        let (profile_id, core_cfg) = self.renderer_profiles.resolve_for_device(&desc);
+        let pacer_config = PacerConfig::from(core_cfg);
+        eprintln!(
+            "[Cadence UPnP Streamer] Resolved renderer profile '{}' for '{}' (UDN: {}, steady_mult={:.3}x, lock_cruise={})",
+            profile_id,
+            device.friendly_name,
+            device.id,
+            pacer_config.initial_overfeed_multiplier,
+            pacer_config.lock_cruise_on_fill_or_backoff
+        );
 
         // Pre-load the untouched file into page-locked RAM before the renderer
         // starts pulling, so storage is idle for the duration of playback.
         let reset_existing = {
             let guard = self.current_stream.lock();
             if let Some(s) = guard.as_ref() {
-                if admitted.is_none() && s.path == file_path && matches!(s.mode, BufferMode::WholeTrack(_)) {
+                if admitted.is_none()
+                    && s.path == file_path
+                    && s.pacer_config == pacer_config
+                    && matches!(s.mode, BufferMode::WholeTrack(_))
+                {
                     s.has_streamed_audio.store(false, Ordering::Release);
                     s.last_audio_end_offset.store(0, Ordering::Release);
                     true
@@ -1287,7 +1383,8 @@ impl UpnpManager {
             // Release the previous track's buffer first so peak RAM isn't old + new.
             *self.current_stream.lock() = None;
             let limit_mb = self.buffer_limit_mb.load(Ordering::SeqCst);
-            let source = StreamSource::prepare_source(file_path, duration_secs, limit_mb, admitted)?;
+            let source =
+                StreamSource::prepare_source(file_path, duration_secs, limit_mb, admitted, pacer_config)?;
             *self.current_stream.lock() = Some(Arc::new(source));
         }
 

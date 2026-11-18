@@ -32,14 +32,8 @@ pub const TARGET_PACING_TICK_SECS: f64 = 0.00125;
 /// - CD .. DSD256 (`<= 2.82 MB/s`): `4 KB` (`~1.30–1.45 ms` ticks at DSD256 `1.00–1.12x`)
 /// - DSD512 (`5.64 MB/s`): `8 KB` (`~1.29–1.45 ms` ticks)
 /// - DSD1024 (`11.29 MB/s`): `16 KB` (`~1.29–1.45 ms` ticks)
-pub fn calculate_pacing_chunk_bytes(bitrate_bytes_per_sec: f64) -> usize {
-    const PAGE_ALIGN: usize = 4 * 1024;
-    if bitrate_bytes_per_sec <= 0.0 {
-        return CHUNK_BYTES;
-    }
-    let raw = (bitrate_bytes_per_sec * TARGET_PACING_TICK_SECS).ceil() as usize;
-    let aligned = raw.saturating_add(PAGE_ALIGN - 1) & !(PAGE_ALIGN - 1);
-    aligned.clamp(MIN_PACING_CHUNK_BYTES, CHUNK_BYTES)
+pub fn calculate_pacing_chunk_bytes(_bitrate_bytes_per_sec: f64) -> usize {
+    CHUNK_BYTES
 }
 
 /// Rounds a buffer size up to the nearest 16 KB (16,384 byte) chunk boundary.
@@ -61,9 +55,9 @@ pub const MIN_SOCKET_SNDBUF_BYTES: usize = 16 * 1024;
 /// Backward-compatible alias for minimum socket send buffer.
 pub const SOCKET_SNDBUF_BYTES: usize = MIN_SOCKET_SNDBUF_BYTES;
 
-/// Ceiling for steady-state kernel TCP send buffer (32 KB) to physically prevent
-/// kernel-level hoard-and-flush micro-bursts when TCP windows reopen after backpressure stalls.
-pub const MAX_SOCKET_SNDBUF_BYTES: usize = 32 * 1024;
+/// Ceiling for steady-state kernel TCP send buffer (512 KB) to absorb transient Wi-Fi ACK
+/// delays on high-bitrate DSD streams while `calculate_sndbuf_bytes` keeps low-bitrate PCM at 32 KB.
+pub const MAX_SOCKET_SNDBUF_BYTES: usize = 512 * 1024;
 
 /// Baseline kernel TCP send buffer for the initial unpaced pre-roll burst.
 pub const SOCKET_FAST_START_SNDBUF: usize = 256 * 1024;
@@ -747,47 +741,46 @@ mod tests {
 
     #[test]
     fn test_calculate_sndbuf_hires_pcm() {
-        // High-rate streams are clamped to the 32 KB steady-state ceiling to prevent kernel micro-bursts
+        // High-rate PCM streams scale to ~100 ms in-flight aligned to 16 KB chunks
         let sndbuf_96 = calculate_sndbuf_bytes(96_000.0 * 3.0 * 2.0);
-        assert_eq!(sndbuf_96, 32 * 1024);
+        assert_eq!(sndbuf_96, 64 * 1024);
         assert_eq!(sndbuf_96 % CHUNK_BYTES, 0);
 
         let sndbuf_192 = calculate_sndbuf_bytes(192_000.0 * 3.0 * 2.0);
-        assert_eq!(sndbuf_192, 32 * 1024);
+        assert_eq!(sndbuf_192, 128 * 1024);
         assert_eq!(sndbuf_192 % CHUNK_BYTES, 0);
     }
 
     #[test]
     fn test_calculate_sndbuf_dsd_rates() {
-        // All DSD rates (DSD64 to DSD1024) are capped at the 32 KB steady ceiling (2 x 16 KB chunks)
-        // so the OS kernel never hoards data during TCP ZeroWindow stalls.
+        // DSD rates scale to ~100 ms in-flight, capped at MAX_SOCKET_SNDBUF_BYTES (512 KB)
         let dsd64 = calculate_sndbuf_bytes(705_600.0);
-        assert_eq!(dsd64, 32 * 1024);
+        assert_eq!(dsd64, 80 * 1024);
         assert_eq!(dsd64 % CHUNK_BYTES, 0);
 
         let dsd128 = calculate_sndbuf_bytes(1_411_200.0);
-        assert_eq!(dsd128, 32 * 1024);
+        assert_eq!(dsd128, 144 * 1024);
         assert_eq!(dsd128 % CHUNK_BYTES, 0);
 
         let dsd256 = calculate_sndbuf_bytes(2_822_400.0);
-        assert_eq!(dsd256, 32 * 1024);
+        assert_eq!(dsd256, 288 * 1024);
         assert_eq!(dsd256 % CHUNK_BYTES, 0);
 
         let dsd512 = calculate_sndbuf_bytes(5_644_800.0);
-        assert_eq!(dsd512, 32 * 1024);
+        assert_eq!(dsd512, 512 * 1024);
         assert_eq!(dsd512 % CHUNK_BYTES, 0);
 
         let dsd1024 = calculate_sndbuf_bytes(11_289_600.0);
-        assert_eq!(dsd1024, 32 * 1024);
+        assert_eq!(dsd1024, 512 * 1024);
         assert_eq!(dsd1024 % CHUNK_BYTES, 0);
     }
 
     #[test]
     fn test_calculate_sndbuf_clamped_to_max() {
-        // Extreme 50 MB/s stream -> clamped to MAX_SOCKET_SNDBUF_BYTES (32 KB)
+        // Extreme 50 MB/s stream -> clamped to MAX_SOCKET_SNDBUF_BYTES (512 KB)
         let max_buf = calculate_sndbuf_bytes(50_000_000.0);
         assert_eq!(max_buf, MAX_SOCKET_SNDBUF_BYTES);
-        assert_eq!(max_buf, 32 * 1024);
+        assert_eq!(max_buf, 512 * 1024);
         assert_eq!(max_buf % CHUNK_BYTES, 0);
     }
 
@@ -798,21 +791,21 @@ mod tests {
         assert_eq!(cd_fast, 256 * 1024);
         assert_eq!(cd_fast % CHUNK_BYTES, 0);
 
-        // High rates clamp to SOCKET_FAST_START_SNDBUF
+        // DSD256 (288 KB steady * 4 = 1152 KB)
         let dsd256_fast = calculate_fast_start_sndbuf_bytes(2_822_400.0);
-        assert_eq!(dsd256_fast, 256 * 1024);
+        assert_eq!(dsd256_fast, 1152 * 1024);
         assert_eq!(dsd256_fast % CHUNK_BYTES, 0);
     }
 
     #[test]
     fn test_calculate_pacing_chunk_bytes_scales_cleanly() {
         assert_eq!(calculate_pacing_chunk_bytes(0.0), CHUNK_BYTES);
-        assert_eq!(calculate_pacing_chunk_bytes(176_400.0), 4 * 1024);
-        assert_eq!(calculate_pacing_chunk_bytes(705_600.0), 4 * 1024);
-        assert_eq!(calculate_pacing_chunk_bytes(1_411_200.0), 4 * 1024);
-        assert_eq!(calculate_pacing_chunk_bytes(2_822_400.0), 4 * 1024);
-        assert_eq!(calculate_pacing_chunk_bytes(5_644_800.0), 8 * 1024);
-        assert_eq!(calculate_pacing_chunk_bytes(11_289_600.0), 16 * 1024);
+        assert_eq!(calculate_pacing_chunk_bytes(176_400.0), CHUNK_BYTES);
+        assert_eq!(calculate_pacing_chunk_bytes(705_600.0), CHUNK_BYTES);
+        assert_eq!(calculate_pacing_chunk_bytes(1_411_200.0), CHUNK_BYTES);
+        assert_eq!(calculate_pacing_chunk_bytes(2_822_400.0), CHUNK_BYTES);
+        assert_eq!(calculate_pacing_chunk_bytes(5_644_800.0), CHUNK_BYTES);
+        assert_eq!(calculate_pacing_chunk_bytes(11_289_600.0), CHUNK_BYTES);
     }
 
     #[cfg(windows)]
