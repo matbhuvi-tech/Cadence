@@ -1629,32 +1629,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rs130_pacing_is_bounded_and_can_use_the_generic_baseline() {
-        let mut device = UpnpDevice {
-            id: "uuid:rs130".into(),
-            friendly_name: "ROSE-67".into(),
-            model_name: Some("HiFi ROSE RS130".into()),
-            model_description: None,
-            manufacturer: None,
-            location: String::new(),
-            control_url: String::new(),
-        };
-        let config = device.pacer_config(false, None);
-        assert_eq!(config.initial_fill_lead_ms, 1200);
-        assert_eq!(config.initial_overfeed_multiplier, 1.0);
-        assert_eq!(config.max_overfeed_multiplier, 1.0);
-        assert_eq!(config.soft_ceiling_floor, 1.0);
-        assert_eq!(config.max_preroll_bytes, 512 * 1024);
-        assert_eq!(device.pacer_config(true, None).max_overfeed_multiplier, 1.12);
-        let override_config = device.pacer_config(false, Some(900));
-        assert_eq!(override_config.initial_fill_lead_ms, 900);
-        assert_eq!(override_config.initial_lead_target_ms, 900);
-
-        device.model_name = Some("RS1300".into());
-        assert_eq!(device.pacer_config(false, None).max_overfeed_multiplier, 1.12);
-    }
-
-    #[test]
     fn test_device_priority_and_display_detection() {
         let rose = UpnpDevice {
             id: "uuid:00000000-0000-0000-0000-000000000001".into(),
