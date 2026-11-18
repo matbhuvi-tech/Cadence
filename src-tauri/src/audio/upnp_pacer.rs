@@ -27,9 +27,8 @@ use crate::diag_log;
 use crate::diagnostics::DiagCategory;
 
 /// Tuning parameters for the receiver-backpressure-driven UPnP pacing controller.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct PacerConfig {
-    pub max_preroll_bytes: u64,
     /// Reference initial lead target retained for contiguous-reconnect lead seeding & config compatibility.
     pub initial_lead_target_ms: u64,
     /// Paced startup boost multiplier applied in `InitialFill` before settling to `1.080x` (`1.180x`).
@@ -79,7 +78,6 @@ pub struct PacerConfig {
 impl Default for PacerConfig {
     fn default() -> Self {
         Self {
-            max_preroll_bytes: stream_tuning::MAX_PREROLL_BYTES,
             initial_lead_target_ms: 1200,
             initial_fill_multiplier: 1.180,
             initial_fill_lead_ms: 1_000,
