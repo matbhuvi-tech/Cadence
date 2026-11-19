@@ -951,6 +951,11 @@ class TauriBridgeService {
     }
   }
 
+  public async localCorePairingEndpoint(): Promise<DiscoveredCoreNode | null> {
+    if (!this.isTauri()) return null
+    return invoke<DiscoveredCoreNode | null>('local_core_pairing_endpoint')
+  }
+
   public async discoverCoreNodes(): Promise<DiscoveredCoreNode[]> {
     if (!this.isTauri()) return []
     try {

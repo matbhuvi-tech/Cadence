@@ -232,6 +232,7 @@ pub fn run() {
             core_connect_events,
             core_disconnect_events,
             discover_core_nodes,
+            local_core_pairing_endpoint,
             get_upnp_pacer_enabled,
             set_upnp_pacer_enabled,
             // Diagnostics & Debug Logging commands

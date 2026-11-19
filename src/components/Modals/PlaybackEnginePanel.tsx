@@ -15,7 +15,7 @@ import {
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { useOptionalAudioPlayer } from '../../context/AudioPlayerContext'
 import { getEndpointDisplayName } from '../../core/endpointRouting'
-import { type SavedCoreProfile } from '../../services/coreControllerTransport'
+import { isLoopbackEngineUrl, type SavedCoreProfile } from '../../services/coreControllerTransport'
 
 interface PlaybackEnginePanelProps {
   onEngineActivated?: () => void
@@ -152,6 +152,18 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
             )}
           </div>
         </div>
+
+        {state?.activeProfile && (
+          <details className="mt-3 text-xs text-white/65">
+            <summary className="cursor-pointer">Connection Details</summary>
+            <p className="mt-2 break-all">
+              {isLoopbackEngineUrl(state.activeProfile.baseUrl) ? 'Loopback' : 'Network'} · {state.activeProfile.baseUrl}
+            </p>
+            <p>{state.activeProfile.certFingerprint
+              ? (isConnected ? 'HTTPS fingerprint verified' : 'HTTPS fingerprint pinned')
+              : 'No HTTPS fingerprint saved'}</p>
+          </details>
+        )}
 
         {isCoreActive && !isConnected && (
           <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-black/30 px-3 py-2 text-xs text-rose-200">

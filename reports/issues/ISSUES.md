@@ -1,10 +1,12 @@
 # Issue Log
 
-## Windows Desktop intermittently misses Playback Engine at startup
+## GitHub #47 — Windows Desktop intermittently misses Playback Engine at startup
 
 - Reported behavior. Cadence Desktop and the Windows Playback Engine require repeated restarts before connecting. Expected behavior is for Desktop to connect to the previously paired engine once it is ready, regardless of launch order.
 - Source findings. Desktop tries saved profiles once, then lists discovery results. The engine publishes localhost pairing metadata after TCP bind and before its HTTPS control loop starts. LAN discovery can retain the LAN URL for a same-machine engine, and the startup gate's discovered-engine selection drops the available certificate fingerprint and pairing token.
 - Live observation. The already-running installed engine responded to loopback `/healthz` with an engine ID matching the local pairing file. The failing startup sequence was not reproduced. No processes were restarted.
+- Fix. Saved, fingerprint-pinned loopback profiles receive up to four HTTPS readiness probes. Discovery verifies localhost over HTTPS before adding the endpoint. Desktop offers Retry, Switch Engine, and Connection Details, and removes the persistent catalog banner.
+- Startup splash. Keep the existing logo and floating embers visible while connecting, display the engine and attempt number below the logo, and share the initial connection promise across Strict Mode effect replays.
 
 ## GitHub #29 — Windows RS130 DSD256 stuttering over Wi-Fi
 

@@ -17,7 +17,6 @@ import {
   FolderPlus,
   Filter,
   Heart,
-  Server,
 } from 'lucide-react'
 import { Work, Track, Release, AlbumDisplayMode, AuditIssue, CanvasViewMode } from '../../core/types'
 import { AlbumCoverGrid, EntityTab, SortBy, CardSize } from './AlbumCoverGrid'
@@ -663,35 +662,6 @@ export const DataCanvas: React.FC<DataCanvasProps> = ({
               </button>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* 2.5 Active Core Catalog Banner (always visible when browsing a remote Core instead of This PC) */}
-      {isCoreEngineActive && (
-        <div
-          data-testid="active-core-catalog-banner"
-          className="px-6 py-2 bg-[#D4AF37]/10 border-b border-[#D4AF37]/25 flex items-center justify-between gap-4 text-xs shrink-0"
-        >
-          <div className="flex items-center gap-2 min-w-0 text-amber-100/90">
-            <Server className="w-3.5 h-3.5 text-[#D4AF37] shrink-0" />
-            <span className="truncate">
-              Browsing <strong className="text-white">{activeEngineLabel}</strong> ({totalLibraryTracksCount.toLocaleString()} tracks &bull; {totalLibraryReleasesCount ?? releases.length} albums){onSwitchToLocalEngine ? (
-                <> &mdash; folders added on <strong className="text-white">This PC</strong> do not sync automatically to the Core host.</>
-              ) : (
-                <> &mdash; served directly from the Playback Engine.</>
-              )}
-            </span>
-          </div>
-          {onSwitchToLocalEngine && (
-            <button
-              type="button"
-              data-testid="btn-switch-to-this-pc"
-              onClick={onSwitchToLocalEngine}
-              className="px-3 py-1 rounded-lg bg-[#D4AF37]/20 hover:bg-[#D4AF37]/30 border border-[#D4AF37]/40 text-white text-[11px] font-semibold shrink-0 cursor-pointer transition-colors"
-            >
-              Switch to This PC
-            </button>
-          )}
         </div>
       )}
 

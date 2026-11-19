@@ -231,13 +231,19 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   const [offlineStats, setOfflineStats] = useState<{ tracks: number; releases: number }>({ tracks: 0, releases: 0 })
   const [isCheckingConnectivity, setIsCheckingConnectivity] = useState<boolean>(false)
   const [showStartupSplash, setShowStartupSplash] = useState<boolean>(true)
-  const isDbInitializing = isBootstrapping
-  const dbInitStatus = isBootstrapping
-    ? 'Discovering & connecting to Playback Engine...'
+  const startupConnection = engineState.startupConnection
+  const startupStatus = isBootstrapping
+    ? startupConnection?.phase === 'ready'
+      ? `Connected to ${startupConnection.profile.label}. Opening library…`
+      : startupConnection
+        ? `Waiting for ${startupConnection.profile.label} to come online · Attempt ${startupConnection.attempt} of 4`
+        : engineState.savedCores.length > 0
+          ? 'Waiting for a saved Playback Engine to come online…'
+          : 'Looking for a Playback Engine on the local network…'
     : isCoreActive
       ? `Connected to ${engineState.view.session.active.label}`
       : 'Select a Playback Engine'
-  const dbInitProgress = isBootstrapping ? 45 : 100
+  const startupProgress = isBootstrapping ? 20 + (startupConnection?.attempt ?? 0) * 15 : 100
 
   // Split releases persisted on the Engine
   const [splitReleaseIds, setSplitReleaseIds] = useState<Set<string>>(new Set())
@@ -1521,9 +1527,9 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#0D0E12] text-[#F1F5F9] select-none font-sans">
       {showStartupSplash && (
         <StartupSplashScreen
-          isReady={!isDbInitializing}
-          statusText={dbInitStatus}
-          progress={dbInitProgress}
+          isReady={!isBootstrapping}
+          statusText={startupStatus}
+          progress={startupProgress}
           onExited={() => setShowStartupSplash(false)}
         />
       )}

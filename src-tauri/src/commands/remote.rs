@@ -496,7 +496,7 @@ pub async fn core_disconnect_events(
 
 #[tauri::command]
 pub async fn discover_core_nodes() -> Result<Vec<DiscoveredCoreEndpoint>, String> {
-    tokio::task::spawn_blocking(|| {
+    let mut results = tokio::task::spawn_blocking(|| {
         let daemon = match mdns_sd::ServiceDaemon::new() {
             Ok(d) => d,
             Err(_) => return Vec::new(),
@@ -567,28 +567,18 @@ pub async fn discover_core_nodes() -> Result<Vec<DiscoveredCoreEndpoint>, String
             }
         }
         let _ = daemon.shutdown();
-        if let Some(local_ep) = probe_localhost_windows_engine() {
-            if let Some(existing) = results
-                .iter_mut()
-                .find(|r| r.engine_id == local_ep.engine_id || r.base_url == local_ep.base_url)
-            {
-                if existing.pairing_token.is_none() {
-                    existing.pairing_token = local_ep.pairing_token;
-                }
-                if existing.cert_fingerprint.is_none() {
-                    existing.cert_fingerprint = local_ep.cert_fingerprint;
-                }
-            } else {
-                results.insert(0, local_ep);
-            }
-        }
         results
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if let Some(local) = probe_localhost_windows_engine().await {
+        results.retain(|node| node.engine_id != local.engine_id && node.base_url != local.base_url);
+        results.insert(0, local);
+    }
+    Ok(results)
 }
 
-fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
+async fn read_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
     let data_dir = if let Ok(explicit) = std::env::var("CADENCE_DATA_DIR") {
         let trimmed = explicit.trim();
         if trimmed.is_empty() {
@@ -601,14 +591,11 @@ fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
         return None;
     };
     let pairing_path = data_dir.join("localhost-pairing.json");
-    let raw = std::fs::read_to_string(pairing_path).ok()?;
+    let raw = tokio::fs::read_to_string(pairing_path).await.ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
     let base_url = parsed.get("baseUrl")?.as_str()?.to_string();
-    let host_port = base_url
-        .strip_prefix("https://")
-        .or_else(|| base_url.strip_prefix("http://"))?;
-    let addr: std::net::SocketAddr = host_port.parse().ok()?;
-    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_err() {
+    let addr: std::net::SocketAddr = base_url.strip_prefix("https://")?.parse().ok()?;
+    if !addr.ip().is_loopback() {
         return None;
     }
     Some(DiscoveredCoreEndpoint {
@@ -626,6 +613,38 @@ fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
             .and_then(Value::as_str)
             .map(str::to_string),
     })
+}
+
+#[tauri::command]
+pub async fn local_core_pairing_endpoint() -> Option<DiscoveredCoreEndpoint> {
+    let mut local = read_localhost_windows_engine().await?;
+    local.pairing_token = None;
+    Some(local)
+}
+
+async fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
+    let local = read_localhost_windows_engine().await?;
+    let client = build_core_http_client(
+        Some(local.cert_fingerprint.as_deref()?),
+        false,
+        Some(Duration::from_millis(750)),
+        Duration::from_millis(500),
+    )
+    .ok()?;
+    let response = client
+        .get(format!("{}/healthz", local.base_url))
+        .send()
+        .await
+        .ok()?;
+    let health = read_bounded_json_response(response).await.ok()?;
+    if health.get("ready").and_then(Value::as_bool) == Some(true)
+        && health.get("engineId")?.as_str()? == local.engine_id.as_str()
+        && health.get("libraryId")?.as_str()? == local.library_id.as_str()
+    {
+        Some(local)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

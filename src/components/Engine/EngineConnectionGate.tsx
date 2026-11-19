@@ -12,20 +12,30 @@ import {
 } from 'lucide-react'
 import { useEngineController } from '../../context/EngineControllerContext'
 import { CadenceLogo } from '../common/CadenceLogo'
-import { type SavedCoreProfile } from '../../services/coreControllerTransport'
+import { isLoopbackEngineUrl, type SavedCoreProfile } from '../../services/coreControllerTransport'
 
 export const EngineConnectionGate: React.FC = () => {
   const engine = useEngineController()
   const { state, isBootstrapping } = engine
+  const connection = state.startupConnection
+  const detailsProfile = connection?.profile ?? state.savedCores[0]
 
   const [addressInput, setAddressInput] = useState('')
   const [labelInput, setLabelInput] = useState('')
   const [showManualForm, setShowManualForm] = useState(() => state.savedCores.length === 0)
+  const [probeError, setProbeError] = useState<string | null>(null)
+
+  const probeAddress = async (target: Parameters<typeof engine.probeAndStageAddress>[0]) => {
+    engine.cancelStartupConnection()
+    setProbeError(null)
+    const result = await engine.probeAndStageAddress(target)
+    if (!result.ok) setProbeError(result.error ?? 'Unable to verify the engine endpoint.')
+  }
 
   const handleProbe = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!addressInput.trim()) return
-    await engine.probeAndStageAddress({
+    await probeAddress({
       baseUrl: addressInput.trim(),
       label: labelInput.trim() || undefined,
       trustInsecure: true,
@@ -33,18 +43,23 @@ export const EngineConnectionGate: React.FC = () => {
   }
 
   const handleConnectSaved = async (profile: SavedCoreProfile) => {
+    setProbeError(null)
     await engine.switchToSavedCore(profile)
   }
 
   const handleRetryLast = async () => {
-    if (state.savedCores.length > 0) {
-      await engine.switchToSavedCore(state.savedCores[0])
-    } else {
-      await engine.discoverCores()
-    }
+    setProbeError(null)
+    await engine.retryStartupConnection()
   }
 
-  const errorBanner = state.stagingError || state.lastError
+  const handleSwitchEngine = () => {
+    engine.cancelStartupConnection()
+    setProbeError(null)
+    setShowManualForm(true)
+    void engine.discoverCores()
+  }
+
+  const errorBanner = probeError || (connection?.error ? null : state.stagingError || state.lastError)
 
   return (
     <div className="flex-1 flex items-center justify-center bg-[#0A0B0F] text-[#F1F5F9] p-6 overflow-y-auto">
@@ -60,7 +75,7 @@ export const EngineConnectionGate: React.FC = () => {
                 Connect to a Cadence Playback Engine
               </h1>
               <p className="text-xs text-[#98A2B3] mt-0.5">
-                Connect to a Cadence Playback Engine on your NAS or PC to browse, curate, and play music.
+                Connect to Playback Engine to browse, curate, or play music.
               </p>
             </div>
           </div>
@@ -69,7 +84,7 @@ export const EngineConnectionGate: React.FC = () => {
             <button
               type="button"
               onClick={() => void handleRetryLast()}
-              disabled={state.isBusy || isBootstrapping}
+              disabled={state.isBusy || isBootstrapping || connection?.phase === 'waiting' || connection?.phase === 'checking'}
               className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-white/80 hover:bg-white/[0.08] cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${state.isBusy ? 'animate-spin' : ''}`} />
@@ -77,7 +92,7 @@ export const EngineConnectionGate: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => void engine.discoverCores()}
+              onClick={handleSwitchEngine}
               disabled={state.isDiscovering || state.isBusy}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4AF37]/35 bg-[#D4AF37]/10 px-3 py-1.5 text-xs font-medium text-[#D4AF37] hover:bg-[#D4AF37]/20 cursor-pointer disabled:opacity-50"
             >
@@ -86,16 +101,31 @@ export const EngineConnectionGate: React.FC = () => {
               ) : (
                 <Wifi className="w-3.5 h-3.5" />
               )}
-              <span>Discover on LAN</span>
+              <span>Switch Engine</span>
             </button>
           </div>
         </div>
 
-        {isBootstrapping && (
-          <div className="flex items-center gap-2.5 rounded-xl border border-white/[0.08] bg-black/35 px-4 py-3 text-xs text-white/75">
-            <Loader2 className="w-4 h-4 animate-spin text-[#D4AF37] shrink-0" />
-            <span>Checking saved Playback Engines and local network...</span>
+        {(isBootstrapping || connection) && (
+          <div role="status" className={`rounded-xl border border-white/[0.08] bg-black/35 px-4 py-3 text-xs text-white/75 transition-opacity duration-200 motion-reduce:transition-none ${connection?.phase === 'ready' ? 'opacity-0' : 'opacity-100'}`}>
+            {connection?.phase === 'ready'
+              ? 'Engine ready. Opening library…'
+              : connection?.phase === 'failed'
+              ? (connection.error ?? 'Could not connect to the saved engine.') + ' Retry or switch engines.'
+              : connection
+                ? `Waiting for ${connection.profile.label} (attempt ${connection.attempt} of 4)`
+                : 'Checking saved engines and the local network…'}
           </div>
+        )}
+
+        {detailsProfile && (
+          <details className="text-xs text-white/65">
+            <summary className="cursor-pointer">Connection Details</summary>
+            <div className="mt-2 space-y-1 break-all">
+              <p>{isLoopbackEngineUrl(detailsProfile.baseUrl) ? 'Loopback' : 'Network'} · {detailsProfile.baseUrl}</p>
+              <p>{connection?.phase === 'ready' ? 'HTTPS fingerprint verified' : detailsProfile.certFingerprint ? 'HTTPS fingerprint pinned' : 'No HTTPS fingerprint saved'}</p>
+            </div>
+          </details>
         )}
 
         {errorBanner && !isBootstrapping && (
@@ -140,7 +170,10 @@ export const EngineConnectionGate: React.FC = () => {
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       type="button"
-                      onClick={() => void handleConnectSaved(profile)}
+                      onClick={() => {
+                        engine.cancelStartupConnection()
+                        void handleConnectSaved(profile)
+                      }}
                       disabled={state.isBusy}
                       className="rounded-lg bg-[#D4AF37] px-3.5 py-1.5 text-xs font-semibold text-black hover:bg-[#E0BE52] cursor-pointer disabled:opacity-50"
                     >
@@ -187,10 +220,12 @@ export const EngineConnectionGate: React.FC = () => {
                     onClick={() => {
                       setAddressInput(node.baseUrl)
                       setLabelInput(node.label)
-                      void engine.probeAndStageAddress({
+                      void probeAddress({
                         baseUrl: node.baseUrl,
                         label: node.label,
-                        trustInsecure: true,
+                        certFingerprint: node.certFingerprint,
+                        pairingToken: node.pairingToken,
+                        trustInsecure: !node.certFingerprint,
                       })
                     }}
                     className="rounded-lg border border-emerald-400/35 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/25 cursor-pointer"

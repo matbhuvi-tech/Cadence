@@ -103,6 +103,12 @@ export interface CoreControllerState {
   switchPrompt: CoreSwitchPrompt | null
   statusAnnouncement: string
   lastError: string | null
+  startupConnection?: {
+    profile: SavedCoreProfile
+    attempt: number
+    phase: 'checking' | 'waiting' | 'ready' | 'failed'
+    error?: string
+  }
 }
 
 export interface StorageLike {
@@ -118,6 +124,12 @@ export interface LocalOwnerPort extends LocalEngineOwner {
 
 type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never
 export type CoreCommandInput = DistributiveOmit<CoreCommand, 'commandId' | 'expectedRevision'>
+
+const normalizeFingerprint = (value: string) => value.replace(/[^0-9a-f]/gi, '').toLowerCase()
+
+export function isLoopbackEngineUrl(url: string): boolean {
+  return /^https:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/?$/i.test(url)
+}
 
 const SAVED_CORES_STORAGE_KEY = 'cadence:core_profiles:v1'
 
@@ -381,6 +393,7 @@ export interface DesktopCoreControllerStoreOptions {
   storage?: StorageLike | null
   channelFactory?: (profile: SavedCoreProfile) => AuthenticatedCoreChannel
   httpBridge?: HttpCoreTransportBridge
+  readLocalPairingEndpoint?: () => Promise<DiscoveredCoreNode | null>
   discoverNodes?: () => Promise<DiscoveredCoreNode[]>
   generateCommandId?: () => string
 }
@@ -422,6 +435,8 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       return options.localOwner.request(req)
     },
   }
+  let startupGeneration = 0
+  let startupRunning = false
   const localService = createLocalEngineService(wrappedLocalOwner)
   const controller = createEngineServiceController(localService)
   const storage = options.storage ?? null
@@ -1294,28 +1309,83 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     },
 
     async bootstrapStartupConnection(): Promise<void> {
-      if (disposed) return
-      if (controller.getView().session.active.kind === 'core') return
-      if (state.savedCores.length > 0) {
-        for (const profile of state.savedCores) {
-          const outcome = await activateProfileInternal(profile, 'idle')
-          if (outcome === 'activated') {
-            return
+      if (disposed || state.isBusy || startupRunning || controller.getView().session.active.kind === 'core') return
+      startupRunning = true
+      const generation = ++startupGeneration
+      const current = () => !disposed && generation === startupGeneration
+      try {
+        let local = state.savedCores.find((profile) =>
+          isLoopbackEngineUrl(profile.baseUrl) &&
+          Boolean(profile.certFingerprint),
+        )
+        if (!local && options.readLocalPairingEndpoint && state.savedCores.some((profile) => profile.certFingerprint)) {
+          const pairing = await options.readLocalPairingEndpoint().catch(() => null)
+          if (!current()) return
+          if (pairing?.certFingerprint && isLoopbackEngineUrl(pairing.baseUrl)) {
+            const fingerprint = normalizeFingerprint(pairing.certFingerprint)
+            const saved = state.savedCores.find((profile) =>
+              profile.engineId === pairing.engineId &&
+              profile.libraryId === pairing.libraryId &&
+              normalizeFingerprint(profile.certFingerprint ?? '') === fingerprint,
+            )
+            if (saved) local = { ...saved, baseUrl: pairing.baseUrl }
           }
         }
-      }
-      if (options.discoverNodes) {
-        state = { ...state, isDiscovering: true }
-        emit()
-        try {
-          const nodes = await options.discoverNodes()
-          state = { ...state, isDiscovering: false, discoveredCores: nodes }
+        if (local) {
+          let failure: string | undefined
+          const profile = { ...local, certFingerprint: local.certFingerprint!, trustInsecure: false }
+          for (let attempt = 1; attempt <= 4 && current(); attempt++) {
+            state = { ...state, stagingError: null, lastError: null,
+              startupConnection: { profile, attempt, phase: 'checking' } }
+            emit()
+            try {
+              const health = await httpBridge.probeHealth(profile)
+              if (!current()) return
+              if (health.engineId !== profile.engineId || health.libraryId !== profile.libraryId) {
+                throw new CoreServiceError('identity_mismatch')
+              }
+              if (health.tlsFingerprintSha256 &&
+                  normalizeFingerprint(health.tlsFingerprintSha256) !== normalizeFingerprint(profile.certFingerprint)) {
+                throw new CoreServiceError('untrusted_peer')
+              }
+              if (health.ready !== true) throw new CoreServiceError('not_ready')
+              state = { ...state, startupConnection: { profile, attempt, phase: 'ready' } }
+              emit()
+              if (await activateProfileInternal(profile, options.localOwner.getActivity()) === 'activated') return
+              break
+            } catch (error) {
+              if (!current()) return
+              if (error instanceof CoreServiceError && !['unavailable', 'not_ready'].includes(error.code)) {
+                failure = error.message
+                break
+              }
+            }
+            if (attempt < 4) {
+              state = { ...state, startupConnection: { profile, attempt, phase: 'waiting' } }
+              emit()
+              await new Promise<void>((resolve) => setTimeout(resolve, attempt * 750))
+            }
+          }
+          if (!current()) return
+          state = { ...state, startupConnection: { ...state.startupConnection!, phase: 'failed', error: failure } }
           emit()
-        } catch {
-          state = { ...state, isDiscovering: false }
-          emit()
+          return
         }
+        for (const profile of state.savedCores) {
+          if (!current()) return
+          if (await activateProfileInternal(profile, options.localOwner.getActivity()) === 'activated') return
+        }
+        if (current()) await this.discoverOnDemand()
+      } finally {
+        if (generation === startupGeneration) startupRunning = false
       }
+    },
+
+    cancelStartupConnection(): void {
+      startupGeneration++
+      startupRunning = false
+      state = { ...state, startupConnection: undefined }
+      emit()
     },
 
     /** Closing the controller never sends Stop to Core; the Core session continues independently. */

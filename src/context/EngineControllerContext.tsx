@@ -42,6 +42,8 @@ export interface EngineControllerContextValue {
   state: CoreControllerState
   isCoreActive: boolean
   isBootstrapping: boolean
+  retryStartupConnection: () => Promise<void>
+  cancelStartupConnection: () => void
   activeCoreSnapshot: CoreSnapshot | null
   engineClient: EngineClient | null
   coreCatalogTracks: Track[]
@@ -344,6 +346,7 @@ export const EngineControllerProvider: React.FC<{
       httpBridge,
       channelFactory: (profile) => createAuthenticatedHttpChannel(profile, httpBridge),
       discoverNodes: () => tauriBridge.discoverCoreNodes(),
+      readLocalPairingEndpoint: () => tauriBridge.localCorePairingEndpoint(),
       localOwner: {
         getActivity: () => activityRef.current,
         stopAndAcknowledge: async () => {
@@ -359,6 +362,7 @@ export const EngineControllerProvider: React.FC<{
   const store = storeRef.current
   const [state, setState] = useState<CoreControllerState>(() => store.getState())
   const [isBootstrapping, setIsBootstrapping] = useState<boolean>(() => !storeOverride)
+  const initialConnectionRef = useRef<Promise<void> | null>(null)
   const eventListenersRef = useRef(new Set<(event: EngineEventRecord) => void>())
   const artworkCacheRef = useRef<EngineArtworkCache | null>(null)
   if (!artworkCacheRef.current) {
@@ -386,8 +390,9 @@ export const EngineControllerProvider: React.FC<{
       return
     }
     let mounted = true
-    void store
-      .bootstrapStartupConnection()
+    // Reuse the in-flight connection when Strict Mode replays this effect.
+    initialConnectionRef.current ??= store.bootstrapStartupConnection()
+    void initialConnectionRef.current
       .catch(() => {})
       .finally(() => {
         if (mounted) setIsBootstrapping(false)
@@ -692,6 +697,11 @@ export const EngineControllerProvider: React.FC<{
       state,
       isCoreActive,
       isBootstrapping,
+      retryStartupConnection: () => store.bootstrapStartupConnection(),
+      cancelStartupConnection: () => {
+        store.cancelStartupConnection()
+        setIsBootstrapping(false)
+      },
       activeCoreSnapshot,
       engineClient,
       coreCatalogTracks,

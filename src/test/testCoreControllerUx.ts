@@ -247,6 +247,54 @@ test('Phase 7 controller store defaults to This PC with zero startup Core I/O', 
   assert.equal(localPlayCalls, 0)
 })
 
+test('startup recovers a saved LAN profile over pinned loopback HTTPS once ready', async () => {
+  const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
+  const node = createFakeCoreNode()
+  const certFingerprint = 'ab'.repeat(32)
+  const profile = { ...node.context, baseUrl: 'https://127.0.0.1:4040', certFingerprint, musicRoots: [] }
+  let probes = 0
+  let activations = 0
+  const store = createDesktopCoreControllerStore({
+    storage: {
+      getItem: () => JSON.stringify([{ ...profile, baseUrl: 'https://192.168.1.42:4040' }]),
+      setItem: () => {},
+    },
+    readLocalPairingEndpoint: async () => profile,
+    localOwner: {
+      getActivity: () => 'idle',
+      stopAndAcknowledge: async () => true,
+      request: async () => ({ ok: true, data: {} }),
+    },
+    httpBridge: {
+      async probeHealth(target) {
+        assert.equal(target.baseUrl, profile.baseUrl)
+        assert.equal(target.certFingerprint, certFingerprint)
+        assert.equal(target.trustInsecure, false)
+        return { ...node.context, ready: ++probes > 1, tlsFingerprintSha256: certFingerprint }
+      },
+      postCoreRequest: (_target, request) => node.channel.request(request),
+    },
+    channelFactory: () => {
+      activations++
+      return node.channel
+    },
+  })
+
+  try {
+    const startup = store.bootstrapStartupConnection()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(store.getState().startupConnection?.phase, 'waiting')
+    assert.equal(activations, 0)
+    await startup
+    assert.equal(store.getState().view.session.active.kind, 'core')
+    assert.equal(store.getState().activeProfile?.baseUrl, profile.baseUrl)
+    assert.equal(store.getState().startupConnection?.phase, 'ready')
+    assert.equal(activations, 1)
+  } finally {
+    store.dispose()
+  }
+})
+
 test('Phase 7 Add/Cancel/Fail/Prepare/Activate Core preserves prior state on cancel or failure and commits atomically without auto-play', async () => {
   const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
 
