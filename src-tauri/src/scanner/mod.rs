@@ -3,6 +3,7 @@ pub mod dsd;
 pub mod engine;
 pub mod media;
 
+pub use media::find_local_cover_art;
 #[cfg(feature = "desktop")]
 pub use engine::{ScanCompletePayload, ScanProgressPayload, ScannerController};
 

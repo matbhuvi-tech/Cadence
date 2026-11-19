@@ -605,26 +605,18 @@ impl MaintenanceWorker {
         let mut raw_bytes: Option<Vec<u8>> = None;
         let mut source_mtime: i64 = 0;
 
-        // A. Check folder images first
+        // A. Check folder images first (case-insensitive ranked + artwork subdirs + multi-disc parent)
         if folder_path.is_dir() {
-            let candidates = [
-                "cover.jpg", "folder.jpg", "front.jpg", "album.jpg",
-                "cover.png", "folder.png", "front.png", "Cover.jpg",
-                "Folder.jpg", "Front.jpg", "cover.jpeg", "front.jpeg"
-            ];
-            for cand in candidates {
-                let img_path = folder_path.join(cand);
-                if img_path.is_file() {
-                    if let Ok(b) = fs::read(&img_path) {
-                        source_mtime = fs::metadata(&img_path)
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        raw_bytes = Some(b);
-                        break;
-                    }
+            if let Some(img_path_str) = crate::scanner::find_local_cover_art(folder_path) {
+                let img_path = Path::new(&img_path_str);
+                if let Ok(b) = fs::read(img_path) {
+                    source_mtime = fs::metadata(img_path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    raw_bytes = Some(b);
                 }
             }
         }
@@ -639,12 +631,16 @@ impl MaintenanceWorker {
                         raw_bytes = extract_dsf_artwork(t_path);
                     } else if ext_lower == "dff" || ext_lower == "dsdiff" {
                         raw_bytes = crate::scanner::dsd::probe_dsd_file(t_path)
-                            .and_then(|d| d.tag.and_then(|t| t.pictures().first().map(|p| p.data().to_vec())));
+                            .and_then(|d| d.tag.and_then(|t| crate::scanner::media::select_best_picture(&t).map(|p| p.data().to_vec())));
                     }
                     if raw_bytes.is_none() {
                         if let Ok(tagged_file) = Probe::open(t_path).and_then(|p| p.read()) {
-                            if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
-                                if let Some(pic) = tag.pictures().first() {
+                            if let Some(tag) = tagged_file
+                                .primary_tag()
+                                .or_else(|| tagged_file.first_tag())
+                                .or_else(|| tagged_file.tags().iter().find(|t| !t.pictures().is_empty()))
+                            {
+                                if let Some(pic) = crate::scanner::media::select_best_picture(tag) {
                                     raw_bytes = Some(pic.data().to_vec());
                                 }
                             }

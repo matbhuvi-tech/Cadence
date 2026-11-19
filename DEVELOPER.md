@@ -70,4 +70,6 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 - Frontend: `npm run build`
 - Optional Core contracts/adapters: `npm run test:core-services`
 - Native backend: `cargo test --manifest-path src-tauri/Cargo.toml`
-- Windows installer: `npm run tauri:build -- --bundles nsis`
+- Windows Desktop installer: `npm run tauri:build -- --bundles nsis`
+- Windows Playback Engine binary (`src-tauri/target/release/cadence-engine.exe`): `cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --features engine-audio --bin cadence-engine`
+- Windows Playback Engine NSIS installer (`src-tauri/target/release/bundle/nsis/cadence-engine-setup.exe`): `.\deploy\windows-engine\build-windows-engine.ps1` (pass `-SkipCargoBuild` if `cadence-engine.exe` is already built)

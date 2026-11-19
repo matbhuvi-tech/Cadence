@@ -1,5 +1,22 @@
 # Issue Log
 
+## GitHub #48 — Album Art Pipeline: Import competence, playback browse throttling, 100K+ scale, PWA parity, and auto-migration
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/48
+- **Branch:** `fix/48-album-art-pipeline`
+- **Reported behavior:**
+  1. Album art differs between installed Windows app and `npm run tauri:dev`.
+  2. Many albums fail to display cover art after import/scan.
+  3. Migration from V1 Desktop DB (`%APPDATA%`) to V2 External Playback Engine (`%LOCALAPPDATA%\CadenceEngine`) loses cover art or requires manual CLI flags.
+  4. Users browsing their collection (genres, composers, albums) while music is playing hit `503 deferred_until_idle` blank covers that never retry, while Mobile Remote PWA shows a flat text track list without album art in Core mode.
+- **Root causes:**
+  1. `core_runtime/library.rs` only matches 5 lowercase filenames (`cover.jpg`, `cover.png`, `folder.jpg`, `folder.png`, `front.jpg`), ignores `PictureType::CoverFront`, caps source images at 4 MB, and re-encodes artwork on every track of an album.
+  2. `enriched_tracks()` derives `hasCoverArt` only from `tracks.has_embedded_art` instead of `engine_artwork` presence.
+  3. `Library::artwork()` blocks read-only SQLite `engine_artwork` lookups during playback/cooldown on RAM cache misses, wipes the entire 32 MB cache on overflow or revision change, and `EngineArtworkImg.tsx` never retries after `503`.
+  4. `self.pending` uses breadth-first traversal with a 100,000 hard limit, and `EngineArtworkImg` lacks viewport `IntersectionObserver` lazy loading.
+  5. Mobile PWA uses legacy `/api/remote/library/artwork/{id}?token=...` and flat track rows in Core mode, while `dragonfish.rs` `/v1/artwork/{id}` does not strip query strings or resolve track IDs.
+  6. `WindowsEngineNode::bootstrap()` does not auto-run `migrate_legacy_desktop_db()` when `cadence.db` is absent/empty, and `migration.rs` drops `releases.front_cover_url` and `backdrop_url`.
+
 ## GitHub #47 — Windows Desktop intermittently misses Playback Engine at startup
 
 - Reported behavior. Cadence Desktop and the Windows Playback Engine require repeated restarts before connecting. Expected behavior is for Desktop to connect to the previously paired engine once it is ready, regardless of launch order.

@@ -1241,8 +1241,13 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
                             continue;
                         }
                     }
-                } else if method == "GET" && path.starts_with("/v1/artwork/") {
-                    let id=path.trim_start_matches("/v1/artwork/");
+                } else if method == "GET" && (path.starts_with("/v1/artwork/") || path.starts_with("/api/remote/library/artwork/")) {
+                    let raw_tail = path
+                        .strip_prefix("/v1/artwork/")
+                        .or_else(|| path.strip_prefix("/api/remote/library/artwork/"))
+                        .unwrap_or("");
+                    let raw_id = raw_tail.split('?').next().unwrap_or("");
+                    let id = raw_id.strip_prefix("core_rel_").unwrap_or(raw_id);
                     let result=runtime.lock().map_err(|_|"Unavailable".to_string()).and_then(|mut rt|rt.artwork_at(id,std::time::Instant::now()));
                     match result {
                         Ok((etag,bytes))=>{

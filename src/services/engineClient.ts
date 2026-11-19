@@ -400,20 +400,23 @@ export function createEngineArtworkCache(options: {
   maxEntries?: number
   maxConcurrent?: number
 }): EngineArtworkCache {
-  const maxEntries = options.maxEntries ?? 256
+  const maxEntries = options.maxEntries ?? 512
   const maxConcurrent = Math.max(1, options.maxConcurrent ?? 2)
-  const cache = new Map<string, { objectUrl: string | null; etag: string | null; miss?: boolean }>()
+  const cache = new Map<
+    string,
+    { objectUrl: string | null; etag: string | null; revision: number; miss?: boolean }
+  >()
   const inFlight = new Map<string, Promise<string | null>>()
   const waitQueue: Array<() => void> = []
   let active = 0
 
-  function makeKey(engineId: string, releaseId: string, revision: number): string {
-    return `${engineId}::${releaseId}::${revision}`
+  function makeKey(engineId: string, releaseId: string): string {
+    return `${engineId}::${releaseId}`
   }
 
   function touchEntry(
     key: string,
-    value: { objectUrl: string | null; etag: string | null; miss?: boolean },
+    value: { objectUrl: string | null; etag: string | null; revision: number; miss?: boolean },
   ) {
     if (cache.has(key)) {
       cache.delete(key)
@@ -447,25 +450,26 @@ export function createEngineArtworkCache(options: {
   }
 
   return {
-    getCached(engineId, rawReleaseId, revision) {
+    getCached(engineId, rawReleaseId, _revision) {
       const cleanId = stripCoreReleasePrefix(rawReleaseId)
-      const entry = cache.get(makeKey(engineId, cleanId, revision))
+      const entry = cache.get(makeKey(engineId, cleanId))
       return entry?.objectUrl ?? null
     },
 
     async getOrFetch(profile, rawReleaseId, revision) {
       const cleanId = stripCoreReleasePrefix(rawReleaseId)
       if (!cleanId) return null
-      const key = makeKey(profile.engineId, cleanId, revision)
+      const key = makeKey(profile.engineId, cleanId)
       const existing = cache.get(key)
-      if (existing) {
+      if (existing && existing.revision === revision) {
         if (existing.miss) return null
         if (existing.objectUrl) {
           touchEntry(key, existing)
           return existing.objectUrl
         }
       }
-      const pending = inFlight.get(key)
+      const inFlightKey = `${key}::${revision}`
+      const pending = inFlight.get(inFlightKey)
       if (pending) return pending
 
       const promise = withSlot(async (): Promise<string | null> => {
@@ -481,19 +485,24 @@ export function createEngineArtworkCache(options: {
             existing?.etag ?? undefined,
           )
           if (res.status === 304 && existing?.objectUrl) {
+            const refreshed = { ...existing, revision }
+            touchEntry(key, refreshed)
             return existing.objectUrl
           }
           if (res.status === 404) {
-            touchEntry(key, { objectUrl: null, etag: res.etag, miss: true })
+            if (existing?.objectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+              URL.revokeObjectURL(existing.objectUrl)
+            }
+            touchEntry(key, { objectUrl: null, etag: res.etag, revision, miss: true })
             return null
           }
           if (res.status === 503) {
-            // Playback/cooldown active on Engine — do not cache as permanent miss
-            return null
+            // Playback/cooldown active on Engine — preserve any prior objectUrl and do not cache as permanent miss
+            return existing?.objectUrl ?? null
           }
           const rawBytes = res.bytes ?? (res.base64 ? base64ToUint8Array(res.base64) : null)
           if (!rawBytes || rawBytes.byteLength === 0) {
-            return null
+            return existing?.objectUrl ?? null
           }
           if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
             return null
@@ -501,16 +510,24 @@ export function createEngineArtworkCache(options: {
           const arrayBuffer = rawBytes.slice().buffer
           const blob = new Blob([arrayBuffer], { type: res.contentType || 'image/jpeg' })
           const objectUrl = URL.createObjectURL(blob)
-          touchEntry(key, { objectUrl, etag: res.etag })
+          if (
+            existing?.objectUrl &&
+            existing.objectUrl !== objectUrl &&
+            typeof URL !== 'undefined' &&
+            typeof URL.revokeObjectURL === 'function'
+          ) {
+            URL.revokeObjectURL(existing.objectUrl)
+          }
+          touchEntry(key, { objectUrl, etag: res.etag, revision })
           return objectUrl
         } catch {
-          return null
+          return existing?.objectUrl ?? null
         } finally {
-          inFlight.delete(key)
+          inFlight.delete(inFlightKey)
         }
       })
 
-      inFlight.set(key, promise)
+      inFlight.set(inFlightKey, promise)
       return promise
     },
 

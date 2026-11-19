@@ -850,6 +850,7 @@ async function run(): Promise<void> {
       (() => {
         window.__cadenceActiveCid = '${activeCid}';
         function setVal(el, v) {
+          if (!el) return;
           const proto = HTMLInputElement.prototype;
           Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
           el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -863,7 +864,7 @@ async function run(): Promise<void> {
       })();
     `)
     await desktopCdp.evaluate(`
-      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Verify & Pair')).click();
+      Array.from(document.querySelectorAll('button')).find(b => b.textContent?.includes('Verify & Pair') || b.textContent?.includes('Verify & Connect')).click();
     `)
     await desktopCdp.waitFor(
       `Array.from(document.querySelectorAll('button')).some(b => b.textContent?.includes('Open Library'))`,
@@ -929,6 +930,8 @@ async function run(): Promise<void> {
       addedOk: boolean
       artworkStatus: number
       artworkBytes: number
+      pwaArtworkStatus: number
+      pwaArtworkBytes: number
       renderedBlobImgs: number
       draftSaved: boolean
       dryRunBlockedReason: string | null
@@ -965,6 +968,8 @@ async function run(): Promise<void> {
         headers: { 'x-cadence-token': '${E2E_PAIRING_TOKEN}' },
       });
       const artBuf = artRes.ok ? await artRes.arrayBuffer() : new ArrayBuffer(0);
+      const pwaArtRes = await fetch(base + '/api/remote/library/artwork/trk_gb_1?token=${E2E_PAIRING_TOKEN}');
+      const pwaArtBuf = pwaArtRes.ok ? await pwaArtRes.arrayBuffer() : new ArrayBuffer(0);
       const renderedBlobImgs = Array.from(document.querySelectorAll('img')).filter(
         (img) => img.src.startsWith('blob:') && img.complete && img.naturalWidth > 0,
       ).length;
@@ -987,6 +992,8 @@ async function run(): Promise<void> {
         addedOk,
         artworkStatus: artRes.status,
         artworkBytes: artBuf.byteLength,
+        pwaArtworkStatus: pwaArtRes.status,
+        pwaArtworkBytes: pwaArtBuf.byteLength,
         renderedBlobImgs,
         draftSaved: Boolean(draftRes?.ok),
         dryRunBlockedReason: dryRunRes?.data?.blockReason || dryRunRes?.error?.code || null,
@@ -1003,6 +1010,8 @@ async function run(): Promise<void> {
       v2Probe.addedOk &&
       v2Probe.artworkStatus === 200 &&
       v2Probe.artworkBytes > 0 &&
+      v2Probe.pwaArtworkStatus === 200 &&
+      v2Probe.pwaArtworkBytes > 0 &&
       v2Probe.renderedBlobImgs >= 1 &&
       v2Probe.draftSaved &&
       !hasThisPcUi

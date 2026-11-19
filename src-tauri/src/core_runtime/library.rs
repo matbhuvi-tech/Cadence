@@ -14,14 +14,22 @@ use std::path::{Component, Path, PathBuf};
 
 type Result<T> = std::result::Result<T, String>;
 const MAX_LIST: usize = 4096;
-const MAX_ART_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ART_BYTES: usize = 24 * 1024 * 1024;
+const MAX_COMPRESSED_ART_BYTES: usize = 1024 * 1024;
 const MAX_ART_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SCAN_QUEUE: usize = 1_000_000;
+const PROTECTED_ART_BURST: f64 = 24.0;
+const PROTECTED_ART_REFILL_PER_SEC: f64 = 12.0;
 
 pub struct Library {
     db: AppDb,
     roots: Vec<PathBuf>,
     browse_cache: HashMap<PathBuf, Value>,
     art_cache: HashMap<String, (String, Vec<u8>)>,
+    art_lru: VecDeque<String>,
+    art_source_hashes: HashMap<String, [u8; 32]>,
+    art_throttle_tokens: f64,
+    art_throttle_last_refill: std::time::Instant,
     pending: VecDeque<(String, PathBuf)>,
     scan: Value,
     revision: u64,
@@ -127,6 +135,10 @@ impl Library {
             roots,
             browse_cache: HashMap::new(),
             art_cache: HashMap::new(),
+            art_lru: VecDeque::new(),
+            art_source_hashes: HashMap::new(),
+            art_throttle_tokens: PROTECTED_ART_BURST,
+            art_throttle_last_refill: std::time::Instant::now(),
             pending,
             scan,
             revision,
@@ -225,7 +237,6 @@ impl Library {
 
     fn changed(&mut self) -> Result<()> {
         self.revision += 1;
-        self.art_cache.clear();
         self.persist()?;
         self.events
             .progress("catalog.changed", json!({"revision":self.revision}));
@@ -676,11 +687,14 @@ impl Library {
                 .map_err(|e| e.to_string())?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
-            if entries.len() > 100_000 {
+            if entries.len() > MAX_SCAN_QUEUE {
                 return Err("Scan directory limit exceeded".into());
             }
             entries.sort_by_key(|e| e.file_name());
-            for entry in entries {
+            // Push in reverse order to the front of the queue so `pop_front()` performs
+            // a depth-first traversal in alphabetical order, keeping queue memory O(depth * width)
+            // even on 100K+ track catalogues and scanning all tracks of an album contiguously.
+            for entry in entries.into_iter().rev() {
                 let ty = entry.file_type().map_err(|e| e.to_string())?;
                 if ty.is_symlink() {
                     continue;
@@ -708,10 +722,10 @@ impl Library {
                                 | "dsdiff"
                         ))
                 {
-                    if self.pending.len() >= 100_000 {
+                    if self.pending.len() >= MAX_SCAN_QUEUE {
                         return Err("Scan queue limit exceeded".into());
                     }
-                    self.pending.push_back((folder_id.to_string(), child));
+                    self.pending.push_front((folder_id.to_string(), child));
                 }
             }
             return Ok(());
@@ -750,8 +764,10 @@ impl Library {
                 "SELECT EXISTS(SELECT 1 FROM engine_artwork WHERE release_id=?1)",
                 params![existing.as_ref().unwrap().1], |r| r.get(0),
             ).map_err(|e| e.to_string())?;
-            let folder_has_art = path.parent().map(|dir| ["cover.jpg", "cover.png", "folder.jpg", "folder.png", "front.jpg"]
-                .iter().any(|name| self.open_path(&dir.join(name)).is_ok())).unwrap_or(false);
+            let folder_has_art = path
+                .parent()
+                .map(|dir| !self.find_folder_cover_candidates(dir).is_empty())
+                .unwrap_or(false);
             if has_art && !folder_has_art {
                 self.db
                     .conn
@@ -812,27 +828,23 @@ impl Library {
         let disc = tag.and_then(|t| t.disk());
         let original_album = tag.and_then(crate::scanner::dsd::extract_original_album);
         let original_year = tag.and_then(crate::scanner::dsd::extract_original_year);
-        let jpeg = tag
-            .and_then(|t| t.pictures().first())
-            .and_then(|p| compress_art(p.data()).ok())
-            .or_else(|| {
-                [
-                    "cover.jpg",
-                    "cover.png",
-                    "folder.jpg",
-                    "folder.png",
-                    "front.jpg",
-                ]
-                .iter()
-                .find_map(|name| {
-                    let f = self.open_path(&dir.join(name)).ok()?;
-                    let mut data = Vec::new();
-                    f.take((MAX_ART_BYTES + 1) as u64)
-                        .read_to_end(&mut data)
-                        .ok()?;
-                    if data.len() <= MAX_ART_BYTES { compress_art(&data).ok() } else { None }
-                })
-            });
+        let release_already_has_art: bool = self
+            .db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_artwork WHERE release_id=?1)",
+                params![release],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        let art_outcome = self.resolve_and_compress_artwork(&release, tag, dir, release_already_has_art);
+        let (new_jpeg, has_art_for_release) = match art_outcome {
+            Some(Some(jpeg)) => (Some(jpeg), true),
+            Some(None) => (None, true),
+            None => (None, release_already_has_art),
+        };
+        let cover_sentinel = has_art_for_release.then(|| format!("cadence-art://{release}"));
         let mut conn = self.db.conn.lock();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mount: String = tx
@@ -842,14 +854,17 @@ impl Library {
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,composer_name,release_year,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,composer_name=excluded.composer_name,release_year=excluded.release_year",params![release,album,dir.to_string_lossy(),folder_name,parsed.artist,composer,year]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,composer_name,release_year,front_cover_url,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET title=excluded.title,composer_name=excluded.composer_name,release_year=excluded.release_year,front_cover_url=COALESCE(excluded.front_cover_url, releases.front_cover_url)",params![release,album,dir.to_string_lossy(),folder_name,parsed.artist,composer,year,cover_sentinel]).map_err(|e|e.to_string())?;
         tx.execute("INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,file_size,mtime,title,artist_credit,album_title,duration_secs,format,sample_rate,bit_depth,channels,composer,genre,album_artist,release_year,track_number,disc_number,has_embedded_art,language,lyrics,original_album,original_year,created_at)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,CURRENT_TIMESTAMP)
             ON CONFLICT(file_path) DO UPDATE SET mount_id=excluded.mount_id,title=excluded.title,artist_credit=excluded.artist_credit,album_title=excluded.album_title,duration_secs=excluded.duration_secs,sample_rate=excluded.sample_rate,bit_depth=excluded.bit_depth,channels=excluded.channels,composer=excluded.composer,genre=excluded.genre,album_artist=excluded.album_artist,release_year=excluded.release_year,track_number=excluded.track_number,disc_number=excluded.disc_number,has_embedded_art=excluded.has_embedded_art,language=excluded.language,lyrics=excluded.lyrics,original_album=excluded.original_album,original_year=excluded.original_year,file_size=excluded.file_size,mtime=excluded.mtime,is_online=1",
-            params![id,release,mount,dir.to_string_lossy(),folder_name,path.to_string_lossy(),path.file_name().unwrap_or_default().to_string_lossy(),metadata.len() as i64,metadata.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs() as i64).unwrap_or(0),title,parsed.artist,album,parsed.duration,extension.to_uppercase(),parsed.sample_rate,parsed.bit_depth,parsed.channels,composer,genre,album_artist,year,number,disc,jpeg.is_some(),language,lyrics,original_album,original_year]).map_err(|e|e.to_string())?;
-        if let Some(jpeg) = jpeg {
+            params![id,release,mount,dir.to_string_lossy(),folder_name,path.to_string_lossy(),path.file_name().unwrap_or_default().to_string_lossy(),metadata.len() as i64,metadata.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs() as i64).unwrap_or(0),title,parsed.artist,album,parsed.duration,extension.to_uppercase(),parsed.sample_rate,parsed.bit_depth,parsed.channels,composer,genre,album_artist,year,number,disc,has_art_for_release,language,lyrics,original_album,original_year]).map_err(|e|e.to_string())?;
+        let mut updated_art: Option<(String, Vec<u8>)> = None;
+        if let Some(jpeg) = new_jpeg {
             let etag = token("art", &format!("{:x}", Sha256::digest(&jpeg)));
             tx.execute("INSERT INTO engine_artwork VALUES(?1,?2,?3) ON CONFLICT(release_id) DO UPDATE SET etag=excluded.etag,jpeg=excluded.jpeg",params![release,etag,jpeg]).map_err(|e|e.to_string())?;
+            tx.execute("UPDATE tracks SET has_embedded_art=1 WHERE release_id=?1", params![release]).map_err(|e|e.to_string())?;
+            updated_art = Some((etag, jpeg));
         }
         tx.execute(
             "INSERT OR IGNORE INTO engine_scan_seen VALUES(?1,?2)",
@@ -857,40 +872,363 @@ impl Library {
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        drop(conn);
+        if let Some(art_entry) = updated_art {
+            self.insert_art_cache(release, art_entry);
+        }
         Ok(())
     }
 
-    pub fn artwork(&mut self, id: &str, idle: bool) -> Result<(String, Vec<u8>)> {
-        if let Some(art) = self.art_cache.get(id) {
-            return Ok(art.clone());
+    fn read_authorized_image_bytes(&self, path: &Path) -> Option<Vec<u8>> {
+        let f = self.open_path(path).ok()?;
+        let mut data = Vec::new();
+        f.take((MAX_ART_BYTES + 1) as u64)
+            .read_to_end(&mut data)
+            .ok()?;
+        if !data.is_empty() && data.len() <= MAX_ART_BYTES {
+            Some(data)
+        } else {
+            None
         }
+    }
+
+    /// Discovers ranked cover image files in a single directory (case-insensitive across Windows/Linux).
+    fn find_ranked_images_in_single_dir(&self, target_dir: &Path) -> Vec<PathBuf> {
+        let Ok(dir_file) = self.open_path(target_dir) else {
+            return Vec::new();
+        };
+        let Ok(read_dir) = std::fs::read_dir(handle_path(&dir_file, target_dir)) else {
+            return Vec::new();
+        };
+        let mut image_files: Vec<(String, PathBuf)> = Vec::new();
+        for entry in read_dir.flatten() {
+            let Ok(ty) = entry.file_type() else {
+                continue;
+            };
+            if !ty.is_file() || ty.is_symlink() {
+                continue;
+            }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let ext = Path::new(&file_name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            if media::is_cover_image_extension(ext) {
+                image_files.push((file_name.clone(), target_dir.join(file_name)));
+            }
+        }
+        let allow_single = image_files.len() == 1;
+        let mut ranked: Vec<((u8, u8), String, PathBuf)> = image_files
+            .into_iter()
+            .filter_map(|(name, p)| {
+                let rank = media::rank_cover_filename(&name, allow_single)?;
+                Some((rank, name.to_ascii_lowercase(), p))
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        ranked.into_iter().map(|(_, _, p)| p).collect()
+    }
+
+    /// Discovers folder cover art candidates in priority order:
+    /// 1. `cadence-album.sidecar.json` local path (if authorized)
+    /// 2. Ranked cover images directly in `dir` (`cover.*`, `folder.*`, `front.*`, `album.*`, `artwork.*`, or single-image fallback)
+    /// 3. Artwork subdirectories (`Artwork/`, `Covers/`, `Scans/`, `Art/`) inside `dir`
+    /// 4. Multi-disc parent directory (`..` and its artwork subdirectories) when `dir` is `CD1`, `Disc 1`, etc.
+    fn find_folder_cover_candidates(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+
+        // 1. Check cadence-album.sidecar.json
+        if let Some(sidecar_bytes) = self.read_authorized_image_bytes(&dir.join("cadence-album.sidecar.json")) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&sidecar_bytes) {
+                if let Some(raw_cover) = v
+                    .get("coverArtUrl")
+                    .or_else(|| v.get("artworkUrl"))
+                    .and_then(|s| s.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !s.starts_with("http://") && !s.starts_with("https://") && !s.starts_with("cadence-art://"))
+                {
+                    let clean = raw_cover
+                        .strip_prefix("file:///")
+                        .or_else(|| raw_cover.strip_prefix("file://"))
+                        .unwrap_or(raw_cover);
+                    let candidate = Path::new(clean);
+                    let resolved = if candidate.is_absolute() {
+                        candidate.to_path_buf()
+                    } else {
+                        dir.join(candidate)
+                    };
+                    if self.open_path(&resolved).is_ok() {
+                        out.push(resolved);
+                    }
+                }
+            }
+        }
+
+        // 2. Direct images in `dir`
+        out.extend(self.find_ranked_images_in_single_dir(dir));
+
+        // 3. Artwork subdirectories inside `dir`
+        if let Ok(dir_file) = self.open_path(dir) {
+            if let Ok(read_dir) = std::fs::read_dir(handle_path(&dir_file, dir)) {
+                let mut subdirs: Vec<PathBuf> = Vec::new();
+                for entry in read_dir.flatten() {
+                    if entry.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink()) {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if media::is_artwork_subdir_name(&name) {
+                            subdirs.push(dir.join(name));
+                        }
+                    }
+                }
+                subdirs.sort();
+                for sub in subdirs {
+                    out.extend(self.find_ranked_images_in_single_dir(&sub));
+                }
+            }
+        }
+
+        // 4. Multi-disc parent directory fallback (`CD1`, `Disc 1`, etc.)
+        if out.is_empty() {
+            let folder_name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if media::is_multidisc_subfolder_name(&folder_name) {
+                if let Some(parent) = dir.parent() {
+                    if self.authorized(parent).is_ok() {
+                        out.extend(self.find_ranked_images_in_single_dir(parent));
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Resolves and compresses artwork for a release, deduplicating work when the raw source bytes
+    /// match what was already compressed for this `release_id`.
+    /// Returns:
+    /// - `Some(Some(jpeg))` if newly compressed JPEG bytes should be written to `engine_artwork`
+    /// - `Some(None)` if the identical source bytes were already compressed and stored in `engine_artwork`
+    /// - `None` if no valid embedded or folder cover was found on this track
+    fn resolve_and_compress_artwork(
+        &mut self,
+        release: &str,
+        tag: Option<&lofty::tag::Tag>,
+        dir: &Path,
+        release_already_has_art: bool,
+    ) -> Option<Option<Vec<u8>>> {
+        // 1. Try best embedded picture (prioritizing CoverFront)
+        if let Some(pic) = tag.and_then(media::select_best_picture) {
+            let raw = pic.data();
+            if !raw.is_empty() && raw.len() <= MAX_ART_BYTES {
+                let raw_hash: [u8; 32] = Sha256::digest(raw).into();
+                if release_already_has_art && self.art_source_hashes.get(release) == Some(&raw_hash) {
+                    return Some(None);
+                }
+                if let Ok(jpeg) = compress_art(raw) {
+                    self.art_source_hashes.insert(release.to_string(), raw_hash);
+                    return Some(Some(jpeg));
+                }
+            }
+        }
+
+        // 2. Try ranked folder / sidecar / multi-disc cover candidates
+        for candidate in self.find_folder_cover_candidates(dir) {
+            let Some(raw) = self.read_authorized_image_bytes(&candidate) else {
+                continue;
+            };
+            let raw_hash: [u8; 32] = Sha256::digest(&raw).into();
+            if release_already_has_art && self.art_source_hashes.get(release) == Some(&raw_hash) {
+                return Some(None);
+            }
+            if let Ok(jpeg) = compress_art(&raw) {
+                self.art_source_hashes.insert(release.to_string(), raw_hash);
+                return Some(Some(jpeg));
+            }
+        }
+
+        None
+    }
+
+    fn touch_art_lru(&mut self, key: &str) {
+        if let Some(pos) = self.art_lru.iter().position(|k| k == key) {
+            self.art_lru.remove(pos);
+        }
+        self.art_lru.push_back(key.to_string());
+    }
+
+    fn insert_art_cache(&mut self, key: String, art: (String, Vec<u8>)) {
+        let entry_len = art.1.len();
+        if entry_len > MAX_ART_CACHE_BYTES {
+            return;
+        }
+        if self.art_cache.contains_key(&key) {
+            self.art_cache.remove(&key);
+        }
+        let mut current_bytes: usize = self.art_cache.values().map(|(_, b)| b.len()).sum();
+        while current_bytes + entry_len > MAX_ART_CACHE_BYTES {
+            let Some(oldest_key) = self.art_lru.pop_front() else {
+                self.art_cache.clear();
+                break;
+            };
+            if let Some((_, evicted_bytes)) = self.art_cache.remove(&oldest_key) {
+                current_bytes = current_bytes.saturating_sub(evicted_bytes.len());
+            }
+        }
+        self.touch_art_lru(&key);
+        self.art_cache.insert(key, art);
+    }
+
+    fn try_consume_protected_art_token(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.saturating_duration_since(self.art_throttle_last_refill).as_secs_f64();
+        if elapsed > 0.0 {
+            self.art_throttle_tokens = (self.art_throttle_tokens + elapsed * PROTECTED_ART_REFILL_PER_SEC)
+                .min(PROTECTED_ART_BURST);
+            self.art_throttle_last_refill = now;
+        }
+        if self.art_throttle_tokens >= 1.0 {
+            self.art_throttle_tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn artwork(&mut self, id: &str, idle: bool) -> Result<(String, Vec<u8>)> {
+        if let Some(art) = self.art_cache.get(id).cloned() {
+            self.touch_art_lru(id);
+            return Ok(art);
+        }
+
         if !idle {
+            // During active playback or 30s post-playback cooldown:
+            // - Music library drives are NEVER touched (zero filesystem I/O).
+            // - Read-only primary-key lookup against `engine_artwork` (on OS AppData SQLite) is allowed
+            //   under a token-bucket rate limiter (24 burst, 12/sec refill) with non-blocking `try_lock()`
+            //   so users can browse albums/genres/composers smoothly while blocking chaos-test floods.
+            if !self.try_consume_protected_art_token() {
+                return Err("deferred_until_idle".into());
+            }
+            let Some(conn) = self.db.conn.try_lock() else {
+                return Err("deferred_until_idle".into());
+            };
+            let art: Option<(String, String, Vec<u8>)> = conn
+                .query_row(
+                    "SELECT release_id, etag, jpeg FROM engine_artwork WHERE release_id=?1
+                     UNION ALL
+                     SELECT a.release_id, a.etag, a.jpeg FROM engine_artwork a
+                     JOIN tracks t ON t.release_id = a.release_id
+                     WHERE t.id=?1
+                     LIMIT 1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            drop(conn);
+            if let Some((resolved_rel_id, etag, bytes)) = art {
+                let entry = (etag, bytes);
+                self.insert_art_cache(resolved_rel_id.clone(), entry.clone());
+                if resolved_rel_id != id {
+                    self.insert_art_cache(id.to_string(), entry.clone());
+                }
+                return Ok(entry);
+            }
             return Err("deferred_until_idle".into());
         }
-        let art: Option<(String, Vec<u8>)> = self
+
+        // Audio transport is idle:
+        // 1. Check `engine_artwork` by `release_id` or `track_id`
+        let art: Option<(String, String, Vec<u8>)> = self
             .db
             .conn
             .lock()
             .query_row(
-                "SELECT etag,jpeg FROM engine_artwork WHERE release_id=?1",
+                "SELECT release_id, etag, jpeg FROM engine_artwork WHERE release_id=?1
+                 UNION ALL
+                 SELECT a.release_id, a.etag, a.jpeg FROM engine_artwork a
+                 JOIN tracks t ON t.release_id = a.release_id
+                 WHERE t.id=?1
+                 LIMIT 1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        let art = art.ok_or("Artwork not found")?;
-        if self.art_cache.values().map(|(_, b)| b.len()).sum::<usize>() + art.1.len()
-            > MAX_ART_CACHE_BYTES
-        {
-            self.art_cache.clear();
+
+        if let Some((resolved_rel_id, etag, bytes)) = art {
+            let entry = (etag, bytes);
+            self.insert_art_cache(resolved_rel_id.clone(), entry.clone());
+            if resolved_rel_id != id {
+                self.insert_art_cache(id.to_string(), entry.clone());
+            }
+            return Ok(entry);
         }
-        self.art_cache.insert(id.to_string(), art.clone());
-        Ok(art)
+
+        // 2. Self-healing lazy extraction when idle (e.g. migrated V1 releases not yet in `engine_artwork`):
+        let candidate_track: Option<(String, String, String)> = self
+            .db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT release_id, folder_path, file_path FROM tracks WHERE release_id=?1 OR id=?1 ORDER BY has_embedded_art DESC, track_number ASC LIMIT 1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        if let Some((resolved_rel_id, folder_path_str, file_path_str)) = candidate_track {
+            let file_path = Path::new(&file_path_str);
+            let dir_path = Path::new(&folder_path_str);
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let parsed_tag = self
+                .open_path(file_path)
+                .ok()
+                .and_then(|f| media::inspect(&handle_path(&f, file_path), &ext).ok())
+                .and_then(|m| m.tag);
+            if let Some(Some(jpeg)) = self.resolve_and_compress_artwork(
+                &resolved_rel_id,
+                parsed_tag.as_ref(),
+                dir_path,
+                false,
+            ) {
+                let etag = token("art", &format!("{:x}", Sha256::digest(&jpeg)));
+                {
+                    let conn = self.db.conn.lock();
+                    let _ = conn.execute(
+                        "INSERT INTO engine_artwork VALUES(?1,?2,?3) ON CONFLICT(release_id) DO UPDATE SET etag=excluded.etag,jpeg=excluded.jpeg",
+                        params![resolved_rel_id, etag, jpeg],
+                    );
+                    let _ = conn.execute(
+                        "UPDATE tracks SET has_embedded_art=1 WHERE release_id=?1",
+                        params![resolved_rel_id],
+                    );
+                    let _ = conn.execute(
+                        "UPDATE releases SET front_cover_url=?2 WHERE id=?1 AND front_cover_url IS NULL",
+                        params![resolved_rel_id, format!("cadence-art://{resolved_rel_id}")],
+                    );
+                }
+                let entry = (etag, jpeg);
+                self.insert_art_cache(resolved_rel_id.clone(), entry.clone());
+                if resolved_rel_id != id {
+                    self.insert_art_cache(id.to_string(), entry.clone());
+                }
+                return Ok(entry);
+            }
+        }
+
+        Err("Artwork not found".into())
     }
 
     pub fn enriched_tracks(&self) -> Result<HashMap<String, Value>> {
         let conn = self.db.conn.lock();
-        let mut stmt=conn.prepare("SELECT id,composer,genre,folder_name,language,dr_score,has_embedded_art,lyrics,format,acoustid_fingerprint,original_album FROM tracks").map_err(|e|e.to_string())?;
+        let mut stmt=conn.prepare("SELECT t.id,t.composer,t.genre,t.folder_name,t.language,t.dr_score,(t.has_embedded_art != 0 OR EXISTS(SELECT 1 FROM engine_artwork a WHERE a.release_id = t.release_id)),t.lyrics,t.format,t.acoustid_fingerprint,t.original_album FROM tracks t").map_err(|e|e.to_string())?;
         let rows=stmt.query_map([],|r|{let format=r.get::<_,String>(8)?;let fingerprint=r.get::<_,Option<String>>(9)?;Ok((r.get::<_,String>(0)?,json!({"composerName":r.get::<_,Option<String>>(1)?,"genreTags":r.get::<_,Option<String>>(2)?.map(|s|vec![s]).unwrap_or_default(),"folderName":r.get::<_,String>(3)?,"language":r.get::<_,Option<String>>(4)?,"dynamicRange":r.get::<_,Option<i64>>(5)?,"hasCoverArt":r.get::<_,bool>(6)?,"lyrics":r.get::<_,Option<String>>(7)?,"fingerprintStatus":if matches!(format.as_str(),"DSF"|"DFF"|"DSDIFF"){"UNSUPPORTED_DSD"}else if fingerprint.is_some(){"INDEXED"}else{"PENDING"},"provenanceStatus":if r.get::<_,Option<String>>(10)?.is_some(){"INDEXED"}else{"PENDING"}})))}).map_err(|e|e.to_string())?;
         rows.collect::<std::result::Result<HashMap<_, _>, _>>()
             .map_err(|e| e.to_string())
@@ -937,7 +1275,7 @@ fn compress_art(bytes: &[u8]) -> Result<Vec<u8>> {
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
         .encode_image(&image)
         .map_err(|e| e.to_string())?;
-    if out.len() > MAX_ART_BYTES {
+    if out.len() > MAX_COMPRESSED_ART_BYTES {
         return Err("Artwork too large".into());
     }
     Ok(out)
@@ -1215,5 +1553,100 @@ mod artwork_regression_tests {
             .unwrap();
         assert_eq!(current_title, original_title);
         assert_eq!(seen_count, 1);
+    }
+
+    #[test]
+    fn discovers_multidisc_parent_and_artwork_subdir_and_single_image_fallback() {
+        let (root, mut lib, wav) = fixture();
+        // 1. Single non-standard image filename in folder falls back cleanly
+        cover(&root.join("Dark Side of the Moon.jpg"), [120, 40, 200]);
+        lib.scan_path("w", &wav).unwrap();
+        let release_id: String = lib
+            .db
+            .conn
+            .lock()
+            .query_row("SELECT release_id FROM tracks LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(lib.artwork(&release_id, true).is_ok(), "single image fallback should resolve");
+
+        // 2. Multi-disc subfolder `CD1/track2.wav` inherits cover from parent album folder
+        let cd1 = root.join("CD1");
+        std::fs::create_dir_all(&cd1).unwrap();
+        let wav_cd1 = cd1.join("track2.wav");
+        std::fs::copy(&wav, &wav_cd1).unwrap();
+        lib.scan_path("w", &wav_cd1).unwrap();
+        let cd1_rel_id: String = lib
+            .db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT release_id FROM tracks WHERE file_path=?1",
+                params![wav_cd1.to_string_lossy()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            lib.artwork(&cd1_rel_id, true).is_ok(),
+            "multi-disc CD1 subfolder must inherit parent folder cover art"
+        );
+    }
+
+    #[test]
+    fn playback_active_allows_throttled_sqlite_artwork_browsing_and_blocks_chaos_flood() {
+        let (root, mut lib, wav) = fixture();
+        cover(&root.join("Folder.JPG"), [10, 200, 50]);
+        lib.scan_path("w", &wav).unwrap();
+
+        let (release_id, track_id): (String, String) = lib
+            .db
+            .conn
+            .lock()
+            .query_row("SELECT release_id, id FROM tracks LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+
+        // Insert 30 synthetic pre-indexed album covers into SQLite `engine_artwork`
+        // and clear the in-memory RAM cache to simulate cold browsing while audio is playing.
+        {
+            let conn = lib.db.conn.lock();
+            for i in 0..30 {
+                conn.execute(
+                    "INSERT INTO engine_artwork(release_id, etag, jpeg) VALUES(?1, ?2, ?3)",
+                    params![format!("rel_chaos_{i}"), format!("etag_{i}"), vec![1u8, 2, 3]],
+                )
+                .unwrap();
+            }
+        }
+        lib.art_cache.clear();
+        lib.art_lru.clear();
+
+        // 1. Track-ID lookup resolves parent release artwork even during playback (`idle = false`)
+        assert!(
+            lib.artwork(&track_id, false).is_ok(),
+            "track_id should resolve parent release artwork from SQLite during playback"
+        );
+        // 2. Cached RAM hit does not consume token bucket
+        assert!(lib.artwork(&release_id, false).is_ok());
+
+        // 3. Drain remaining burst tokens (23 left out of 24 burst)
+        let mut allowed_during_playback = 1;
+        let mut throttled_count = 0;
+        for i in 0..30 {
+            match lib.artwork(&format!("rel_chaos_{i}"), false) {
+                Ok(_) => allowed_during_playback += 1,
+                Err(e) if e == "deferred_until_idle" => throttled_count += 1,
+                Err(other) => panic!("unexpected error: {other}"),
+            }
+        }
+        assert_eq!(
+            allowed_during_playback,
+            PROTECTED_ART_BURST as usize,
+            "must allow human browse burst of 24 uncached SQLite covers during playback"
+        );
+        assert!(
+            throttled_count > 0,
+            "chaos flood exceeding token bucket during playback must be throttled with deferred_until_idle"
+        );
     }
 }

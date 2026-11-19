@@ -381,10 +381,10 @@ pub fn import_snapshot_into_core(
         }
     }
 
-    // Copy releases (mapped folder_path)
+    // Copy releases (mapped folder_path, front_cover_url, and backdrop_url)
     {
         let mut stmt = src_conn
-            .prepare("SELECT id, title, folder_path, folder_name, artist_credit, composer_name, release_year, genre_tags, is_compilation, is_favorite, created_at FROM releases")
+            .prepare("SELECT id, title, folder_path, folder_name, artist_credit, composer_name, release_year, genre_tags, is_compilation, is_favorite, created_at, front_cover_url, backdrop_url FROM releases")
             .map_err(|e| MigrationError::Database(e.to_string()))?;
         let mut rows = stmt
             .query([])
@@ -404,11 +404,32 @@ pub fn import_snapshot_into_core(
             let is_comp: i64 = r.get(8).map_err(|e| MigrationError::Database(e.to_string()))?;
             let is_fav: i64 = r.get(9).map_err(|e| MigrationError::Database(e.to_string()))?;
             let created_at: String = r.get(10).map_err(|e| MigrationError::Database(e.to_string()))?;
+            let raw_front_cover: Option<String> = r.get(11).ok().flatten();
+            let raw_backdrop: Option<String> = r.get(12).ok().flatten();
+
+            let mapped_front_cover = raw_front_cover.map(|cov| {
+                if cov.starts_with("http://") || cov.starts_with("https://") || cov.starts_with("cadence-art://") {
+                    cov
+                } else {
+                    map_path_with_roots(&cov, &options.mappings)
+                        .map(|(m, _)| m)
+                        .unwrap_or(cov)
+                }
+            });
+            let mapped_backdrop = raw_backdrop.map(|back| {
+                if back.starts_with("http://") || back.starts_with("https://") || back.starts_with("cadence-art://") {
+                    back
+                } else {
+                    map_path_with_roots(&back, &options.mappings)
+                        .map(|(m, _)| m)
+                        .unwrap_or(back)
+                }
+            });
 
             tx.execute(
-                "INSERT OR REPLACE INTO releases (id, title, folder_path, folder_name, artist_credit, composer_name, release_year, genre_tags, is_compilation, is_favorite, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![id, title, mapped_folder, folder_name, artist_credit, composer_name, release_year, genre_tags, is_comp, is_fav, created_at],
+                "INSERT OR REPLACE INTO releases (id, title, folder_path, folder_name, artist_credit, composer_name, release_year, genre_tags, is_compilation, is_favorite, created_at, front_cover_url, backdrop_url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![id, title, mapped_folder, folder_name, artist_credit, composer_name, release_year, genre_tags, is_comp, is_fav, created_at, mapped_front_cover, mapped_backdrop],
             )
             .map_err(|e| MigrationError::Database(e.to_string()))?;
         }
@@ -471,6 +492,35 @@ pub fn import_snapshot_into_core(
 
             imported_track_ids.insert(id);
             imported_tracks += 1;
+        }
+    }
+
+    // Preserve engine_artwork BLOBs if present in source snapshot
+    {
+        let _ = tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS engine_artwork (release_id TEXT PRIMARY KEY, etag TEXT NOT NULL, jpeg BLOB NOT NULL);",
+        );
+        if let Ok(mut stmt) = src_conn.prepare("SELECT release_id, etag, jpeg FROM engine_artwork") {
+            if let Ok(mut rows) = stmt.query([]) {
+                while let Ok(Some(r)) = rows.next() {
+                    if let (Ok(rel_id), Ok(etag), Ok(jpeg)) = (
+                        r.get::<_, String>(0),
+                        r.get::<_, String>(1),
+                        r.get::<_, Vec<u8>>(2),
+                    ) {
+                        if !jpeg.is_empty() {
+                            let _ = tx.execute(
+                                "INSERT OR REPLACE INTO engine_artwork (release_id, etag, jpeg) VALUES (?1, ?2, ?3)",
+                                params![rel_id, etag, jpeg],
+                            );
+                            let _ = tx.execute(
+                                "UPDATE tracks SET has_embedded_art = 1 WHERE release_id = ?1",
+                                params![rel_id],
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

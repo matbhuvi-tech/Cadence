@@ -8,6 +8,7 @@ import { TabBar, TabId } from './components/Navigation/TabBar';
 import { MiniPlayer } from './components/Navigation/MiniPlayer';
 import { NowPlayingView } from './components/NowPlaying/NowPlayingView';
 import { CatalogView } from './components/Catalog/CatalogView';
+import { getArtworkUrl } from './services/api';
 import { QueueView } from './components/Queue/QueueView';
 import { PairingView } from './components/Connection/PairingView';
 import { DiagnosticsSheet } from './components/Connection/DiagnosticsSheet';
@@ -232,6 +233,7 @@ export function App() {
             ) : (
               coreCatalogTracks.map((trk) => {
                 const isCurrent = status.currentFile === trk.id;
+                const artUrl = getArtworkUrl(trk.releaseId || trk.id, token, baseUrl);
                 return (
                   <div
                     key={trk.id}
@@ -241,11 +243,26 @@ export function App() {
                         : 'bg-zinc-900/60 border-zinc-800/80'
                     }`}
                   >
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-zinc-100 truncate">{trk.title}</p>
-                      <p className="text-[11px] text-zinc-400 truncate">
-                        {trk.artist} · {trk.album}
-                      </p>
+                    <div className="flex items-center gap-3 min-w-0">
+                      {artUrl && (
+                        <div className="w-11 h-11 rounded-xl bg-zinc-900 border border-zinc-800/80 overflow-hidden shrink-0 relative">
+                          <img
+                            src={artUrl}
+                            alt={trk.album}
+                            loading="lazy"
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLElement).style.display = 'none';
+                            }}
+                          />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-zinc-100 truncate">{trk.title}</p>
+                        <p className="text-[11px] text-zinc-400 truncate">
+                          {trk.artist} · {trk.album}
+                        </p>
+                      </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <button

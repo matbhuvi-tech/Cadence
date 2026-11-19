@@ -86,24 +86,21 @@ impl ArtworkCache {
                     }
 
                     if let Ok(tagged_file) = Probe::open(audio_path).and_then(|p| p.read()) {
-                        if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
-                            if let Some(pic) = tag.pictures().first() {
+                        if let Some(tag) = tagged_file
+                            .primary_tag()
+                            .or_else(|| tagged_file.first_tag())
+                            .or_else(|| tagged_file.tags().iter().find(|t| !t.pictures().is_empty()))
+                        {
+                            if let Some(pic) = crate::scanner::media::select_best_picture(tag) {
                                 return Some(pic.data().to_vec());
                             }
                         }
                     }
 
                     if let Some(parent) = audio_path.parent() {
-                        let candidates = [
-                            "cover.jpg", "folder.jpg", "front.jpg", "album.jpg",
-                            "cover.png", "folder.png", "front.png", "Cover.jpg", "Folder.jpg"
-                        ];
-                        for cand in candidates {
-                            let p = parent.join(cand);
-                            if p.is_file() {
-                                if let Ok(b) = fs::read(&p) {
-                                    return Some(b);
-                                }
+                        if let Some(found_cover) = crate::scanner::find_local_cover_art(parent) {
+                            if let Ok(b) = fs::read(&found_cover) {
+                                return Some(b);
                             }
                         }
                     }

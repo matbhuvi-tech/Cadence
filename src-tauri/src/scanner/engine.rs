@@ -112,29 +112,7 @@ pub fn read_album_sidecar(dir: &Path) -> AlbumSidecar {
     AlbumSidecar::default()
 }
 
-pub fn find_local_cover_art(dir: &Path) -> Option<String> {
-    let candidates = [
-        "cover.jpg",
-        "cover.png",
-        "folder.jpg",
-        "folder.png",
-        "front.jpg",
-        "front.png",
-        "cover.jpeg",
-        "folder.jpeg",
-        "Cover.jpg",
-        "Cover.png",
-        "Folder.jpg",
-        "Folder.png",
-    ];
-    for c in &candidates {
-        let p = dir.join(c);
-        if p.is_file() {
-            return Some(p.to_string_lossy().to_string());
-        }
-    }
-    None
-}
+pub use super::media::find_local_cover_art;
 
 #[derive(Debug, Default, Clone)]
 pub struct TrackSidecar {

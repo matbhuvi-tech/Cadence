@@ -1,5 +1,6 @@
 # Issues
 
+- [#48](https://github.com/matbhuvi-tech/Cadence/issues/48): Album Art Pipeline: Missing covers on import, dev vs release disparity, playback browse lockouts, PWA parity, and V1-to-V2 engine migration.
 - [#43](https://github.com/matbhuvi-tech/Cadence/issues/43): Album artwork missing or stale after import and scans. Initial Windows Engine fixes and remaining cases are tracked in `reports/album-artwork-tdd.md`.
 
 - Album artwork missing, stale, or incorrect after catalogue import and quick/full scans: source audit recorded in [reports/album-art-import-scan-audit.md](reports/album-art-import-scan-audit.md). Initial Windows Engine fixes and TDD evidence are tracked in GitHub issue #43.

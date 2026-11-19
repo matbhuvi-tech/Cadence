@@ -12,7 +12,7 @@ export function extractEngineArtworkReleaseId(url?: string | null): string | nul
   return id || null
 }
 
-export function useResolvedMediaUrl(src?: string | null): string {
+export function useResolvedMediaUrl(src?: string | null, enabled: boolean = true): string {
   const engine = useOptionalEngineController()
   const rawReleaseId = extractEngineArtworkReleaseId(src)
   const syncUrl = rawReleaseId
@@ -20,6 +20,7 @@ export function useResolvedMediaUrl(src?: string | null): string {
     : resolveMediaUrl(src)
 
   const [resolved, setResolved] = useState<string>(syncUrl)
+  const playbackActivity = engine?.activeCoreSnapshot?.playback.activity
 
   useEffect(() => {
     if (!rawReleaseId) {
@@ -29,6 +30,9 @@ export function useResolvedMediaUrl(src?: string | null): string {
     const cached = engine?.getCachedCoreArtworkUrl(rawReleaseId)
     if (cached) {
       setResolved(cached)
+      return
+    }
+    if (!enabled) {
       return
     }
     setResolved('')
@@ -45,7 +49,15 @@ export function useResolvedMediaUrl(src?: string | null): string {
     return () => {
       cancelled = true
     }
-  }, [rawReleaseId, src, engine, engine?.isCoreActive, engine?.activeCoreSnapshot?.catalog.revision])
+  }, [
+    rawReleaseId,
+    src,
+    enabled,
+    engine,
+    engine?.isCoreActive,
+    engine?.activeCoreSnapshot?.catalog.revision,
+    playbackActivity === 'idle',
+  ])
 
   return resolved
 }
@@ -60,19 +72,59 @@ export const EngineArtworkImg: React.FC<EngineArtworkImgProps> = ({
   fallback = null,
   onError,
   alt = '',
+  loading,
   ...rest
 }) => {
-  const resolved = useResolvedMediaUrl(src)
+  const isLazy = loading === 'lazy' && typeof IntersectionObserver !== 'undefined'
+  const [inView, setInView] = useState<boolean>(!isLazy)
+  const anchorRef = React.useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    if (!isLazy || inView) return
+    const el = anchorRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      setInView(true)
+      return
+    }
+    const target = el.parentElement ?? el
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInView(true)
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '480px' },
+    )
+    observer.observe(target)
+    return () => {
+      observer.disconnect()
+    }
+  }, [isLazy, inView, src])
+
+  const resolved = useResolvedMediaUrl(src, inView)
   const [failedSrc, setFailedSrc] = useState<string | null>(null)
 
   if (!resolved || failedSrc === resolved) {
-    return <>{fallback}</>
+    return isLazy && !inView ? (
+      <>
+        <span
+          ref={anchorRef}
+          aria-hidden="true"
+          style={{ position: 'absolute', width: 1, height: 1, pointerEvents: 'none', opacity: 0 }}
+        />
+        {fallback}
+      </>
+    ) : (
+      <>{fallback}</>
+    )
   }
 
   return (
     <img
       src={resolved}
       alt={alt}
+      loading={loading}
       onError={(e) => {
         setFailedSrc(resolved)
         onError?.(e)

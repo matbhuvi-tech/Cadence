@@ -371,7 +371,7 @@ export const EngineControllerProvider: React.FC<{
         ? (target, releaseId, ifNoneMatch) =>
             tauriBridge.coreFetchArtwork(target, releaseId, ifNoneMatch)
         : createBrowserArtworkFetch(),
-      maxEntries: 256,
+      maxEntries: 512,
       maxConcurrent: 2,
     })
   }

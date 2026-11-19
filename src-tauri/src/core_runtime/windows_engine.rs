@@ -274,6 +274,24 @@ impl WindowsEngineNode {
             });
 
         let db_path = config.app_data_dir.join("cadence.db");
+        if !config.allow_loopback_for_tests {
+            if let Some(legacy_db_path) = detect_legacy_desktop_db() {
+                if legacy_db_path != db_path {
+                    let target_empty = !db_path.is_file()
+                        || Connection::open(&db_path)
+                            .and_then(|c| {
+                                c.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0))
+                            })
+                            .unwrap_or(0)
+                            == 0;
+                    if target_empty {
+                        let _ = migrate_legacy_desktop_db(&legacy_db_path, &config.app_data_dir);
+                    } else {
+                        let _ = copy_cached_artwork_from_legacy(&legacy_db_path, &db_path);
+                    }
+                }
+            }
+        }
         let run_state = Arc::new(Mutex::new(ActiveRunState {
             token: None,
             saw_active: false,
@@ -647,26 +665,78 @@ fn copy_cached_artwork_from_legacy(legacy_db_path: &Path, target_db: &Path) -> R
     let dst = Connection::open(target_db).map_err(|e| e.to_string())?;
     dst.execute_batch("CREATE TABLE IF NOT EXISTS engine_artwork (release_id TEXT PRIMARY KEY, etag TEXT NOT NULL, jpeg BLOB NOT NULL);")
         .map_err(|e| e.to_string())?;
-    let Ok(mut stmt) = src.prepare(
+    if let Ok(mut stmt) = src.prepare(
         "SELECT id, cache_path FROM artwork_cache_state WHERE entity_type='release' AND status='cached' AND cache_path IS NOT NULL",
-    ) else {
-        return Ok(());
-    };
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .map_err(|e| e.to_string())?;
-    for row in rows.flatten() {
-        let (release_id, cache_path) = row;
-        if let Ok(bytes) = std::fs::read(&cache_path) {
-            if !bytes.is_empty() {
-                let hash = format!("{:x}", Sha256::digest(&bytes));
-                let etag = format!("art_{}", &hash[..16]);
-                dst.execute(
-                    "INSERT INTO engine_artwork(release_id, etag, jpeg) VALUES(?1, ?2, ?3) ON CONFLICT(release_id) DO UPDATE SET etag=excluded.etag, jpeg=excluded.jpeg",
-                    rusqlite::params![release_id, etag, bytes],
-                ).map_err(|e| e.to_string())?;
-                dst.execute("UPDATE tracks SET has_embedded_art=1 WHERE release_id=?1", rusqlite::params![release_id])
-                    .map_err(|e| e.to_string())?;
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            for row in rows.flatten() {
+                let (release_id, cache_path) = row;
+                if let Ok(bytes) = std::fs::read(&cache_path) {
+                    if !bytes.is_empty() {
+                        let hash = format!("{:x}", Sha256::digest(&bytes));
+                        let etag = format!("art_{}", &hash[..16]);
+                        dst.execute(
+                            "INSERT INTO engine_artwork(release_id, etag, jpeg) VALUES(?1, ?2, ?3) ON CONFLICT(release_id) DO UPDATE SET etag=excluded.etag, jpeg=excluded.jpeg",
+                            rusqlite::params![release_id, etag, bytes],
+                        ).map_err(|e| e.to_string())?;
+                        dst.execute("UPDATE tracks SET has_embedded_art=1 WHERE release_id=?1", rusqlite::params![release_id])
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Backfill any release still missing from `engine_artwork` using legacy `front_cover_url` or local folder art
+    if let Ok(mut stmt) = src.prepare("SELECT id, folder_path, front_cover_url FROM releases") {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2).ok().flatten(),
+            ))
+        }) {
+            for (release_id, folder_path, front_cover_url) in rows.flatten() {
+                let already_cached: bool = dst
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM engine_artwork WHERE release_id=?1)",
+                        rusqlite::params![release_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+                if already_cached {
+                    continue;
+                }
+                let candidate_path = front_cover_url
+                    .as_deref()
+                    .and_then(|u| {
+                        let clean = u
+                            .strip_prefix("file:///")
+                            .or_else(|| u.strip_prefix("file://"))
+                            .unwrap_or(u);
+                        let p = Path::new(clean);
+                        p.is_file().then(|| p.to_path_buf())
+                    })
+                    .or_else(|| {
+                        crate::scanner::find_local_cover_art(Path::new(&folder_path))
+                            .map(PathBuf::from)
+                    });
+                if let Some(img_path) = candidate_path {
+                    if let Ok(bytes) = std::fs::read(&img_path) {
+                        if !bytes.is_empty() {
+                            let hash = format!("{:x}", Sha256::digest(&bytes));
+                            let etag = format!("art_{}", &hash[..16]);
+                            let _ = dst.execute(
+                                "INSERT INTO engine_artwork(release_id, etag, jpeg) VALUES(?1, ?2, ?3) ON CONFLICT(release_id) DO UPDATE SET etag=excluded.etag, jpeg=excluded.jpeg",
+                                rusqlite::params![release_id, etag, bytes],
+                            );
+                            let _ = dst.execute(
+                                "UPDATE tracks SET has_embedded_art=1 WHERE release_id=?1",
+                                rusqlite::params![release_id],
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -936,5 +1006,48 @@ mod tests {
         assert_eq!(bytes, b"cached-image");
         let advertised: bool = conn.query_row("SELECT has_embedded_art FROM tracks WHERE id='t'", [], |r| r.get(0)).unwrap();
         assert!(advertised, "migrated artwork must be advertised to the catalogue");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_migration_preserves_front_cover_url_and_backfills_uncached_folder_art() {
+        let root = temp_dir("migrate-folder-art");
+        let album_dir = root.join("AlbumDir");
+        std::fs::create_dir_all(&album_dir).unwrap();
+        let folder_cover = album_dir.join("Cover.jpg");
+        std::fs::write(&folder_cover, b"folder-cover-bytes").unwrap();
+        let source = root.join("legacy.db");
+        let engine_dir = root.join("engine-data");
+        {
+            let db = crate::db::AppDb::new(source.clone()).unwrap();
+            let conn = db.conn.lock();
+            conn.execute(
+                "INSERT INTO storage_mounts(id,name,mount_path,mount_type,file_system,last_seen_timestamp) VALUES ('m','Music',?1,'local_disk','ntfs',CURRENT_TIMESTAMP)",
+                rusqlite::params![root.to_string_lossy()],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,front_cover_url,created_at) VALUES ('r_uncached','Album',?1,'AlbumDir','Artist',?2,CURRENT_TIMESTAMP)",
+                rusqlite::params![album_dir.to_string_lossy(), folder_cover.to_string_lossy()],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,file_size,mtime,title,artist_credit,album_title,duration_secs,format,has_embedded_art,created_at) VALUES ('t_uncached','r_uncached','m',?1,'AlbumDir',?2,'01.flac',1,1,'Track','Artist','Album',1,'FLAC',0,CURRENT_TIMESTAMP)",
+                rusqlite::params![album_dir.to_string_lossy(), album_dir.join("01.flac").to_string_lossy()],
+            ).unwrap();
+        }
+        migrate_legacy_desktop_db(&source, &engine_dir).unwrap();
+        let conn = Connection::open(engine_dir.join("cadence.db")).unwrap();
+        let front_cover: Option<String> = conn
+            .query_row("SELECT front_cover_url FROM releases WHERE id='r_uncached'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(front_cover.as_deref(), Some(folder_cover.to_string_lossy().as_ref()));
+        let bytes: Vec<u8> = conn
+            .query_row("SELECT jpeg FROM engine_artwork WHERE release_id='r_uncached'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bytes, b"folder-cover-bytes");
+        let advertised: bool = conn
+            .query_row("SELECT has_embedded_art FROM tracks WHERE id='t_uncached'", [], |r| r.get(0))
+            .unwrap();
+        assert!(advertised, "backfilled folder cover must set has_embedded_art=1");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
