@@ -253,6 +253,14 @@ fn clean_install_persists_identity_cert_wal_db_and_serves_control_and_readiness(
         node.tls_certificate().sha256_fingerprint
     );
     assert_eq!(health_json["musicReadOnly"], true);
+    let expected_build = cadence_core_lib::build_info::current_build_info();
+    assert_eq!(health_json["protocolVersion"], 2);
+    assert_eq!(
+        health_json["protocolRevision"],
+        cadence_core_lib::build_info::CORE_PROTOCOL_V2_REVISION
+    );
+    assert_eq!(health_json["build"]["display"], expected_build.display);
+    assert_eq!(health_json["build"]["commitSha"], expected_build.commit_sha);
 
     let (status_hello, hello_json) = http_post_json(
         &dirs.app_data_dir,
@@ -268,6 +276,28 @@ fn clean_install_persists_identity_cert_wal_db_and_serves_control_and_readiness(
     assert_eq!(status_hello, 200, "{hello_json}");
     assert_eq!(hello_json["ok"], true);
     assert_eq!(hello_json["data"]["ready"], true);
+    assert_eq!(hello_json["data"]["protocolVersion"], 1);
+    assert!(hello_json["data"].get("build").is_none());
+
+    let (status_hello_v2, hello_v2_json) = http_post_json(
+        &dirs.app_data_dir,
+        control_addr,
+        "/v1/core",
+        &json!({
+            "protocolVersion": 2,
+            "engineId": identity.engine_id,
+            "libraryId": identity.library_id,
+            "operation": "core.hello"
+        }),
+    );
+    assert_eq!(status_hello_v2, 200, "{hello_v2_json}");
+    assert_eq!(hello_v2_json["ok"], true);
+    assert_eq!(hello_v2_json["data"]["protocolVersion"], 2);
+    assert_eq!(
+        hello_v2_json["data"]["protocolRevision"],
+        cadence_core_lib::build_info::CORE_PROTOCOL_V2_REVISION
+    );
+    assert_eq!(hello_v2_json["data"]["build"]["display"], expected_build.display);
 
     node.shutdown().expect("clean shutdown");
 }

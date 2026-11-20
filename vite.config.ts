@@ -1,11 +1,13 @@
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fetchAppleWithQuota } from './src/services/appleQuota.ts'
+import { cleanCommitSummary, formatBuildDisplay, type CoreBuildInfo } from './src/core/buildInfo.ts'
 
 const uncHostReachability = new Map<string, { reachable: boolean; checkedAt: number }>()
 
@@ -2858,9 +2860,152 @@ Instructions:
   }
 }
 
+function cleanSingleLine(raw: string): string {
+  return Array.from(raw)
+    .filter((ch) => ch.charCodeAt(0) >= 32)
+    .join('')
+    .trim()
+}
+
+function nonEmptyBuildEnv(name: string): string | null {
+  const raw = process.env[name]
+  if (!raw) return null
+  return cleanSingleLine(raw) || null
+}
+
+function runGitSafe(cwd: string, args: string[]): string | null {
+  try {
+    const stdout = execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3000,
+    })
+    return cleanSingleLine(stdout) || null
+  } catch {
+    return null
+  }
+}
+
+function parseGitDescribeOutput(raw: string): {
+  tag: string | null
+  commitsSinceTag: number | null
+  sha: string | null
+  dirty: boolean
+} {
+  let core = raw.trim()
+  let dirty = false
+  if (core.endsWith('-dirty')) {
+    core = core.slice(0, -'-dirty'.length)
+    dirty = true
+  }
+  const gIdx = core.lastIndexOf('-g')
+  if (gIdx !== -1) {
+    const prefix = core.slice(0, gIdx)
+    const sha = core.slice(gIdx + 2)
+    if (sha && /^[0-9a-fA-F]+$/.test(sha)) {
+      const dashIdx = prefix.lastIndexOf('-')
+      if (dashIdx > 0) {
+        const tag = prefix.slice(0, dashIdx)
+        const commitsStr = prefix.slice(dashIdx + 1)
+        if (/^\d+$/.test(commitsStr)) {
+          return {
+            tag,
+            commitsSinceTag: Number(commitsStr),
+            sha,
+            dirty,
+          }
+        }
+      }
+    }
+  }
+  return {
+    tag: null,
+    commitsSinceTag: null,
+    sha: /^[0-9a-fA-F]+$/.test(core) ? core : null,
+    dirty,
+  }
+}
+
+function computeCoreBuildInfo(): CoreBuildInfo {
+  const cwd = process.cwd()
+  const pkgVersion = '0.1.0'
+  const cadenceVersion = nonEmptyBuildEnv('CADENCE_VERSION')
+  const describeRaw = runGitSafe(cwd, ['describe', '--tags', '--long', '--always', '--dirty'])
+  const described = describeRaw ? parseGitDescribeOutput(describeRaw) : null
+
+  const tag =
+    nonEmptyBuildEnv('CADENCE_BUILD_TAG') ??
+    described?.tag ??
+    (cadenceVersion && cadenceVersion.startsWith('v') ? cadenceVersion : null) ??
+    `v${pkgVersion}`
+
+  const envCommits = nonEmptyBuildEnv('CADENCE_BUILD_COMMITS_SINCE_TAG')
+  const parsedEnvCommits = envCommits && /^\d+$/.test(envCommits) ? Number(envCommits) : null
+  const commitsSinceTag =
+    parsedEnvCommits ?? (described?.tag ? described.commitsSinceTag : null) ?? 0
+
+  const commitSha =
+    nonEmptyBuildEnv('CADENCE_BUILD_SHA') ??
+    described?.sha ??
+    runGitSafe(cwd, ['log', '-1', '--format=%h']) ??
+    (cadenceVersion && /^[0-9a-fA-F]{7,}$/.test(cadenceVersion) ? cadenceVersion.slice(0, 7) : null) ??
+    'unknown'
+
+  const commitDate =
+    nonEmptyBuildEnv('CADENCE_BUILD_DATE') ??
+    runGitSafe(cwd, ['log', '-1', '--format=%cs']) ??
+    ''
+
+  const rawSummary =
+    nonEmptyBuildEnv('CADENCE_BUILD_SUMMARY') ??
+    runGitSafe(cwd, ['log', '-1', '--format=%s']) ??
+    ''
+  const commitSummary = cleanCommitSummary(rawSummary)
+
+  const envDirty = nonEmptyBuildEnv('CADENCE_BUILD_DIRTY')
+  let dirty = false
+  if (envDirty !== null) {
+    dirty = ['1', 'true', 'yes'].includes(envDirty.toLowerCase())
+  } else {
+    try {
+      const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 3000,
+      })
+      dirty = status.trim().length > 0
+    } catch {
+      dirty = described?.dirty ?? false
+    }
+  }
+
+  const display = formatBuildDisplay({
+    tag,
+    commitsSinceTag,
+    commitDate,
+    commitSha,
+    dirty,
+    pkgVersion,
+  })
+
+  return {
+    tag,
+    commitsSinceTag,
+    commitSha,
+    commitDate,
+    commitSummary,
+    dirty,
+    display,
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-
+  define: {
+    __CADENCE_BUILD_INFO__: JSON.stringify(computeCoreBuildInfo()),
+  },
   plugins: [react(), tailwindcss(), localLibraryScannerPlugin()],
   optimizeDeps: {
     include: [

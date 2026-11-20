@@ -837,6 +837,8 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         let revision=self.library.as_ref().map(|lib|lib.revision()).unwrap_or(0);
         if operation=="core.hello" && response["ok"]==true {
             response["data"]["protocolVersion"]=json!(2);
+            response["data"]["protocolRevision"]=json!(crate::build_info::CORE_PROTOCOL_V2_REVISION);
+            response["data"]["build"]=serde_json::to_value(crate::build_info::current_build_info()).unwrap_or(Value::Null);
             if let Some(caps)=response["data"]["capabilities"].as_array_mut(){caps.extend(["fs.browse","folders.manage","playlists.manage","artwork.read","curate.write","enrichment.manage"].iter().map(|s|json!(s)));}
         }
         let catalog=if operation=="catalog.page" {response.get_mut("data")} else if operation=="session.snapshot"{response.get_mut("data").and_then(|v|v.get_mut("catalog"))} else {None};

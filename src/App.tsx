@@ -145,6 +145,11 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   // Primary Graph State (pure in-memory projection fed by the active Playback Engine)
   const [catalogTracks, setTracks] = useState<Track[]>([])
   const [catalogReleases, setReleases] = useState<Release[]>([])
+  const [dismissedCompatKey, setDismissedCompatKey] = useState<string | null>(null)
+  const compatWarning = engineState.compatibilityWarning
+  const compatKey = compatWarning
+    ? `${compatWarning.reason}:${compatWarning.engineBuild?.commitSha ?? 'none'}`
+    : null
   const [curateCommits, setCurateCommits] = useState<CurateCommitRow[]>([])
   const activeEngineJobsRef = useRef<
     Map<
@@ -1715,7 +1720,11 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             onClick={() => openSettings('engine')}
             aria-label={`Playback engine: ${engineState.view.session.active.label}${isCoreActive && !engineState.view.session.connected ? ' (Disconnected)' : ''
               }`}
-            title={`Playback engine: ${engineState.view.session.active.label}`}
+            title={
+              isCoreActive && engineState.activeEngineBuild
+                ? `Playback engine: ${engineState.view.session.active.label} · ${engineState.activeEngineBuild.display}`
+                : `Playback engine: ${engineState.view.session.active.label}`
+            }
             className={`px-2 py-1.5 rounded-[7px] border transition-all cursor-pointer flex items-center gap-1.5 text-[11px] font-medium ${isCoreActive
               ? engineState.view.session.connected
                 ? 'bg-[#D4AF37]/12 border-[#D4AF37]/35 text-[#EDEDED] hover:bg-[#D4AF37]/20'
@@ -1727,6 +1736,12 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
             <span className={isCoreActive ? 'inline max-w-[130px] truncate' : 'hidden xl:inline max-w-[110px] truncate'}>
               {isCoreActive ? engineState.view.session.active.label : 'Connect Engine'}
             </span>
+            {isCoreActive && compatWarning?.severity === 'warning' && (
+              <span
+                aria-hidden="true"
+                className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"
+              />
+            )}
           </button>
 
           {/* Always-Visible Cadence Settings */}
@@ -2086,6 +2101,37 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
                     </div>
                   </div>
                 )}
+                {isCoreActive &&
+                  engineState.view.session.connected &&
+                  compatWarning?.severity === 'warning' &&
+                  compatKey !== dismissedCompatKey && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between gap-4 text-xs font-medium shrink-0"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+                        <span className="text-amber-200 truncate">{compatWarning.detail}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => openSettings('engine')}
+                          className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border border-amber-500/40 text-[11px] font-medium cursor-pointer"
+                        >
+                          View Details
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDismissedCompatKey(compatKey)}
+                          className="px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-white/85 border border-white/[0.1] text-[11px] cursor-pointer"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 {isCoreActive &&
                   engineState.view.session.connected &&
                   activeCoreSnapshot?.playback.takeoverRequired && (

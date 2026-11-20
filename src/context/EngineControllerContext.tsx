@@ -805,7 +805,7 @@ export const EngineControllerProvider: React.FC<{
       coreUpcomingEntries,
       async probeAndStageAddress(input) {
         try {
-          const { profile } = await probeCoreNodeAddress(
+          const { profile, health } = await probeCoreNodeAddress(
             input.baseUrl,
             {
               label: input.label,
@@ -816,7 +816,7 @@ export const EngineControllerProvider: React.FC<{
             },
             bridgeRef.current!,
           )
-          return await store.stageCandidate(profile)
+          return await store.stageCandidate(profile, health)
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Unable to reach Cadence Core.'
           return { ok: false, error: msg }

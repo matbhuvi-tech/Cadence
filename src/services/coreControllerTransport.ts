@@ -1,7 +1,14 @@
 import {
+  CORE_BUILD_INFO,
+  evaluateEngineCompatibility,
+  type CoreBuildInfo,
+  type EngineCompatibilityWarning,
+} from '../core/buildInfo'
+import {
   CORE_MAX_MESSAGE_BYTES,
   CORE_MAX_PAGE_TRACKS,
   CORE_PROTOCOL_VERSION,
+  CORE_PROTOCOL_V2_REVISION,
   CoreServiceError,
   parseCoreSnapshot,
   type CoreCatalogPage,
@@ -41,6 +48,11 @@ export interface CoreHealthMetadata {
   engineId?: string
   libraryId?: string
   label?: string
+  appVersion?: string
+  schemaVersion?: number
+  protocolVersion?: number
+  protocolRevision?: number
+  build?: CoreBuildInfo
   tlsFingerprintSha256?: string
   pinnedRs130Udn?: string | null
   musicReadOnly?: boolean
@@ -97,6 +109,9 @@ export interface CoreControllerState {
   isBusy: boolean
   activeProfile: SavedCoreProfile | null
   activeDescriptor: CoreDescriptor | null
+  activeEngineHealth: CoreHealthMetadata | null
+  activeEngineBuild: CoreBuildInfo | null
+  compatibilityWarning: EngineCompatibilityWarning | null
   musicReadOnly: boolean | null
   stagedCandidate: StagedCoreCandidate | null
   stagingError: string | null
@@ -581,6 +596,9 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     isBusy: false,
     activeProfile: null,
     activeDescriptor: null,
+    activeEngineHealth: null,
+    activeEngineBuild: null,
+    compatibilityWarning: null,
     musicReadOnly: null,
     stagedCandidate: null,
     stagingError: null,
@@ -621,9 +639,30 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     return createRemoteEngineService(context, channel)
   }
 
-  async function stageCandidate(profile: SavedCoreProfile): Promise<
-    { ok: true; candidate: StagedCoreCandidate } | { ok: false; error: string }
-  > {
+  function buildCompatibilityWarning(
+    descriptor: CoreDescriptor | null,
+    health: CoreHealthMetadata | null,
+    engineBuild: CoreBuildInfo | null,
+    v2CatalogDegraded: boolean,
+  ): EngineCompatibilityWarning | null {
+    const engineProtocolVersion = descriptor?.protocolVersion ?? health?.protocolVersion ?? null
+    if (!descriptor && !health && !v2CatalogDegraded) {
+      return null
+    }
+    return evaluateEngineCompatibility({
+      coreBuild: CORE_BUILD_INFO,
+      coreProtocolRevision: CORE_PROTOCOL_V2_REVISION,
+      engineBuild,
+      engineProtocolVersion,
+      engineProtocolRevision: descriptor?.protocolRevision ?? health?.protocolRevision ?? null,
+      v2CatalogDegraded,
+    })
+  }
+
+  async function stageCandidate(
+    profile: SavedCoreProfile,
+    probedHealth?: CoreHealthMetadata | null,
+  ): Promise<{ ok: true; candidate: StagedCoreCandidate } | { ok: false; error: string }> {
     state = { ...state, isBusy: true, stagingError: null }
     emit()
     try {
@@ -634,7 +673,10 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         musicRoots: [...(profile.musicRoots || [])],
       }
       const remoteService = buildCandidateService(normalizedProfile)
-      const prepared = await remoteService.prepare()
+      const [prepared, health] = await Promise.all([
+        remoteService.prepare(),
+        probedHealth !== undefined ? Promise.resolve(probedHealth) : probeProfileHealthSafe(normalizedProfile),
+      ])
       const candidate: StagedCoreCandidate = {
         profile: {
           ...normalizedProfile,
@@ -644,7 +686,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         },
         descriptor: prepared.descriptor,
         snapshot: prepared.snapshot,
-        health: null,
+        health,
         needsMusicRoots:
           prepared.snapshot.catalog.tracks.length === 0 && normalizedProfile.musicRoots.length === 0,
       }
@@ -675,20 +717,25 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     service: EngineService,
     snapshot: CoreSnapshot | null,
     profile?: SavedCoreProfile | null,
-  ): Promise<{ tracks: CoreCatalogTrack[]; descriptor: CoreDescriptor | null }> {
-    if (!snapshot) return { tracks: [], descriptor: null }
+  ): Promise<{ tracks: CoreCatalogTrack[]; descriptor: CoreDescriptor | null; v2Degraded: boolean }> {
+    if (!snapshot) return { tracks: [], descriptor: null, v2Degraded: false }
+    let hello: CoreDescriptor | null = null
     if (profile && options.httpBridge) {
+      const client = createEngineClient(profile, (target, body) =>
+        httpBridge.postCoreRequest(target, body),
+      )
       try {
-        const client = createEngineClient(profile, (target, body) =>
-          httpBridge.postCoreRequest(target, body),
-        )
-        const hello = await client.hello()
-        if (hello.protocolVersion === 2) {
-          const enriched = await client.fetchEnrichedCatalog()
-          return { tracks: enriched.tracks, descriptor: hello }
-        }
+        hello = await client.hello()
       } catch {
-        // Fallback cleanly to v1 catalog pagination if peer is v1-only
+        hello = null
+      }
+      if (hello?.protocolVersion === 2) {
+        try {
+          const enriched = await client.fetchEnrichedCatalog()
+          return { tracks: enriched.tracks, descriptor: hello, v2Degraded: false }
+        } catch {
+          // Fall back to v1 pagination so playback continues, while surfacing v2 degradation
+        }
       }
     }
     const merged: CoreCatalogTrack[] = [...snapshot.catalog.tracks]
@@ -709,7 +756,11 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       }
       cursor = page.nextCursor
     }
-    return { tracks: merged, descriptor: null }
+    return {
+      tracks: merged,
+      descriptor: hello,
+      v2Degraded: hello?.protocolVersion === 2,
+    }
   }
 
   async function probeProfileHealthSafe(profile: SavedCoreProfile): Promise<CoreHealthMetadata | null> {
@@ -755,9 +806,17 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         hydrateCatalogTracks(remoteService, view.snapshot, profile).catch(() => ({
           tracks: view.snapshot?.catalog.tracks ?? [],
           descriptor: null,
+          v2Degraded: false,
         })),
         probeProfileHealthSafe(profile),
       ])
+      const activeEngineBuild = hydrated.descriptor?.build ?? health?.build ?? null
+      const compatibilityWarning = buildCompatibilityWarning(
+        hydrated.descriptor,
+        health,
+        activeEngineBuild,
+        hydrated.v2Degraded,
+      )
       const outLabel = view.snapshot?.output?.label ?? 'Unassigned'
       state = {
         ...state,
@@ -765,6 +824,9 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         hydratedCatalogTracks: hydrated.tracks,
         activeProfile: profile,
         activeDescriptor: hydrated.descriptor,
+        activeEngineHealth: health,
+        activeEngineBuild,
+        compatibilityWarning,
         musicReadOnly: typeof health?.musicReadOnly === 'boolean' ? health.musicReadOnly : state.musicReadOnly,
         isBusy: false,
         stagedCandidate: null,
@@ -1052,6 +1114,9 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           hydratedCatalogTracks: [],
           activeProfile: null,
           activeDescriptor: null,
+          activeEngineHealth: null,
+          activeEngineBuild: null,
+          compatibilityWarning: null,
           musicReadOnly: null,
           switchPrompt: null,
           lastError: null,
@@ -1114,6 +1179,9 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           hydratedCatalogTracks: [],
           activeProfile: null,
           activeDescriptor: null,
+          activeEngineHealth: null,
+          activeEngineBuild: null,
+          compatibilityWarning: null,
           musicReadOnly: null,
           isBusy: false,
           switchPrompt: null,
@@ -1141,21 +1209,34 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       if (outcome === 'updated') {
         let hydratedCatalogTracks = state.hydratedCatalogTracks
         let activeDescriptor = state.activeDescriptor
+        let v2Degraded = false
         if (activeCoreService) {
           try {
             const hydrated = await hydrateCatalogTracks(activeCoreService, nextView.snapshot, activeCoreProfile)
             hydratedCatalogTracks = hydrated.tracks
             if (hydrated.descriptor) activeDescriptor = hydrated.descriptor
+            v2Degraded = hydrated.v2Degraded
           } catch {
             // Preserve previously hydrated catalog on transient failure
           }
         }
         const health = activeCoreProfile ? await probeProfileHealthSafe(activeCoreProfile) : null
+        const activeEngineHealth = health ?? state.activeEngineHealth
+        const activeEngineBuild = activeDescriptor?.build ?? activeEngineHealth?.build ?? null
+        const compatibilityWarning = buildCompatibilityWarning(
+          activeDescriptor,
+          activeEngineHealth,
+          activeEngineBuild,
+          v2Degraded,
+        )
         state = {
           ...state,
           view: nextView,
           hydratedCatalogTracks,
           activeDescriptor,
+          activeEngineHealth,
+          activeEngineBuild,
+          compatibilityWarning,
           musicReadOnly: typeof health?.musicReadOnly === 'boolean' ? health.musicReadOnly : state.musicReadOnly,
           isBusy: false,
           lastError: null,
@@ -1300,11 +1381,21 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         latestView.snapshot ?? currentView.snapshot,
         activeCoreProfile,
       )
+      const activeDescriptor = hydrated.descriptor ?? state.activeDescriptor
+      const activeEngineBuild = activeDescriptor?.build ?? state.activeEngineHealth?.build ?? null
+      const compatibilityWarning = buildCompatibilityWarning(
+        activeDescriptor,
+        state.activeEngineHealth,
+        activeEngineBuild,
+        hydrated.v2Degraded,
+      )
       state = {
         ...state,
         view: latestView,
         hydratedCatalogTracks: hydrated.tracks,
-        activeDescriptor: hydrated.descriptor ?? state.activeDescriptor,
+        activeDescriptor,
+        activeEngineBuild,
+        compatibilityWarning,
       }
       emit()
       return hydrated.tracks

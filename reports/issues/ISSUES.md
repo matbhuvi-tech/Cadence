@@ -1,5 +1,18 @@
 # Issue Log
 
+## GitHub #50 — Advertise human-readable build identity and prevent silent v2-to-v1 compatibility downgrade
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/50
+- **Branch:** `fix/50-build-identity-and-v2-compat`
+- **Reported behavior:** Running a newer `cadence-engine` (`8dfc87c`) alongside an older installed `Cadence Core` (`66aace7`) caused all album cover art to disappear in the UI with no error or version mismatch warning, while `/healthz` continued reporting static `"0.1.0"` cached in `node-identity.json`.
+- **Root causes:**
+  1. `parseCoreCatalogPage()` rejected all 2,787 Protocol v2 tracks containing the newly added `folderPath` / `fileName` keys, and `hydrateCatalogTracks()` silently caught the validation failure and downgraded to Protocol v1 (which omits `hasCoverArt`).
+  2. Neither `cadence-engine` / `cadence-headless` nor `Cadence Core` embedded or advertised a live human-readable build identity (`v0.1.0-rc.2 +38 · Nov 20`) or protocol revision, and `PlaybackEnginePanel` / `EngineConnectionGate` had no version comparison or mismatch banner.
+- **Fix:**
+  1. Embedded compile-time human-readable build identity (`tag +commits · Mon D` + cleaned commit summary) and `CORE_PROTOCOL_V2_REVISION` in both Rust (`build.rs`, `build_info.rs`) and Vite (`vite.config.ts`, `src/core/buildInfo.ts`), advertised from live `/healthz`, `/readyz`, v2 `core.hello`, and mDNS TXT.
+  2. Added forward-compatible Protocol v2 descriptor/catalog validation (`parseCoreV2Descriptor`, `parseCoreV2CatalogPage`) that strips/ignores unknown additive fields while preserving strict Protocol v1 contracts and security-forbidden key rejection (`filePath`, `sql`, `password`, `token`).
+  3. Replaced silent v2-to-v1 downgrades with `evaluateEngineCompatibility()` surfacing non-blocking compatibility warnings in `App.tsx`, `PlaybackEnginePanel.tsx`, and `EngineConnectionGate.tsx` alongside Core vs Engine build labels.
+
 ## GitHub #49 — Commit Album fails with Access Denied on Windows/SMB and disconnects Windows & Linux Playback Engines
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/49

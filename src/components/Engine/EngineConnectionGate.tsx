@@ -11,6 +11,7 @@ import {
   Wifi,
 } from 'lucide-react'
 import { useEngineController } from '../../context/EngineControllerContext'
+import { CORE_BUILD_INFO } from '../../core/buildInfo'
 import { CadenceLogo } from '../common/CadenceLogo'
 import { isLoopbackEngineUrl, type SavedCoreProfile } from '../../services/coreControllerTransport'
 
@@ -243,12 +244,20 @@ export const EngineConnectionGate: React.FC = () => {
           <section className="rounded-xl border border-[#D4AF37]/35 bg-[#D4AF37]/10 p-4 space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div className="space-y-1">
-                <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-white">
                   <ShieldCheck className="w-4 h-4 text-[#D4AF37]" />
                   <span>{state.stagedCandidate.descriptor.label}</span>
                   <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
                     Protocol v{state.stagedCandidate.descriptor.protocolVersion}
                   </span>
+                  {state.stagedCandidate.health?.build?.display && (
+                    <span
+                      title={state.stagedCandidate.health.build.commitSummary || undefined}
+                      className="rounded-full border border-white/15 bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium text-white/85"
+                    >
+                      {state.stagedCandidate.health.build.display}
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-white/70 font-mono">
                   {state.stagedCandidate.profile.baseUrl} · Output:{' '}
@@ -331,6 +340,15 @@ export const EngineConnectionGate: React.FC = () => {
             </form>
           )}
         </section>
+
+        <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between gap-3 text-[11px] text-white/40">
+          <span title={CORE_BUILD_INFO.commitSummary || undefined} className="font-mono">
+            Cadence Core · {CORE_BUILD_INFO.display}
+          </span>
+          {CORE_BUILD_INFO.commitSummary && (
+            <span className="truncate">{CORE_BUILD_INFO.commitSummary}</span>
+          )}
+        </div>
       </div>
     </div>
   )

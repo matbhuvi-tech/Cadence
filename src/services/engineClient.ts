@@ -2,7 +2,7 @@ import {
   CORE_MAX_PAGE_TRACKS,
   CORE_PROTOCOL_VERSION_V2,
   CoreServiceError,
-  parseCoreCatalogPage,
+  parseCoreV2CatalogPage,
   parseCoreV2Descriptor,
   type AddEngineSmbShareInput,
   type CoreCatalogTrack,
@@ -235,7 +235,7 @@ export function createEngineClient(
           cursor,
           limit: CORE_MAX_PAGE_TRACKS,
         })
-        const page = parseCoreCatalogPage(rawPage)
+        const page = parseCoreV2CatalogPage(rawPage)
         revision = page.revision
         for (const trk of page.tracks) {
           if (!seen.has(trk.id)) {

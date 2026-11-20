@@ -4,6 +4,12 @@ FROM rust:1-bookworm AS build
 WORKDIR /build
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
 COPY src-tauri/src ./src-tauri/src
+ARG CADENCE_VERSION=development
+ARG CADENCE_BUILD_TAG=""
+ARG CADENCE_BUILD_COMMITS_SINCE_TAG=""
+ARG CADENCE_BUILD_SHA=""
+ARG CADENCE_BUILD_DATE=""
+ARG CADENCE_BUILD_SUMMARY=""
 RUN cargo build --locked --release --manifest-path src-tauri/Cargo.toml \
     --no-default-features --features bundled-sqlite --bin cadence-headless
 

@@ -1,8 +1,12 @@
+import type { CoreBuildInfo } from './buildInfo'
 import type { EngineActivity, EngineContext } from './engineSession'
+
+export type { CoreBuildInfo }
 
 /** Control-plane v1/v2 contracts. Media, SQL, and raw host paths stay on the Engine. */
 export const CORE_PROTOCOL_VERSION = 1 as const
 export const CORE_PROTOCOL_VERSION_V2 = 2 as const
+export const CORE_PROTOCOL_V2_REVISION = 2 as const
 export const CORE_SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const
 export const CORE_MAX_MESSAGE_BYTES = 1_048_576
 export const CORE_MAX_QUEUE_ENTRIES = 4096
@@ -11,6 +15,8 @@ export const CORE_REQUIRED_CAPABILITIES = ['catalog.read', 'session.read', 'play
 
 export interface CoreDescriptor {
   protocolVersion: typeof CORE_PROTOCOL_VERSION | typeof CORE_PROTOCOL_VERSION_V2
+  protocolRevision?: number
+  build?: CoreBuildInfo
   engineId: string
   libraryId: string
   label: string
@@ -274,8 +280,58 @@ export function parseCoreDescriptor(value: unknown, expected: Readonly<EngineCon
   return object as unknown as CoreDescriptor
 }
 
+const FORBIDDEN_WIRE_KEYS = new Set(['filePath', 'sql', 'password', 'token'])
+
+const REQUIRED_TRACK_KEYS = ['id', 'title', 'artist', 'album', 'durationSeconds'] as const
+const OPTIONAL_TRACK_KEYS = [
+  'releaseId', 'albumArtist', 'isCompilation', 'edition', 'format', 'sampleRate', 'bitDepth',
+  'trackNumber', 'discNumber', 'releaseYear', 'composerName', 'genreTags', 'folderName',
+  'folderPath', 'fileName', 'language', 'dynamicRange', 'hasCoverArt', 'provenanceStatus',
+  'lyrics', 'fingerprintStatus',
+] as const
+
+function rejectForbiddenKeys(obj: Record<string, unknown>): void {
+  for (const key of Object.keys(obj)) {
+    requireValue(!FORBIDDEN_WIRE_KEYS.has(key))
+  }
+}
+
+function validateBuildInfo(value: unknown): CoreBuildInfo {
+  const obj = record(value)
+  rejectForbiddenKeys(obj)
+  const required = ['tag', 'commitsSinceTag', 'commitSha', 'commitDate', 'commitSummary', 'dirty', 'display']
+  requireValue(required.every((k) => Object.hasOwn(obj, k)))
+  text(obj.tag, 128)
+  requireValue(
+    typeof obj.commitsSinceTag === 'number' &&
+      Number.isInteger(obj.commitsSinceTag) &&
+      obj.commitsSinceTag >= 0 &&
+      obj.commitsSinceTag <= 1_000_000,
+  )
+  text(obj.commitSha, 64)
+  text(obj.commitDate, 32)
+  text(obj.commitSummary, 160)
+  requireValue(typeof obj.dirty === 'boolean')
+  text(obj.display, 192)
+  return {
+    tag: obj.tag,
+    commitsSinceTag: obj.commitsSinceTag,
+    commitSha: obj.commitSha,
+    commitDate: obj.commitDate,
+    commitSummary: obj.commitSummary,
+    dirty: obj.dirty,
+    display: obj.display,
+  }
+}
+
 export function parseCoreV2Descriptor(value: unknown, expected: Readonly<EngineContext>): CoreDescriptor {
-  const object = fields(boundedCopy(value), ['protocolVersion', 'engineId', 'libraryId', 'label', 'capabilities', 'ready'])
+  const object = record(boundedCopy(value))
+  rejectForbiddenKeys(object)
+  requireValue(
+    ['protocolVersion', 'engineId', 'libraryId', 'label', 'capabilities', 'ready'].every((key) =>
+      Object.hasOwn(object, key),
+    ),
+  )
   requireValue(
     object.protocolVersion === CORE_PROTOCOL_VERSION || object.protocolVersion === CORE_PROTOCOL_VERSION_V2,
     'incompatible_protocol',
@@ -291,7 +347,21 @@ export function parseCoreV2Descriptor(value: unknown, expected: Readonly<EngineC
   requireValue(CORE_REQUIRED_CAPABILITIES.every(capability => capabilities.includes(capability)), 'unsupported_capability')
   requireValue(typeof object.ready === 'boolean')
   requireValue(object.ready, 'not_ready')
-  return object as unknown as CoreDescriptor
+  if (object.protocolRevision !== undefined && object.protocolRevision !== null) {
+    optionalPositiveInt(object.protocolRevision, 10_000)
+  }
+  const build =
+    object.build !== undefined && object.build !== null ? validateBuildInfo(object.build) : undefined
+  return {
+    protocolVersion: object.protocolVersion as typeof CORE_PROTOCOL_VERSION | typeof CORE_PROTOCOL_VERSION_V2,
+    ...(typeof object.protocolRevision === 'number' ? { protocolRevision: object.protocolRevision } : {}),
+    ...(build ? { build } : {}),
+    engineId: object.engineId as string,
+    libraryId: object.libraryId as string,
+    label: object.label as string,
+    capabilities: [...(capabilities as string[])],
+    ready: true,
+  }
 }
 
 function optionalPositiveInt(value: unknown, max: number): void {
@@ -309,55 +379,88 @@ function optionalNullableInt(value: unknown, min: number, max: number): void {
   requireValue(typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max)
 }
 
-function catalogPage(value: unknown): CoreCatalogPage {
-  const page = fields(value, ['revision', 'tracks', 'nextCursor'])
+function validateCatalogTrack(value: unknown, allowUnknownKeys: boolean): CoreCatalogTrack {
+  let track: Record<string, unknown>
+  if (allowUnknownKeys) {
+    track = record(value)
+    rejectForbiddenKeys(track)
+    requireValue(REQUIRED_TRACK_KEYS.every((key) => Object.hasOwn(track, key)))
+  } else {
+    track = fields(value, [...REQUIRED_TRACK_KEYS], [...OPTIONAL_TRACK_KEYS])
+  }
+  token(track.id); text(track.title); text(track.artist); text(track.album); seconds(track.durationSeconds)
+  if (track.releaseId !== undefined) token(track.releaseId)
+  if (track.albumArtist !== undefined) text(track.albumArtist)
+  if (track.isCompilation !== undefined) requireValue(typeof track.isCompilation === 'boolean')
+  if (track.edition !== undefined) text(track.edition)
+  if (track.format !== undefined) text(track.format, 32)
+  optionalPositiveInt(track.sampleRate, 90_316_800)
+  optionalPositiveInt(track.bitDepth, 64)
+  optionalPositiveInt(track.trackNumber, 9999)
+  optionalPositiveInt(track.discNumber, 999)
+  optionalPositiveInt(track.releaseYear, 9999)
+  optionalNullableText(track.composerName)
+  optionalNullableText(track.folderName)
+  optionalNullableText(track.folderPath, 4096)
+  optionalNullableText(track.fileName, 512)
+  optionalNullableText(track.language, 64)
+  optionalNullableInt(track.dynamicRange, 0, 100)
+  if (track.hasCoverArt !== undefined) requireValue(typeof track.hasCoverArt === 'boolean')
+  optionalNullableText(track.provenanceStatus, 64)
+  optionalNullableText(track.lyrics, 262_144)
+  optionalNullableText(track.fingerprintStatus, 64)
+  if (track.genreTags !== undefined) {
+    requireValue(Array.isArray(track.genreTags) && track.genreTags.length <= 32)
+    for (const tag of track.genreTags) text(tag, 128)
+  }
+
+  const sanitized: Record<string, unknown> = {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    durationSeconds: track.durationSeconds,
+  }
+  for (const key of OPTIONAL_TRACK_KEYS) {
+    if (Object.hasOwn(track, key) && track[key] !== undefined) {
+      sanitized[key] = track[key]
+    }
+  }
+  return sanitized as unknown as CoreCatalogTrack
+}
+
+function catalogPage(value: unknown, allowUnknownKeys = false): CoreCatalogPage {
+  let page: Record<string, unknown>
+  if (allowUnknownKeys) {
+    page = record(value)
+    rejectForbiddenKeys(page)
+    requireValue(['revision', 'tracks', 'nextCursor'].every((key) => Object.hasOwn(page, key)))
+  } else {
+    page = fields(value, ['revision', 'tracks', 'nextCursor'])
+  }
   revision(page.revision)
   requireValue(Array.isArray(page.tracks) && page.tracks.length <= CORE_MAX_PAGE_TRACKS)
   const ids = new Set<string>()
-  for (const value of page.tracks) {
-    const track = fields(
-      value,
-      ['id', 'title', 'artist', 'album', 'durationSeconds'],
-      [
-        'releaseId', 'albumArtist', 'isCompilation', 'edition', 'format', 'sampleRate', 'bitDepth',
-        'trackNumber', 'discNumber', 'releaseYear', 'composerName', 'genreTags', 'folderName',
-        'folderPath', 'fileName', 'language', 'dynamicRange', 'hasCoverArt', 'provenanceStatus',
-        'lyrics', 'fingerprintStatus',
-      ],
-    )
-    token(track.id); text(track.title); text(track.artist); text(track.album); seconds(track.durationSeconds)
-    if (track.releaseId !== undefined) token(track.releaseId)
-    if (track.albumArtist !== undefined) text(track.albumArtist)
-    if (track.isCompilation !== undefined) requireValue(typeof track.isCompilation === 'boolean')
-    if (track.edition !== undefined) text(track.edition)
-    if (track.format !== undefined) text(track.format, 32)
-    optionalPositiveInt(track.sampleRate, 90_316_800)
-    optionalPositiveInt(track.bitDepth, 64)
-    optionalPositiveInt(track.trackNumber, 9999)
-    optionalPositiveInt(track.discNumber, 999)
-    optionalPositiveInt(track.releaseYear, 9999)
-    optionalNullableText(track.composerName)
-    optionalNullableText(track.folderName)
-    optionalNullableText(track.folderPath, 4096)
-    optionalNullableText(track.fileName, 512)
-    optionalNullableText(track.language, 64)
-    optionalNullableInt(track.dynamicRange, 0, 100)
-    if (track.hasCoverArt !== undefined) requireValue(typeof track.hasCoverArt === 'boolean')
-    optionalNullableText(track.provenanceStatus, 64)
-    optionalNullableText(track.lyrics, 262_144)
-    optionalNullableText(track.fingerprintStatus, 64)
-    if (track.genreTags !== undefined) {
-      requireValue(Array.isArray(track.genreTags) && track.genreTags.length <= 32)
-      for (const tag of track.genreTags) text(tag, 128)
-    }
-    requireValue(!ids.has(track.id)); ids.add(track.id)
+  const sanitizedTracks: CoreCatalogTrack[] = []
+  for (const item of page.tracks) {
+    const validated = validateCatalogTrack(item, allowUnknownKeys)
+    requireValue(!ids.has(validated.id)); ids.add(validated.id)
+    sanitizedTracks.push(validated)
   }
   if (page.nextCursor !== null) token(page.nextCursor)
-  return page as unknown as CoreCatalogPage
+  return {
+    revision: page.revision as number,
+    tracks: sanitizedTracks,
+    nextCursor: page.nextCursor as string | null,
+  }
 }
 
 export function parseCoreCatalogPage(value: unknown): CoreCatalogPage {
-  return catalogPage(boundedCopy(value))
+  return catalogPage(boundedCopy(value), false)
+}
+
+export function parseCoreV2CatalogPage(value: unknown): CoreCatalogPage {
+  return catalogPage(boundedCopy(value), true)
 }
 
 function queueEntries(value: unknown): CoreQueueEntry[] {

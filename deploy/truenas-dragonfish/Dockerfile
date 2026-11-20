@@ -9,6 +9,13 @@ WORKDIR /build
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
 COPY src-tauri/src ./src-tauri/src
 
+ARG CADENCE_VERSION=0.1.0
+ARG CADENCE_BUILD_TAG=""
+ARG CADENCE_BUILD_COMMITS_SINCE_TAG=""
+ARG CADENCE_BUILD_SHA=""
+ARG CADENCE_BUILD_DATE=""
+ARG CADENCE_BUILD_SUMMARY=""
+
 RUN cargo build \
     --manifest-path /build/src-tauri/Cargo.toml \
     --locked \

@@ -637,6 +637,7 @@ fn register_engine_mdns(
             .take(32)
             .collect::<String>()
     );
+    let build_info = crate::build_info::current_build_info();
     let props = [
         ("role", "core"),
         ("engineId", identity.engine_id.as_str()),
@@ -644,6 +645,8 @@ fn register_engine_mdns(
         ("label", identity.label.as_str()),
         ("protocol", "https"),
         ("fp", tls_fingerprint),
+        ("ver", build_info.display.as_str()),
+        ("proto", "2"),
     ];
     let info = mdns_sd::ServiceInfo::new(
         "_cadence-core._tcp.local.",

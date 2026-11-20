@@ -14,6 +14,8 @@ import {
 } from 'lucide-react'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { useOptionalAudioPlayer } from '../../context/AudioPlayerContext'
+import { CORE_BUILD_INFO, evaluateEngineCompatibility } from '../../core/buildInfo'
+import { CORE_PROTOCOL_V2_REVISION } from '../../core/coreProtocol'
 import { getEndpointDisplayName } from '../../core/endpointRouting'
 import { isLoopbackEngineUrl, type SavedCoreProfile } from '../../services/coreControllerTransport'
 
@@ -47,6 +49,24 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
   const isBusy = state?.isBusy ?? false
   const stagingError = state?.stagingError ?? null
   const lastError = state?.lastError ?? null
+  const engineBuild = state?.activeEngineBuild ?? null
+  const compatWarning = state?.compatibilityWarning ?? null
+  const activeDescriptor = state?.activeDescriptor ?? null
+  const activeHealth = state?.activeEngineHealth ?? null
+  const activeProtocolVersion =
+    activeDescriptor?.protocolVersion ?? activeHealth?.protocolVersion ?? 1
+  const activeProtocolRevision =
+    activeDescriptor?.protocolRevision ?? activeHealth?.protocolRevision ?? null
+  const stagedCompat = staged
+    ? evaluateEngineCompatibility({
+        coreBuild: CORE_BUILD_INFO,
+        coreProtocolRevision: CORE_PROTOCOL_V2_REVISION,
+        engineBuild: staged.health?.build ?? null,
+        engineProtocolVersion: staged.health?.protocolVersion ?? staged.descriptor.protocolVersion,
+        engineProtocolRevision:
+          staged.health?.protocolRevision ?? staged.descriptor.protocolRevision ?? null,
+      })
+    : null
 
   const activeOutputLabel = isCoreActive
     ? snapshot?.output?.label ?? 'No output assigned on Core'
@@ -133,6 +153,43 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
               <span>Audio output: {activeOutputLabel}</span>
             </div>
 
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-white/65 pt-0.5">
+              {isCoreActive && (
+                <span title={engineBuild?.commitSummary || undefined}>
+                  Engine:{' '}
+                  <span className="font-mono text-white/90">
+                    {engineBuild?.display ?? 'Legacy build (unversioned)'}
+                  </span>
+                </span>
+              )}
+              <span title={CORE_BUILD_INFO.commitSummary || undefined}>
+                Core UI:{' '}
+                <span className="font-mono text-white/90">{CORE_BUILD_INFO.display}</span>
+              </span>
+              {isCoreActive && isConnected && engineBuild && !compatWarning && (
+                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
+                  Matched
+                </span>
+              )}
+              {isCoreActive && compatWarning?.severity === 'info' && (
+                <span className="rounded-full border border-white/15 bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium text-white/80">
+                  Different build
+                </span>
+              )}
+              {isCoreActive && compatWarning?.severity === 'warning' && (
+                <span className="rounded-full border border-amber-500/35 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+                  Update recommended
+                </span>
+              )}
+            </div>
+            {(engineBuild?.commitSummary || CORE_BUILD_INFO.commitSummary) && (
+              <div className="text-[11px] text-white/45 truncate">
+                {isCoreActive && engineBuild?.commitSummary
+                  ? `Engine: ${engineBuild.commitSummary}`
+                  : `Core UI: ${CORE_BUILD_INFO.commitSummary}`}
+              </div>
+            )}
+
             {state?.statusAnnouncement && (
               <p className="text-[11px] text-white/60">{state.statusAnnouncement}</p>
             )}
@@ -169,6 +226,13 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
           <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-black/30 px-3 py-2 text-xs text-rose-200">
             <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" aria-hidden="true" />
             <span>Connection lost. Playback may still be continuing.</span>
+          </div>
+        )}
+
+        {isCoreActive && isConnected && compatWarning?.severity === 'warning' && (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2 text-xs text-amber-200">
+            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+            <span>{compatWarning.detail}</span>
           </div>
         )}
       </div>
@@ -357,9 +421,17 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
         <div className="rounded-xl border border-[#D4AF37]/40 bg-[#D4AF37]/[0.06] p-4 space-y-3">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1">
-              <div className="flex items-center gap-2 text-xs font-semibold text-white">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-white">
                 <ShieldCheck className="h-4 w-4 text-[#D4AF37]" aria-hidden="true" />
                 <span>Ready to Activate: {staged.descriptor.label}</span>
+                {staged.health?.build?.display && (
+                  <span
+                    title={staged.health.build.commitSummary || undefined}
+                    className="rounded-full border border-white/15 bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium text-white/85"
+                  >
+                    {staged.health.build.display}
+                  </span>
+                )}
               </div>
               <div className="text-[11px] text-white/70 font-mono">
                 Engine: {staged.descriptor.engineId} · Library: {staged.descriptor.libraryId} ·{' '}
@@ -368,6 +440,12 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
               <div className="text-[11px] text-white/75">
                 Audio output: {staged.snapshot.output?.label ?? 'None configured'}
               </div>
+              {stagedCompat?.severity === 'warning' && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2 text-xs text-amber-200">
+                  <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+                  <span>{stagedCompat.detail}</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -428,7 +506,25 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
           Advanced Core &amp; Hardware Readiness Details
         </summary>
         <div className="mt-2.5 space-y-1.5 text-[11px] font-mono text-white/60">
-          <div>Protocol version: v1 · Engine scope: {active.kind} ({active.engineId})</div>
+          <div>
+            Protocol: v{activeProtocolVersion}
+            {activeProtocolRevision ? ` (rev ${activeProtocolRevision})` : ''} · Engine scope:{' '}
+            {active.kind} ({active.engineId})
+          </div>
+          <div>
+            Core UI build: {CORE_BUILD_INFO.display} ({CORE_BUILD_INFO.commitSha})
+            {CORE_BUILD_INFO.commitSummary ? ` — ${CORE_BUILD_INFO.commitSummary}` : ''}
+          </div>
+          {isCoreActive && (
+            <div>
+              Engine build:{' '}
+              {engineBuild
+                ? `${engineBuild.display} (${engineBuild.commitSha})${
+                    engineBuild.commitSummary ? ` — ${engineBuild.commitSummary}` : ''
+                  }`
+                : 'Legacy build (unversioned)'}
+            </div>
+          )}
           <div>Session revision: {snapshot?.revision ?? 0}</div>
           <div>
             Note: Controller readiness checks API protocol and trust only. Physical DAC/RS130

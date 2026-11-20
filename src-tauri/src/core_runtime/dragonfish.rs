@@ -1289,13 +1289,17 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
                     let _ = stream.write_all(header.as_bytes());
                     let _ = stream.flush();
                 } else if method == "GET" && (path == "/healthz" || path == "/readyz") {
+                    let build_info = crate::build_info::current_build_info();
                     let payload = json!({
                         "ready": true,
                         "engineId": identity.engine_id,
                         "libraryId": identity.library_id,
                         "label": identity.label,
                         "schemaVersion": identity.schema_version,
-                        "appVersion": identity.app_version,
+                        "appVersion": env!("CARGO_PKG_VERSION"),
+                        "protocolVersion": 2,
+                        "protocolRevision": crate::build_info::CORE_PROTOCOL_V2_REVISION,
+                        "build": build_info,
                         "advertisedIp": advertised_ip,
                         "controlPort": control_port,
                         "mediaPort": media_port,
