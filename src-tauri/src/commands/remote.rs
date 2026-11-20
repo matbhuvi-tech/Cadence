@@ -587,21 +587,8 @@ pub async fn discover_core_nodes() -> Result<Vec<DiscoveredCoreEndpoint>, String
     Ok(results)
 }
 
-async fn read_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
-    let data_dir = if let Ok(explicit) = std::env::var("CADENCE_DATA_DIR") {
-        let trimmed = explicit.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        std::path::PathBuf::from(trimmed)
-    } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        std::path::PathBuf::from(local_app_data).join("CadenceEngine")
-    } else {
-        return None;
-    };
-    let pairing_path = data_dir.join("localhost-pairing.json");
-    let raw = tokio::fs::read_to_string(pairing_path).await.ok()?;
-    let parsed: Value = serde_json::from_str(&raw).ok()?;
+fn parse_localhost_pairing_json(raw: &str) -> Option<DiscoveredCoreEndpoint> {
+    let parsed: Value = serde_json::from_str(raw).ok()?;
     let base_url = parsed.get("baseUrl")?.as_str()?.to_string();
     let addr: std::net::SocketAddr = base_url.strip_prefix("https://")?.parse().ok()?;
     if !addr.ip().is_loopback() {
@@ -624,15 +611,51 @@ async fn read_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
     })
 }
 
+async fn read_localhost_candidates_from_dirs(
+    dirs: &[std::path::PathBuf],
+) -> Vec<DiscoveredCoreEndpoint> {
+    let mut candidates: Vec<DiscoveredCoreEndpoint> = Vec::new();
+    for dir in dirs {
+        let pairing_path = dir.join("localhost-pairing.json");
+        let Ok(raw) = tokio::fs::read_to_string(pairing_path).await else {
+            continue;
+        };
+        let Some(parsed) = parse_localhost_pairing_json(&raw) else {
+            continue;
+        };
+        if !candidates.iter().any(|existing| {
+            existing.base_url == parsed.base_url
+                && existing.engine_id == parsed.engine_id
+                && existing.cert_fingerprint == parsed.cert_fingerprint
+        }) {
+            candidates.push(parsed);
+        }
+    }
+    candidates
+}
+
+async fn read_localhost_windows_engine_candidates() -> Vec<DiscoveredCoreEndpoint> {
+    let dirs = crate::core_runtime::windows_engine::localhost_windows_engine_candidate_dirs();
+    read_localhost_candidates_from_dirs(&dirs).await
+}
+
 #[tauri::command]
 pub async fn local_core_pairing_endpoint() -> Option<DiscoveredCoreEndpoint> {
-    let mut local = read_localhost_windows_engine().await?;
+    let mut local = if let Some(live) = probe_localhost_windows_engine().await {
+        live
+    } else {
+        read_localhost_windows_engine_candidates()
+            .await
+            .into_iter()
+            .next()?
+    };
     local.pairing_token = None;
     Some(local)
 }
 
-async fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
-    let local = read_localhost_windows_engine().await?;
+async fn probe_single_localhost_windows_engine(
+    local: DiscoveredCoreEndpoint,
+) -> Option<DiscoveredCoreEndpoint> {
     let client = build_core_http_client(
         Some(local.cert_fingerprint.as_deref()?),
         false,
@@ -654,6 +677,15 @@ async fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
     } else {
         None
     }
+}
+
+pub(crate) async fn probe_localhost_windows_engine() -> Option<DiscoveredCoreEndpoint> {
+    for candidate in read_localhost_windows_engine_candidates().await {
+        if let Some(live) = probe_single_localhost_windows_engine(candidate).await {
+            return Some(live);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -689,5 +721,70 @@ mod tests {
         assert!(bad_verifier
             .verify_server_cert(&cert_der, &[], &server_name, &[], UnixTime::now())
             .is_err());
+    }
+
+    #[test]
+    fn parse_localhost_pairing_json_validates_loopback_base_url() {
+        let valid = r#"{
+            "baseUrl": "https://127.0.0.1:4040",
+            "token": "secret-tok",
+            "tlsFingerprintSha256": "aa:bb",
+            "engineId": "core_svc",
+            "libraryId": "lib_svc",
+            "label": "Service Engine"
+        }"#;
+        let parsed = parse_localhost_pairing_json(valid).expect("valid loopback json");
+        assert_eq!(parsed.engine_id, "core_svc");
+        assert_eq!(parsed.library_id, "lib_svc");
+        assert_eq!(parsed.base_url, "https://127.0.0.1:4040");
+        assert_eq!(parsed.pairing_token.as_deref(), Some("secret-tok"));
+
+        let non_loopback = r#"{
+            "baseUrl": "https://192.168.1.5:4040",
+            "token": "secret-tok",
+            "tlsFingerprintSha256": "aa:bb",
+            "engineId": "core_lan",
+            "libraryId": "lib_lan",
+            "label": "LAN Engine"
+        }"#;
+        assert!(parse_localhost_pairing_json(non_loopback).is_none());
+    }
+
+    #[tokio::test]
+    async fn read_localhost_candidates_from_dirs_preserves_order_and_dedups() {
+        let root = std::env::temp_dir().join(format!(
+            "cadence_remote_cand_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let dir_a = root.join("a");
+        let dir_missing = root.join("missing");
+        let dir_bad = root.join("bad");
+        let dir_dup = root.join("dup");
+        let dir_b = root.join("b");
+        for d in [&dir_a, &dir_bad, &dir_dup, &dir_b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let json_a = r#"{"baseUrl":"https://127.0.0.1:4040","token":"tokA","tlsFingerprintSha256":"aa","engineId":"core_a","libraryId":"lib_a","label":"A"}"#;
+        let json_b = r#"{"baseUrl":"https://127.0.0.1:4040","token":"tokB","tlsFingerprintSha256":"bb","engineId":"core_b","libraryId":"lib_b","label":"B"}"#;
+        std::fs::write(dir_a.join("localhost-pairing.json"), json_a).unwrap();
+        std::fs::write(dir_bad.join("localhost-pairing.json"), "{not valid json").unwrap();
+        std::fs::write(dir_dup.join("localhost-pairing.json"), json_a).unwrap();
+        std::fs::write(dir_b.join("localhost-pairing.json"), json_b).unwrap();
+
+        let candidates = read_localhost_candidates_from_dirs(&[
+            dir_missing,
+            dir_bad,
+            dir_a,
+            dir_dup,
+            dir_b,
+        ])
+        .await;
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].engine_id, "core_a");
+        assert_eq!(candidates[1].engine_id, "core_b");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

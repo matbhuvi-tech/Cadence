@@ -1407,11 +1407,8 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       const generation = ++startupGeneration
       const current = () => !disposed && generation === startupGeneration
       try {
-        let local = state.savedCores.find((profile) =>
-          isLoopbackEngineUrl(profile.baseUrl) &&
-          Boolean(profile.certFingerprint),
-        )
-        if (!local && options.readLocalPairingEndpoint && state.savedCores.some((profile) => profile.certFingerprint)) {
+        let local: SavedCoreProfile | undefined
+        if (options.readLocalPairingEndpoint && state.savedCores.some((profile) => profile.certFingerprint)) {
           const pairing = await options.readLocalPairingEndpoint().catch(() => null)
           if (!current()) return
           if (pairing?.certFingerprint && isLoopbackEngineUrl(pairing.baseUrl)) {
@@ -1423,6 +1420,12 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
             )
             if (saved) local = { ...saved, baseUrl: pairing.baseUrl }
           }
+        }
+        if (!local) {
+          local = state.savedCores.find((profile) =>
+            isLoopbackEngineUrl(profile.baseUrl) &&
+            Boolean(profile.certFingerprint),
+          )
         }
         if (local) {
           let failure: string | undefined
@@ -1462,6 +1465,9 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           if (!current()) return
           state = { ...state, startupConnection: { ...state.startupConnection!, phase: 'failed', error: failure } }
           emit()
+          if (current() && options.discoverNodes) {
+            await this.discoverOnDemand()
+          }
           return
         }
         for (const profile of state.savedCores) {

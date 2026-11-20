@@ -2,6 +2,7 @@
 //! strict locked-RAM admission, and 30-second post-playback storage silence.
 
 pub mod curate;
+pub mod doctor;
 pub mod dragonfish;
 pub mod enrichment;
 pub mod migration;

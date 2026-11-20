@@ -192,8 +192,31 @@ fn emit_build_metadata() {
     println!("cargo:rustc-env=CADENCE_BUILD_DISPLAY={}", sanitize_env_value(&display));
 }
 
+fn emit_windows_engine_manifest() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+        || std::env::var("CARGO_FEATURE_ENGINE_AUDIO").is_err()
+        || std::env::var("CARGO_FEATURE_DESKTOP").is_ok()
+    {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
+    );
+    let manifest_path = manifest_dir.join("windows").join("cadence-engine.manifest");
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    println!("cargo:rustc-link-arg-bin=cadence-engine=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg-bin=cadence-engine=/MANIFESTUAC:NO");
+    println!(
+        "cargo:rustc-link-arg-bin=cadence-engine=/MANIFESTINPUT:{}",
+        manifest_path.display()
+    );
+}
+
 fn main() {
     emit_build_metadata();
+    emit_windows_engine_manifest();
     #[cfg(feature = "desktop")]
     tauri_build::build();
 }

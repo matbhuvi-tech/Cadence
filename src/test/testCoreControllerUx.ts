@@ -295,6 +295,99 @@ test('startup recovers a saved LAN profile over pinned loopback HTTPS once ready
   }
 })
 
+test('startup prefers active readLocalPairingEndpoint profile when both Tray and Service loopback profiles are saved', async () => {
+  const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
+  const trayNode = createFakeCoreNode({ engineId: 'core_tray', libraryId: 'lib_tray', label: 'Tray Engine' })
+  const svcNode = createFakeCoreNode({ engineId: 'core_svc', libraryId: 'lib_svc', label: 'Service Engine' })
+  const trayFp = '11'.repeat(32)
+  const svcFp = '22'.repeat(32)
+  const trayProfile = { ...trayNode.context, baseUrl: 'https://127.0.0.1:4040', certFingerprint: trayFp, musicRoots: [] }
+  const svcProfile = { ...svcNode.context, baseUrl: 'https://127.0.0.1:4040', certFingerprint: svcFp, musicRoots: [] }
+  const probedEngines: string[] = []
+
+  const store = createDesktopCoreControllerStore({
+    storage: {
+      getItem: () => JSON.stringify([trayProfile, svcProfile]),
+      setItem: () => {},
+    },
+    readLocalPairingEndpoint: async () => svcProfile,
+    localOwner: {
+      getActivity: () => 'idle',
+      stopAndAcknowledge: async () => true,
+      request: async () => ({ ok: true, data: {} }),
+    },
+    httpBridge: {
+      async probeHealth(target) {
+        probedEngines.push(target.engineId)
+        assert.equal(target.engineId, svcProfile.engineId)
+        assert.equal(target.certFingerprint, svcFp)
+        return { ...svcNode.context, ready: true, tlsFingerprintSha256: svcFp }
+      },
+      postCoreRequest: (_target, request) => svcNode.channel.request(request),
+    },
+    channelFactory: () => svcNode.channel,
+  })
+
+  try {
+    await store.bootstrapStartupConnection()
+    assert.deepEqual(probedEngines, ['core_svc', 'core_svc'])
+    assert.equal(store.getState().view.session.active.kind, 'core')
+    assert.equal(store.getState().activeProfile?.engineId, 'core_svc')
+    assert.equal(store.getState().startupConnection?.phase, 'ready')
+  } finally {
+    store.dispose()
+  }
+})
+
+test('startup falls back to discoverNodes when stale Tray loopback profile fails with untrusted_peer', async () => {
+  const { createDesktopCoreControllerStore, CoreServiceError } = await import('../services/coreControllerTransport')
+  const trayNode = createFakeCoreNode({ engineId: 'core_tray', libraryId: 'lib_tray', label: 'Tray Engine' })
+  const svcNode = createFakeCoreNode({ engineId: 'core_svc', libraryId: 'lib_svc', label: 'Service Engine' })
+  const trayFp = '11'.repeat(32)
+  const svcFp = '22'.repeat(32)
+  const trayProfile = { ...trayNode.context, baseUrl: 'https://127.0.0.1:4040', certFingerprint: trayFp, musicRoots: [] }
+  const svcDiscovered = {
+    ...svcNode.context,
+    baseUrl: 'https://127.0.0.1:4040',
+    certFingerprint: svcFp,
+    pairingToken: 'svc-token',
+  }
+  let discoverCalls = 0
+
+  const store = createDesktopCoreControllerStore({
+    storage: {
+      getItem: () => JSON.stringify([trayProfile]),
+      setItem: () => {},
+    },
+    readLocalPairingEndpoint: async () => svcDiscovered,
+    discoverNodes: async () => {
+      discoverCalls++
+      return [svcDiscovered]
+    },
+    localOwner: {
+      getActivity: () => 'idle',
+      stopAndAcknowledge: async () => true,
+      request: async () => ({ ok: true, data: {} }),
+    },
+    httpBridge: {
+      async probeHealth() {
+        throw new CoreServiceError('untrusted_peer')
+      },
+      postCoreRequest: (_target, request) => trayNode.channel.request(request),
+    },
+  })
+
+  try {
+    await store.bootstrapStartupConnection()
+    assert.equal(store.getState().startupConnection?.phase, 'failed')
+    assert.equal(discoverCalls, 1)
+    assert.equal(store.getState().discoveredCores.length, 1)
+    assert.equal(store.getState().discoveredCores[0].engineId, 'core_svc')
+  } finally {
+    store.dispose()
+  }
+})
+
 test('Phase 7 Add/Cancel/Fail/Prepare/Activate Core preserves prior state on cancel or failure and commits atomically without auto-play', async () => {
   const { createDesktopCoreControllerStore } = await import('../services/coreControllerTransport')
 

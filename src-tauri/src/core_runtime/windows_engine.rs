@@ -61,19 +61,296 @@ impl Default for WindowsEngineConfig {
     }
 }
 
+pub const WINDOWS_SERVICE_NAME: &str = "CadencePlaybackEngine";
+
 pub fn default_windows_engine_data_dir() -> PathBuf {
-    if let Ok(explicit) = std::env::var("CADENCE_DATA_DIR") {
-        let trimmed = explicit.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+    let fallback = if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         if !local_app_data.trim().is_empty() {
-            return PathBuf::from(local_app_data).join("CadenceEngine");
+            PathBuf::from(local_app_data).join("CadenceEngine")
+        } else {
+            PathBuf::from(".cadence-engine")
+        }
+    } else {
+        PathBuf::from(".cadence-engine")
+    };
+    crate::core_runtime::dragonfish::resolve_env_data_dir(fallback)
+}
+
+#[cfg(windows)]
+pub fn default_windows_service_data_dir() -> PathBuf {
+    if let Ok(program_data) = std::env::var("ProgramData") {
+        let trimmed = program_data.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("CadenceEngine");
         }
     }
-    PathBuf::from(".cadence-engine")
+    PathBuf::from(r"C:\ProgramData\CadenceEngine")
+}
+
+#[cfg(not(windows))]
+pub fn default_windows_service_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/cadence")
+}
+
+#[cfg(windows)]
+pub fn is_windows_service_running() -> bool {
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_HANDLE,
+        SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START_PENDING,
+        SERVICE_STATUS, SERVICE_STOP_PENDING,
+    };
+
+    struct ScmHandle(SC_HANDLE);
+    impl Drop for ScmHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CloseServiceHandle(self.0);
+                }
+            }
+        }
+    }
+
+    let scm_raw = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
+    if scm_raw.is_null() {
+        return false;
+    }
+    let scm = ScmHandle(scm_raw);
+    let svc_name: Vec<u16> = WINDOWS_SERVICE_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let svc_raw = unsafe { OpenServiceW(scm.0, svc_name.as_ptr(), SERVICE_QUERY_STATUS) };
+    if svc_raw.is_null() {
+        return false;
+    }
+    let svc = ScmHandle(svc_raw);
+    let mut st: SERVICE_STATUS = unsafe { std::mem::zeroed() };
+    if unsafe { QueryServiceStatus(svc.0, &mut st) } == 0 {
+        return false;
+    }
+    matches!(
+        st.dwCurrentState,
+        SERVICE_RUNNING | SERVICE_START_PENDING | SERVICE_STOP_PENDING
+    )
+}
+
+#[cfg(not(windows))]
+pub fn is_windows_service_running() -> bool {
+    false
+}
+
+pub(crate) fn parse_data_dir_from_service_cmd(cmd: &str) -> Option<PathBuf> {
+    let mut tokens: Vec<String> = Vec::new();
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let mut token = String::new();
+        let mut in_quotes = false;
+        while i < chars.len() {
+            let ch = chars[i];
+            if !in_quotes && ch.is_whitespace() {
+                break;
+            }
+            if ch == '\\' {
+                let mut slashes = 0;
+                while i + slashes < chars.len() && chars[i + slashes] == '\\' {
+                    slashes += 1;
+                }
+                if i + slashes < chars.len() && chars[i + slashes] == '"' {
+                    for _ in 0..(slashes / 2) {
+                        token.push('\\');
+                    }
+                    if slashes % 2 == 1 {
+                        token.push('"');
+                        i += slashes + 1;
+                    } else {
+                        in_quotes = !in_quotes;
+                        i += slashes + 1;
+                    }
+                } else {
+                    for _ in 0..slashes {
+                        token.push('\\');
+                    }
+                    i += slashes;
+                }
+            } else if ch == '"' {
+                in_quotes = !in_quotes;
+                i += 1;
+            } else {
+                token.push(ch);
+                i += 1;
+            }
+        }
+        tokens.push(token);
+    }
+
+    for pair in tokens.windows(2) {
+        if matches!(pair[0].as_str(), "--data-dir" | "--app-data-dir") {
+            let trimmed = pair[1].trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+pub fn installed_windows_service_data_dir() -> Option<PathBuf> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
+    use windows_sys::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
+        QUERY_SERVICE_CONFIGW, SC_HANDLE, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+    };
+
+    struct ScmHandle(SC_HANDLE);
+    impl Drop for ScmHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CloseServiceHandle(self.0);
+                }
+            }
+        }
+    }
+
+    let scm_raw = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
+    if scm_raw.is_null() {
+        return None;
+    }
+    let scm = ScmHandle(scm_raw);
+    let svc_name: Vec<u16> = WINDOWS_SERVICE_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let svc_raw = unsafe { OpenServiceW(scm.0, svc_name.as_ptr(), SERVICE_QUERY_CONFIG) };
+    if svc_raw.is_null() {
+        return None;
+    }
+    let svc = ScmHandle(svc_raw);
+
+    let mut needed: u32 = 0;
+    let first_ok = unsafe { QueryServiceConfigW(svc.0, std::ptr::null_mut(), 0, &mut needed) };
+    if first_ok != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return None;
+    }
+    if needed == 0 || needed > 64 * 1024 {
+        return None;
+    }
+
+    let words = ((needed as usize) + 7) / 8;
+    let mut buf = vec![0u64; words];
+    let ok = unsafe {
+        QueryServiceConfigW(
+            svc.0,
+            buf.as_mut_ptr().cast::<QUERY_SERVICE_CONFIGW>(),
+            (words * 8) as u32,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+
+    let cfg = unsafe { &*buf.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
+    if cfg.lpBinaryPathName.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while len < 32 * 1024 && *cfg.lpBinaryPathName.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let cmd = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(cfg.lpBinaryPathName, len) });
+    parse_data_dir_from_service_cmd(&cmd)
+}
+
+#[cfg(not(windows))]
+pub fn installed_windows_service_data_dir() -> Option<PathBuf> {
+    None
+}
+
+pub(crate) fn resolve_localhost_candidate_dirs(
+    explicit_env: Option<&str>,
+    local_app_data: Option<&str>,
+    program_data: Option<&str>,
+    installed_service_dir: Option<&Path>,
+    service_running: bool,
+) -> Vec<PathBuf> {
+    if let Some(trimmed) = explicit_env.map(str::trim).filter(|s| !s.is_empty()) {
+        return vec![PathBuf::from(trimmed)];
+    }
+
+    let tray_dir = local_app_data
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| PathBuf::from(s).join("CadenceEngine"));
+    let configured_svc_dir = installed_service_dir.and_then(|p| {
+        if p.to_string_lossy().trim().is_empty() {
+            None
+        } else {
+            Some(p.to_path_buf())
+        }
+    });
+    let default_svc_dir = program_data
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| PathBuf::from(s).join("CadenceEngine"));
+
+    let ordered = if service_running {
+        [configured_svc_dir, tray_dir, default_svc_dir]
+    } else {
+        [tray_dir, configured_svc_dir, default_svc_dir]
+    };
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in ordered.into_iter().flatten() {
+        #[cfg(windows)]
+        let already = out.iter().any(|existing| {
+            existing.to_string_lossy().to_ascii_lowercase()
+                == dir.to_string_lossy().to_ascii_lowercase()
+        });
+        #[cfg(not(windows))]
+        let already = out.contains(&dir);
+        if !already {
+            out.push(dir);
+        }
+    }
+    out
+}
+
+pub fn localhost_windows_engine_candidate_dirs() -> Vec<PathBuf> {
+    let explicit_env = std::env::var("CADENCE_DATA_DIR").ok();
+    let local_app_data = std::env::var("LOCALAPPDATA").ok();
+    let env_program_data = std::env::var("ProgramData").ok();
+    #[cfg(windows)]
+    let program_data = env_program_data
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(Some(r"C:\ProgramData"));
+    #[cfg(not(windows))]
+    let program_data = env_program_data
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let installed_service_dir = installed_windows_service_data_dir();
+
+    resolve_localhost_candidate_dirs(
+        explicit_env.as_deref(),
+        local_app_data.as_deref(),
+        program_data,
+        installed_service_dir.as_deref(),
+        is_windows_service_running(),
+    )
 }
 
 pub fn detect_legacy_desktop_db() -> Option<PathBuf> {
@@ -1093,5 +1370,89 @@ mod tests {
             .unwrap();
         assert!(advertised, "backfilled folder cover must set has_embedded_art=1");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_data_dir_from_service_cmd_extracts_quoted_and_unquoted_paths() {
+        assert_eq!(
+            parse_data_dir_from_service_cmd(
+                r#"C:\Apps\cadence-engine.exe --service-run --no-tray --data-dir C:\ProgramData\CadenceEngine --port 4040"#,
+            ),
+            Some(PathBuf::from(r"C:\ProgramData\CadenceEngine"))
+        );
+        assert_eq!(
+            parse_data_dir_from_service_cmd(
+                r#""C:\Program Files\Cadence\cadence-engine.exe" --service-run --data-dir "C:\Users\John Doe\AppData\Local\CadenceEngine" --port 4040"#,
+            ),
+            Some(PathBuf::from(r"C:\Users\John Doe\AppData\Local\CadenceEngine"))
+        );
+        assert_eq!(
+            parse_data_dir_from_service_cmd(
+                r#"cadence-engine.exe --app-data-dir "D:\My \"Audio\" Data\Cadence""#,
+            ),
+            Some(PathBuf::from(r#"D:\My "Audio" Data\Cadence"#))
+        );
+        assert_eq!(
+            parse_data_dir_from_service_cmd(r#"cadence-engine.exe --service-run --port 4040"#),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_localhost_candidate_dirs_respects_explicit_override_ordering_and_dedup() {
+        assert_eq!(
+            resolve_localhost_candidate_dirs(
+                Some("  D:\\CustomCadence  "),
+                Some("C:\\Users\\Test\\AppData\\Local"),
+                Some("C:\\ProgramData"),
+                Some(Path::new("E:\\ServiceData")),
+                true,
+            ),
+            vec![PathBuf::from("D:\\CustomCadence")]
+        );
+
+        assert_eq!(
+            resolve_localhost_candidate_dirs(
+                Some("   "),
+                Some("C:\\Users\\Test\\AppData\\Local"),
+                Some("C:\\ProgramData"),
+                Some(Path::new("E:\\ServiceData")),
+                true,
+            ),
+            vec![
+                PathBuf::from("E:\\ServiceData"),
+                PathBuf::from("C:\\Users\\Test\\AppData\\Local").join("CadenceEngine"),
+                PathBuf::from("C:\\ProgramData").join("CadenceEngine"),
+            ]
+        );
+
+        assert_eq!(
+            resolve_localhost_candidate_dirs(
+                None,
+                Some("C:\\Users\\Test\\AppData\\Local"),
+                Some("C:\\ProgramData"),
+                Some(Path::new("E:\\ServiceData")),
+                false,
+            ),
+            vec![
+                PathBuf::from("C:\\Users\\Test\\AppData\\Local").join("CadenceEngine"),
+                PathBuf::from("E:\\ServiceData"),
+                PathBuf::from("C:\\ProgramData").join("CadenceEngine"),
+            ]
+        );
+
+        assert_eq!(
+            resolve_localhost_candidate_dirs(
+                None,
+                Some("C:\\Users\\Test\\AppData\\Local"),
+                Some("C:\\ProgramData"),
+                Some(Path::new("c:\\users\\test\\appdata\\local\\CadenceEngine")),
+                true,
+            ),
+            vec![
+                PathBuf::from("c:\\users\\test\\appdata\\local\\CadenceEngine"),
+                PathBuf::from("C:\\ProgramData").join("CadenceEngine"),
+            ]
+        );
     }
 }

@@ -106,17 +106,14 @@ pub fn get_upnp_pacing_stats(engine: State<'_, AudioEngine>) -> UpnpPacingSnapsh
 async fn sync_windows_engine_upnp_pacer(enabled: Option<bool>) -> Option<bool> {
     #[cfg(windows)]
     {
-        use crate::commands::remote::{core_control_request, CoreEndpointBridgeTarget};
-        use crate::core_runtime::windows_engine::{
-            default_windows_engine_data_dir, LocalhostPairingInfo,
+        use crate::commands::remote::{
+            core_control_request, probe_localhost_windows_engine, CoreEndpointBridgeTarget,
         };
-        let pairing_path = default_windows_engine_data_dir().join("localhost-pairing.json");
-        let raw = std::fs::read_to_string(pairing_path).ok()?;
-        let pairing: LocalhostPairingInfo = serde_json::from_str(&raw).ok()?;
+        let pairing = probe_localhost_windows_engine().await?;
         let target = CoreEndpointBridgeTarget {
             base_url: pairing.base_url,
-            pairing_token: Some(pairing.token),
-            cert_fingerprint: Some(pairing.tls_fingerprint_sha256),
+            pairing_token: pairing.pairing_token,
+            cert_fingerprint: pairing.cert_fingerprint,
             trust_insecure: Some(false),
         };
         let mut payload = serde_json::json!({

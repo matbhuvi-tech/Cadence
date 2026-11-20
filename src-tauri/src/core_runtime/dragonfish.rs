@@ -400,11 +400,20 @@ impl DragonfishNode<SystemPlatformProbe, SystemMemoryLocker> {
             "tls-cert.json",
             "tls-cert.pem",
             "tls-key.pem",
+            "pairing-token",
+            "localhost-pairing.json",
         ] {
             let src = backup_dir.join(file_name);
             if src.is_file() {
-                std::fs::copy(&src, app_data_dir.join(file_name))
+                let dest = app_data_dir.join(file_name);
+                std::fs::copy(&src, &dest)
                     .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
+                if matches!(
+                    file_name,
+                    "tls-key.pem" | "pairing-token" | "localhost-pairing.json"
+                ) {
+                    set_private_file_perms(&dest)?;
+                }
             }
         }
 
@@ -819,6 +828,42 @@ impl<P: PlatformProbe, L: MemoryLocker> Drop for DragonfishNode<P, L> {
     }
 }
 
+pub fn resolve_env_data_dir(default_dir: PathBuf) -> PathBuf {
+    for key in ["CADENCE_DATA_DIR", "CADENCE_APP_DATA_DIR"] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+    }
+    default_dir
+}
+
+fn set_private_dir_perms(path: &Path) -> Result<(), DragonfishError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn set_private_file_perms(path: &Path) -> Result<(), DragonfishError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn create_versioned_backup_at(
     app_data_dir: &Path,
     app_version: &str,
@@ -834,6 +879,7 @@ fn create_versioned_backup_at(
     }
     std::fs::create_dir_all(&backup_dir)
         .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
+    set_private_dir_perms(&backup_dir)?;
 
     let db_path = app_data_dir.join("cadence.db");
     let backup_db_path = backup_dir.join("cadence.db");
@@ -849,11 +895,20 @@ fn create_versioned_backup_at(
         "tls-cert.json",
         "tls-cert.pem",
         "tls-key.pem",
+        "pairing-token",
+        "localhost-pairing.json",
     ] {
         let src = app_data_dir.join(file_name);
         if src.is_file() {
-            std::fs::copy(&src, backup_dir.join(file_name))
+            let dest = backup_dir.join(file_name);
+            std::fs::copy(&src, &dest)
                 .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
+            if matches!(
+                file_name,
+                "tls-key.pem" | "pairing-token" | "localhost-pairing.json"
+            ) {
+                set_private_file_perms(&dest)?;
+            }
         }
     }
 
@@ -873,16 +928,33 @@ fn create_versioned_backup_at(
     Ok(backup_dir)
 }
 
-/// Performs a local HTTP `/healthz` readiness check for container `HEALTHCHECK` probes.
-pub fn probe_healthcheck(control_port: u16) -> Result<(), String> {
+/// Performs a local HTTP/HTTPS `/healthz` readiness check against an explicit or env-resolved data dir.
+pub fn probe_healthcheck_with_data_dir(
+    control_port: u16,
+    app_data_dir: Option<&Path>,
+) -> Result<(), String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], control_port));
     let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e|e.to_string())?;
     let _=tcp.set_read_timeout(Some(Duration::from_secs(2)));
     let _=tcp.set_write_timeout(Some(Duration::from_secs(2)));
     let plain=std::env::var("CADENCE_ALLOW_LOOPBACK").as_deref()==Ok("true") && std::env::var("CADENCE_TEST_TLS").as_deref()!=Ok("true");
     let mut stream:Box<dyn ControlIo>=if plain{Box::new(tcp)}else{
-        let data=std::env::var("CADENCE_APP_DATA_DIR").unwrap_or_else(|_|"/var/lib/cadence".into());
-        let pem=std::fs::read(Path::new(&data).join("tls-cert.pem")).map_err(|e|e.to_string())?;
+        let data_dir = match app_data_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => {
+                #[cfg(windows)]
+                let platform_default = std::env::var("LOCALAPPDATA")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| PathBuf::from(s).join("CadenceEngine"))
+                    .unwrap_or_else(|| PathBuf::from(".cadence-engine"));
+                #[cfg(not(windows))]
+                let platform_default = PathBuf::from("/var/lib/cadence");
+                resolve_env_data_dir(platform_default)
+            }
+        };
+        let pem=std::fs::read(data_dir.join("tls-cert.pem")).map_err(|e|e.to_string())?;
         let mut roots=rustls::RootCertStore::empty();
         for cert in rustls_pemfile::certs(&mut pem.as_slice()){roots.add(cert.map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;}
         let cfg=rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().map_err(|e|e.to_string())?.with_root_certificates(roots).with_no_client_auth();
@@ -914,6 +986,11 @@ pub fn probe_healthcheck(control_port: u16) -> Result<(), String> {
     } else {
         Err(format!("node reported not ready: {}", body))
     }
+}
+
+/// Performs a local HTTP `/healthz` readiness check for container `HEALTHCHECK` probes.
+pub fn probe_healthcheck(control_port: u16) -> Result<(), String> {
+    probe_healthcheck_with_data_dir(control_port, None)
 }
 
 fn validate_mounts_and_acls(config: &DragonfishConfig) -> Result<(), DragonfishError> {
