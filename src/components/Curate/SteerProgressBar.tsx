@@ -51,7 +51,7 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
 
   // Completed outcome badge with click to inspect
   let badgeColor = 'bg-zinc-800 text-zinc-300 border-zinc-700'
-  let label = 'Evidence history'
+  let label = 'Match History'
 
   if (outcomeStatus === 'matched_applied') {
     badgeColor = 'bg-emerald-950/80 text-emerald-400 border-emerald-700/50 hover:bg-emerald-900/80'
@@ -86,7 +86,7 @@ export const SteerProgressBar: React.FC<SteerProgressBarProps> = ({
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-mono font-medium transition-colors shadow-sm cursor-pointer ${badgeColor}`}
         title={evidenceSaveFailed || outcomeStatus === 'failed'
           ? message || label
-          : 'Click or press Ctrl+I to inspect curation decision rationale and evidence'}
+          : 'Click or press Ctrl+I to open Match & Activity History'}
       >
         <span className="w-1.5 h-1.5 rounded-full bg-current opacity-80" />
         <span>{label}</span>

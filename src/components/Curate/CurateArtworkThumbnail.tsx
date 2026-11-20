@@ -32,15 +32,18 @@ export function CurateArtworkThumbnail({
   const [prevSrc, setPrevSrc] = useState(src)
   const [hasError, setHasError] = useState(false)
 
-  // Reset error state during render if src changes
-  if (prevSrc !== src) {
-    setPrevSrc(src)
-    setHasError(false)
-  }
-
   const rawSrc = typeof src === 'string' && src.trim().length > 0 ? src.trim() : null
   const resolvedMedia = useResolvedMediaUrl(rawSrc)
   const effectiveSrc = resolvedMedia || null
+  const [prevEffectiveSrc, setPrevEffectiveSrc] = useState(effectiveSrc)
+
+  // Reset error state during render if src or resolved media URL changes
+  if (prevSrc !== src || prevEffectiveSrc !== effectiveSrc) {
+    if (prevSrc !== src) setPrevSrc(src)
+    if (prevEffectiveSrc !== effectiveSrc) setPrevEffectiveSrc(effectiveSrc)
+    if (hasError) setHasError(false)
+  }
+
   const isImageAvailable = Boolean(effectiveSrc && !hasError)
 
   const handleImageError = () => {

@@ -21,6 +21,7 @@ export function useResolvedMediaUrl(src?: string | null, enabled: boolean = true
 
   const [resolved, setResolved] = useState<string>(syncUrl)
   const playbackActivity = engine?.activeCoreSnapshot?.playback.activity
+  const artworkVersion = engine?.artworkVersion ?? 0
 
   useEffect(() => {
     if (!rawReleaseId) {
@@ -56,6 +57,7 @@ export function useResolvedMediaUrl(src?: string | null, enabled: boolean = true
     engine,
     engine?.isCoreActive,
     engine?.activeCoreSnapshot?.catalog.revision,
+    artworkVersion,
     playbackActivity === 'idle',
   ])
 
@@ -104,6 +106,11 @@ export const EngineArtworkImg: React.FC<EngineArtworkImgProps> = ({
 
   const resolved = useResolvedMediaUrl(src, inView)
   const [failedSrc, setFailedSrc] = useState<string | null>(null)
+  const engineArtworkVersion = useOptionalEngineController()?.artworkVersion ?? 0
+
+  useEffect(() => {
+    setFailedSrc(null)
+  }, [resolved, engineArtworkVersion])
 
   if (!resolved || failedSrc === resolved) {
     return isLazy && !inView ? (

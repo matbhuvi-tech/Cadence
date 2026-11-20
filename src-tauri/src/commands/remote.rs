@@ -252,10 +252,19 @@ pub async fn core_control_request(
         return Err("invalid_payload".to_string());
     }
     let url = base.join("v1/core").map_err(|_| "invalid_payload".to_string())?;
+    let timeout_ms = if payload
+        .get("operation")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("curate."))
+    {
+        90_000
+    } else {
+        15_000
+    };
     let client = build_core_http_client(
         target.cert_fingerprint.as_deref(),
         target.trust_insecure.unwrap_or(false),
-        Some(Duration::from_millis(15000)),
+        Some(Duration::from_millis(timeout_ms)),
         Duration::from_millis(4000),
     )?;
     let req = attach_token(

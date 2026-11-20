@@ -3,6 +3,7 @@
 
 pub mod curate;
 pub mod dragonfish;
+pub mod enrichment;
 pub mod migration;
 pub mod library;
 pub mod platform;
@@ -103,10 +104,14 @@ pub struct HeadlessCoreRuntime<
     library: Option<library::Library>,
     catalog_extras: HashMap<String, Value>,
     curate_pending: bool,
+    curate_worker_active: bool,
     track_db_ids: HashMap<String,String>,
     public_track_ids: HashMap<String,String>,
     renderer_discovery: Option<Box<dyn renderer_discovery::RendererDiscovery>>,
     last_discovery_at: Option<Instant>,
+    idle_gate: Arc<enrichment::worker::EnrichmentIdleGate>,
+    enrichment_gates: Arc<enrichment::gate::GateRegistry>,
+    last_enrichment_dirty_version: u64,
 }
 
 impl<R: Renderer> HeadlessCoreRuntime<R, SystemPlatformProbe, SystemMemoryLocker> {
@@ -128,6 +133,11 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         locker: L,
     ) -> Result<Self, RuntimeError> {
         let db = AppDb::new(config.db_path.clone()).map_err(RuntimeError::Database)?;
+        {
+            let conn = db.conn.lock();
+            enrichment::schema::ensure_schema(&conn)
+                .map_err(|e| RuntimeError::Database(e.to_string()))?;
+        }
         let (catalog, track_files) = load_catalog_projection(&db)?;
         let shared_renderer = SharedRenderer {
             inner: Arc::new(Mutex::new(renderer)),
@@ -153,6 +163,10 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
 
         let track_db_ids=load_track_identifiers(&db,&track_files)?;
         let public_track_ids=track_db_ids.iter().map(|(public,raw)|(raw.clone(),public.clone())).collect();
+        let enrichment_gates = Arc::new(enrichment::gate::GateRegistry::new());
+        let idle_gate = Arc::new(enrichment::worker::EnrichmentIdleGate::new(Arc::clone(
+            &enrichment_gates,
+        )));
         Ok(Self {
             config,
             db: Some(db),
@@ -165,11 +179,40 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             library: None,
             catalog_extras: HashMap::new(),
             curate_pending: false,
+            curate_worker_active: false,
             track_db_ids,
             public_track_ids,
             renderer_discovery: None,
             last_discovery_at: None,
+            idle_gate,
+            enrichment_gates,
+            last_enrichment_dirty_version: 0,
         })
+    }
+
+    pub fn enrichment_idle_gate(&self) -> Arc<enrichment::worker::EnrichmentIdleGate> {
+        Arc::clone(&self.idle_gate)
+    }
+
+    pub fn enrichment_gate_registry(&self) -> Arc<enrichment::gate::GateRegistry> {
+        Arc::clone(&self.enrichment_gates)
+    }
+
+    pub fn set_curate_worker_active(&mut self, active: bool) {
+        self.curate_worker_active = active;
+    }
+
+    pub fn artwork_dir(&self) -> PathBuf {
+        self.config
+            .db_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("artwork")
+    }
+
+    pub fn serve_artist_artwork(&self, artist_id: &str) -> Result<(String, String, Vec<u8>), String> {
+        let db = self.db.as_ref().ok_or("runtime closed")?;
+        enrichment::serve_artist_artwork(db, &self.artwork_dir(), artist_id)
     }
 
     /// Installs the explicit renderer-discovery backend (`renderer.discover`).
@@ -520,6 +563,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     /// Deterministically stops any active session, unlocks all pinned RAM buffers,
     /// checkpoints WAL, and closes the SQLite handle cleanly.
     pub fn shutdown(&mut self) -> Result<(), RuntimeError> {
+        self.idle_gate.shutdown();
         if self.owner.activity()!="idle"{if let Some(library)=&self.library{library.record_activity(false).map_err(RuntimeError::Database)?;}}
         let _ = self.renderer.apply(&RendererAction::Stop);
         self.arena.clear();
@@ -558,6 +602,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     fn track_activity_change(&mut self,was_active:bool,now:Instant){
         let active=self.owner.activity()!="idle";
         if was_active && !active{self.last_stopped_at=Some(now);}
+        self.idle_gate.set_transport_active(active);
         if active!=was_active{if let Some(library)=&self.library{let _=library.record_activity(active);}}
     }
 
@@ -662,6 +707,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         let remaining=library.recovery_cooldown().map_err(RuntimeError::Database)?;
         if !remaining.is_zero(){
             self.last_stopped_at=Some(Instant::now()-(COOLDOWN_DURATION-remaining.min(COOLDOWN_DURATION)));
+            self.idle_gate.apply_recovery_cooldown(remaining.min(COOLDOWN_DURATION).as_millis() as u64);
             library.record_activity(false).map_err(RuntimeError::Database)?;
         }
         self.library = Some(library);
@@ -673,10 +719,27 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     /// commands, one scan operation at a time; no new timer/worker is introduced.
     pub fn library_step_at(&mut self, now: Instant) -> Result<(), RuntimeError> {
         if self.ensure_storage_idle_at(now).is_err() { return Ok(()); }
+        let mut scanned_completed = false;
         if let Some(library) = &mut self.library {
-            if library.step().map_err(RuntimeError::Database)? { self.reload_catalog_at(now)?; }
+            if library.step().map_err(RuntimeError::Database)? {
+                self.reload_catalog_at(now)?;
+                scanned_completed = true;
+            }
         }
-        if !self.music_read_only && self.curate_pending {
+        let dirty_ver = self.idle_gate.catalog_dirty_version();
+        if dirty_ver != self.last_enrichment_dirty_version {
+            self.last_enrichment_dirty_version = dirty_ver;
+            if let Some(library) = &mut self.library {
+                library.metadata_changed().map_err(RuntimeError::Database)?;
+            }
+            if !scanned_completed {
+                let _ = self.reload_catalog_at(now);
+            }
+        }
+        if scanned_completed {
+            self.idle_gate.wake();
+        }
+        if !self.curate_worker_active && !self.music_read_only && self.curate_pending {
             self.execute_pending_curate_jobs_at(now).map_err(|e|RuntimeError::Database(format!("{e:?}")))?;
         }
         Ok(())
@@ -688,7 +751,15 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.library.as_mut().ok_or("Library unavailable")?.artwork(id,idle)
     }
 
-    pub fn take_library_events(&mut self)->Vec<Value>{self.library.as_mut().map(|l|l.take_events()).unwrap_or_default()}
+    pub fn take_library_events(&mut self) -> Vec<Value> {
+        let mut events = self
+            .library
+            .as_mut()
+            .map(|l| l.take_events())
+            .unwrap_or_default();
+        events.extend(self.idle_gate.take_events());
+        events
+    }
 
     fn request_v2_at(&mut self, mut request: Value, now: Instant) -> Value {
         if request["engineId"].as_str()!=Some(&self.config.engine_id) || request["libraryId"].as_str()!=Some(&self.config.library_id) {
@@ -717,11 +788,44 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             project_track_tokens(&mut response,&self.public_track_ids);
             return response;
         }
+        if operation.starts_with("enrichment.") {
+            let Some(db) = self.db.as_ref() else {
+                return json!({ "ok": false, "error": { "code": "not_ready" } });
+            };
+            let (mut response, catalog_changed) = enrichment::handle_enrichment_request(
+                db,
+                &self.idle_gate,
+                &operation,
+                &request,
+                &self.track_db_ids,
+            );
+            if catalog_changed {
+                if self.ensure_storage_idle_at(now).is_ok() {
+                    if let Some(library) = &mut self.library {
+                        let _ = library.metadata_changed();
+                    }
+                    let _ = self.reload_catalog_at(now);
+                    self.last_enrichment_dirty_version = self.idle_gate.catalog_dirty_version();
+                } else {
+                    self.idle_gate.mark_catalog_dirty();
+                }
+            }
+            project_track_tokens(&mut response, &self.public_track_ids);
+            return response;
+        }
         if operation.starts_with("fs.") || operation.starts_with("folders.") || operation.starts_with("shares.") || operation.starts_with("playlists.") || operation.starts_with("releases.split.") || operation=="engine.events" || operation=="curate.draft.list" {
             let idle=self.ensure_storage_idle_at(now).is_ok();
             if operation=="playlists.setTracks"{if let Some(ids)=request["trackIds"].as_array_mut(){for id in ids{if let Some(raw)=id.as_str().and_then(|id|self.track_db_ids.get(id)){*id=json!(raw);}}}}
             return match self.library.as_mut().ok_or("Library unavailable".to_string()).and_then(|lib|lib.request(&operation,&request,idle)) {
                 Ok(mut value)=>{
+                    if operation == "engine.events" {
+                        let extra = self.idle_gate.take_events();
+                        if !extra.is_empty() {
+                            if let Some(arr) = value.get_mut("events").and_then(Value::as_array_mut) {
+                                arr.extend(extra);
+                            }
+                        }
+                    }
                     project_track_tokens(&mut value,public_ids);
                     json!({"ok":true,"data":value})
                 },
@@ -733,7 +837,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         let revision=self.library.as_ref().map(|lib|lib.revision()).unwrap_or(0);
         if operation=="core.hello" && response["ok"]==true {
             response["data"]["protocolVersion"]=json!(2);
-            if let Some(caps)=response["data"]["capabilities"].as_array_mut(){caps.extend(["fs.browse","folders.manage","playlists.manage","artwork.read","curate.write"].iter().map(|s|json!(s)));}
+            if let Some(caps)=response["data"]["capabilities"].as_array_mut(){caps.extend(["fs.browse","folders.manage","playlists.manage","artwork.read","curate.write","enrichment.manage"].iter().map(|s|json!(s)));}
         }
         let catalog=if operation=="catalog.page" {response.get_mut("data")} else if operation=="session.snapshot"{response.get_mut("data").and_then(|v|v.get_mut("catalog"))} else {None};
         if let Some(catalog)=catalog {
@@ -813,6 +917,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             self.music_read_only,
         )?;
         self.curate_pending = true;
+        self.idle_gate.wake_curate();
         Ok(receipt)
     }
 
@@ -916,6 +1021,175 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             _ => json!({ "ok": false, "error": { "code": "unsupported_capability" } }),
         }
     }
+
+    pub(crate) fn try_prepare_async_curate(
+        &self,
+        body_bytes: &[u8],
+        now: Instant,
+    ) -> Option<Result<CurateAsyncPrepTask, Value>> {
+        if !self.curate_worker_active || body_bytes.len() > MAX_MESSAGE_BYTES {
+            return None;
+        }
+        let parsed = serde_json::from_slice::<Value>(body_bytes).ok()?;
+        let op = parsed.get("operation").and_then(Value::as_str)?;
+        if !matches!(op, "curate.dry_run" | "curate.approve") {
+            return None;
+        }
+        let protocol_version = parsed.get("protocolVersion").and_then(Value::as_u64)?;
+        if protocol_version != 1 && protocol_version != 2 {
+            return None;
+        }
+        if parsed.get("engineId").and_then(Value::as_str) != Some(self.config.engine_id.as_str())
+            || parsed.get("libraryId").and_then(Value::as_str)
+                != Some(self.config.library_id.as_str())
+        {
+            return Some(Err(json!({ "ok": false, "error": { "code": "identity_mismatch" } })));
+        }
+        if self.ensure_storage_idle_at(now).is_err() {
+            let code = if protocol_version == 2 {
+                "deferred_until_idle"
+            } else {
+                "not_ready"
+            };
+            return Some(Err(json!({ "ok": false, "error": { "code": code } })));
+        }
+
+        let Some(draft_id) = parsed.get("draftId").and_then(Value::as_str) else {
+            return Some(Err(json!({ "ok": false, "error": { "code": "invalid_payload" } })));
+        };
+        let kind = match op {
+            "curate.dry_run" => CurateAsyncPrepKind::DryRun {
+                draft_id: draft_id.to_string(),
+            },
+            "curate.approve" => {
+                let (Some(hash), Some(cmd_id)) = (
+                    parsed.get("approvalHash").and_then(Value::as_str),
+                    parsed.get("commandId").and_then(Value::as_str),
+                ) else {
+                    return Some(Err(json!({ "ok": false, "error": { "code": "invalid_payload" } })));
+                };
+                CurateAsyncPrepKind::Approve {
+                    draft_id: draft_id.to_string(),
+                    approval_hash: hash.to_string(),
+                    command_id: cmd_id.to_string(),
+                }
+            }
+            _ => return None,
+        };
+
+        let track_id: Option<String> = self.db.as_ref().and_then(|db| {
+            db.conn
+                .lock()
+                .query_row(
+                    "SELECT track_id FROM remote_curate_drafts WHERE draft_id=?1",
+                    rusqlite::params![draft_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+        });
+        let public_track_pair = track_id.as_ref().and_then(|raw| {
+            self.public_track_ids
+                .get(raw)
+                .map(|pub_id| (raw.clone(), pub_id.clone()))
+        });
+        let v2_auth_check = if protocol_version == 2 {
+            if let Some(raw) = track_id.as_ref() {
+                let public = self.public_track_ids.get(raw).unwrap_or(raw);
+                let Some(path) = self.track_files.get(public) else {
+                    return Some(Err(json!({ "ok": false, "error": { "code": "unauthorized_path" } })));
+                };
+                let Some(lib) = self.library.as_ref() else {
+                    return Some(Err(json!({ "ok": false, "error": { "code": "unauthorized_path" } })));
+                };
+                Some((lib.roots().to_vec(), path.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Some(Ok(CurateAsyncPrepTask {
+            db_path: self.config.db_path.clone(),
+            music_read_only: self.music_read_only,
+            idle_gate: Arc::clone(&self.idle_gate),
+            protocol_version,
+            public_track_pair,
+            v2_auth_check,
+            kind,
+        }))
+    }
+}
+
+pub(crate) fn execute_async_curate_prep(db: &AppDb, task: &CurateAsyncPrepTask) -> Value {
+    if !task.idle_gate.is_transport_storage_idle() {
+        let code = if task.protocol_version == 2 {
+            "deferred_until_idle"
+        } else {
+            "not_ready"
+        };
+        return json!({ "ok": false, "error": { "code": code } });
+    }
+    if let Some((roots, path)) = &task.v2_auth_check {
+        if library::open_authorized(roots, path).is_err() {
+            return json!({ "ok": false, "error": { "code": "unauthorized_path" } });
+        }
+    }
+
+    let mut response = match &task.kind {
+        CurateAsyncPrepKind::DryRun { draft_id } => {
+            match curate::dry_run_draft(db, draft_id, task.music_read_only) {
+                Ok(rep) => json!({ "ok": true, "data": rep }),
+                Err(e) => curate_err_json(e),
+            }
+        }
+        CurateAsyncPrepKind::Approve {
+            draft_id,
+            approval_hash,
+            command_id,
+        } => match curate::approve_draft(
+            db,
+            draft_id,
+            approval_hash,
+            command_id,
+            task.music_read_only,
+        ) {
+            Ok(rec) => {
+                task.idle_gate.wake_curate();
+                json!({ "ok": true, "data": rec })
+            }
+            Err(e) => curate_err_json(e),
+        },
+    };
+
+    if task.protocol_version == 2 {
+        if let Some((raw, pub_id)) = &task.public_track_pair {
+            let map = HashMap::from([(raw.clone(), pub_id.clone())]);
+            project_track_tokens(&mut response, &map);
+        }
+    }
+    response
+}
+
+pub(crate) enum CurateAsyncPrepKind {
+    DryRun {
+        draft_id: String,
+    },
+    Approve {
+        draft_id: String,
+        approval_hash: String,
+        command_id: String,
+    },
+}
+
+pub(crate) struct CurateAsyncPrepTask {
+    pub db_path: PathBuf,
+    pub music_read_only: bool,
+    pub idle_gate: Arc<enrichment::worker::EnrichmentIdleGate>,
+    pub protocol_version: u64,
+    pub public_track_pair: Option<(String, String)>,
+    pub v2_auth_check: Option<(Vec<PathBuf>, PathBuf)>,
+    pub kind: CurateAsyncPrepKind,
 }
 
 fn curate_err_json(err: curate::RemoteCurateError) -> Value {
@@ -945,17 +1219,53 @@ fn load_catalog_projection(
     let conn = db.conn.lock();
     let mut stmt = conn
         .prepare(
-            "SELECT t.id, t.title, t.artist_credit, t.album_title, t.duration_secs, t.file_path,
-                    t.format, t.sample_rate, t.bit_depth, t.track_number, t.disc_number,
-                    COALESCE(t.release_year, r.release_year),
+            "SELECT t.id,
+                    COALESCE(NULLIF(TRIM(ov_trk_title.value_text), ''), t.title),
+                    COALESCE(NULLIF(TRIM(ov_trk_artist.value_text), ''), t.artist_credit),
+                    COALESCE(NULLIF(TRIM(ov_album.value_text), ''), t.album_title),
+                    t.duration_secs,
+                    t.file_path,
+                    t.format,
+                    t.sample_rate,
+                    t.bit_depth,
+                    t.track_number,
+                    t.disc_number,
+                    COALESCE(
+                        CAST(NULLIF(TRIM(ov_trk_year.value_text), '') AS INTEGER),
+                        CAST(NULLIF(TRIM(ov_rel_year.value_text), '') AS INTEGER),
+                        t.release_year,
+                        r.release_year
+                    ),
                     t.release_id,
-                    COALESCE(NULLIF(TRIM(t.album_artist), ''), NULLIF(TRIM(r.artist_credit), '')),
+                    COALESCE(
+                        NULLIF(TRIM(ov_album_artist.value_text), ''),
+                        NULLIF(TRIM(t.album_artist), ''),
+                        NULLIF(TRIM(r.artist_credit), '')
+                    ),
                     CASE WHEN COALESCE(r.is_compilation, 0) != 0 OR COALESCE(t.is_compilation, 0) != 0 THEN 1 ELSE 0 END,
-                    COALESCE(NULLIF(TRIM(r.folder_name), ''), NULLIF(TRIM(t.folder_name), ''))
+                    COALESCE(NULLIF(TRIM(r.folder_name), ''), NULLIF(TRIM(t.folder_name), '')),
+                    CASE WHEN ov_album.value_text IS NOT NULL AND TRIM(ov_album.value_text) != '' THEN 1 ELSE 0 END
              FROM tracks t
              LEFT JOIN releases r ON t.release_id = r.id
+             LEFT JOIN metadata_overlays ov_album
+                 ON ov_album.entity_type = 'release' AND ov_album.entity_id = t.release_id AND ov_album.field_name = 'album'
+             LEFT JOIN metadata_overlays ov_album_artist
+                 ON ov_album_artist.entity_type = 'release' AND ov_album_artist.entity_id = t.release_id AND ov_album_artist.field_name = 'album_artist'
+             LEFT JOIN metadata_overlays ov_rel_year
+                 ON ov_rel_year.entity_type = 'release' AND ov_rel_year.entity_id = t.release_id AND ov_rel_year.field_name = 'year'
+             LEFT JOIN metadata_overlays ov_trk_title
+                 ON ov_trk_title.entity_type = 'track' AND ov_trk_title.entity_id = t.id AND ov_trk_title.field_name = 'track_title'
+             LEFT JOIN metadata_overlays ov_trk_artist
+                 ON ov_trk_artist.entity_type = 'track' AND ov_trk_artist.entity_id = t.id AND ov_trk_artist.field_name = 'track_artist'
+             LEFT JOIN metadata_overlays ov_trk_year
+                 ON ov_trk_year.entity_type = 'track' AND ov_trk_year.entity_id = t.id AND ov_trk_year.field_name = 'year'
              WHERE t.is_online != 0
-             ORDER BY t.album_title ASC, t.release_id ASC, COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 0) ASC, t.title ASC, t.id ASC",
+             ORDER BY COALESCE(NULLIF(TRIM(ov_album.value_text), ''), t.album_title) ASC,
+                      t.release_id ASC,
+                      COALESCE(t.disc_number, 1) ASC,
+                      COALESCE(t.track_number, 0) ASC,
+                      COALESCE(NULLIF(TRIM(ov_trk_title.value_text), ''), t.title) ASC,
+                      t.id ASC",
         )
         .map_err(|e| RuntimeError::Database(e.to_string()))?;
 
@@ -978,6 +1288,7 @@ fn load_catalog_projection(
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, i64>(14)?,
                 row.get::<_, Option<String>>(15)?,
+                row.get::<_, i64>(16)? != 0,
             ))
         })
         .map_err(|e| RuntimeError::Database(e.to_string()))?;
@@ -1004,6 +1315,7 @@ fn load_catalog_projection(
             raw_album_artist,
             raw_is_compilation,
             raw_folder_name,
+            has_album_overlay,
         ) = row.map_err(|e| RuntimeError::Database(e.to_string()))?;
         let token_id = sanitize_or_hash_token(&raw_id, &mut used_ids);
         let safe_duration = if duration_secs.is_finite() && (0.001..=86_400.0).contains(&duration_secs) {
@@ -1053,12 +1365,11 @@ fn load_catalog_projection(
             .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&clean_artist))
             .map(|s| sanitize_display_text(s, ""))
             .filter(|s| !s.is_empty());
-        let edition = raw_folder_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(&clean_album))
-            .map(|s| sanitize_display_text(s, ""))
-            .filter(|s| !s.is_empty());
+        let edition = derive_clean_edition(
+            raw_folder_name.as_deref(),
+            &clean_album,
+            has_album_overlay,
+        );
 
         catalog.push(CatalogTrack {
             id: token_id.clone(),
@@ -1144,10 +1455,139 @@ fn sanitize_display_text(value: &str, fallback: &str) -> String {
     }
 }
 
+fn strip_rip_noise_tokens(input: &str) -> String {
+    const TOKENS: &[&str] = &[
+        "lossless rip",
+        "flac rip",
+        "wav rip",
+        "eac rip",
+        "web rip",
+        "cd rip",
+        "cd-rip",
+        "cdrip",
+    ];
+    let mut s = input.to_string();
+    loop {
+        let lower = s.to_ascii_lowercase();
+        let mut removed = false;
+        for token in TOKENS {
+            let mut search_from = 0usize;
+            while let Some(rel_idx) = lower[search_from..].find(token) {
+                let start = search_from + rel_idx;
+                let end = start + token.len();
+                let left_ok = start == 0
+                    || !lower[..start]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_alphanumeric());
+                let right_ok = end == lower.len()
+                    || !lower[end..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphanumeric());
+                if left_ok && right_ok {
+                    s.replace_range(start..end, " ");
+                    removed = true;
+                    break;
+                }
+                search_from = start + token.len();
+            }
+            if removed {
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    // Remove empty brackets created when a rip token was the only text inside `()` or `[]`
+    loop {
+        let mut trimmed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        for empty in ["()", "[]", "( )", "[ ]", "( - )", "[ - ]"] {
+            trimmed = trimmed.replace(empty, " ");
+        }
+        trimmed = trimmed
+            .replace(" )", ")")
+            .replace("( ", "(")
+            .replace(" ]", "]")
+            .replace("[ ", "[")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if trimmed == s {
+            break;
+        }
+        s = trimmed;
+    }
+    s.trim_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '-' | '–' | '—' | '_' | ':')
+    })
+    .to_string()
+}
+
+pub(crate) fn derive_clean_edition(
+    raw_folder_name: Option<&str>,
+    clean_album: &str,
+    has_album_overlay: bool,
+) -> Option<String> {
+    if has_album_overlay {
+        return None;
+    }
+    let raw = raw_folder_name?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let sanitized = sanitize_display_text(raw, "");
+    let mut cleaned = strip_rip_noise_tokens(&sanitized);
+    if cleaned.is_empty() || cleaned.eq_ignore_ascii_case(clean_album.trim()) {
+        return None;
+    }
+
+    let album_trimmed = clean_album.trim();
+    if !album_trimmed.is_empty() {
+        let lower_cleaned = cleaned.to_ascii_lowercase();
+        let lower_album = album_trimmed.to_ascii_lowercase();
+        if let Some(rest) = lower_cleaned.strip_prefix(&lower_album) {
+            let boundary_ok = rest.is_empty()
+                || rest
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_ascii_alphanumeric());
+            if boundary_ok {
+                let offset = cleaned.len().saturating_sub(rest.len());
+                let suffix = cleaned[offset..].trim();
+                let suffix = suffix
+                    .trim_matches(|c: char| {
+                        c.is_whitespace() || matches!(c, '-' | '–' | '—' | '_' | ':')
+                    })
+                    .trim();
+                let unwrapped = if (suffix.starts_with('(') && suffix.ends_with(')'))
+                    || (suffix.starts_with('[') && suffix.ends_with(']'))
+                {
+                    suffix[1..suffix.len() - 1].trim()
+                } else {
+                    suffix
+                };
+                cleaned = unwrapped.to_string();
+            }
+        }
+    }
+
+    if cleaned.is_empty() || cleaned.eq_ignore_ascii_case(album_trimmed) {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
 fn project_track_tokens(value:&mut Value,ids:&HashMap<String,String>){
     match value{
         Value::Object(object)=>{
             if let Some(id)=object.get_mut("trackId"){if let Some(public)=id.as_str().and_then(|id|ids.get(id)){*id=json!(public);}}
+            if let Some(id)=object.get_mut("localTrackId"){if let Some(public)=id.as_str().and_then(|id|ids.get(id)){*id=json!(public);}}
+            if object.get("entityType").and_then(Value::as_str)==Some("track"){
+                if let Some(id)=object.get_mut("entityId"){if let Some(public)=id.as_str().and_then(|id|ids.get(id)){*id=json!(public);}}
+            }
             if let Some(Value::Array(tracks))=object.get_mut("trackIds"){for id in tracks{if let Some(public)=id.as_str().and_then(|id|ids.get(id)){*id=json!(public);}}}
             for nested in object.values_mut(){project_track_tokens(nested,ids);}
         }

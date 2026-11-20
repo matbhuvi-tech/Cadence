@@ -9,6 +9,9 @@ import {
   type CoreDescriptor,
   type CoreErrorCode,
   type EngineCurateDraftSummary,
+  type EngineEnrichmentAlbumDetail,
+  type EngineEnrichmentAlbumSummary,
+  type EngineEnrichmentStatus,
   type EngineEventRecord,
   type EngineFolderRecord,
   type EngineFsBrowseResult,
@@ -17,6 +20,9 @@ import {
   type EnginePlaylistSummary,
   type EngineScanStatus,
   type EngineSmbSupportStatus,
+  type EnrichmentAlbumAction,
+  type EnrichmentControlAction,
+  type UserTrackOverlayEdit,
 } from '../core/coreProtocol'
 import type {
   RemoteCurateApprovalReceipt,
@@ -101,6 +107,27 @@ export interface EngineClient {
     status: string
     errorMessage?: string | null
   }>
+  getEnrichmentStatus(): Promise<EngineEnrichmentStatus>
+  controlEnrichment(input: {
+    action: EnrichmentControlAction
+    enabled?: boolean
+    folderId?: string
+    releaseId?: string
+  }): Promise<EngineEnrichmentStatus>
+  listEnrichmentAlbums(input?: {
+    status?: string
+    folderId?: string
+    limit?: number
+    offset?: number
+  }): Promise<EngineEnrichmentAlbumSummary[]>
+  getEnrichmentAlbumDetail(releaseId: string): Promise<EngineEnrichmentAlbumDetail>
+  applyEnrichmentAlbumAction(input: {
+    releaseId: string
+    action: EnrichmentAlbumAction
+    fields?: Record<string, string | number | null>
+    tracks?: UserTrackOverlayEdit[]
+    coverArtUrl?: string
+  }): Promise<EngineEnrichmentAlbumDetail>
   fetchEvents(): Promise<EngineEventRecord[]>
   readonly curateTransport: RemoteCurateTransport
 }
@@ -339,6 +366,40 @@ export function createEngineClient(
         errorMessage?: string | null
       }>('curate.job.status', { jobId }),
 
+    getEnrichmentStatus: () => call<EngineEnrichmentStatus>('enrichment.status'),
+
+    controlEnrichment: (input) =>
+      call<EngineEnrichmentStatus>('enrichment.control', {
+        action: input.action,
+        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+        ...(input.folderId ? { folderId: input.folderId } : {}),
+        ...(input.releaseId ? { releaseId: stripCoreReleasePrefix(input.releaseId) } : {}),
+      }),
+
+    listEnrichmentAlbums: async (input) => {
+      const res = await call<{ albums: EngineEnrichmentAlbumSummary[] }>('enrichment.albums.list', {
+        ...(input?.status ? { status: input.status } : {}),
+        ...(input?.folderId ? { folderId: input.folderId } : {}),
+        ...(input?.limit !== undefined ? { limit: input.limit } : {}),
+        ...(input?.offset !== undefined ? { offset: input.offset } : {}),
+      })
+      return res.albums ?? []
+    },
+
+    getEnrichmentAlbumDetail: (releaseId) =>
+      call<EngineEnrichmentAlbumDetail>('enrichment.album.detail', {
+        releaseId: stripCoreReleasePrefix(releaseId),
+      }),
+
+    applyEnrichmentAlbumAction: (input) =>
+      call<EngineEnrichmentAlbumDetail>('enrichment.album.action', {
+        releaseId: stripCoreReleasePrefix(input.releaseId),
+        action: input.action,
+        ...(input.fields ? { fields: input.fields } : {}),
+        ...(input.tracks ? { tracks: input.tracks } : {}),
+        ...(input.coverArtUrl ? { coverArtUrl: input.coverArtUrl } : {}),
+      }),
+
     fetchEvents: async () => {
       const res = await call<{ events: EngineEventRecord[] }>('engine.events')
       return res.events ?? []
@@ -355,6 +416,7 @@ export interface EngineArtworkCache {
     revision: number,
   ): Promise<string | null>
   getCached(engineId: string, rawReleaseId: string, revision: number): string | null
+  invalidate(releaseId?: string): void
   clear(): void
 }
 
@@ -529,6 +591,30 @@ export function createEngineArtworkCache(options: {
 
       inFlight.set(inFlightKey, promise)
       return promise
+    },
+
+    invalidate(releaseId) {
+      if (releaseId) {
+        const clean = stripCoreReleasePrefix(releaseId.trim())
+        if (!clean) return
+        const targets = new Set([clean, `core_rel_${clean}`])
+        for (const [key, entry] of cache.entries()) {
+          const sepIdx = key.indexOf('::')
+          const keyId = sepIdx >= 0 ? key.slice(sepIdx + 2) : key
+          if (targets.has(keyId)) {
+            if (entry.objectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+              URL.revokeObjectURL(entry.objectUrl)
+            }
+            cache.delete(key)
+          }
+        }
+        return
+      }
+      for (const [key, entry] of cache.entries()) {
+        if (entry.miss) {
+          cache.delete(key)
+        }
+      }
     },
 
     clear() {

@@ -147,7 +147,17 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   const [catalogReleases, setReleases] = useState<Release[]>([])
   const [curateCommits, setCurateCommits] = useState<CurateCommitRow[]>([])
   const activeEngineJobsRef = useRef<
-    Map<string, { jobId: string; draftId: string; trackId: string; payloadJson: string; status: string }>
+    Map<
+      string,
+      {
+        jobId: string
+        draftId: string
+        trackId: string
+        payloadJson: string
+        status: string
+        errorMessage?: string | null
+      }
+    >
   >(new Map())
   const draftSaveVersion = useRef(0)
 
@@ -156,10 +166,25 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
       id: j.jobId,
       trackId: j.trackId,
       status: mapEngineJobStatusToCommitStatus(j.status),
+      engineJobState: j.status as CurateCommitRow['engineJobState'],
       payloadJson: j.payloadJson,
+      errorMessage: j.errorMessage ?? null,
     }))
     setCurateCommits((current) => (areCurateCommitRowsEqual(current, rows) ? current : rows))
   }, [])
+
+  const clearRecentEngineCommits = useCallback(() => {
+    let changed = false
+    for (const [jobId, job] of activeEngineJobsRef.current.entries()) {
+      if (job.status === 'verified' || job.status === 'failed') {
+        activeEngineJobsRef.current.delete(jobId)
+        changed = true
+      }
+    }
+    if (changed) {
+      syncCurateRowsFromActiveJobs()
+    }
+  }, [syncCurateRowsFromActiveJobs])
 
   const refreshCurateCommits = useCallback(
     async (
@@ -169,6 +194,7 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
         trackId: string
         payloadJson: string
         status: string
+        errorMessage?: string | null
       }>,
     ) => {
       if (submittedJobs?.length) {
@@ -183,7 +209,11 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
         if (existing.status === 'verified' || existing.status === 'failed') continue
         try {
           const next = await engineClient.getCurateJobStatus(jobId)
-          activeEngineJobsRef.current.set(jobId, { ...existing, status: next.status })
+          activeEngineJobsRef.current.set(jobId, {
+            ...existing,
+            status: next.status,
+            errorMessage: next.errorMessage ?? existing.errorMessage ?? null,
+          })
           if (next.status === 'verified') anyVerified = true
         } catch {
           // keep last known status
@@ -745,12 +775,26 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
   }, [refreshEngineFolders])
 
   useEffect(() => {
+    if (!isCoreActive || topMode !== 'curate') return
+    const snapActivity = activeCoreSnapshot?.playback.activity
+    const isIdle = !isPlaying && !isPaused && snapActivity !== 'playing' && snapActivity !== 'paused'
+    if (isIdle) {
+      void coreRefreshCatalog().catch(() => {})
+    }
+  }, [isCoreActive, topMode, isPlaying, isPaused, activeCoreSnapshot?.playback.activity, coreRefreshCatalog])
+
+  useEffect(() => {
     if (!isCoreActive) return
-    return subscribeEngineEvents((ev) => {
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    const unsub = subscribeEngineEvents((ev) => {
       if (ev.event === 'catalog.changed') {
-        void refreshEngineFolders()
-        void refreshPlaylists()
-        void refreshCurateCommits()
+        if (refreshTimer !== null) clearTimeout(refreshTimer)
+        refreshTimer = setTimeout(() => {
+          refreshTimer = null
+          void refreshEngineFolders()
+          void refreshPlaylists()
+          void refreshCurateCommits()
+        }, 500)
       } else if (ev.event.startsWith('scan.')) {
         const data = (ev.data ?? {}) as Record<string, unknown>
         const processed = typeof data.processed === 'number' ? data.processed : 0
@@ -765,15 +809,35 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
           void refreshEngineFolders()
         }
       } else if (ev.event.startsWith('curate.')) {
+        const data = (ev.data ?? {}) as Record<string, unknown>
+        if (typeof data.jobId === 'string' && typeof data.status === 'string') {
+          const existing = activeEngineJobsRef.current.get(data.jobId)
+          if (existing) {
+            activeEngineJobsRef.current.set(data.jobId, {
+              ...existing,
+              status: data.status,
+              errorMessage:
+                typeof data.errorMessage === 'string'
+                  ? data.errorMessage
+                  : existing.errorMessage,
+            })
+            syncCurateRowsFromActiveJobs()
+          }
+        }
         void refreshCurateCommits()
       }
     })
+    return () => {
+      if (refreshTimer !== null) clearTimeout(refreshTimer)
+      unsub()
+    }
   }, [
     isCoreActive,
     subscribeEngineEvents,
     refreshEngineFolders,
     refreshPlaylists,
     refreshCurateCommits,
+    syncCurateRowsFromActiveJobs,
     coreRefreshCatalog,
   ])
 
@@ -1611,9 +1675,12 @@ function AppContentView({ onGeminiRemoved }: { onGeminiRemoved?: () => void }) {
           {(topMode !== 'curate' || curateQueueHost) && <CommitStatusPill
             portalTarget={topMode === 'curate' ? curateQueueHost : null}
             alwaysVisible={topMode === 'curate'}
-            commitRows={topMode === 'curate' ? curateCommits : undefined}
-            tracks={topMode === 'curate' ? catalogTracks : undefined}
-            releases={topMode === 'curate' ? catalogReleases : undefined}
+            commitRows={curateCommits}
+            tracks={catalogTracks}
+            releases={catalogReleases}
+            isExternalEngine={isCoreActive}
+            enginePlaybackActivity={activeCoreSnapshot?.playback.activity}
+            onClearRecentCommits={clearRecentEngineCommits}
           />}
 
           {/* Activity telemetry */}

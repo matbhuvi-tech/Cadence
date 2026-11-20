@@ -1,9 +1,16 @@
 import React, { useEffect, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
+import type { EngineEnrichmentAlbumDetail } from '../../core/coreProtocol'
 import type { CurationDecisionTrace, OutcomeStatus } from '../../core/types'
 import type { CurateEvidenceRun, CurateEvidenceSummary } from '../../services/curateEvidenceService'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { getUiCurationEvidence, listUiCurationEvidence } from '../../services/engineCurateBridge'
+import {
+  formatArtworkSourcePlainEnglish,
+  formatEnrichmentUserAction,
+  formatProviderDisplayName,
+  translateVetoToPlainEnglish,
+} from './AutoEnrichmentPanel'
 import { CurateEvidenceAttempt } from './CurateEvidenceAttempt'
 
 interface CurationDecisionTraceDrawerProps {
@@ -12,11 +19,144 @@ interface CurationDecisionTraceDrawerProps {
   trace: CurationDecisionTrace | null
   albumId?: string
   lastEvidenceId?: string
+  enrichmentDetail?: EngineEnrichmentAlbumDetail | null
   onResumeFetch?: () => void
   isResuming?: boolean
 }
 
-function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: string }) {
+const RULE_LABELS: Record<string, string> = {
+  consensus_apple_mb: 'Apple Music & MusicBrainz agreement',
+  consensus_all: 'All sources agreed',
+  earliest_year_rule: 'Earliest verified release year',
+  single_provider_match: 'Single source match',
+  local_fallback: 'Existing file tag',
+  manual_override: 'Manual edit',
+  ai_synthesized: 'AI assisted lookup',
+}
+
+export function humanizeConsensusRule(code?: string | null): string {
+  if (!code) return ''
+  const clean = code.trim()
+  return RULE_LABELS[clean] || clean.replaceAll('_', ' ')
+}
+
+export function humanizeDecisionExplanation(text: string): string {
+  let out = text
+  for (const [token, label] of Object.entries(RULE_LABELS)) {
+    out = out.replaceAll(token, label.toLowerCase())
+  }
+  return out
+}
+
+function AutomaticMatchSection({ detail }: { detail: EngineEnrichmentAlbumDetail }) {
+  const proposal = detail.proposal as
+    | {
+        album?: string | null
+        albumArtist?: string | null
+        year?: number | null
+        tracks?: unknown[]
+      }
+    | null
+    | undefined
+  const vetoes = (detail.vetoes ?? []) as Array<{ code?: string; message?: string }>
+  const providerName = detail.provider ? formatProviderDisplayName(detail.provider) : null
+  const confidencePct =
+    detail.distance !== null && detail.distance !== undefined
+      ? Math.max(0, Math.min(100, Math.round((1 - detail.distance) * 100)))
+      : null
+  const artworkPlain = formatArtworkSourcePlainEnglish(
+    detail.artworkSource,
+    detail.artworkStatus,
+    detail.artworkWidth,
+    detail.artworkHeight,
+  )
+
+  return (
+    <section className="space-y-2 rounded border border-zinc-800 bg-zinc-900/40 p-3 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="font-semibold text-zinc-100">Automatic Match</h3>
+        {providerName && (
+          <span className="rounded bg-zinc-800 px-2 py-0.5 text-[10px] font-medium text-zinc-200">
+            {providerName}
+            {confidencePct !== null ? ` · ${confidencePct}% match` : ''}
+          </span>
+        )}
+      </div>
+
+      {vetoes.map((veto, idx) => (
+        <p
+          key={`${veto.code ?? 'v'}-${idx}`}
+          className="rounded border border-amber-800/50 bg-amber-950/30 px-2.5 py-1.5 text-[11px] text-amber-200 leading-snug"
+        >
+          {translateVetoToPlainEnglish(veto, detail.provider)}
+        </p>
+      ))}
+
+      {proposal && (proposal.album || proposal.albumArtist || proposal.year) && (
+        <div className="rounded bg-zinc-950/70 border border-zinc-800/70 px-2.5 py-2 space-y-1 text-[11px] text-zinc-300">
+          {proposal.album && (
+            <div>
+              <span className="text-zinc-500">Matched album:</span>{' '}
+              <span className="font-medium text-zinc-100">{proposal.album}</span>
+            </div>
+          )}
+          {proposal.albumArtist && (
+            <div>
+              <span className="text-zinc-500">Artist:</span>{' '}
+              <span className="text-zinc-200">{proposal.albumArtist}</span>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-3 text-zinc-400">
+            {proposal.year && <span>Year: {proposal.year}</span>}
+            {Array.isArray(proposal.tracks) && proposal.tracks.length > 0 && (
+              <span>{proposal.tracks.length} matched tracks</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {artworkPlain && (
+        <p className="text-[11px] text-zinc-400">{artworkPlain}</p>
+      )}
+
+      {(detail.externalReleaseId || detail.artworkTrace.length > 0) && (
+        <details className="text-[11px] text-zinc-400">
+          <summary className="cursor-pointer hover:text-zinc-200 select-none">
+            Technical details
+          </summary>
+          <div className="mt-1.5 space-y-1 font-mono text-[10px] text-zinc-500">
+            {detail.externalReleaseId && (
+              <div>Release ID: {detail.externalReleaseId}</div>
+            )}
+            {detail.distance !== null && detail.distance !== undefined && (
+              <div>
+                Match score delta: {detail.distance.toFixed(3)}
+                {detail.runnerUpDistance !== null && detail.runnerUpDistance !== undefined
+                  ? ` (next candidate margin ${(detail.runnerUpDistance - detail.distance).toFixed(3)})`
+                  : ''}
+              </div>
+            )}
+            {detail.artworkTrace.map((step, i) => (
+              <div key={i}>
+                [{step.outcome}] {step.candidate}: {step.detail}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </section>
+  )
+}
+
+function EvidenceHistory({
+  albumId,
+  revision,
+  hasAutomaticMatch,
+}: {
+  albumId: string
+  revision?: string
+  hasAutomaticMatch?: boolean
+}) {
   const engine = useOptionalEngineController()
   const engineId = engine?.state.activeProfile?.engineId
   const libraryId = engine?.state.activeDescriptor?.libraryId
@@ -48,12 +188,22 @@ function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: st
     }
   }, [albumId, activeId, engineId, libraryId])
   const selected = detail?.id === activeId ? detail : null
+  if (loaded && !error && !runs.length && hasAutomaticMatch) {
+    return (
+      <section className="space-y-1 rounded border border-zinc-800 p-3 text-xs">
+        <h3 className="font-semibold text-zinc-100">Manual Lookups</h3>
+        <p className="text-zinc-400">No manual Refresh Evidence lookups run for this album.</p>
+      </section>
+    )
+  }
   return (
     <section className="space-y-2 rounded border border-zinc-800 p-3 text-xs">
-      <h3 className="font-semibold text-zinc-100">Evidence history</h3>
+      <h3 className="font-semibold text-zinc-100">Manual Lookups</h3>
       {error && <p role="alert" className="text-amber-300">{error}</p>}
-      {!loaded && !error && <p className="text-zinc-400">Loading evidence…</p>}
-      {loaded && !runs.length && <p className="text-zinc-400">No saved retrievals yet.</p>}
+      {!loaded && !error && <p className="text-zinc-400">Loading lookup history…</p>}
+      {loaded && !runs.length && (
+        <p className="text-zinc-400">No match or lookup history recorded for this album yet.</p>
+      )}
       {runs.length > 0 && (
         <select aria-label="Inspect evidence run" value={activeId} onChange={e => setSelectedId(e.target.value)}
           className="w-full rounded border border-zinc-700 bg-zinc-900 p-2 text-zinc-200">
@@ -78,9 +228,11 @@ function EvidenceHistory({ albumId, revision }: { albumId: string; revision?: st
           {selected.decision && (
             <details className="text-zinc-300">
               <summary className="cursor-pointer">Decision snapshot</summary>
-              <p className="mt-2">{selected.decision.headlineSummary}</p>
+              <p className="mt-2">{humanizeDecisionExplanation(selected.decision.headlineSummary)}</p>
               {Object.entries(selected.decision.fieldTraces).map(([field, decision]) => (
-                <p key={field} className="mt-1">{field} · {decision.chosenValue} · {decision.plainExplanation}</p>
+                <p key={field} className="mt-1">
+                  {field} · {decision.chosenValue} · {humanizeDecisionExplanation(decision.plainExplanation)}
+                </p>
               ))}
               {selected.trackDecisions?.map(track => (
                 <div key={track.trackId} className="mt-1">
@@ -107,13 +259,14 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
   trace,
   albumId,
   lastEvidenceId,
+  enrichmentDetail,
   onResumeFetch,
   isResuming = false
 }) => {
   const [showTelemetry, setShowTelemetry] = useState(false)
   const [copied, setCopied] = useState(false)
 
-  if (!isOpen || (!trace && !albumId)) {
+  if (!isOpen || (!trace && !albumId && !enrichmentDetail)) {
     return null
   }
 
@@ -216,16 +369,24 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
 
   const fieldEntries = Object.entries(trace?.fieldTraces || {})
 
+  const hasAutomaticMatch = Boolean(
+    enrichmentDetail &&
+      (enrichmentDetail.provider ||
+        enrichmentDetail.proposal ||
+        enrichmentDetail.artworkSource ||
+        enrichmentDetail.vetoes.length > 0),
+  )
+
   return (
     <div
       className="fixed inset-y-0 right-0 w-[460px] max-w-full z-50 bg-zinc-950/95 backdrop-blur-md border-l border-zinc-800 shadow-2xl flex flex-col transform transition-transform duration-200 ease-out animate-in slide-in-from-right"
       role="dialog"
-      aria-label="Curation Decision Rationale"
+      aria-label="Match & Activity History"
     >
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-800 bg-zinc-900/60">
         <div className="flex items-center gap-2.5">
-          <span className="text-sm font-semibold text-zinc-100">Curation Rationale</span>
+          <span className="text-sm font-semibold text-zinc-100">Match &amp; Activity History</span>
           {trace && formatOutcomeBadge(trace.outcomeStatus)}
         </div>
         <button
@@ -242,12 +403,43 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-        {albumId && <EvidenceHistory key={albumId} albumId={albumId} revision={lastEvidenceId} />}
+        {enrichmentDetail && hasAutomaticMatch && (
+          <AutomaticMatchSection detail={enrichmentDetail} />
+        )}
+        {albumId && (
+          <EvidenceHistory
+            key={albumId}
+            albumId={albumId}
+            revision={lastEvidenceId}
+            hasAutomaticMatch={hasAutomaticMatch}
+          />
+        )}
+        {enrichmentDetail && enrichmentDetail.userActions.length > 0 && (
+          <section className="space-y-2 rounded border border-zinc-800 p-3 text-xs">
+            <h3 className="font-semibold text-zinc-100">
+              Activity Log ({enrichmentDetail.userActions.length})
+            </h3>
+            <ul className="space-y-1.5">
+              {enrichmentDetail.userActions.slice(0, 20).map((act) => {
+                const formatted = formatEnrichmentUserAction(act)
+                return (
+                  <li key={act.id} className="rounded bg-zinc-900/60 px-2.5 py-1.5 border border-zinc-800/60">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-zinc-200">{formatted.label}</span>
+                      <span className="text-[10px] font-mono text-zinc-500">{act.createdAt}</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 break-words">{formatted.detail}</p>
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        )}
         {trace && <>
         {/* Headline Summary */}
         <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800/80">
           <p className="text-xs text-zinc-300 leading-relaxed font-sans">
-            {trace.headlineSummary}
+            {humanizeDecisionExplanation(trace.headlineSummary)}
           </p>
         </div>
 
@@ -302,11 +494,11 @@ export const CurationDecisionTraceDrawer: React.FC<CurationDecisionTraceDrawerPr
                       </span>
                     </div>
                     <p className="text-xs text-zinc-300 font-sans leading-normal">
-                      {decision.plainExplanation}
+                      {humanizeDecisionExplanation(decision.plainExplanation)}
                     </p>
                     {decision.consensusRatio && (
                       <div className="text-[11px] font-mono text-zinc-500">
-                        Consensus: <span className="text-zinc-400">{decision.consensusRatio}</span>
+                        Source: <span className="text-zinc-400">{humanizeConsensusRule(decision.consensusRatio)}</span>
                         {decision.confidenceScore > 0 && (
                           <span className="ml-2">
                             • Confidence: <span className="text-zinc-400">{Math.round(decision.confidenceScore * 100)}%</span>

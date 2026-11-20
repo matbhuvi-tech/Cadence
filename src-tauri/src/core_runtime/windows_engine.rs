@@ -213,6 +213,8 @@ pub struct WindowsEngineNode {
     control_join: Option<std::thread::JoinHandle<()>>,
     reconcile_join: Option<std::thread::JoinHandle<()>>,
     mdns_daemon: Option<mdns_sd::ServiceDaemon>,
+    enrichment_worker: Option<crate::core_runtime::enrichment::worker::EnrichmentWorker>,
+    curate_worker: Option<crate::core_runtime::curate::CurateJobWorker>,
 }
 
 impl WindowsEngineNode {
@@ -304,7 +306,7 @@ impl WindowsEngineNode {
         );
 
         let headless_cfg = HeadlessConfig {
-            db_path,
+            db_path: db_path.clone(),
             engine_id: identity.engine_id.clone(),
             library_id: identity.library_id.clone(),
             label: identity.label.clone(),
@@ -324,6 +326,31 @@ impl WindowsEngineNode {
         };
         rt.configure_library(browse_roots)
             .map_err(DragonfishError::Runtime)?;
+
+        let enrichment_worker = if std::env::var("CADENCE_DISABLE_ENRICHMENT").as_deref() != Ok("1") {
+            rt.db().map(|db_ref| {
+                crate::core_runtime::enrichment::worker::EnrichmentWorker::start(
+                    db_ref,
+                    crate::core_runtime::enrichment::worker::EnrichmentWorkerConfig {
+                        db_path: db_path.clone(),
+                        artwork_dir: rt.artwork_dir(),
+                        enable_external: !config.allow_loopback_for_tests
+                            && std::env::var("CADENCE_DISABLE_ENRICHMENT_EXTERNAL").as_deref() != Ok("1"),
+                    },
+                    rt.enrichment_idle_gate(),
+                    rt.enrichment_gate_registry(),
+                )
+            })
+        } else {
+            None
+        };
+        let idle_gate_rec = rt.enrichment_idle_gate();
+        rt.set_curate_worker_active(true);
+        let curate_worker = Some(crate::core_runtime::curate::CurateJobWorker::start(
+            db_path.clone(),
+            false,
+            Arc::clone(&idle_gate_rec),
+        ));
 
         let runtime = Arc::new(Mutex::new(rt));
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -468,7 +495,7 @@ impl WindowsEngineNode {
         let reconcile_join = std::thread::Builder::new()
             .name("cadence-win-engine-reconcile".into())
             .spawn(move || {
-                run_windows_reconcile_loop(rt_rec, stop_rec, audio_rec, run_rec);
+                run_windows_reconcile_loop(rt_rec, stop_rec, audio_rec, run_rec, idle_gate_rec);
             })
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
 
@@ -493,6 +520,8 @@ impl WindowsEngineNode {
             control_join: Some(control_join),
             reconcile_join: Some(reconcile_join),
             mdns_daemon,
+            enrichment_worker,
+            curate_worker,
         })
     }
 
@@ -502,6 +531,12 @@ impl WindowsEngineNode {
 
     pub fn shutdown(&mut self) {
         self.stop_flag.store(true, Ordering::Release);
+        if let Some(mut ew) = self.enrichment_worker.take() {
+            ew.shutdown();
+        }
+        if let Some(mut cw) = self.curate_worker.take() {
+            cw.shutdown();
+        }
         let _ = self.audio.stop();
         if let Some(daemon) = self.mdns_daemon.take() {
             let _ = daemon.shutdown();
@@ -526,14 +561,20 @@ fn run_windows_reconcile_loop<P, L>(
     stop_flag: Arc<AtomicBool>,
     audio: Arc<AudioEngine>,
     run_state: Arc<Mutex<ActiveRunState>>,
+    idle_gate: Arc<crate::core_runtime::enrichment::worker::EnrichmentIdleGate>,
 ) where
     P: crate::core_runtime::PlatformProbe,
     L: crate::core_runtime::MemoryLocker,
 {
+    let mut prev_active = false;
     while !stop_flag.load(Ordering::Acquire) {
         let status = audio.get_status();
         let is_loading = audio.is_loading();
         let active = status.is_playing || status.is_paused || is_loading;
+        if active != prev_active {
+            idle_gate.set_transport_active(active);
+            prev_active = active;
+        }
 
         let mut completed_token: Option<RunToken> = None;
         let mut started_token: Option<RunToken> = None;

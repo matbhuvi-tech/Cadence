@@ -1,10 +1,11 @@
+import type { EngineEnrichmentAlbumDetail } from '../core/coreProtocol'
 import type { CurateDraft } from '../core/curateDraft'
 import type { CurateCommitRow } from '../core/curateCommit'
 import type { RemoteCurateFieldChange } from '../core/remoteCurate'
 import type { CurationDecisionTrace, Release, Track } from '../core/types'
 import type { NewCommitItemPayload } from '../types/commit'
 import type { CurateEvidenceRun } from './curateEvidenceService'
-import type { EngineClient } from './engineClient'
+import { stripCoreReleasePrefix, type EngineClient } from './engineClient'
 
 const DRAFT_STORAGE_PREFIX = 'cadence:curate_ui_drafts:v1:'
 const TRACE_STORAGE_PREFIX = 'cadence:curate_ui_traces:v1:'
@@ -61,6 +62,18 @@ export function listUiCurateDrafts(
   libraryId?: string,
 ): Record<string, CurateDraft> {
   return readJsonMap<CurateDraft>(`${DRAFT_STORAGE_PREFIX}${scopeKey(engineId, libraryId)}`)
+}
+
+export function deleteUiCurateDraft(
+  albumId: string,
+  engineId?: string,
+  libraryId?: string,
+): void {
+  const key = `${DRAFT_STORAGE_PREFIX}${scopeKey(engineId, libraryId)}`
+  const map = readJsonMap<CurateDraft>(key)
+  if (!(albumId in map)) return
+  delete map[albumId]
+  writeJsonMap(key, map)
 }
 
 export function loadUiCurationTrace(
@@ -133,17 +146,94 @@ export function getUiCurationEvidence(
   return (evMap[albumId] ?? []).find((entry) => entry.run.id === evidenceId)?.run ?? null
 }
 
+export interface EngineRawBaseline {
+  release?: {
+    album?: string
+    albumArtist?: string
+    composer?: string
+    genre?: string
+    year?: number | null
+  }
+  tracksById?: ReadonlyMap<
+    string,
+    {
+      title?: string
+      artist?: string
+      albumArtist?: string
+      year?: number | null
+    }
+  >
+}
+
+export function rawBaselineFromEnrichmentDetail(
+  detail: EngineEnrichmentAlbumDetail | null | undefined,
+): EngineRawBaseline | undefined {
+  if (!detail) return undefined
+  const tracksById = new Map<
+    string,
+    { title?: string; artist?: string; albumArtist?: string; year?: number | null }
+  >()
+  for (const t of detail.tracks) {
+    tracksById.set(t.trackId, {
+      title: t.title,
+      artist: t.artist,
+      albumArtist: t.albumArtist ?? undefined,
+      year: t.releaseYear ?? null,
+    })
+  }
+  return {
+    release: {
+      album: detail.rawTitle,
+      albumArtist: detail.rawAlbumArtist ?? detail.rawArtist,
+      composer: detail.rawComposer ?? undefined,
+      genre: detail.rawGenre ?? undefined,
+      year: detail.rawYear ?? null,
+    },
+    tracksById,
+  }
+}
+
 const ENGINE_TAG_FIELD_MAP: Array<{
   payloadKey: string
   engineField: string
-  getBefore: (track?: Track, release?: Release) => string
+  getBefore: (track?: Track, release?: Release, rawBaseline?: EngineRawBaseline) => string
 }> = [
-  { payloadKey: 'title', engineField: 'title', getBefore: (t) => t?.title ?? '' },
-  { payloadKey: 'artist', engineField: 'artist', getBefore: (t) => t?.artistCredit ?? '' },
-  { payloadKey: 'album', engineField: 'album', getBefore: (t, r) => r?.title ?? t?.albumTitle ?? '' },
-  { payloadKey: 'albumArtist', engineField: 'albumArtist', getBefore: (t, r) => t?.albumArtist ?? r?.artistCredit ?? '' },
-  { payloadKey: 'composer', engineField: 'composer', getBefore: (t, r) => t?.composerName ?? r?.composerName ?? '' },
-  { payloadKey: 'genre', engineField: 'genre', getBefore: (t, r) => t?.genre ?? r?.genreTags?.[0] ?? '' },
+  {
+    payloadKey: 'title',
+    engineField: 'title',
+    getBefore: (t, _r, raw) => (t ? raw?.tracksById?.get(t.id)?.title : undefined) ?? t?.title ?? '',
+  },
+  {
+    payloadKey: 'artist',
+    engineField: 'artist',
+    getBefore: (t, _r, raw) =>
+      (t ? raw?.tracksById?.get(t.id)?.artist : undefined) ?? t?.artistCredit ?? '',
+  },
+  {
+    payloadKey: 'album',
+    engineField: 'album',
+    getBefore: (t, r, raw) => raw?.release?.album ?? r?.title ?? t?.albumTitle ?? '',
+  },
+  {
+    payloadKey: 'albumArtist',
+    engineField: 'albumArtist',
+    getBefore: (t, r, raw) =>
+      (t ? raw?.tracksById?.get(t.id)?.albumArtist : undefined) ??
+      raw?.release?.albumArtist ??
+      t?.albumArtist ??
+      r?.artistCredit ??
+      '',
+  },
+  {
+    payloadKey: 'composer',
+    engineField: 'composer',
+    getBefore: (t, r, raw) => raw?.release?.composer ?? t?.composerName ?? r?.composerName ?? '',
+  },
+  {
+    payloadKey: 'genre',
+    engineField: 'genre',
+    getBefore: (t, r, raw) => raw?.release?.genre ?? t?.genre ?? r?.genreTags?.[0] ?? '',
+  },
   { payloadKey: 'originalAlbum', engineField: 'originalAlbum', getBefore: (t) => t?.originalAlbum ?? '' },
   {
     payloadKey: 'originalYear',
@@ -157,6 +247,7 @@ export function buildEngineCurateChanges(
   payloadJson: string,
   track?: Track,
   release?: Release,
+  rawBaseline?: EngineRawBaseline,
 ): RemoteCurateFieldChange[] {
   let parsed: Record<string, unknown>
   try {
@@ -170,7 +261,7 @@ export function buildEngineCurateChanges(
     if (rawVal === undefined || rawVal === null) continue
     const after = String(rawVal).trim()
     if (!after) continue
-    const before = mapping.getBefore(track, release)
+    const before = mapping.getBefore(track, release, rawBaseline)
     if (before === after) continue
     changes.push({
       field: mapping.engineField,
@@ -186,11 +277,22 @@ export async function submitCurateItemsToEngine(options: {
   items: readonly NewCommitItemPayload[]
   tracks: readonly Track[]
   releases: readonly Release[]
+  rawBaseline?: EngineRawBaseline
+  rawBaselineByRelease?: ReadonlyMap<string, EngineRawBaseline>
+  onProgress?: (current: number, total: number) => void
 }): Promise<{
   submittedJobs: Array<{ jobId: string; draftId: string; trackId: string; payloadJson: string; status: string }>
   blockedReasons: string[]
 }> {
-  const { engineClient, items, tracks, releases } = options
+  const {
+    engineClient,
+    items,
+    tracks,
+    releases,
+    rawBaseline,
+    rawBaselineByRelease,
+    onProgress,
+  } = options
   const trackMap = new Map(tracks.map((t) => [t.id, t]))
   const releaseMap = new Map(releases.map((r) => [r.id, r]))
   const existingDrafts = await engineClient.listCurateDrafts().catch(() => [])
@@ -205,11 +307,22 @@ export async function submitCurateItemsToEngine(options: {
   }> = []
   const blockedReasons: string[] = []
 
-  for (const item of items) {
+  const planned = items.flatMap((item) => {
     const trk = trackMap.get(item.trackId)
     const rel = trk ? releaseMap.get(trk.releaseId) : undefined
-    const changes = buildEngineCurateChanges(item.payloadJson, trk, rel)
-    if (changes.length === 0) continue
+    const trackRawBaseline =
+      rawBaseline ??
+      (trk
+        ? rawBaselineByRelease?.get(trk.releaseId) ??
+          rawBaselineByRelease?.get(stripCoreReleasePrefix(trk.releaseId))
+        : undefined)
+    const changes = buildEngineCurateChanges(item.payloadJson, trk, rel, trackRawBaseline)
+    return changes.length > 0 ? [{ item, trk, changes }] : []
+  })
+
+  for (let i = 0; i < planned.length; i++) {
+    const { item, trk, changes } = planned[i]
+    onProgress?.(i + 1, planned.length)
 
     const draftId = `curate_${item.trackId}`
     const expectedRevision = revisionByDraftId.get(draftId) ?? null

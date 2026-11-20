@@ -1,5 +1,20 @@
 # Issue Log
 
+## GitHub #49 — Commit Album fails with Access Denied on Windows/SMB and disconnects Windows & Linux Playback Engines
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/49
+- **Branch:** `feat/automated-metadata-enrichment`
+- **Reported behavior:** Clicking **Commit Album** on SMB-backed WAV tracks left the Windows Playback Engine disconnected in the UI and failed to write tags (same control-loop blocking and permission behavior affects writable Linux Playback Engines over CIFS/NFS).
+- **Root causes:**
+  1. `curate.rs` kept `target.source` / `_parent` handles open across `atomic_replace()` (`fs::rename`), triggering Windows/SMB `Access is denied (os error 5)`, and required strict permission cloning on remote filesystems.
+  2. `dragonfish.rs` executed `execute_pending_curate_jobs_at()` synchronously inside the single-threaded HTTP control dispatcher under `runtime.lock()` while inserting 2× full-track BLOBs per file into `remote_curate_journal`, starving localhost HTTPS requests past `remote.rs`'s 15s timeout and leaving ~590 MB of orphaned BLOBs when `atomic_replace()` failed.
+  3. Even with `CurateJobWorker` backgrounded, `curate.dry_run` and `curate.approve` still ran synchronously inside `run_control_listener_loop` under `runtime.lock()`, and each operation read the full audio file over Wi-Fi SMB twice while `CurateJobWorker` concurrently began writing earlier tracks — blocking TLS/HTTPS control requests (`session.snapshot` / `/healthz`) past `remote.rs`'s 4s connect timeout mid-album and disconnecting the Engine.
+- **Fix:**
+  1. Dropped open file/dir handles before `atomic_replace()`, made SMB/CIFS/NFS permission copy best-effort, and added bounded Windows rename retries.
+  2. Replaced 2× full-file SQLite BLOB journaling with lightweight `result_file_sha256` crash-recovery tracking plus automatic pruning/WAL checkpoint of orphaned `remote_curate_journal` rows.
+  3. Extracted idle/cooldown-gated `CurateJobWorker` (`cadence-curate-writer`) and non-blocking `cadence-curate-prep` (`curate.dry_run` / `curate.approve`) background workers off `run_control_listener_loop` for both Windows (`WindowsEngineNode`) and Linux (`DragonfishNode`) engines so `/v1/core`, `/healthz`, `/v1/events`, and playback controls remain responsive (`curate.*` HTTP timeout raised to 90s; live `Queuing X/Y…` progress added in Desktop Curate).
+  4. Added verified `(size, mtime_ns)` dry-run stat caching on `remote_curate_drafts` (`>= 1 MiB`) so `approve_draft` skips redundant second SMB full-file reads, plus a 1.5s `CuratePrepGuard` settle yield so `CurateJobWorker` waits until multi-track queuing finishes before starting SMB writes.
+
 ## GitHub #48 — Album Art Pipeline: Import competence, playback browse throttling, 100K+ scale, PWA parity, and auto-migration
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/48

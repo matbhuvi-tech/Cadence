@@ -9,13 +9,18 @@ import {
   Folder,
   Server,
   Clock,
+  Sparkles,
+  Pause,
+  Play,
 } from 'lucide-react'
 import { StorageMount, WatchedFolder } from '../../core/types'
 import type {
+  EngineEnrichmentStatus,
   EngineFolderRecord,
   EngineNetworkShareRecord,
   EngineScanStatus,
   EngineSmbSupportStatus,
+  RootEnrichmentProgress,
 } from '../../core/coreProtocol'
 import { formatEngineScanSummary } from '../../core/scanStatus'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
@@ -38,6 +43,32 @@ interface StorageManagerModalProps {
   showToast: (msg: string) => void
 }
 
+export function findRootEnrichmentProgress(
+  status: EngineEnrichmentStatus | null,
+  folderId: string,
+): RootEnrichmentProgress | null {
+  return status?.roots.find((r) => r.folderId === folderId) ?? null
+}
+
+export function formatEnrichmentStateLabel(status: EngineEnrichmentStatus): string {
+  switch (status.state) {
+    case 'active':
+      return 'Active'
+    case 'cooldown':
+      return `Cooldown${status.cooldownRemainingSecs ? ` (${status.cooldownRemainingSecs}s)` : ''}`
+    case 'paused_playback':
+      return 'Paused (Playback)'
+    case 'user_paused':
+      return 'Paused'
+    case 'disabled':
+      return 'Disabled'
+    case 'complete':
+      return 'Complete'
+    default:
+      return status.state
+  }
+}
+
 export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
   isOpen,
   onClose,
@@ -54,6 +85,8 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
   const [scanStatus, setScanStatus] = useState<EngineScanStatus | null>(null)
   const [smbSupport, setSmbSupport] = useState<EngineSmbSupportStatus | null>(null)
   const [smbShares, setSmbShares] = useState<EngineNetworkShareRecord[]>([])
+  const [enrichmentStatus, setEnrichmentStatus] = useState<EngineEnrichmentStatus | null>(null)
+  const [isUpdatingEnrichment, setIsUpdatingEnrichment] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [isAddingFolder, setIsAddingFolder] = useState(false)
   const [isAddingSmb, setIsAddingSmb] = useState(false)
@@ -71,16 +104,18 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
     if (!engineClient) return
     setIsLoading(true)
     try {
-      const [folders, status, support, shares] = await Promise.all([
+      const [folders, status, support, shares, enrichment] = await Promise.all([
         engineClient.listFolders().catch(() => []),
         engineClient.getScanStatus().catch(() => null),
         engineClient.getSmbStatus().catch(() => null),
         engineClient.listSmbShares().catch(() => []),
+        engineClient.getEnrichmentStatus().catch(() => null),
       ])
       setEngineFolders(folders)
       setScanStatus(status)
       setSmbSupport(support)
       setSmbShares(shares)
+      setEnrichmentStatus(enrichment)
     } finally {
       setIsLoading(false)
     }
@@ -91,6 +126,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
     setScanStatus(null)
     setSmbSupport(null)
     setSmbShares([])
+    setEnrichmentStatus(null)
     setIsAddingFolder(false)
     setIsAddingSmb(false)
     setSmbError(null)
@@ -104,7 +140,15 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
 
   useEffect(() => {
     if (!isOpen || !engine) return
-    return engine.subscribeEngineEvents((ev) => {
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    const scheduleRefresh = () => {
+      if (refreshTimer !== null) clearTimeout(refreshTimer)
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null
+        void refreshEngineStorage()
+      }, 300)
+    }
+    const unsub = engine.subscribeEngineEvents((ev) => {
       if (ev.event === 'scan.progress' && ev.data && typeof ev.data === 'object') {
         const next = ev.data as unknown as EngineScanStatus
         if (typeof next.status !== 'string') return
@@ -114,16 +158,58 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
           setScanStatus(next)
         }
         if (isTerminal) {
-          void refreshEngineStorage()
+          scheduleRefresh()
           onRefreshLibrary()
         }
-      } else if (ev.event === 'catalog.changed') {
-        void refreshEngineStorage()
+      } else if (ev.event === 'catalog.changed' || ev.event === 'enrichment.updated') {
+        scheduleRefresh()
       }
     })
+    return () => {
+      if (refreshTimer !== null) clearTimeout(refreshTimer)
+      unsub()
+    }
   }, [isOpen, engine, refreshEngineStorage, onRefreshLibrary])
 
   if (!isOpen) return null
+
+  const handleToggleEnrichmentPause = async () => {
+    if (!engineClient || !enrichmentStatus) return
+    setIsUpdatingEnrichment(true)
+    try {
+      const next = await engineClient.controlEnrichment({
+        action: enrichmentStatus.userPaused ? 'resume' : 'pause',
+      })
+      setEnrichmentStatus(next)
+      showToast(next.userPaused ? 'Auto-Enrichment paused.' : 'Auto-Enrichment resumed (runs when idle).')
+    } catch (err: any) {
+      showToast(err?.message || 'Could not update Auto-Enrichment state.')
+    } finally {
+      setIsUpdatingEnrichment(false)
+    }
+  }
+
+  const handleRerunEnrichment = async (folderId?: string) => {
+    if (!engineClient) return
+    setIsUpdatingEnrichment(true)
+    try {
+      const next = await engineClient.controlEnrichment(
+        folderId
+          ? { action: 'rerun_root', folderId }
+          : { action: 'rerun_missing' },
+      )
+      setEnrichmentStatus(next)
+      showToast(
+        folderId
+          ? 'Queued root for background Auto-Enrichment (idle/cooldown gated).'
+          : 'Queued unresolved albums for background Auto-Enrichment.',
+      )
+    } catch (err: any) {
+      showToast(err?.message || 'Could not queue Auto-Enrichment.')
+    } finally {
+      setIsUpdatingEnrichment(false)
+    }
+  }
 
   const handleScanFolder = async (folderId?: string, forceFull = false) => {
     if (!engineClient) return
@@ -249,7 +335,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
 
         {/* Telemetry Bar */}
         <div className="px-6 py-3 bg-white/[0.02] border-b border-white/[0.06] flex flex-wrap items-center justify-between gap-3 text-xs text-white/70">
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center gap-6">
             <div>
               <span className="text-white/40 mr-1.5">Indexed Tracks:</span>
               <span className="font-mono font-semibold text-[#D4AF37]">
@@ -270,6 +356,46 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                   {formatEngineScanSummary(scanStatus)}
                   {scanStatus.deferred ? ' · paused during playback/cooldown' : ''}
                 </span>
+              </div>
+            )}
+            {enrichmentStatus && (
+              <div className="flex items-center gap-2" data-testid="storage-enrichment-telemetry">
+                <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span className="text-white/40">Auto-Enrich:</span>
+                <span className="font-mono font-semibold text-emerald-300">
+                  {enrichmentStatus.coveragePercent}% ({enrichmentStatus.coveredAlbums}/{enrichmentStatus.totalAlbums})
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] text-white/75">
+                  {formatEnrichmentStateLabel(enrichmentStatus)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void handleToggleEnrichmentPause()}
+                  disabled={isUpdatingEnrichment || !engineClient}
+                  className="px-2 py-0.5 rounded bg-white/[0.06] hover:bg-white/[0.12] text-white/80 text-[10px] font-medium flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-40"
+                >
+                  {enrichmentStatus.userPaused ? (
+                    <>
+                      <Play className="w-2.5 h-2.5" />
+                      <span>Resume</span>
+                    </>
+                  ) : (
+                    <>
+                      <Pause className="w-2.5 h-2.5" />
+                      <span>Pause</span>
+                    </>
+                  )}
+                </button>
+                {(enrichmentStatus.pendingAlbums > 0 || enrichmentStatus.failedAlbums > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRerunEnrichment()}
+                    disabled={isUpdatingEnrichment || !engineClient}
+                    className="px-2 py-0.5 rounded bg-[#D4AF37]/15 hover:bg-[#D4AF37]/25 text-[#D4AF37] text-[10px] font-medium transition-colors cursor-pointer disabled:opacity-40"
+                  >
+                    Run Missing
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -536,78 +662,132 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
               </div>
             ) : (
               <div className="space-y-2">
-                {displayedFolders.map((f) => (
-                  <div
-                    key={f.id}
-                    className={`p-3.5 rounded-xl border transition-all flex items-center justify-between gap-4 ${
-                      !f.online
-                        ? 'bg-amber-500/[0.03] border-amber-500/20 text-white/60'
-                        : 'bg-white/[0.02] border-white/[0.06] hover:border-white/[0.15]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-white/[0.05] text-white/75">
-                        {isSmbBackedPath(f.path, smbShares) ? (
-                          <Server className="w-4 h-4" />
-                        ) : (
-                          <Folder className="w-4 h-4" />
-                        )}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-semibold text-xs text-white truncate">
-                            {f.displayName}
-                          </span>
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                              f.online
-                                ? 'bg-emerald-500/20 text-emerald-300'
-                                : 'bg-amber-500/20 text-amber-300'
-                            }`}
-                          >
-                            {f.online ? 'Online' : 'Offline'}
-                          </span>
-                          <span className="text-[10px] text-white/45 font-mono">
-                            {f.trackCount.toLocaleString()} tracks · {f.scanMode}
-                          </span>
+                {displayedFolders.map((f) => {
+                  const rootProgress = findRootEnrichmentProgress(enrichmentStatus, f.id)
+                  const pct = rootProgress ? Math.max(0, Math.min(100, rootProgress.coveragePercent)) : 0
+                  return (
+                    <div
+                      key={f.id}
+                      data-testid={`watched-root-${f.id}`}
+                      className={`p-3.5 rounded-xl border transition-all space-y-2.5 ${
+                        !f.online
+                          ? 'bg-amber-500/[0.03] border-amber-500/20 text-white/60'
+                          : 'bg-white/[0.02] border-white/[0.06] hover:border-white/[0.15]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-white/[0.05] text-white/75">
+                            {isSmbBackedPath(f.path, smbShares) ? (
+                              <Server className="w-4 h-4" />
+                            ) : (
+                              <Folder className="w-4 h-4" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-xs text-white truncate">
+                                {f.displayName}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                  f.online
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : 'bg-amber-500/20 text-amber-300'
+                                }`}
+                              >
+                                {f.online ? 'Online' : 'Offline'}
+                              </span>
+                              <span className="text-[10px] text-white/45 font-mono">
+                                {f.trackCount.toLocaleString()} tracks · {f.scanMode}
+                              </span>
+                            </div>
+                            <div className="text-[11px] font-mono text-white/40 truncate">
+                              {formatEngineDisplayPath(f.path, smbShares)}
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-[11px] font-mono text-white/40 truncate">
-                          {formatEngineDisplayPath(f.path, smbShares)}
-                        </div>
-                      </div>
-                    </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => void handleScanFolder(f.id, false)}
-                        disabled={!f.online || !engineClient}
-                        className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-[#D4AF37]/15 hover:text-[#D4AF37] disabled:opacity-30 text-xs font-medium text-white/75 transition-colors flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                        <span>Quick Rescan</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleScanFolder(f.id, true)}
-                        disabled={!f.online || !engineClient}
-                        className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-30 text-xs font-medium text-white/60 hover:text-white transition-colors flex items-center gap-1 cursor-pointer"
-                      >
-                        <RotateCw className="w-3.5 h-3.5" />
-                        <span>Full Rescan</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleRemoveFolder(f.id, f.displayName)}
-                        disabled={!engineClient}
-                        title="Remove folder from monitoring"
-                        className="p-1.5 rounded-lg bg-white/[0.03] hover:bg-rose-500/20 hover:text-rose-300 text-white/40 transition-colors cursor-pointer"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => void handleRerunEnrichment(f.id)}
+                            disabled={!f.online || !engineClient || isUpdatingEnrichment}
+                            title="Re-run background Auto-Enrichment for this watched root"
+                            className="px-2.5 py-1.5 rounded-lg bg-[#D4AF37]/10 hover:bg-[#D4AF37]/20 disabled:opacity-30 text-xs font-medium text-[#D4AF37] transition-colors flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Re-enrich</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleScanFolder(f.id, false)}
+                            disabled={!f.online || !engineClient}
+                            className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-[#D4AF37]/15 hover:text-[#D4AF37] disabled:opacity-30 text-xs font-medium text-white/75 transition-colors flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>Quick Rescan</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleScanFolder(f.id, true)}
+                            disabled={!f.online || !engineClient}
+                            className="px-2.5 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-30 text-xs font-medium text-white/60 hover:text-white transition-colors flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCw className="w-3.5 h-3.5" />
+                            <span>Full Rescan</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveFolder(f.id, f.displayName)}
+                            disabled={!engineClient}
+                            title="Remove folder from monitoring"
+                            className="p-1.5 rounded-lg bg-white/[0.03] hover:bg-rose-500/20 hover:text-rose-300 text-white/40 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {rootProgress && (
+                        <div
+                          className="pl-11 space-y-1.5"
+                          data-testid={`watched-root-progress-${f.id}`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-semibold text-white">
+                                Auto-Enrich {pct}% ({rootProgress.coveredAlbums}/{rootProgress.totalAlbums} albums)
+                              </span>
+                              <span className="text-white/45 font-mono">
+                                · Art {rootProgress.artworkCoveragePercent}%
+                              </span>
+                            </div>
+                            <span className="text-[10px] font-mono text-white/50">
+                              Auto: {rootProgress.autoAppliedAlbums} · Review: {rootProgress.needsReviewAlbums} · No Match: {rootProgress.noMatchAlbums} · Locked: {rootProgress.userLockedAlbums} · Pending: {rootProgress.pendingAlbums}
+                              {rootProgress.failedAlbums > 0 ? ` · Retrying: ${rootProgress.failedAlbums}` : ''}
+                            </span>
+                          </div>
+                          <div
+                            role="progressbar"
+                            aria-label={`Auto-Enrich coverage for ${f.displayName}`}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={pct}
+                            className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden"
+                          >
+                            <div
+                              className={`h-full rounded-full ${
+                                pct >= 100 ? 'bg-emerald-400' : 'bg-[#D4AF37]'
+                              }`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>

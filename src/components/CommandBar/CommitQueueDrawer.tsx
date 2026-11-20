@@ -9,6 +9,20 @@ export interface CommitQueueTrackIdentity {
   trackTitle: string
 }
 
+export interface CommitQueueRecentAlbum {
+  id: string
+  title: string
+  completedCount: number
+  failedCount: number
+  tracks: {
+    id: string
+    title: string
+    status: 'completed' | 'failed'
+    statusLabel: string
+    errorMessage?: string | null
+  }[]
+}
+
 export interface CommitQueueDrawerModel {
   activeCount: number
   albums: {
@@ -16,6 +30,28 @@ export interface CommitQueueDrawerModel {
     title: string
     tracks: { id: string; title: string; statusLabel: string }[]
   }[]
+  recentAlbums: CommitQueueRecentAlbum[]
+}
+
+function resolveRowIdentity(
+  row: CurateCommitRow,
+  catalog?: ReadonlyMap<string, CommitQueueTrackIdentity>,
+): CommitQueueTrackIdentity | undefined {
+  const fromCatalog = catalog?.get(row.trackId)
+  if (fromCatalog) return fromCatalog
+  try {
+    const payload = JSON.parse(row.payloadJson)
+    if (typeof payload?.album === 'string' && payload.album.trim()) {
+      return {
+        albumId: 'payload:' + (payload.curateReviewId || payload.album),
+        albumTitle: payload.album,
+        trackTitle: typeof payload.title === 'string' ? payload.title : row.trackId,
+      }
+    }
+  } catch {
+    // A missing catalog entry can still display its queue status.
+  }
+  return undefined
 }
 
 // oxlint-disable-next-line react/only-export-components
@@ -25,6 +61,7 @@ export function buildCommitQueueDrawerModel(
   catalog?: ReadonlyMap<string, CommitQueueTrackIdentity>,
 ): CommitQueueDrawerModel {
   const albums = new Map<string, CommitQueueDrawerModel['albums'][number]>()
+  const recentAlbums = new Map<string, CommitQueueRecentAlbum>()
   const labels: Record<'pending' | 'in_flight', string> = {
     pending: telemetry?.state === 'paused_playback' ? 'Queued — waiting for playback'
       : telemetry?.state === 'cooldown' ? 'Queued — cooldown' : 'Queued',
@@ -32,37 +69,47 @@ export function buildCommitQueueDrawerModel(
   }
   let activeCount = 0
   for (const row of commitRows) {
-    if (row.status !== 'pending' && row.status !== 'in_flight') continue
-    let identity = catalog?.get(row.trackId)
-    if (!identity) {
-      try {
-        const payload = JSON.parse(row.payloadJson)
-        if (typeof payload?.album === 'string' && payload.album.trim()) {
-          identity = {
-            albumId: 'payload:' + (payload.curateReviewId || payload.album),
-            albumTitle: payload.album,
-            trackTitle: typeof payload.title === 'string' ? payload.title : row.trackId,
-          }
-        }
-      } catch {
-        // A missing catalog entry can still display its queue status.
-      }
-    }
+    const identity = resolveRowIdentity(row, catalog)
     const id = identity?.albumId ?? 'unknown'
-    let album = albums.get(id)
-    if (!album) {
-      album = { id, title: identity?.albumTitle ?? 'Unknown album', tracks: [] }
-      albums.set(id, album)
+    if (row.status === 'pending' || row.status === 'in_flight') {
+      let album = albums.get(id)
+      if (!album) {
+        album = { id, title: identity?.albumTitle ?? 'Unknown album', tracks: [] }
+        albums.set(id, album)
+      }
+      album.tracks.push({
+        id: row.id,
+        title: identity?.trackTitle || row.trackId,
+        statusLabel: labels[row.status],
+      })
+      activeCount++
+    } else if (row.status === 'completed' || row.status === 'failed') {
+      let recent = recentAlbums.get(id)
+      if (!recent) {
+        recent = {
+          id,
+          title: identity?.albumTitle ?? 'Unknown album',
+          completedCount: 0,
+          failedCount: 0,
+          tracks: [],
+        }
+        recentAlbums.set(id, recent)
+      }
+      if (row.status === 'completed') recent.completedCount++
+      else recent.failedCount++
+      recent.tracks.push({
+        id: row.id,
+        title: identity?.trackTitle || row.trackId,
+        status: row.status,
+        statusLabel: row.status === 'failed' ? 'Failed' : 'Saved',
+        errorMessage: row.errorMessage ?? null,
+      })
     }
-    album.tracks.push({
-      id: row.id, title: identity?.trackTitle || row.trackId,
-      statusLabel: labels[row.status],
-    })
-    activeCount++
   }
   return {
     activeCount: Math.max(activeCount, (telemetry?.pendingItems ?? 0) + (telemetry?.inflightItems ?? 0)),
     albums: [...albums.values()],
+    recentAlbums: [...recentAlbums.values()],
   }
 }
 
@@ -72,7 +119,9 @@ interface CommitQueueDrawerProps {
   telemetry: CommitTelemetryPayload
   model: CommitQueueDrawerModel
   isCurate: boolean
+  isExternalEngine?: boolean
   onClose: () => void
+  onClearRecent?: () => void
   onTogglePause: () => void
   onCancelPending: () => void
   onUndoBatch: () => void
@@ -80,7 +129,7 @@ interface CommitQueueDrawerProps {
 }
 
 export function CommitQueueDrawer({
-  id, drawerRef, telemetry, model, isCurate, onClose,
+  id, drawerRef, telemetry, model, isCurate, isExternalEngine = false, onClose, onClearRecent,
   onTogglePause, onCancelPending, onUndoBatch, onRetryMounts,
 }: CommitQueueDrawerProps) {
   const {
@@ -250,12 +299,86 @@ export function CommitQueueDrawer({
               </ul>
             </section>
           ))}
-          {!model.albums.length && !hasActiveWork && <p className="text-zinc-300">The queue is empty.</p>}
+          {!model.albums.length && !hasActiveWork && model.recentAlbums.length > 0 && (
+            <div className="space-y-2.5 pt-1">
+              <div className="flex items-center justify-between text-[11px] uppercase tracking-wider text-zinc-400">
+                <span>Recently Finished</span>
+                {onClearRecent && (
+                  <button
+                    type="button"
+                    onClick={onClearRecent}
+                    className="text-[10px] font-medium normal-case text-zinc-400 hover:text-white cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {model.recentAlbums.map((album) => (
+                <section key={album.id} className="rounded-lg border border-white/10 bg-white/[0.03] p-2.5 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="font-semibold text-white truncate">{album.title}</h3>
+                    <span className="shrink-0 text-[10px] font-mono text-emerald-300">
+                      {album.failedCount > 0
+                        ? `${album.completedCount} saved · ${album.failedCount} failed`
+                        : `${album.completedCount} saved to disk`}
+                    </span>
+                  </div>
+                  <ul className="space-y-1">
+                    {album.tracks.map((track) => (
+                      <li key={track.id} className="rounded bg-black/30 px-2 py-1">
+                        <div className="flex justify-between gap-2">
+                          <span className="break-words min-w-0 text-white/85">{track.title}</span>
+                          <span className={`shrink-0 ${track.status === 'failed' ? 'text-rose-300' : 'text-emerald-300'}`}>
+                            {track.statusLabel}
+                          </span>
+                        </div>
+                        {track.errorMessage && (
+                          <p className="mt-0.5 text-[10px] text-rose-300/80 break-words">{track.errorMessage}</p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          )}
+          {!model.albums.length && !hasActiveWork && !model.recentAlbums.length && (
+            <p className="text-zinc-300">The queue is empty.</p>
+          )}
         </div>
       )}
 
-      {/* Actions Bar */}
-      {(showBatch || state === 'user_paused') && (
+      {!isCurate && model.recentAlbums.length > 0 && !model.albums.length && !hasActiveWork && (
+        <div className="my-3 space-y-2.5 text-xs">
+          <div className="flex items-center justify-between text-[11px] uppercase tracking-wider text-zinc-400">
+            <span>Recently Finished</span>
+            {onClearRecent && (
+              <button
+                type="button"
+                onClick={onClearRecent}
+                className="text-[10px] font-medium normal-case text-zinc-400 hover:text-white cursor-pointer"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {model.recentAlbums.map((album) => (
+            <section key={album.id} className="rounded-lg border border-white/10 bg-white/[0.03] p-2.5 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-semibold text-white truncate">{album.title}</h3>
+                <span className="shrink-0 text-[10px] font-mono text-emerald-300">
+                  {album.failedCount > 0
+                    ? `${album.completedCount} saved · ${album.failedCount} failed`
+                    : `${album.completedCount} saved`}
+                </span>
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+
+      {/* Actions Bar (Local Engine only; remote Engine batches use SSE idle/cooldown worker) */}
+      {!isExternalEngine && (showBatch || state === 'user_paused') && (
         <div className="flex items-center justify-between pt-3 border-t border-white/10 text-xs">
           <button
             onClick={onTogglePause}

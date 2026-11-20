@@ -103,6 +103,8 @@ impl Library {
                 CREATE TABLE IF NOT EXISTS engine_scan_seen (folder_id TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(folder_id,track_id));
                 CREATE TABLE IF NOT EXISTS engine_artwork (release_id TEXT PRIMARY KEY, etag TEXT NOT NULL, jpeg BLOB NOT NULL);")
                 .map_err(|e| e.to_string())?;
+            crate::core_runtime::enrichment::schema::ensure_schema(&conn)
+                .map_err(|e| e.to_string())?;
             conn.query_row(
                 "SELECT revision, scan_json FROM engine_library_state WHERE id=1",
                 [],
@@ -253,6 +255,10 @@ impl Library {
     /// on kernels without openat2 rather than falling back to canonicalize/open.
     pub fn open_path(&self, path: &Path) -> Result<File> {
         open_authorized(&self.roots, path)
+    }
+
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
     }
 
     pub fn browse(&mut self, path: Option<&str>, idle: bool) -> Result<Value> {
@@ -1228,11 +1234,99 @@ impl Library {
 
     pub fn enriched_tracks(&self) -> Result<HashMap<String, Value>> {
         let conn = self.db.conn.lock();
-        let mut stmt=conn.prepare("SELECT t.id,t.composer,t.genre,t.folder_name,t.language,t.dr_score,(t.has_embedded_art != 0 OR EXISTS(SELECT 1 FROM engine_artwork a WHERE a.release_id = t.release_id)),t.lyrics,t.format,t.acoustid_fingerprint,t.original_album FROM tracks t").map_err(|e|e.to_string())?;
-        let rows=stmt.query_map([],|r|{let format=r.get::<_,String>(8)?;let fingerprint=r.get::<_,Option<String>>(9)?;Ok((r.get::<_,String>(0)?,json!({"composerName":r.get::<_,Option<String>>(1)?,"genreTags":r.get::<_,Option<String>>(2)?.map(|s|vec![s]).unwrap_or_default(),"folderName":r.get::<_,String>(3)?,"language":r.get::<_,Option<String>>(4)?,"dynamicRange":r.get::<_,Option<i64>>(5)?,"hasCoverArt":r.get::<_,bool>(6)?,"lyrics":r.get::<_,Option<String>>(7)?,"fingerprintStatus":if matches!(format.as_str(),"DSF"|"DFF"|"DSDIFF"){"UNSUPPORTED_DSD"}else if fingerprint.is_some(){"INDEXED"}else{"PENDING"},"provenanceStatus":if r.get::<_,Option<String>>(10)?.is_some(){"INDEXED"}else{"PENDING"}})))}).map_err(|e|e.to_string())?;
+        let mut shares: Vec<(String, String)> = conn
+            .prepare("SELECT mount_path, server, share FROM engine_network_shares")
+            .and_then(|mut s| {
+                s.query_map([], |r| {
+                    let mp: String = r.get(0)?;
+                    let srv: String = r.get(1)?;
+                    let sh: String = r.get(2)?;
+                    Ok((
+                        mp.trim_end_matches(['/', '\\']).to_string(),
+                        format!("//{}/{}", srv.trim(), sh.trim_start_matches('/')),
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .unwrap_or_default();
+        shares.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.id,
+                        COALESCE(NULLIF(TRIM(ov_comp.value_text), ''), t.composer),
+                        COALESCE(NULLIF(TRIM(ov_genre.value_text), ''), t.genre),
+                        t.folder_name,
+                        t.language,
+                        t.dr_score,
+                        (t.has_embedded_art != 0
+                            OR EXISTS(SELECT 1 FROM engine_artwork a WHERE a.release_id = t.release_id)
+                            OR EXISTS(SELECT 1 FROM artwork_items ai WHERE ai.entity_kind='album' AND ai.entity_id = t.release_id AND ai.status IN ('found','found_stale','user_override'))),
+                        t.lyrics,
+                        t.format,
+                        t.acoustid_fingerprint,
+                        t.original_album,
+                        t.folder_path,
+                        t.file_name
+                 FROM tracks t
+                 LEFT JOIN metadata_overlays ov_comp
+                     ON ov_comp.entity_type = 'release' AND ov_comp.entity_id = t.release_id AND ov_comp.field_name = 'composer'
+                 LEFT JOIN metadata_overlays ov_genre
+                     ON ov_genre.entity_type = 'release' AND ov_genre.entity_id = t.release_id AND ov_genre.field_name = 'genre'",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                let format = r.get::<_, String>(8)?;
+                let fingerprint = r.get::<_, Option<String>>(9)?;
+                let raw_folder_path = r.get::<_, Option<String>>(11)?;
+                let display_folder_path = raw_folder_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format_display_folder_path(s, &shares));
+                let display_file_name = r
+                    .get::<_, Option<String>>(12)?
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                Ok((
+                    r.get::<_, String>(0)?,
+                    json!({
+                        "composerName": r.get::<_, Option<String>>(1)?,
+                        "genreTags": r.get::<_, Option<String>>(2)?.map(|s| vec![s]).unwrap_or_default(),
+                        "folderName": r.get::<_, String>(3)?,
+                        "folderPath": display_folder_path,
+                        "fileName": display_file_name,
+                        "language": r.get::<_, Option<String>>(4)?,
+                        "dynamicRange": r.get::<_, Option<i64>>(5)?,
+                        "hasCoverArt": r.get::<_, bool>(6)?,
+                        "lyrics": r.get::<_, Option<String>>(7)?,
+                        "fingerprintStatus": if matches!(format.as_str(), "DSF" | "DFF" | "DSDIFF") { "UNSUPPORTED_DSD" } else if fingerprint.is_some() { "INDEXED" } else { "PENDING" },
+                        "provenanceStatus": if r.get::<_, Option<String>>(10)?.is_some() { "INDEXED" } else { "PENDING" }
+                    }),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
         rows.collect::<std::result::Result<HashMap<_, _>, _>>()
             .map_err(|e| e.to_string())
     }
+}
+
+fn format_display_folder_path(raw: &str, shares: &[(String, String)]) -> String {
+    for (mount, prefix) in shares {
+        if mount.is_empty() {
+            continue;
+        }
+        if raw == mount {
+            return prefix.clone();
+        }
+        if let Some(suffix) = raw.strip_prefix(mount) {
+            if suffix.starts_with('/') || suffix.starts_with('\\') {
+                return format!("{}{}", prefix.trim_end_matches('/'), suffix.replace('\\', "/"));
+            }
+        }
+    }
+    raw.to_string()
 }
 
 fn required<'a>(v: &'a Value, key: &str) -> Result<&'a str> {

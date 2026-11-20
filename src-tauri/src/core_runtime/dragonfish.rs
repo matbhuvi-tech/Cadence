@@ -329,6 +329,8 @@ pub struct DragonfishNode<
     stop_control: Arc<AtomicBool>,
     control_join: Option<std::thread::JoinHandle<()>>,
     reconcile_join: Option<std::thread::JoinHandle<()>>,
+    enrichment_worker: Option<super::enrichment::worker::EnrichmentWorker>,
+    curate_worker: Option<super::curate::CurateJobWorker>,
 }
 
 impl DragonfishNode<SystemPlatformProbe, SystemMemoryLocker> {
@@ -561,6 +563,31 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             }
         }
 
+        let enrichment_worker = if std::env::var("CADENCE_DISABLE_ENRICHMENT").as_deref() != Ok("1") {
+            rt.db().map(|db_ref| {
+                super::enrichment::worker::EnrichmentWorker::start(
+                    db_ref,
+                    super::enrichment::worker::EnrichmentWorkerConfig {
+                        db_path: db_path.clone(),
+                        artwork_dir: rt.artwork_dir(),
+                        enable_external: !config.allow_loopback_for_tests
+                            && std::env::var("CADENCE_DISABLE_ENRICHMENT_EXTERNAL").as_deref() != Ok("1"),
+                    },
+                    rt.enrichment_idle_gate(),
+                    rt.enrichment_gate_registry(),
+                )
+            })
+        } else {
+            None
+        };
+
+        rt.set_curate_worker_active(true);
+        let curate_worker = Some(super::curate::CurateJobWorker::start(
+            db_path.clone(),
+            config.music_read_only,
+            rt.enrichment_idle_gate(),
+        ));
+
         let runtime = Arc::new(Mutex::new(rt));
         let stop_control = Arc::new(AtomicBool::new(false));
         let media_port = media_server.listen_addr().port();
@@ -636,6 +663,8 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
             stop_control,
             control_join: Some(control_join),
             reconcile_join,
+            enrichment_worker,
+            curate_worker,
         })
     }
 
@@ -747,6 +776,12 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
 impl<P: PlatformProbe, L: MemoryLocker> DragonfishNode<P, L> {
     pub fn shutdown(&mut self) -> Result<(), DragonfishError> {
         self.stop_control.store(true, Ordering::Release);
+        if let Some(mut ew) = self.enrichment_worker.take() {
+            ew.shutdown();
+        }
+        if let Some(mut cw) = self.curate_worker.take() {
+            cw.shutdown();
+        }
         if let Some(join) = self.control_join.take() {
             let wake_addr = if self.control_listen_addr.ip().is_unspecified() {
                 SocketAddr::from(([127, 0, 0, 1], self.control_listen_addr.port()))
@@ -1133,6 +1168,44 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
 ) {
     let mut event_clients:Vec<ControlConnection>=Vec::new();
     let mut last_heartbeat=std::time::Instant::now();
+    let (curate_prep_tx, curate_prep_rx) = std::sync::mpsc::sync_channel::<(
+        ControlConnection,
+        super::CurateAsyncPrepTask,
+        super::enrichment::worker::CuratePrepGuard,
+    )>(8);
+    let curate_prep_join = std::thread::Builder::new()
+        .name("cadence-curate-prep".into())
+        .spawn(move || {
+            super::enrichment::worker::configure_background_thread();
+            let mut cached_db: Option<(PathBuf, crate::db::AppDb)> = None;
+            while let Ok((mut stream, task, _guard)) = curate_prep_rx.recv() {
+                let db_ok = match &cached_db {
+                    Some((path, _)) if path == &task.db_path => true,
+                    _ => match crate::db::AppDb::new(task.db_path.clone()) {
+                        Ok(db) => {
+                            cached_db = Some((task.db_path.clone(), db));
+                            true
+                        }
+                        Err(_) => {
+                            cached_db = None;
+                            false
+                        }
+                    },
+                };
+                let resp_val = if db_ok {
+                    if let Some((_, db)) = cached_db.as_ref() {
+                        super::execute_async_curate_prep(db, &task)
+                    } else {
+                        json!({ "ok": false, "error": { "code": "not_ready" } })
+                    }
+                } else {
+                    json!({ "ok": false, "error": { "code": "not_ready" } })
+                };
+                write_json_response(&mut stream, 200, "OK", &resp_val);
+                stream.finish();
+            }
+        })
+        .ok();
     while !stop_flag.load(Ordering::Acquire) {
         // Bounded event-driven SSE subscribers share this control dispatcher;
         // no extra worker or progress polling is required. Slow readers drop.
@@ -1241,6 +1314,40 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
                             continue;
                         }
                     }
+                } else if method == "GET" && path.starts_with("/v1/artwork/artist/") {
+                    let raw_tail = path.strip_prefix("/v1/artwork/artist/").unwrap_or("");
+                    let artist_id = raw_tail.split('?').next().unwrap_or("");
+                    let result = runtime
+                        .lock()
+                        .map_err(|_| "Unavailable".to_string())
+                        .and_then(|rt| rt.serve_artist_artwork(artist_id));
+                    match result {
+                        Ok((etag, mime, bytes)) => {
+                            let etag = format!("\"{etag}\"");
+                            let not_modified = req_str
+                                .lines()
+                                .filter_map(|l| l.split_once(':'))
+                                .any(|(k, v)| k.eq_ignore_ascii_case("if-none-match") && v.trim() == etag);
+                            let (status, reason, size) = if not_modified {
+                                (304, "Not Modified", 0)
+                            } else {
+                                (200, "OK", bytes.len())
+                            };
+                            let header = format!(
+                                "HTTP/1.1 {status} {reason}\r\nContent-Type: {mime}\r\nContent-Length: {size}\r\nETag: {etag}\r\nCache-Control: private, max-age=3600\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: ETag\r\nConnection: close\r\n\r\n"
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            if !not_modified {
+                                let _ = stream.write_all(&bytes);
+                            }
+                        }
+                        Err(error) => write_json_response(
+                            &mut stream,
+                            if error == "deferred_until_idle" { 503 } else { 404 },
+                            "Unavailable",
+                            &json!({ "ok": false, "error": { "code": error } }),
+                        ),
+                    }
                 } else if method == "GET" && (path.starts_with("/v1/artwork/") || path.starts_with("/api/remote/library/artwork/")) {
                     let raw_tail = path
                         .strip_prefix("/v1/artwork/")
@@ -1269,6 +1376,46 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
                     } else {
                         &[][..]
                     };
+                    let async_prep = match runtime.lock() {
+                        Ok(rt) => rt.try_prepare_async_curate(body_bytes, std::time::Instant::now()),
+                        Err(_) => Some(Err(json!({ "ok": false, "error": { "code": "not_ready" } }))),
+                    };
+                    if let Some(prep_res) = async_prep {
+                        match prep_res {
+                            Ok(task) => {
+                                let guard = super::enrichment::worker::CuratePrepGuard::acquire(
+                                    Arc::clone(&task.idle_gate),
+                                );
+                                match curate_prep_tx.try_send((stream, task, guard)) {
+                                    Ok(()) => continue,
+                                    Err(std::sync::mpsc::TrySendError::Full((
+                                        mut stream,
+                                        _,
+                                        _guard,
+                                    )))
+                                    | Err(std::sync::mpsc::TrySendError::Disconnected((
+                                        mut stream,
+                                        _,
+                                        _guard,
+                                    ))) => {
+                                        write_json_response(
+                                            &mut stream,
+                                            503,
+                                            "Service Unavailable",
+                                            &json!({ "ok": false, "error": { "code": "busy" } }),
+                                        );
+                                        stream.finish();
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(err_val) => {
+                                write_json_response(&mut stream, 200, "OK", &err_val);
+                                stream.finish();
+                                continue;
+                            }
+                        }
+                    }
                     let resp_val = match runtime.lock() {
                         Ok(mut rt) => {
                             if let Some(handled) = extra_op_handler.as_ref().and_then(|handler| {
@@ -1316,6 +1463,10 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+    drop(curate_prep_tx);
+    if let Some(join) = curate_prep_join {
+        let _ = join.join();
     }
 }
 

@@ -37,6 +37,8 @@ export interface CoreCatalogTrack {
   composerName?: string | null
   genreTags?: string[]
   folderName?: string | null
+  folderPath?: string | null
+  fileName?: string | null
   language?: string | null
   dynamicRange?: number | null
   hasCoverArt?: boolean
@@ -319,7 +321,8 @@ function catalogPage(value: unknown): CoreCatalogPage {
       [
         'releaseId', 'albumArtist', 'isCompilation', 'edition', 'format', 'sampleRate', 'bitDepth',
         'trackNumber', 'discNumber', 'releaseYear', 'composerName', 'genreTags', 'folderName',
-        'language', 'dynamicRange', 'hasCoverArt', 'provenanceStatus', 'lyrics', 'fingerprintStatus',
+        'folderPath', 'fileName', 'language', 'dynamicRange', 'hasCoverArt', 'provenanceStatus',
+        'lyrics', 'fingerprintStatus',
       ],
     )
     token(track.id); text(track.title); text(track.artist); text(track.album); seconds(track.durationSeconds)
@@ -335,6 +338,8 @@ function catalogPage(value: unknown): CoreCatalogPage {
     optionalPositiveInt(track.releaseYear, 9999)
     optionalNullableText(track.composerName)
     optionalNullableText(track.folderName)
+    optionalNullableText(track.folderPath, 4096)
+    optionalNullableText(track.fileName, 512)
     optionalNullableText(track.language, 64)
     optionalNullableInt(track.dynamicRange, 0, 100)
     if (track.hasCoverArt !== undefined) requireValue(typeof track.hasCoverArt === 'boolean')
@@ -477,6 +482,164 @@ export interface AddEngineSmbShareInput {
   readOnly?: boolean
   displayName?: string
 }
+
+export interface EngineMetadataOverlayRecord {
+  entityType: 'release' | 'track' | string
+  entityId: string
+  fieldName: string
+  valueText: string | null
+  origin: 'user' | 'auto' | string
+  provider: string | null
+  confidence: number | null
+  distance: number | null
+  locked: boolean
+  updatedAt: string
+}
+
+export interface EngineMetadataUserActionRecord {
+  id: number
+  entityType: 'release' | 'track' | string
+  entityId: string
+  fieldName: string
+  action: string
+  previousValue: string | null
+  newValue: string | null
+  actor: string
+  createdAt: string
+}
+
+export interface RootEnrichmentProgress {
+  folderId: string
+  displayName: string
+  path: string
+  totalAlbums: number
+  coveredAlbums: number
+  coveragePercent: number
+  autoAppliedAlbums: number
+  needsReviewAlbums: number
+  noMatchAlbums: number
+  userLockedAlbums: number
+  pendingAlbums: number
+  failedAlbums: number
+  artworkCoveredAlbums: number
+  artworkCoveragePercent: number
+}
+
+export interface ProviderGateSnapshot {
+  provider: string
+  circuit: string
+  consecutiveFailures: number
+  retryAfterSecs: number | null
+}
+
+export interface EngineEnrichmentStatus {
+  state: 'active' | 'cooldown' | 'paused_playback' | 'user_paused' | 'disabled' | 'complete' | string
+  enabled: boolean
+  userPaused: boolean
+  cooldownRemainingSecs: number | null
+  currentReleaseId: string | null
+  currentAlbumTitle: string | null
+  totalAlbums: number
+  coveredAlbums: number
+  coveragePercent: number
+  autoAppliedAlbums: number
+  needsReviewAlbums: number
+  noMatchAlbums: number
+  userLockedAlbums: number
+  pendingAlbums: number
+  failedAlbums: number
+  artworkCoveredAlbums: number
+  artworkCoveragePercent: number
+  artworkPendingItems: number
+  providerGates: ProviderGateSnapshot[]
+  roots: RootEnrichmentProgress[]
+}
+
+export interface EngineEnrichmentAlbumSummary {
+  releaseId: string
+  title: string
+  artist: string
+  status: 'pending' | 'auto_applied' | 'needs_review' | 'no_match' | 'user_locked' | 'failed' | string
+  provider: string | null
+  externalReleaseId: string | null
+  distance: number | null
+  runnerUpDistance: number | null
+  vetoes: unknown[]
+  hasUserOverlay: boolean
+  hasAutoOverlay: boolean
+  artworkStatus: string | null
+  artworkSource: string | null
+  artworkWidth: number | null
+  artworkHeight: number | null
+  updatedAt: string
+}
+
+export interface EngineEnrichmentRawTrackSummary {
+  trackId: string
+  title: string
+  artist: string
+  albumArtist: string | null
+  trackNumber: number | null
+  discNumber: number | null
+  durationSecs: number
+  releaseYear: number | null
+}
+
+export interface EngineArtworkTraceStep {
+  candidate: string
+  outcome: string
+  detail: string
+}
+
+export interface EngineEnrichmentAlbumDetail {
+  releaseId: string
+  rawTitle: string
+  rawArtist: string
+  rawAlbumArtist?: string | null
+  rawYear: number | null
+  rawComposer: string | null
+  rawGenre: string | null
+  status: 'pending' | 'auto_applied' | 'needs_review' | 'no_match' | 'user_locked' | 'failed' | string
+  provider: string | null
+  externalReleaseId: string | null
+  distance: number | null
+  runnerUpDistance: number | null
+  vetoes: unknown[]
+  proposal: Record<string, unknown> | null
+  overlays: EngineMetadataOverlayRecord[]
+  tracks: EngineEnrichmentRawTrackSummary[]
+  artworkStatus: string | null
+  artworkSource: string | null
+  artworkWidth: number | null
+  artworkHeight: number | null
+  artworkTrace: EngineArtworkTraceStep[]
+  pendingArtworkUrl?: string | null
+  pendingArtworkAttempts?: number | null
+  pendingArtworkError?: string | null
+  userActions: EngineMetadataUserActionRecord[]
+}
+
+export interface UserTrackOverlayEdit {
+  trackId: string
+  title?: string
+  artist?: string
+  year?: string
+}
+
+export type EnrichmentControlAction =
+  | 'pause'
+  | 'resume'
+  | 'set_enabled'
+  | 'rerun_root'
+  | 'rerun_album'
+  | 'rerun_missing'
+
+export type EnrichmentAlbumAction =
+  | 'save_overlay'
+  | 'accept_proposal'
+  | 'revert_to_file'
+  | 'lock_file_tags'
+  | 'unlock_auto'
 
 /** Ignore server prose: it can contain owner-only paths, SQL or credentials. */
 export function unwrapCoreReply(value: unknown, expected: Readonly<EngineContext>): unknown {

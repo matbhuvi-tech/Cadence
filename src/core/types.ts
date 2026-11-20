@@ -278,6 +278,7 @@ export interface Track {
   storageMountId: string
   folderName?: string
   folderPath?: string
+  fileName?: string
   targetFilePath?: string
   sidecarStatus: SidecarStatus
   pendingSidecarEdits?: Record<string, any>

@@ -18,6 +18,64 @@ export { buildCommitQueueDrawerModel, type CommitQueueDrawerModel } from './Comm
 
 const emptyRows: readonly CurateCommitRow[] = []
 
+// oxlint-disable-next-line react/only-export-components
+export function deriveExternalEngineCommitTelemetry(
+  commitRows: readonly CurateCommitRow[],
+  enginePlaybackActivity?: string,
+): CommitTelemetryPayload {
+  let pendingItems = 0
+  let inflightItems = 0
+  let completedItems = 0
+  let failedItems = 0
+  let hasCoolingDown = false
+  let errorMessage: string | undefined
+
+  for (const row of commitRows) {
+    if (row.status === 'pending') {
+      pendingItems++
+      if (row.engineJobState === 'cooling_down') hasCoolingDown = true
+    } else if (row.status === 'in_flight') {
+      inflightItems++
+    } else if (row.status === 'completed') {
+      completedItems++
+    } else if (row.status === 'failed') {
+      failedItems++
+      if (!errorMessage && row.errorMessage) errorMessage = row.errorMessage
+    }
+  }
+
+  const totalItems = pendingItems + inflightItems + completedItems + failedItems
+  const doneItems = completedItems + failedItems
+  const percent = totalItems > 0 ? Math.round((doneItems / totalItems) * 100) : 100
+
+  let state: CommitTelemetryPayload['state'] = 'idle'
+  if (inflightItems > 0) {
+    state = 'writing'
+  } else if (pendingItems > 0) {
+    if (enginePlaybackActivity === 'playing' || enginePlaybackActivity === 'paused') {
+      state = 'paused_playback'
+    } else if (hasCoolingDown) {
+      state = 'cooldown'
+    } else {
+      state = 'writing'
+    }
+  }
+
+  return {
+    state,
+    pendingItems,
+    inflightItems,
+    completedItems,
+    failedItems,
+    totalItems,
+    percent,
+    throughputItemsPerSec: 0,
+    offlineMounts: [],
+    activeBatchDescription: totalItems > 0 ? 'Engine Tag Write Queue' : undefined,
+    errorMessage,
+  }
+}
+
 interface CommitStatusPillProps {
   onOpenQuarantine?: () => void
   alwaysVisible?: boolean
@@ -25,10 +83,22 @@ interface CommitStatusPillProps {
   tracks?: Track[]
   releases?: Release[]
   portalTarget?: HTMLElement | null
+  isExternalEngine?: boolean
+  enginePlaybackActivity?: string
+  onClearRecentCommits?: () => void
 }
 
-export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisible = false, commitRows = emptyRows, tracks, releases, portalTarget }) => {
-  const [telemetry, setTelemetry] = useState<CommitTelemetryPayload>({
+export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({
+  alwaysVisible = false,
+  commitRows = emptyRows,
+  tracks,
+  releases,
+  portalTarget,
+  isExternalEngine = false,
+  enginePlaybackActivity,
+  onClearRecentCommits,
+}) => {
+  const [localTelemetry, setLocalTelemetry] = useState<CommitTelemetryPayload>({
     state: 'idle',
     pendingItems: 0,
     inflightItems: 0,
@@ -39,6 +109,15 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisibl
     throughputItemsPerSec: 0,
     offlineMounts: [],
   })
+
+  const useExternalDerived = isExternalEngine || !tauriBridge.hasLocalEngine()
+  const telemetry = useMemo(
+    () =>
+      useExternalDerived
+        ? deriveExternalEngineCommitTelemetry(commitRows, enginePlaybackActivity)
+        : localTelemetry,
+    [useExternalDerived, commitRows, enginePlaybackActivity, localTelemetry],
+  )
 
   const [isOpen, setIsOpen] = useState(false)
   const [previousTarget, setPreviousTarget] = useState(portalTarget)
@@ -51,19 +130,39 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisibl
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const completedTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const prevExternalStateRef = useRef<{ active: number; completed: number }>({
+    active: 0,
+    completed: 0,
+  })
 
-  // Subscribe to live telemetry from Tauri native worker (only when local engine exists)
+  // Trigger brief "All Changes Saved" banner when Engine jobs transition from active -> idle
   useEffect(() => {
-    if (!tauriBridge.hasLocalEngine()) return
+    if (!useExternalDerived) return
+    const active = telemetry.pendingItems + telemetry.inflightItems
+    const completed = telemetry.completedItems
+    const prev = prevExternalStateRef.current
+    prevExternalStateRef.current = { active, completed }
+    if (prev.active > 0 && active === 0 && completed > 0) {
+      setShowCompletedBanner(true)
+      if (completedTimerRef.current) clearTimeout(completedTimerRef.current)
+      completedTimerRef.current = setTimeout(() => {
+        setShowCompletedBanner(false)
+      }, 8000)
+    }
+  }, [useExternalDerived, telemetry.pendingItems, telemetry.inflightItems, telemetry.completedItems])
+
+  // Subscribe to live telemetry from Tauri native worker (only when local engine is active)
+  useEffect(() => {
+    if (isExternalEngine || !tauriBridge.hasLocalEngine()) return
     let unlisten: (() => void) | undefined
 
     const init = async () => {
       try {
         const initial = await tauriBridge.commitGetTelemetry()
-        setTelemetry(initial)
+        setLocalTelemetry(initial)
 
         unlisten = await tauriBridge.listenCommitTelemetry((payload) => {
-          setTelemetry((prev) => {
+          setLocalTelemetry((prev) => {
             // When transitioning from writing/paused to idle with items written, show subtle completion
             if (
               (prev.state === 'writing' || prev.state === 'cooldown' || prev.state === 'paused_playback') &&
@@ -90,7 +189,7 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisibl
       if (unlisten) unlisten()
       if (completedTimerRef.current) clearTimeout(completedTimerRef.current)
     }
-  }, [])
+  }, [isExternalEngine])
 
   // Keyboard navigation & accessibility
   useEffect(() => {
@@ -218,7 +317,15 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisibl
       pendingItems + inflightItems,
       commitRows.filter(row => row.status === 'pending' || row.status === 'in_flight').length,
     )
-    pillText = 'Commit Queue (' + activeCount + ')'
+    if (activeCount === 0 && showCompletedBanner) {
+      pillText = 'All Changes Saved'
+    } else if (activeCount > 0 && state === 'paused_playback') {
+      pillText = `Commit Queue (${activeCount} · Paused)`
+    } else if (activeCount > 0 && state === 'cooldown') {
+      pillText = `Commit Queue (${activeCount} · Cooldown)`
+    } else {
+      pillText = 'Commit Queue (' + activeCount + ')'
+    }
   }
 
   const control = (
@@ -280,9 +387,14 @@ export const CommitStatusPill: React.FC<CommitStatusPillProps> = ({ alwaysVisibl
           telemetry={telemetry}
           model={model}
           isCurate={alwaysVisible}
+          isExternalEngine={useExternalDerived}
           onClose={() => {
             setIsOpen(false)
             triggerRef.current?.focus()
+          }}
+          onClearRecent={() => {
+            onClearRecentCommits?.()
+            setShowCompletedBanner(false)
           }}
           onTogglePause={handleTogglePause}
           onCancelPending={handleCancelPending}

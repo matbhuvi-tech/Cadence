@@ -265,12 +265,14 @@ export function createFetchHttpCoreBridge(): HttpCoreTransportBridge {
     async postCoreRequest(profile, req) {
       const base = normalizeCoreBaseUrl(profile.baseUrl)
       const controller = new AbortController()
+      const op = typeof req.operation === 'string' ? req.operation : ''
       const admitsTrack =
         req.operation === 'queue.replace' ||
         (req.operation === 'playback.control' && req.action === 'play') ||
         (req.operation === 'queue.control' && req.action !== 'modes')
+      const timeoutMs = admitsTrack ? 180_000 : op.startsWith('curate.') ? 90_000 : 15_000
       // The Windows engine can synchronously admit large DSD files from NAS while idle.
-      const timer = setTimeout(() => controller.abort(), admitsTrack ? 180_000 : 15_000)
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
       try {
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',

@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { CommitStatusPill, buildCommitQueueDrawerModel } from '../components/CommandBar/CommitStatusPill'
+import {
+  CommitStatusPill,
+  buildCommitQueueDrawerModel,
+  deriveExternalEngineCommitTelemetry,
+} from '../components/CommandBar/CommitStatusPill'
 import { CommitQueueDrawer } from '../components/CommandBar/CommitQueueDrawer'
 import type { CurateCommitRow } from '../core/curateCommit'
 
@@ -49,4 +53,74 @@ test('an idle Curate drawer omits the previous batch and its controls', () => {
   }))
   assert.match(html, /The queue is empty/)
   assert.doesNotMatch(html, /Previous batch|74 of 77|3 failed|Undo Batch/)
+})
+
+test('external Engine commit queue derives live status and displays Recently Finished receipts', () => {
+  const writingTelemetry = deriveExternalEngineCommitTelemetry(
+    [
+      { id: 'j1', trackId: 't1', status: 'in_flight', payloadJson: '{}' },
+      { id: 'j2', trackId: 't2', status: 'pending', engineJobState: 'approved_waiting_idle', payloadJson: '{}' },
+    ],
+    'idle',
+  )
+  assert.equal(writingTelemetry.state, 'writing')
+  assert.equal(writingTelemetry.pendingItems, 1)
+  assert.equal(writingTelemetry.inflightItems, 1)
+
+  const pausedTelemetry = deriveExternalEngineCommitTelemetry(
+    [{ id: 'j1', trackId: 't1', status: 'pending', engineJobState: 'approved_waiting_idle', payloadJson: '{}' }],
+    'playing',
+  )
+  assert.equal(pausedTelemetry.state, 'paused_playback')
+
+  const cooldownTelemetry = deriveExternalEngineCommitTelemetry(
+    [{ id: 'j1', trackId: 't1', status: 'pending', engineJobState: 'cooling_down', payloadJson: '{}' }],
+    'idle',
+  )
+  assert.equal(cooldownTelemetry.state, 'cooldown')
+
+  const finishedRows: CurateCommitRow[] = [
+    {
+      id: 'j1',
+      trackId: 't1',
+      status: 'completed',
+      payloadJson: JSON.stringify({ album: 'Kizhakku Vasal', title: 'Veettukku Veettukku' }),
+    },
+    {
+      id: 'j2',
+      trackId: 't2',
+      status: 'failed',
+      payloadJson: JSON.stringify({ album: 'Kizhakku Vasal', title: 'Track 2' }),
+      errorMessage: 'Access denied on NAS share',
+    },
+  ]
+  const doneTelemetry = deriveExternalEngineCommitTelemetry(finishedRows, 'idle')
+  assert.equal(doneTelemetry.state, 'idle')
+  assert.equal(doneTelemetry.completedItems, 1)
+  assert.equal(doneTelemetry.failedItems, 1)
+
+  const model = buildCommitQueueDrawerModel(finishedRows, doneTelemetry)
+  assert.equal(model.recentAlbums.length, 1)
+  assert.equal(model.recentAlbums[0].completedCount, 1)
+  assert.equal(model.recentAlbums[0].failedCount, 1)
+
+  const noop = () => {}
+  const html = renderToStaticMarkup(createElement(CommitQueueDrawer, {
+    id: 'queue',
+    drawerRef: null,
+    telemetry: doneTelemetry,
+    model,
+    isCurate: true,
+    isExternalEngine: true,
+    onClose: noop,
+    onClearRecent: noop,
+    onTogglePause: noop,
+    onCancelPending: noop,
+    onUndoBatch: noop,
+    onRetryMounts: noop,
+  }))
+  assert.match(html, /Recently Finished/)
+  assert.match(html, /1 saved · 1 failed/)
+  assert.match(html, /Access denied on NAS share/)
+  assert.doesNotMatch(html, /The queue is empty/)
 })

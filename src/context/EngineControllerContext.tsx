@@ -87,6 +87,7 @@ export interface EngineControllerContextValue {
   coreRefreshCatalog: () => Promise<void>
   resolveCoreArtworkUrl: (rawReleaseId: string) => Promise<string | null>
   getCachedCoreArtworkUrl: (rawReleaseId: string) => string | null
+  artworkVersion: number
   subscribeEngineEvents: (listener: (event: EngineEventRecord) => void) => () => void
   selectLocalEndpointWithCoreGuard: (endpoint: AudioEndpoint) => Promise<void>
   confirmRs130Takeover: () => Promise<void>
@@ -178,6 +179,43 @@ function formatCoreSampleRateStr(
   return rawFormat ? 'Core Stream' : 'Core Stream'
 }
 
+export function cleanEditionLabel(rawEdition?: string | null, albumTitle?: string | null): string {
+  if (!rawEdition) return ''
+  let cleaned = rawEdition
+    .replace(/\b(?:lossless|flac|wav|eac|web|cd)[-\s]+rip\b/gi, ' ')
+    .replace(/\bcdrip\b/gi, ' ')
+    .replace(/\(\s*[-–—_:]*\s*\)|\[\s*[-–—_:]*\s*\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s\-–—_:]+|[\s\-–—_:]+$/g, '')
+    .trim()
+  if (!cleaned) return ''
+  const title = albumTitle?.trim() || ''
+  if (title) {
+    if (cleaned.toLowerCase() === title.toLowerCase()) return ''
+    if (cleaned.toLowerCase().startsWith(title.toLowerCase())) {
+      const rest = cleaned.slice(title.length)
+      if (!rest || /^[^a-z0-9]/i.test(rest)) {
+        const stripped = rest
+          .replace(/^[\s\-–—_:]+|[\s\-–—_:]+$/g, '')
+          .trim()
+        cleaned = stripped.replace(/^(?:\((.*)\)|\[(.*)\])$/, '$1$2').trim()
+      }
+    }
+    if (!cleaned || cleaned.toLowerCase() === title.toLowerCase()) return ''
+    if (title.toLowerCase().includes(cleaned.toLowerCase())) return ''
+  }
+  return cleaned
+}
+
+export function selectCatalogTracksForUi(
+  hydrated: readonly CoreCatalogTrack[],
+  snapshotTracks: readonly CoreCatalogTrack[],
+): readonly CoreCatalogTrack[] {
+  return hydrated.length > 0 && hydrated.length >= snapshotTracks.length
+    ? hydrated
+    : snapshotTracks
+}
+
 export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
   tracks: Track[]
   releases: Release[]
@@ -198,11 +236,8 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
       format === 'DSD' || (ct.sampleRate ?? 0) > 48_000 || (ct.bitDepth ?? 0) > 16
     const discNumber = ct.discNumber ?? 1
     const releaseYear = ct.releaseYear ?? 0
-    const editionLabel = ct.edition?.trim() || ''
-    const displayAlbumTitle =
-      editionLabel && !ct.album.toLowerCase().includes(editionLabel.toLowerCase())
-        ? `${ct.album} (${editionLabel})`
-        : ct.album
+    const editionLabel = cleanEditionLabel(ct.edition, ct.album)
+    const displayAlbumTitle = editionLabel ? `${ct.album} (${editionLabel})` : ct.album
     const displayAlbumArtist = ct.isCompilation
       ? 'Various Artists'
       : ct.albumArtist?.trim() || ct.artist
@@ -219,6 +254,8 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
       composerName: ct.composerName ?? undefined,
       genre: ct.genreTags?.[0],
       folderName: ct.folderName ?? undefined,
+      folderPath: ct.folderPath?.trim() || undefined,
+      fileName: ct.fileName?.trim() || undefined,
       language: ct.language ?? undefined,
       drScore: ct.dynamicRange ?? undefined,
       lyrics: ct.lyrics ?? undefined,
@@ -261,6 +298,9 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
         existing.release.releaseYear = releaseYear
         existing.release.originalYear = releaseYear
       }
+      if (!existing.release.folderPath && ct.folderPath?.trim()) {
+        existing.release.folderPath = ct.folderPath.trim()
+      }
       if (!existing.release.composerName && ct.composerName) {
         existing.release.composerName = ct.composerName
       }
@@ -282,7 +322,7 @@ export function mapCoreCatalogToUi(tracks: readonly CoreCatalogTrack[]): {
           masterReleaseId: releaseId,
           title: displayAlbumTitle,
           folderName: ct.folderName?.trim() || editionLabel || ct.album,
-          folderPath: '',
+          folderPath: ct.folderPath?.trim() || '',
           artistCredit: displayAlbumArtist,
           composerName: ct.composerName ?? undefined,
           releaseYear,
@@ -364,6 +404,8 @@ export const EngineControllerProvider: React.FC<{
   const [isBootstrapping, setIsBootstrapping] = useState<boolean>(() => !storeOverride)
   const initialConnectionRef = useRef<Promise<void> | null>(null)
   const eventListenersRef = useRef(new Set<(event: EngineEventRecord) => void>())
+  const pendingCatalogRefreshRef = useRef(false)
+  const [artworkVersion, setArtworkVersion] = useState(0)
   const artworkCacheRef = useRef<EngineArtworkCache | null>(null)
   if (!artworkCacheRef.current) {
     artworkCacheRef.current = createEngineArtworkCache({
@@ -417,6 +459,7 @@ export const EngineControllerProvider: React.FC<{
 
   useEffect(() => {
     if (!isCoreActive || !activeProfile) {
+      pendingCatalogRefreshRef.current = false
       artworkCacheRef.current?.clear()
       void tauriBridge.coreDisconnectEvents()
       return
@@ -425,6 +468,33 @@ export const EngineControllerProvider: React.FC<{
     let cancelled = false
     let unlisten: (() => void) | undefined
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let catalogRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+    const isPlaybackIdleNow = () => {
+      const snapActivity = store.getState().view.snapshot?.playback.activity
+      return activityRef.current === 'idle' && snapActivity !== 'playing' && snapActivity !== 'paused'
+    }
+
+    const scheduleCatalogRefresh = () => {
+      if (cancelled) return
+      if (!isPlaybackIdleNow()) {
+        pendingCatalogRefreshRef.current = true
+        return
+      }
+      if (catalogRefreshTimer !== null) {
+        clearTimeout(catalogRefreshTimer)
+      }
+      catalogRefreshTimer = setTimeout(() => {
+        catalogRefreshTimer = null
+        if (cancelled) return
+        if (!isPlaybackIdleNow()) {
+          pendingCatalogRefreshRef.current = true
+          return
+        }
+        pendingCatalogRefreshRef.current = false
+        void store.refreshCatalog().catch(() => {})
+      }, 400)
+    }
 
     const scheduleSseReconnect = () => {
       if (cancelled || reconnectTimer !== null) return
@@ -435,7 +505,7 @@ export const EngineControllerProvider: React.FC<{
           .coreConnectEvents(activeProfile, activeProfile.engineId)
           .then(() => {
             if (!cancelled) {
-              void store.refreshCatalog().catch(() => {})
+              scheduleCatalogRefresh()
             }
           })
           .catch(() => {
@@ -450,7 +520,17 @@ export const EngineControllerProvider: React.FC<{
         const payload = ev.payload as EngineEventRecord | null
         if (!payload || typeof payload.event !== 'string') return
         if (payload.event === 'catalog.changed') {
-          void store.refreshCatalog().catch(() => {})
+          artworkCacheRef.current?.invalidate()
+          setArtworkVersion((v) => v + 1)
+          scheduleCatalogRefresh()
+        } else if (payload.event === 'enrichment.updated') {
+          const data = (payload.data ?? {}) as Record<string, unknown>
+          const rid = typeof data.releaseId === 'string' ? data.releaseId : undefined
+          const act = typeof data.action === 'string' ? data.action : undefined
+          if (data.artworkOutcome || act === 'save_overlay' || act === 'accept_proposal') {
+            artworkCacheRef.current?.invalidate(rid)
+            setArtworkVersion((v) => v + 1)
+          }
         } else if (payload.event === 'stream.disconnected') {
           scheduleSseReconnect()
         }
@@ -479,10 +559,23 @@ export const EngineControllerProvider: React.FC<{
         clearTimeout(reconnectTimer)
         reconnectTimer = null
       }
+      if (catalogRefreshTimer !== null) {
+        clearTimeout(catalogRefreshTimer)
+        catalogRefreshTimer = null
+      }
       unlisten?.()
       void tauriBridge.coreDisconnectEvents()
     }
   }, [isCoreActive, activeProfile, store])
+
+  useEffect(() => {
+    if (!isCoreActive || !pendingCatalogRefreshRef.current) return
+    const snapActivity = activeCoreSnapshot?.playback.activity
+    if (activityRef.current === 'idle' && snapActivity !== 'playing' && snapActivity !== 'paused') {
+      pendingCatalogRefreshRef.current = false
+      void store.refreshCatalog().catch(() => {})
+    }
+  }, [isCoreActive, isPlaying, isPaused, activeCoreSnapshot?.playback.activity, store])
 
   useEffect(() => {
     return () => {
@@ -612,10 +705,10 @@ export const EngineControllerProvider: React.FC<{
 
   const { tracks: coreCatalogTracks, releases: coreCatalogReleases } = useMemo(() => {
     if (!isCoreActive || !activeCoreSnapshot) return { tracks: [], releases: [] }
-    const allTracks =
-      state.hydratedCatalogTracks.length > activeCoreSnapshot.catalog.tracks.length
-        ? state.hydratedCatalogTracks
-        : activeCoreSnapshot.catalog.tracks
+    const allTracks = selectCatalogTracksForUi(
+      state.hydratedCatalogTracks,
+      activeCoreSnapshot.catalog.tracks,
+    )
     return mapCoreCatalogToUi(allTracks)
   }, [isCoreActive, activeCoreSnapshot?.catalog.tracks, state.hydratedCatalogTracks])
 
@@ -819,6 +912,7 @@ export const EngineControllerProvider: React.FC<{
       },
       resolveCoreArtworkUrl,
       getCachedCoreArtworkUrl,
+      artworkVersion,
       subscribeEngineEvents,
       selectLocalEndpointWithCoreGuard: async (endpoint) => {
         const intercepted = store.requestRs130TakeoverIfControlledByCore(endpoint, () =>
@@ -846,6 +940,7 @@ export const EngineControllerProvider: React.FC<{
     selectEndpoint,
     resolveCoreArtworkUrl,
     getCachedCoreArtworkUrl,
+    artworkVersion,
     subscribeEngineEvents,
   ])
 

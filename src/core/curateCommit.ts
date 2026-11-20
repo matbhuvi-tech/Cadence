@@ -23,6 +23,7 @@ export interface CurateCommitRow {
   trackId: string
   status: 'pending' | 'in_flight' | 'failed' | 'completed'
   payloadJson: string
+  engineJobState?: 'approved_waiting_idle' | 'cooling_down' | 'applying' | 'verified' | 'failed'
   applies?: boolean
   hasNewerDraft?: boolean
   hasHeldEdits?: boolean

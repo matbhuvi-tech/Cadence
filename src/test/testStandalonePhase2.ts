@@ -64,7 +64,9 @@ test('Phase 2: parseCoreV2Descriptor & enriched CatalogTrack v2 fields', () => {
         bitDepth: 1,
         composerName: 'Ilaiyaraaja',
         genreTags: ['Soundtrack'],
-        folderName: 'Master/Tamil/Thillana',
+        folderName: 'Thillana',
+        folderPath: '//192.168.1.6/rajafans/Master/Tamil/Ilaiyaraaja/Thillana',
+        fileName: '01 Thillana.dsf',
         language: null,
         dynamicRange: null,
         hasCoverArt: true,
@@ -77,6 +79,8 @@ test('Phase 2: parseCoreV2Descriptor & enriched CatalogTrack v2 fields', () => {
   assert.equal(page.tracks[0].fingerprintStatus, 'UNSUPPORTED_DSD')
   assert.equal(page.tracks[0].hasCoverArt, true)
   assert.equal(page.tracks[0].composerName, 'Ilaiyaraaja')
+  assert.equal(page.tracks[0].folderPath, '//192.168.1.6/rajafans/Master/Tamil/Ilaiyaraaja/Thillana')
+  assert.equal(page.tracks[0].fileName, '01 Thillana.dsf')
 })
 
 test('Phase 2: EngineClient invokes v2 fs.browse, folders, playlists, split, and curate endpoints', async () => {
