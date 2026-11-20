@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Interactive installer and repeatable redeployer for the Linux Playback Engine."""
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -120,6 +122,64 @@ def fetch(url):
             return response.read(2_000_000).decode('utf-8')
     except (urllib.error.URLError, OSError, UnicodeError) as exc:
         raise InstallError(f'Could not download {url}: {exc}') from exc
+
+
+def parse_checksums(text):
+    """Parse SHA256SUMS manifest text into {filename: lowercase_hex_digest}."""
+    digests = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts[0].lower(), parts[1].strip().lstrip('*')
+        if name.startswith('./'):
+            name = name[2:]
+        if re.fullmatch(r'[0-9a-f]{64}', digest) and name:
+            if name in digests and digests[name] != digest:
+                raise InstallError(f'Conflicting checksum entries for {name} in cadence_checksums.txt.')
+            digests[name] = digest
+    return digests
+
+
+def verify_release_digest(filename, content_text, tag):
+    """Verify downloaded release asset text against cadence_checksums.txt (fail closed)."""
+    if not tag:
+        raise InstallError(f'Cannot verify {filename} without a release tag.')
+    checksums_text = None
+    env_path = os.environ.get('CADENCE_CHECKSUMS_FILE', '').strip()
+    if env_path and os.environ.get('CADENCE_INSTALLER_RELEASE') == tag:
+        candidate = Path(env_path)
+        if candidate.is_file():
+            checksums_text = candidate.read_text(encoding='utf-8')
+    if checksums_text is None:
+        try:
+            checksums_text = fetch(
+                f'https://github.com/{REPOSITORY}/releases/download/{tag}/cadence_checksums.txt'
+            )
+        except InstallError as exc:
+            if os.environ.get('CADENCE_ALLOW_UNVERIFIED') == '1':
+                print(
+                    f'Warning: cadence_checksums.txt unavailable for {tag}; '
+                    f'skipping digest verification for {filename} due to CADENCE_ALLOW_UNVERIFIED=1.',
+                    file=sys.stderr,
+                )
+                return
+            raise InstallError(
+                f'Could not download cadence_checksums.txt for {tag} to verify {filename}. '
+                'Set CADENCE_ALLOW_UNVERIFIED=1 only for legacy releases without checksums.'
+            ) from exc
+
+    checksums = parse_checksums(checksums_text)
+    expected = checksums.get(filename)
+    if not expected:
+        raise InstallError(f'{filename} is missing from cadence_checksums.txt for {tag}.')
+    actual = hashlib.sha256(content_text.encode('utf-8')).hexdigest()
+    if not hmac.compare_digest(actual, expected):
+        raise InstallError(f'SHA256 mismatch for {filename}: expected {expected}, got {actual}.')
+    print(f'Verified {filename} SHA256 ({actual[:12]}...)')
 
 
 def latest_release():
@@ -293,15 +353,21 @@ def local_compose(music, profile='standard'):
         raise InstallError(f'Unsupported deployment profile: {profile}')
     template_name = 'compose.hardened.yml' if profile == 'hardened' else 'compose.yml'
     nearby = Path(__file__).resolve().with_name(template_name)
-    if nearby.is_file():
+    installer_release = os.environ.get('CADENCE_INSTALLER_RELEASE', '').strip()
+    bootstrap_checksums = os.environ.get('CADENCE_CHECKSUMS_FILE', '').strip()
+    tag = os.environ.get('CADENCE_ACTIVE_TAG', '').strip()
+    allow_nearby = not (bootstrap_checksums and installer_release and tag and tag != installer_release)
+    if allow_nearby and nearby.is_file():
         compose = nearby.read_text(encoding='utf-8')
         print(f'Using Compose template alongside installer: {nearby}')
     else:
-        tag = os.environ.get('CADENCE_ACTIVE_TAG')
+        if not tag:
+            raise InstallError('Release tag is required to download Compose template.')
         try:
             compose = fetch(f'https://github.com/{REPOSITORY}/releases/download/{tag}/{template_name}')
         except InstallError:
             compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/{template_name}')
+        verify_release_digest(template_name, compose, tag)
     if profile == 'hardened':
         if not music:
             raise InstallError('Hardened Read-Only mode requires an existing local or NAS music directory.')
