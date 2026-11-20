@@ -1,0 +1,641 @@
+name: Release Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional SemVer tag (e.g. v0.2.0-rc.1) for dry-run build'
+        required: false
+        default: ''
+        type: string
+      publish_images:
+        description: 'Push Linux engine images to GHCR (manual dispatch only)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      semver: ${{ steps.meta.outputs.semver }}
+      has_semver: ${{ steps.meta.outputs.has_semver }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      should_publish: ${{ steps.meta.outputs.should_publish }}
+      should_push_images: ${{ steps.meta.outputs.should_push_images }}
+      tag: ${{ steps.meta.outputs.tag }}
+      commits: ${{ steps.meta.outputs.commits }}
+      sha: ${{ steps.meta.outputs.sha }}
+      date: ${{ steps.meta.outputs.date }}
+      summary: ${{ steps.meta.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - id: meta
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH_IMAGES: ${{ inputs.publish_images }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, sys
+          sys.path.insert(0, 'scripts/release')
+          import sync_version
+
+          ref = os.environ.get('GITHUB_REF', '')
+          ref_name = os.environ.get('GITHUB_REF_NAME', '')
+          event_name = os.environ.get('GITHUB_EVENT_NAME', '')
+          input_ver = os.environ.get('INPUT_VERSION', '').strip()
+          publish_images_input = os.environ.get('INPUT_PUBLISH_IMAGES', 'false').lower() == 'true'
+
+          is_tag = ref.startswith('refs/tags/v')
+          if is_tag:
+              release_tag = ref_name
+              parsed = sync_version.parse_semver(release_tag)
+              semver = parsed.semver
+              has_semver = 'true'
+              is_prerelease = 'true' if parsed.prerelease else 'false'
+              should_publish = 'true'
+              should_push_images = 'true'
+          elif input_ver:
+              parsed = sync_version.parse_semver(input_ver)
+              semver = parsed.semver
+              release_tag = input_ver if input_ver.startswith('v') else f'v{semver}'
+              has_semver = 'true'
+              is_prerelease = 'true' if parsed.prerelease else 'false'
+              should_publish = 'false'
+              should_push_images = 'true' if publish_images_input else 'false'
+          else:
+              release_tag = 'v0.0.0-dev'
+              semver = '0.0.0-dev'
+              has_semver = 'false'
+              is_prerelease = 'true'
+              should_publish = 'false'
+              should_push_images = 'true' if publish_images_input else 'false'
+
+          def git_out(*args):
+              res = subprocess.run(['git', *args], capture_output=True, text=True)
+              return res.stdout.strip() if res.returncode == 0 else ''
+
+          raw_desc = git_out('describe', '--tags', '--long', '--always')
+          sha = git_out('log', '-1', '--format=%h') or os.environ.get('GITHUB_SHA', '')[:7]
+          date = git_out('log', '-1', '--format=%cs')
+          summary = git_out('log', '-1', '--format=%s').replace('\r', ' ').replace('\n', ' ').strip()
+          tag = release_tag if is_tag else ''
+          commits = '0'
+          import re
+          m = re.match(r'^(.+)-([0-9]+)-g([0-9a-fA-F]+)$', raw_desc)
+          if is_tag:
+              tag = release_tag
+              commits = '0'
+          elif m:
+              tag = m.group(1)
+              commits = m.group(2)
+              sha = m.group(3)
+          elif not tag:
+              tag = release_tag
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+              for k, v in (
+                  ('release_tag', release_tag),
+                  ('semver', semver),
+                  ('has_semver', has_semver),
+                  ('is_prerelease', is_prerelease),
+                  ('should_publish', should_publish),
+                  ('should_push_images', should_push_images),
+                  ('tag', tag),
+                  ('commits', commits),
+                  ('sha', sha),
+                  ('date', date),
+                  ('summary', summary),
+              ):
+                  fh.write(f'{k}={v}\n')
+          PY
+
+  verify:
+    name: Verify tests and installers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            pwa/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Install frontend dependencies and build
+        run: |
+          npm ci
+          npm ci --prefix pwa
+          npm run build
+          npm run test:core-services
+
+      - name: Run packaging and release script tests
+        run: |
+          python3 -m unittest discover -s deploy/playback-engine -p test_installer.py -v
+          python3 -m unittest discover -s scripts/release -p "test_*.py" -v
+          bash -n deploy/playback-engine/install.sh
+
+      - name: Run headless Rust test suite
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
+
+  build-linux-engine:
+    name: Build Linux engine (${{ matrix.arch }})
+    needs: [prepare, verify]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync release version
+        if: needs.prepare.outputs.has_semver == 'true'
+        run: python3 scripts/release/sync_version.py --set "${{ needs.prepare.outputs.release_tag }}"
+
+      - name: Compute image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cadence-playback-engine" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: needs.prepare.outputs.should_push_images == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract native cadence-headless binary
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/playback-engine/Dockerfile
+          platforms: ${{ matrix.platform }}
+          target: binary
+          outputs: type=local,dest=./bin-out
+          cache-from: type=gha,scope=linux-engine-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=linux-engine-${{ matrix.arch }}
+          build-args: |
+            CADENCE_VERSION=${{ needs.prepare.outputs.release_tag }}
+            CADENCE_BUILD_TAG=${{ needs.prepare.outputs.tag }}
+            CADENCE_BUILD_COMMITS_SINCE_TAG=${{ needs.prepare.outputs.commits }}
+            CADENCE_BUILD_SHA=${{ needs.prepare.outputs.sha }}
+            CADENCE_BUILD_DATE=${{ needs.prepare.outputs.date }}
+            CADENCE_BUILD_SUMMARY=${{ needs.prepare.outputs.summary }}
+
+      - name: Smoke-test native Linux binary and package tarball
+        run: |
+          chmod +x ./bin-out/cadence-headless
+          ./bin-out/cadence-headless --version
+          ./bin-out/cadence-headless --help
+          ./bin-out/cadence-headless --validate-dragonfish-recipe deploy/truenas-dragonfish/custom-app-24.04.yaml --validate-dockerfile deploy/truenas-dragonfish/Dockerfile
+          mkdir -p dist-linux/cadence-playback-engine staging-linux
+          cp ./bin-out/cadence-headless \
+             deploy/playback-engine/cadence-playback-engine.service \
+             deploy/playback-engine/playback-engine.env.example \
+             deploy/playback-engine/README.md \
+             dist-linux/cadence-playback-engine/
+          tar -czf "staging-linux/Cadence.PlaybackEngine_${{ needs.prepare.outputs.semver }}_linux_${{ matrix.arch }}.tar.gz" -C dist-linux cadence-playback-engine
+
+      - name: Upload Linux standalone tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball-${{ matrix.arch }}
+          path: staging-linux/*.tar.gz
+          if-no-files-found: error
+
+      - name: Build local container image for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/playback-engine/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: cadence-playback-engine:smoke-${{ matrix.arch }}
+          cache-from: type=gha,scope=linux-engine-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=linux-engine-${{ matrix.arch }}
+          build-args: |
+            CADENCE_VERSION=${{ needs.prepare.outputs.release_tag }}
+            CADENCE_BUILD_TAG=${{ needs.prepare.outputs.tag }}
+            CADENCE_BUILD_COMMITS_SINCE_TAG=${{ needs.prepare.outputs.commits }}
+            CADENCE_BUILD_SHA=${{ needs.prepare.outputs.sha }}
+            CADENCE_BUILD_DATE=${{ needs.prepare.outputs.date }}
+            CADENCE_BUILD_SUMMARY=${{ needs.prepare.outputs.summary }}
+
+      - name: Smoke-test Linux container image (Standard & Hardened UID 568)
+        run: |
+          docker run --rm --entrypoint /bin/sh "cadence-playback-engine:smoke-${{ matrix.arch }}" \
+            -c 'command -v mount.cifs >/dev/null && /usr/local/bin/cadence-headless --version && /usr/local/bin/cadence-headless --help'
+          docker run --rm --user 568:568 --entrypoint /usr/local/bin/cadence-headless \
+            "cadence-playback-engine:smoke-${{ matrix.arch }}" --version
+
+      - name: Push Linux image by digest
+        id: push_image
+        if: needs.prepare.outputs.should_push_images == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/playback-engine/Dockerfile
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=linux-engine-${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            CADENCE_VERSION=${{ needs.prepare.outputs.release_tag }}
+            CADENCE_BUILD_TAG=${{ needs.prepare.outputs.tag }}
+            CADENCE_BUILD_COMMITS_SINCE_TAG=${{ needs.prepare.outputs.commits }}
+            CADENCE_BUILD_SHA=${{ needs.prepare.outputs.sha }}
+            CADENCE_BUILD_DATE=${{ needs.prepare.outputs.date }}
+            CADENCE_BUILD_SUMMARY=${{ needs.prepare.outputs.summary }}
+
+      - name: Export pushed digest
+        if: needs.prepare.outputs.should_push_images == 'true'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.push_image.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        if: needs.prepare.outputs.should_push_images == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-linux-manifest:
+    name: Merge & attest Linux container manifest
+    needs: [prepare, build-linux-engine]
+    if: needs.prepare.outputs.should_push_images == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Compute image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cadence-playback-engine" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble and inspect multi-arch manifest
+        id: manifest
+        working-directory: /tmp/digests
+        run: |
+          IMAGE="${{ steps.image.outputs.name }}"
+          TAG="${{ needs.prepare.outputs.release_tag }}"
+          SHA_TAG="sha-${{ needs.prepare.outputs.sha }}"
+          TAGS=(-t "${IMAGE}:${TAG}" -t "${IMAGE}:${SHA_TAG}")
+          if [ "${{ needs.prepare.outputs.is_prerelease }}" = "false" ]; then
+            TAGS+=(-t "${IMAGE}:latest")
+          fi
+          docker buildx imagetools create "${TAGS[@]}" $(printf "${IMAGE}@sha256:%s " *)
+          docker buildx imagetools inspect "${IMAGE}:${TAG}"
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" | awk '/^Digest:/{print $2; exit}')
+          if [ -z "$DIGEST" ]; then
+            DIGEST="sha256:$(docker buildx imagetools inspect --raw "${IMAGE}:${TAG}" | sha256sum | awk '{print $1}')"
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest container image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+  build-windows:
+    name: Build Windows installers
+    needs: [prepare, verify]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Sync release version
+        if: needs.prepare.outputs.has_semver == 'true'
+        run: python scripts/release/sync_version.py --set "${{ needs.prepare.outputs.release_tag }}"
+
+      - name: Install Node dependencies and test Rust
+        run: |
+          npm ci
+          npm ci --prefix pwa
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Windows Desktop and Playback Engine NSIS installers
+        shell: pwsh
+        env:
+          CADENCE_VERSION: ${{ needs.prepare.outputs.release_tag }}
+          CADENCE_BUILD_TAG: ${{ needs.prepare.outputs.tag }}
+          CADENCE_BUILD_COMMITS_SINCE_TAG: ${{ needs.prepare.outputs.commits }}
+          CADENCE_BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+          CADENCE_BUILD_DATE: ${{ needs.prepare.outputs.date }}
+          CADENCE_BUILD_SUMMARY: ${{ needs.prepare.outputs.summary }}
+          CADENCE_BUILD_DIRTY: 'false'
+        run: |
+          npm run tauri:build -- --bundles nsis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\deploy\windows-engine\build-windows-engine.ps1 -RequireInstaller
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Smoke-test Windows Engine CLI and stage installers
+        shell: pwsh
+        run: |
+          $ver = (.\src-tauri\target\release\cadence-engine.exe --version 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $ver.StartsWith("cadence-engine ")) {
+            throw "Unexpected cadence-engine --version output (exit=$LASTEXITCODE): $ver"
+          }
+          Write-Host $ver
+          $help = (.\src-tauri\target\release\cadence-engine.exe --help 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $help.Contains("Cadence Playback Engine")) {
+            throw "Unexpected cadence-engine --help output (exit=$LASTEXITCODE): $help"
+          }
+          Write-Host $help
+
+          $semver = "${{ needs.prepare.outputs.semver }}"
+          $nsisDir = "src-tauri\target\release\bundle\nsis"
+          $desktopExe = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" |
+            Where-Object { $_.Name -ne "cadence-engine-setup.exe" } |
+            Select-Object -First 1
+          if (-not $desktopExe) {
+            throw "Desktop NSIS setup executable not found in $nsisDir"
+          }
+          $engineExe = Join-Path $nsisDir "cadence-engine-setup.exe"
+          if (-not (Test-Path $engineExe)) {
+            throw "Engine NSIS setup executable not found at $engineExe"
+          }
+
+          New-Item -ItemType Directory -Force -Path "staging-windows" | Out-Null
+          Copy-Item $desktopExe.FullName "staging-windows\Cadence.Desktop_${semver}_x64-setup.exe"
+          Copy-Item $engineExe "staging-windows\Cadence.PlaybackEngine_${semver}_x64-setup.exe"
+
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: staging-windows/*.exe
+          if-no-files-found: error
+
+  build-android:
+    name: Build Android Remote APK
+    needs: [prepare, verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pwa/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('pwa/android/**/*.gradle*', 'pwa/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Sync release version
+        if: needs.prepare.outputs.has_semver == 'true'
+        run: python3 scripts/release/sync_version.py --set "${{ needs.prepare.outputs.release_tag }}"
+
+      - name: Sync Capacitor web assets
+        run: |
+          npm ci --prefix pwa
+          npm run --prefix pwa cap:sync
+
+      - name: Build and stage Android APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SHOULD_PUBLISH: ${{ needs.prepare.outputs.should_publish }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+          SEMVER: ${{ needs.prepare.outputs.semver }}
+        run: |
+          mkdir -p staging-android
+          cd pwa/android
+          chmod +x ./gradlew
+          if [ -n "${ANDROID_KEYSTORE_BASE64}" ]; then
+            if [ -z "${ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${ANDROID_KEY_ALIAS}" ] || [ -z "${ANDROID_KEY_PASSWORD}" ]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is set, but ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, or ANDROID_KEY_PASSWORD is missing."
+              exit 1
+            fi
+            KEYSTORE_FILE="${RUNNER_TEMP}/cadence-release.jks"
+            printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${KEYSTORE_FILE}"
+            export CADENCE_KEYSTORE_PATH="${KEYSTORE_FILE}"
+            export CADENCE_KEYSTORE_PASSWORD="${ANDROID_KEYSTORE_PASSWORD}"
+            export CADENCE_KEY_ALIAS="${ANDROID_KEY_ALIAS}"
+            export CADENCE_KEY_PASSWORD="${ANDROID_KEY_PASSWORD}"
+            ./gradlew assembleRelease --no-daemon
+            "${ANDROID_HOME}/build-tools/36.0.0/apksigner" verify app/build/outputs/apk/release/app-release.apk
+            cp app/build/outputs/apk/release/app-release.apk "../../staging-android/Cadence.Remote_${SEMVER}.apk"
+          elif [ "${SHOULD_PUBLISH}" = "true" ] && [ "${IS_PRERELEASE}" = "false" ]; then
+            echo "::error::Stable releases require release-signed Android APKs. Configure repository secrets: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD."
+            exit 1
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not configured; building debug-signed APK for prerelease/manual test."
+            ./gradlew assembleDebug --no-daemon
+            cp app/build/outputs/apk/debug/app-debug.apk "../../staging-android/Cadence.Remote_${SEMVER}-debug.apk"
+          fi
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: staging-android/*.apk
+          if-no-files-found: error
+
+  draft-release:
+    name: Create draft GitHub release
+    needs: [prepare, build-linux-engine, merge-linux-manifest, build-windows, build-android]
+    if: needs.prepare.outputs.should_publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: linux-tarball-*
+          merge-multiple: true
+
+      - name: Download Windows installers
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installers
+          path: release-assets
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: release-assets
+
+      - name: Stage Linux guided setup bundle and installer files
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SEMVER: ${{ needs.prepare.outputs.semver }}
+        run: |
+          mkdir -p linux-bundle
+          python3 - <<'PY'
+          import os, pathlib
+          tag = os.environ['RELEASE_TAG']
+          src = pathlib.Path('deploy/playback-engine/install.sh').read_text(encoding='utf-8')
+          pathlib.Path('release-assets/install.sh').write_text(src.replace('__CADENCE_RELEASE_TAG__', tag), encoding='utf-8')
+          PY
+          cp deploy/playback-engine/install.py \
+             deploy/playback-engine/compose.yml \
+             deploy/playback-engine/compose.hardened.yml \
+             release-assets/
+          cp release-assets/install.sh \
+             release-assets/install.py \
+             release-assets/compose.yml \
+             release-assets/compose.hardened.yml \
+             deploy/playback-engine/.env.example \
+             deploy/playback-engine/README.md \
+             linux-bundle/
+          python3 - <<'PY'
+          import os, pathlib, zipfile
+          semver = os.environ['SEMVER']
+          out = pathlib.Path('release-assets') / f'Cadence.PlaybackEngine_{semver}_Linux-setup.zip'
+          with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(pathlib.Path('linux-bundle').iterdir()):
+                  zf.write(path, arcname=path.name)
+          PY
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd release-assets
+          rm -f cadence_checksums.txt
+          LC_ALL=C ls -1 | sort | xargs sha256sum > ../cadence_checksums.txt
+          mv ../cadence_checksums.txt cadence_checksums.txt
+          cat cadence_checksums.txt
+
+      - name: Attest release artifact provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'release-assets/*'
+
+      - name: Publish Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SEMVER: ${{ needs.prepare.outputs.semver }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+        run: |
+          cat > release-notes.md <<EOF
+          ## Choose Your Setup
+
+          | Your Setup | Download |
+          | :--- | :--- |
+          | **Single Windows PC** *(USB DAC / WASAPI Exclusive / ASIO / UPnP)* | \`Cadence.Desktop_${SEMVER}_x64-setup.exe\` + \`Cadence.PlaybackEngine_${SEMVER}_x64-setup.exe\` |
+          | **Linux / TrueNAS SCALE Audio Server + Windows Remote** | \`install.sh\` *(or \`Cadence.PlaybackEngine_${SEMVER}_Linux-setup.zip\`)* + \`Cadence.Desktop_${SEMVER}_x64-setup.exe\` |
+          | **Phone / Tablet Remote** | Built-in Web PWA via QR code, or \`Cadence.Remote_${SEMVER}*.apk\` *(Android)* |
+
+          ### Linux / TrueNAS Profiles
+          - **Standard *(Default — \`compose.yml\`)*:** Supports dynamic in-app SMB mounting (\`mount.cifs\`) and optional Curate tag writes.
+          - **Hardened Read-Only *(Optional — \`compose.hardened.yml\`)*:** Non-root \`UID/GID 568\`, \`IPC_LOCK\` only, AppArmor enforced, local/NAS \`/music:ro\`.
+
+          ### Verification & Upgrade Safety
+          - Verify downloads against \`cadence_checksums.txt\` (\`sha256sum -c cadence_checksums.txt\` / \`Get-FileHash\`).
+          - Back up the full engine data directory—including \`pairing-token\`—before upgrading.
+          EOF
+
+          PRERELEASE_FLAG=()
+          if [ "${IS_PRERELEASE}" = "true" ]; then
+            PRERELEASE_FLAG+=(--prerelease)
+          fi
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --draft \
+              "${PRERELEASE_FLAG[@]}" \
+              --title "Cadence ${RELEASE_TAG}" \
+              --notes-file release-notes.md
+            gh release upload "${RELEASE_TAG}" release-assets/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" release-assets/* \
+              --draft \
+              "${PRERELEASE_FLAG[@]}" \
+              --title "Cadence ${RELEASE_TAG}" \
+              --notes-file release-notes.md \
+              --generate-notes
+          fi

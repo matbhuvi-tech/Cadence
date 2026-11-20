@@ -214,25 +214,39 @@ When playback is stopped and the transport enters its idle state, Cadence unlock
 
 ## Download and Install
 
-Cadence is a native Windows desktop application. **You do not need Node.js, Rust, a terminal, or a developer environment to use Cadence.**
+Cadence uses an **Engine-First** architecture: the **Playback Engine** owns your music catalog (`cadence.db`), file scanning, cover artwork, tag commits, and bit-perfect audio output, while **Cadence Desktop** and **Cadence Remote** act as thin controllers. **You do not need Node.js, Rust, or a developer environment to use Cadence.**
 
-1. Download the latest Windows installer (`.exe`) from the [**Releases**](../../releases) page.
-2. Run the installer and launch **Cadence**.
-3. Select your local or NAS music library folders when prompted.
-4. Choose your local **WASAPI Exclusive** DAC or **UPnP/DLNA** network renderer, enable **Bit-Perfect Purity Mode**, and start listening.
-5. *(Optional)* Click the **Remote** icon in the top bar and scan the QR code with your phone on the same Wi-Fi network to launch the **Cadence Mobile Remote PWA**.
+### Choose Your Setup
+
+| Your Setup | Download from [Releases](https://github.com/matbhuvi-tech/Cadence/releases) | Notes |
+| :--- | :--- | :--- |
+| **Single Windows PC** *(USB DAC via WASAPI Exclusive / ASIO, or UPnP)* | `Cadence.Desktop_<ver>_x64-setup.exe` **+** `Cadence.PlaybackEngine_<ver>_x64-setup.exe` | Install both on your PC. Desktop auto-discovers the local Windows Engine on `127.0.0.1:4040`. |
+| **Linux / TrueNAS SCALE Audio Server + Windows Remote** | `install.sh` *(or `Cadence.PlaybackEngine_<ver>_Linux-setup.zip`)* **+** `Cadence.Desktop_<ver>_x64-setup.exe` | Linux Engine pulls `ghcr.io/matbhuvi-tech/cadence-playback-engine` (`amd64`/`arm64`). Supports **Standard (SMB mounting — default)** or **Hardened Read-Only** (`UID 568`, optional). |
+| **Phone / Tablet Remote** *(iOS & Android)* | **Built-in Web PWA** *(zero install)* or `Cadence.Remote_<ver>.apk` *(Android)* | Open the **Remote** icon in Desktop and scan the QR code over Wi-Fi, or install the Android APK. |
+
+### Quick Start
+
+1. Download the installers for your setup from the [**GitHub Releases**](https://github.com/matbhuvi-tech/Cadence/releases) page (verify checksums against `cadence_checksums.txt`).
+2. **Start your Playback Engine:**
+   - **Windows PC:** Run `Cadence.PlaybackEngine_<ver>_x64-setup.exe` (runs silently in your system tray).
+   - **Linux / TrueNAS SCALE:** Run `sh install.sh` (accept defaults for **Standard SMB** mode, or choose **Hardened Read-Only** for non-root `/music:ro` NAS mounts). See the [Linux Playback Engine guide](deploy/playback-engine/README.md) for full details.
+3. **Launch Cadence Desktop** (`Cadence.Desktop_<ver>_x64-setup.exe`), select your Playback Engine when prompted, and add your local, NAS, or SMB music folders via **Browse → Add Folder**.
+4. Choose your **WASAPI Exclusive** DAC or **UPnP/DLNA** network renderer, enable **Bit-Perfect Purity Mode**, and start listening.
+5. *(Optional)* Click the **Remote** icon in the top bar and scan the QR code with your phone on the same Wi-Fi network to launch **Cadence Remote**.
 
 ---
 
 ## Your Library Stays Yours
 
-- **100% Local Catalog & Playback:** Cadence stores its catalog database locally (`%APPDATA%/cadence.db`) and streams audio directly from your RAM to your hardware endpoint. Your music files are never uploaded to the cloud.
+- **100% Local Catalog & Playback:** Your Playback Engine stores its catalog database locally (`%LOCALAPPDATA%\CadenceEngine\cadence.db` on Windows Playback Engine, or `/var/lib/cadence/cadence.db` on Linux/TrueNAS) and streams audio directly from RAM to your hardware endpoint. Your music files are never uploaded to the cloud.
 - **Opt-In Metadata Enrichment:** Online metadata providers (MusicBrainz, Apple Music catalog lookup, or optional Gemini AI provenance enrichment) are only queried when you actively use the **Curate** workbench while playback is stopped.
 
 ---
 
 ## Documentation & Links
 
+- **[Linux & TrueNAS Playback Engine Guide (`deploy/playback-engine/README.md`)](deploy/playback-engine/README.md):** Guided installation, Standard (SMB) vs. Hardened Read-Only Compose profiles, upgrades, and rollback.
 - **[Audio Playback & Streaming Optimizations (`docs/AUDIO_PLAYBACK_OPTIMIZATIONS.md`)](docs/AUDIO_PLAYBACK_OPTIMIZATIONS.md):** Full 6-layer architectural breakdown of `VirtualLock` memory pinning, MMCSS core isolation, and the 3-state adaptive UPnP pacer.
 - **[Cover Art Resolution Architecture (`docs/COVER_ART_RESOLUTION_ARCHITECTURE.md`)](docs/COVER_ART_RESOLUTION_ARCHITECTURE.md):** How Cadence resolves, caches, and serves high-resolution artwork without interrupting playback.
+- **[Packaging & Distribution Analysis (`docs/PACKAGING_AND_DISTRIBUTION_ANALYSIS.md`)](docs/PACKAGING_AND_DISTRIBUTION_ANALYSIS.md):** Comparison against Navidrome's multi-platform packaging model and Cadence's release engineering roadmap.
 - **[Developer Guide (`DEVELOPER.md`)](DEVELOPER.md):** Repository structure, build commands, and global engineering invariants for contributors.

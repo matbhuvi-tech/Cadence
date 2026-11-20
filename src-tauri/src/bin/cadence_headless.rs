@@ -60,6 +60,8 @@ impl Renderer for HeadlessMailboxRenderer {
 }
 
 enum CliMode {
+    Help,
+    Version,
     Stdio(HeadlessConfig),
     Dragonfish(DragonfishConfig),
     Healthcheck {
@@ -130,8 +132,29 @@ fn env_bool(key: &str, default: bool) -> bool {
     }
 }
 
+fn print_usage() {
+    println!(
+        "Cadence Headless Playback Engine\n\
+         Usage:\n\
+         \tcadence-headless --dragonfish [--app-data-dir <path>] [--music-dir <path>] [--tmp-dir <path>] [--advertised-ip <ipv4>] [--control-port <u16>] [--media-port <u16>] [--label <name>] [--headroom-mb <mb>]\n\
+         \tcadence-headless --healthcheck [--control-port <u16>]\n\
+         \tcadence-headless --backup <tag> [--app-data-dir <path>] | --restore <tag> [--app-data-dir <path>]\n\
+         \tcadence-headless --export-snapshot <src.db> <dest.db> | --preview-import ... | --import-snapshot ... | --rollback-import ...\n\
+         \tcadence-headless --validate-dragonfish-recipe <yaml> [--validate-dockerfile <dockerfile>]\n\
+         \tcadence-headless --db <path> [stdio flags...]\n\
+         \tcadence-headless --version | --help"
+    );
+}
+
 fn parse_args() -> Result<CliMode, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return Ok(CliMode::Help);
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        return Ok(CliMode::Version);
+    }
 
     let is_dragonfish = args.iter().any(|a| a == "--dragonfish");
     let is_healthcheck = args.iter().any(|a| a == "--healthcheck");
@@ -561,6 +584,12 @@ fn main() {
     };
 
     match mode {
+        CliMode::Help => {
+            print_usage();
+        }
+        CliMode::Version => {
+            println!("cadence-headless {}", env!("CADENCE_BUILD_DISPLAY"));
+        }
         CliMode::ValidateRecipe {
             recipe_path,
             dockerfile_path,

@@ -362,7 +362,8 @@ fn print_usage() {
          \tcadence-engine [--data-dir <path>] [--port <u16>] [--localhost-only] [--label <name>] [--no-tray]\n\
          \tcadence-engine --stop | --restart\n\
          \tcadence-engine --migrate-legacy-db [<path-to-cadence.db>] [--data-dir <path>]\n\
-         \tcadence-engine --healthcheck [--port <u16>]"
+         \tcadence-engine --healthcheck [--port <u16>]\n\
+         \tcadence-engine --version | --help"
     );
 }
 
@@ -383,6 +384,10 @@ fn main() {
         match args[i].as_str() {
             "--help" | "-h" => {
                 print_usage();
+                return;
+            }
+            "--version" | "-V" => {
+                println!("cadence-engine {}", env!("CADENCE_BUILD_DISPLAY"));
                 return;
             }
             "--stop" => {

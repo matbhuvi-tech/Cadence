@@ -1,5 +1,7 @@
 # Cadence Core on TrueNAS SCALE Dragonfish 24.04
 
+> **Legacy Recipe (Dragonfish 24.04 Kubernetes Only):** TrueNAS SCALE **24.10+ / 25.10+** and general Linux deployments use Docker Compose and the guided `install.sh` setup. See [`deploy/playback-engine/README.md`](../playback-engine/README.md) unless you are specifically running TrueNAS SCALE Dragonfish 24.04.
+
 Versioned deployment recipe for the headless `cadence-core` (`cadence-headless`) container on TrueNAS SCALE Dragonfish 24.04.
 
 ## Phase 1 library API and local verification

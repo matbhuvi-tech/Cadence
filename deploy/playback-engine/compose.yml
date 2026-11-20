@@ -1,3 +1,7 @@
+# Cadence Playback Engine — Standard Profile (DEFAULT)
+# Enables runtime SMB share mounting (mount.cifs) and optional Curate tag writes.
+# Requires root (0:0), SYS_ADMIN, DAC_READ_SEARCH, and apparmor:unconfined for kernel CIFS mounts.
+# For non-root read-only local/NAS mounts without runtime SMB, use compose.hardened.yml instead.
 services:
   playback-engine:
     image: ${CADENCE_IMAGE:?Set CADENCE_IMAGE to a published version or digest}

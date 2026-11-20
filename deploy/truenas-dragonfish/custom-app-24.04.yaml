@@ -36,7 +36,7 @@ spec:
         fsGroup: 568
       containers:
         - name: cadence-core
-          image: ghcr.io/matbhuvi/cadence-core:0.1.0
+          image: ghcr.io/matbhuvi-tech/cadence-playback-engine:REPLACE_WITH_RELEASE
           imagePullPolicy: IfNotPresent
           args: ["--dragonfish"]
           securityContext:

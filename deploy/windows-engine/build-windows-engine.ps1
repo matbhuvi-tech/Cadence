@@ -1,5 +1,6 @@
 param(
-  [switch]$SkipCargoBuild
+  [switch]$SkipCargoBuild,
+  [switch]$RequireInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,10 @@ if (-not $Makensis) {
 }
 
 if (-not $Makensis) {
+  if ($RequireInstaller) {
+    Write-Error "makensis.exe not found in PATH or $env:LOCALAPPDATA\tauri\NSIS."
+    exit 1
+  }
   Write-Warning "makensis.exe not found in PATH or $env:LOCALAPPDATA\tauri\NSIS. Skipping NSIS installer packaging; binary is at src-tauri\target\release\cadence-engine.exe."
   exit 0
 }
