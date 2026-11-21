@@ -537,6 +537,7 @@ fn versioned_backup_blocks_incompatible_schema_and_restores_cleanly_on_rollback(
     .expect("boot v0.1.0");
     let original_id = node.identity().clone();
     let original_cert = node.tls_certificate().clone();
+    let original_token = std::fs::read_to_string(dirs.app_data_dir.join("pairing-token")).unwrap();
 
     let song_path = dirs.music_dir.join("goldberg.flac");
     std::fs::write(&song_path, vec![0x77u8; 32 * 1024]).unwrap();
@@ -549,13 +550,29 @@ fn versioned_backup_blocks_incompatible_schema_and_restores_cleanly_on_rollback(
     assert!(backup_dir.join("cadence.db").is_file());
     assert!(backup_dir.join("node-identity.json").is_file());
     assert!(backup_dir.join("tls-cert.json").is_file());
+    assert!(backup_dir.join("pairing-token").is_file());
     assert!(backup_dir.join("backup-manifest.json").is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(backup_dir.join("pairing-token"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     node.shutdown().unwrap();
     drop(node);
 
     // 2. Simulate an incompatible newer schema version (e.g. schema_version = 99) written to state
     DragonfishNode::write_schema_version_for_test(&dirs.app_data_dir, 99).unwrap();
+    std::fs::write(
+        dirs.app_data_dir.join("pairing-token"),
+        "corrupted-token-before-restore-000000000000000000",
+    )
+    .unwrap();
     // Also corrupt/delete the track in the live DB to verify rollback actually restores the snapshot
     {
         let conn = rusqlite::Connection::open(dirs.app_data_dir.join("cadence.db")).unwrap();
@@ -580,6 +597,18 @@ fn versioned_backup_blocks_incompatible_schema_and_restores_cleanly_on_rollback(
     // 3. Roll back to the `0.1.0-pre-upgrade` backup snapshot and verify clean boot + restored data
     DragonfishNode::restore_versioned_backup(&dirs.app_data_dir, "0.1.0-pre-upgrade")
         .expect("restore versioned backup");
+    let restored_token = std::fs::read_to_string(dirs.app_data_dir.join("pairing-token")).unwrap();
+    assert_eq!(restored_token, original_token);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dirs.app_data_dir.join("pairing-token"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     let mut restored_node =
         DragonfishNode::bootstrap_with_platform(cfg, generous_dragonfish_probe(), locker)
@@ -704,6 +733,30 @@ fn cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtr
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(healthy, "cadence-headless --healthcheck never succeeded");
+
+    let doctor_out = Command::new(exe)
+        .arg("--doctor")
+        .arg("--data-dir")
+        .arg(&dirs.app_data_dir)
+        .arg("--port")
+        .arg(ctrl_port.to_string())
+        .env("CADENCE_ALLOW_LOOPBACK", "true")
+        .output()
+        .expect("run --doctor");
+    assert!(
+        doctor_out.status.success(),
+        "--doctor failed: {}",
+        String::from_utf8_lossy(&doctor_out.stderr)
+    );
+    let doctor_stdout = String::from_utf8_lossy(&doctor_out.stdout);
+    assert!(
+        doctor_stdout.contains("PRAGMA integrity_check passed"),
+        "unexpected --doctor output: {doctor_stdout}"
+    );
+    assert!(
+        doctor_stdout.contains("Overall: HEALTHY"),
+        "unexpected --doctor summary: {doctor_stdout}"
+    );
 
     let ctrl_addr: SocketAddr = format!("127.0.0.1:{}", ctrl_port).parse().unwrap();
     let (status_h, health_json) = http_get_json(ctrl_addr, "/healthz");

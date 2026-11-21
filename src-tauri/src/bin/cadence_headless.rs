@@ -9,9 +9,11 @@
 //! - Phase 9 snapshot migration: `--export-snapshot`, `--preview-import`, `--import-snapshot`, `--rollback-import`
 //! - Recipe validator: `--validate-dragonfish-recipe <yaml> [--validate-dockerfile <dockerfile>]`
 
+use cadence_core_lib::core_runtime::doctor::run_engine_doctor;
 use cadence_core_lib::core_runtime::dragonfish::{
-    probe_healthcheck, validate_dragonfish_custom_app_yaml, validate_dragonfish_dockerfile,
-    DragonfishConfig, DragonfishNode, DEFAULT_CONTROL_PORT, DEFAULT_MEDIA_PORT,
+    probe_healthcheck_with_data_dir, resolve_env_data_dir, validate_dragonfish_custom_app_yaml,
+    validate_dragonfish_dockerfile, DragonfishConfig, DragonfishNode, DEFAULT_CONTROL_PORT,
+    DEFAULT_MEDIA_PORT,
 };
 use cadence_core_lib::core_runtime::migration::{
     export_consistent_snapshot, import_snapshot_into_core, preview_snapshot_import,
@@ -65,6 +67,11 @@ enum CliMode {
     Stdio(HeadlessConfig),
     Dragonfish(DragonfishConfig),
     Healthcheck {
+        app_data_dir: Option<PathBuf>,
+        control_port: u16,
+    },
+    Doctor {
+        app_data_dir: PathBuf,
         control_port: u16,
     },
     Backup {
@@ -136,13 +143,15 @@ fn print_usage() {
     println!(
         "Cadence Headless Playback Engine\n\
          Usage:\n\
-         \tcadence-headless --dragonfish [--app-data-dir <path>] [--music-dir <path>] [--tmp-dir <path>] [--advertised-ip <ipv4>] [--control-port <u16>] [--media-port <u16>] [--label <name>] [--headroom-mb <mb>]\n\
-         \tcadence-headless --healthcheck [--control-port <u16>]\n\
-         \tcadence-headless --backup <tag> [--app-data-dir <path>] | --restore <tag> [--app-data-dir <path>]\n\
+         \tcadence-headless --dragonfish [--data-dir <path>] [--music-dir <path>] [--tmp-dir <path>] [--advertised-ip <ipv4>] [--port <u16>] [--media-port <u16>] [--label <name>] [--headroom-mb <mb>]\n\
+         \tcadence-headless --healthcheck [--data-dir <path>] [--port <u16>]\n\
+         \tcadence-headless --doctor [--data-dir <path>] [--port <u16>]\n\
+         \tcadence-headless --backup <tag> [--data-dir <path>] | --restore <tag> [--data-dir <path>]\n\
          \tcadence-headless --export-snapshot <src.db> <dest.db> | --preview-import ... | --import-snapshot ... | --rollback-import ...\n\
          \tcadence-headless --validate-dragonfish-recipe <yaml> [--validate-dockerfile <dockerfile>]\n\
          \tcadence-headless --db <path> [stdio flags...]\n\
-         \tcadence-headless --version | --help"
+         \tcadence-headless --version | --help\n\
+         Note: --app-data-dir and --control-port are accepted as aliases for --data-dir and --port."
     );
 }
 
@@ -158,6 +167,7 @@ fn parse_args() -> Result<CliMode, String> {
 
     let is_dragonfish = args.iter().any(|a| a == "--dragonfish");
     let is_healthcheck = args.iter().any(|a| a == "--healthcheck");
+    let is_doctor = args.iter().any(|a| a == "--doctor");
     let has_recipe = args
         .iter()
         .any(|a| a == "--validate-dragonfish-recipe" || a == "--validate-dockerfile");
@@ -204,36 +214,72 @@ fn parse_args() -> Result<CliMode, String> {
 
     if is_healthcheck {
         let mut control_port = env_u16("CADENCE_CONTROL_PORT", DEFAULT_CONTROL_PORT)?;
+        let mut app_data_dir: Option<PathBuf> = None;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
                 "--healthcheck" => {}
-                "--control-port" => {
+                "--app-data-dir" | "--data-dir" => {
                     i += 1;
-                    let val = args.get(i).ok_or("missing value for --control-port")?;
+                    let val = args.get(i).ok_or("missing value for --data-dir")?;
+                    app_data_dir = Some(PathBuf::from(val));
+                }
+                "--control-port" | "--port" => {
+                    i += 1;
+                    let val = args.get(i).ok_or("missing value for --port")?;
                     control_port = val
                         .parse::<u16>()
-                        .map_err(|_| "invalid --control-port value")?;
+                        .map_err(|_| "invalid --port value")?;
                 }
                 other => return Err(format!("unknown argument: {}", other)),
             }
             i += 1;
         }
-        return Ok(CliMode::Healthcheck { control_port });
+        return Ok(CliMode::Healthcheck {
+            app_data_dir,
+            control_port,
+        });
+    }
+
+    if is_doctor {
+        let mut app_data_dir = resolve_env_data_dir(PathBuf::from("/var/lib/cadence"));
+        let mut control_port = env_u16("CADENCE_CONTROL_PORT", DEFAULT_CONTROL_PORT)?;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--doctor" => {}
+                "--app-data-dir" | "--data-dir" => {
+                    i += 1;
+                    let val = args.get(i).ok_or("missing value for --data-dir")?;
+                    app_data_dir = PathBuf::from(val);
+                }
+                "--control-port" | "--port" => {
+                    i += 1;
+                    let val = args.get(i).ok_or("missing value for --port")?;
+                    control_port = val
+                        .parse::<u16>()
+                        .map_err(|_| "invalid --port value")?;
+                }
+                other => return Err(format!("unknown argument: {}", other)),
+            }
+            i += 1;
+        }
+        return Ok(CliMode::Doctor {
+            app_data_dir,
+            control_port,
+        });
     }
 
     if has_backup || has_restore {
-        let mut app_data_dir = PathBuf::from(
-            std::env::var("CADENCE_APP_DATA_DIR").unwrap_or_else(|_| "/var/lib/cadence".into()),
-        );
+        let mut app_data_dir = resolve_env_data_dir(PathBuf::from("/var/lib/cadence"));
         let mut backup_tag: Option<String> = None;
         let mut restore_tag: Option<String> = None;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--app-data-dir" => {
+                "--app-data-dir" | "--data-dir" => {
                     i += 1;
-                    let val = args.get(i).ok_or("missing value for --app-data-dir")?;
+                    let val = args.get(i).ok_or("missing value for --data-dir")?;
                     app_data_dir = PathBuf::from(val);
                 }
                 "--backup" => {
@@ -260,11 +306,7 @@ fn parse_args() -> Result<CliMode, String> {
 
     if is_dragonfish {
         let mut cfg = DragonfishConfig::default();
-        if let Ok(v) = std::env::var("CADENCE_APP_DATA_DIR") {
-            if !v.trim().is_empty() {
-                cfg.app_data_dir = PathBuf::from(v);
-            }
-        }
+        cfg.app_data_dir = resolve_env_data_dir(cfg.app_data_dir);
         if let Ok(v) = std::env::var("CADENCE_MUSIC_DIR") {
             if !v.trim().is_empty() {
                 cfg.music_mount_dir = PathBuf::from(v);
@@ -305,10 +347,10 @@ fn parse_args() -> Result<CliMode, String> {
         while i < args.len() {
             match args[i].as_str() {
                 "--dragonfish" => {}
-                "--app-data-dir" => {
+                "--app-data-dir" | "--data-dir" => {
                     i += 1;
                     cfg.app_data_dir =
-                        PathBuf::from(args.get(i).ok_or("missing --app-data-dir")?);
+                        PathBuf::from(args.get(i).ok_or("missing --data-dir")?);
                 }
                 "--music-dir" => {
                     i += 1;
@@ -323,13 +365,13 @@ fn parse_args() -> Result<CliMode, String> {
                     i += 1;
                     cfg.advertised_ip = args.get(i).ok_or("missing --advertised-ip")?.clone();
                 }
-                "--control-port" => {
+                "--control-port" | "--port" => {
                     i += 1;
                     let p: u16 = args
                         .get(i)
-                        .ok_or("missing --control-port")?
+                        .ok_or("missing --port")?
                         .parse()
-                        .map_err(|_| "invalid --control-port")?;
+                        .map_err(|_| "invalid --port")?;
                     cfg.control_bind_addr = SocketAddr::from(([0, 0, 0, 0], p));
                 }
                 "--media-port" => {
@@ -630,12 +672,25 @@ fn main() {
             }
             println!("dragonfish recipe validation ok");
         }
-        CliMode::Healthcheck { control_port } => {
-            if let Err(err) = probe_healthcheck(control_port) {
+        CliMode::Healthcheck {
+            app_data_dir,
+            control_port,
+        } => {
+            if let Err(err) = probe_healthcheck_with_data_dir(control_port, app_data_dir.as_deref()) {
                 eprintln!("[cadence-headless] healthcheck failed: {}", err);
                 std::process::exit(1);
             }
             println!("ok");
+        }
+        CliMode::Doctor {
+            app_data_dir,
+            control_port,
+        } => {
+            let report = run_engine_doctor(&app_data_dir, control_port);
+            println!("{}", report.format_text());
+            if !report.is_healthy() {
+                std::process::exit(1);
+            }
         }
         CliMode::Backup { app_data_dir, tag } => {
             match DragonfishNode::create_versioned_backup_offline(

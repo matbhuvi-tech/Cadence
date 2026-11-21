@@ -158,7 +158,26 @@ jobs:
         run: |
           python3 -m unittest discover -s deploy/playback-engine -p test_installer.py -v
           python3 -m unittest discover -s scripts/release -p "test_*.py" -v
-          bash -n deploy/playback-engine/install.sh
+          sh -n deploy/playback-engine/install.sh
+          bash -n \
+            deploy/playback-engine/install.sh \
+            deploy/playback-engine/nfpm/preinstall.sh \
+            deploy/playback-engine/nfpm/postinstall.sh \
+            deploy/playback-engine/nfpm/preremove.sh
+          python3 - <<'PY'
+          import pathlib
+          raw = pathlib.Path('deploy/playback-engine/nfpm/nfpm.yaml').read_text(encoding='utf-8')
+          try:
+              import yaml
+              cfg = yaml.safe_load(raw)
+              assert isinstance(cfg, dict), "nfpm.yaml must parse as a mapping"
+              for key in ('name', 'arch', 'version', 'contents', 'scripts'):
+                  assert key in cfg, f"Missing required nfpm key: {key}"
+          except ImportError:
+              for key in ('name:', 'arch:', 'version:', 'contents:', 'scripts:'):
+                  assert key in raw, f"Missing required nfpm key: {key}"
+          print('Validated deploy/playback-engine/nfpm/nfpm.yaml')
+          PY
 
       - name: Run headless Rust test suite
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
@@ -174,9 +193,11 @@ jobs:
       matrix:
         include:
           - arch: amd64
+            nfpm_arch: x86_64
             platform: linux/amd64
             runner: ubuntu-24.04
           - arch: arm64
+            nfpm_arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
@@ -218,11 +239,16 @@ jobs:
             CADENCE_BUILD_DATE=${{ needs.prepare.outputs.date }}
             CADENCE_BUILD_SUMMARY=${{ needs.prepare.outputs.summary }}
 
-      - name: Smoke-test native Linux binary and package tarball
+      - name: Smoke-test native Linux binary and package tarball, .deb, and .rpm
+        env:
+          CADENCE_ARCH: ${{ matrix.arch }}
+          CADENCE_SEMVER: ${{ needs.prepare.outputs.semver }}
+          NFPM_ARCH: ${{ matrix.nfpm_arch }}
         run: |
           chmod +x ./bin-out/cadence-headless
           ./bin-out/cadence-headless --version
           ./bin-out/cadence-headless --help
+          ./bin-out/cadence-headless --doctor --data-dir "$RUNNER_TEMP/doctor-smoke"
           ./bin-out/cadence-headless --validate-dragonfish-recipe deploy/truenas-dragonfish/custom-app-24.04.yaml --validate-dockerfile deploy/truenas-dragonfish/Dockerfile
           mkdir -p dist-linux/cadence-playback-engine staging-linux
           cp ./bin-out/cadence-headless \
@@ -230,13 +256,37 @@ jobs:
              deploy/playback-engine/playback-engine.env.example \
              deploy/playback-engine/README.md \
              dist-linux/cadence-playback-engine/
-          tar -czf "staging-linux/Cadence.PlaybackEngine_${{ needs.prepare.outputs.semver }}_linux_${{ matrix.arch }}.tar.gz" -C dist-linux cadence-playback-engine
+          tar -czf "staging-linux/Cadence.PlaybackEngine_${CADENCE_SEMVER}_linux_${CADENCE_ARCH}.tar.gz" -C dist-linux cadence-playback-engine
 
-      - name: Upload Linux standalone tarball
+          NFPM_VERSION="2.49.0"
+          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_${NFPM_ARCH}.tar.gz"
+          curl -4 --fail --location --retry 3 --output "$NFPM_TARBALL" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
+          curl -4 --fail --location --retry 3 --output nfpm-checksums.txt \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/checksums.txt"
+          awk -v f="$NFPM_TARBALL" '{ gsub(/^\*/, "", $2); if ($2 == f) { print $1 "  " f; found=1 } } END { exit (found ? 0 : 1) }' nfpm-checksums.txt | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/nfpm-bin"
+          tar -xzf "$NFPM_TARBALL" -C "$RUNNER_TEMP/nfpm-bin" nfpm
+          rm -f "$NFPM_TARBALL" nfpm-checksums.txt
+
+          export CADENCE_BINARY="$PWD/bin-out/cadence-headless"
+          "$RUNNER_TEMP/nfpm-bin/nfpm" pkg \
+            --config deploy/playback-engine/nfpm/nfpm.yaml \
+            --packager deb \
+            --target "staging-linux/Cadence.PlaybackEngine_${CADENCE_SEMVER}_linux_${CADENCE_ARCH}.deb"
+          "$RUNNER_TEMP/nfpm-bin/nfpm" pkg \
+            --config deploy/playback-engine/nfpm/nfpm.yaml \
+            --packager rpm \
+            --target "staging-linux/Cadence.PlaybackEngine_${CADENCE_SEMVER}_linux_${CADENCE_ARCH}.rpm"
+
+          dpkg-deb --info "staging-linux/Cadence.PlaybackEngine_${CADENCE_SEMVER}_linux_${CADENCE_ARCH}.deb"
+          dpkg-deb --contents "staging-linux/Cadence.PlaybackEngine_${CADENCE_SEMVER}_linux_${CADENCE_ARCH}.deb"
+
+      - name: Upload Linux packages
         uses: actions/upload-artifact@v4
         with:
-          name: linux-tarball-${{ matrix.arch }}
-          path: staging-linux/*.tar.gz
+          name: linux-packages-${{ matrix.arch }}
+          path: staging-linux/*
           if-no-files-found: error
 
       - name: Build local container image for smoke test
@@ -392,7 +442,7 @@ jobs:
         run: |
           npm run tauri:build -- --bundles nsis
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\deploy\windows-engine\build-windows-engine.ps1 -RequireInstaller
+          .\deploy\windows-engine\build-windows-engine.ps1 -RequireInstaller -Version "${{ needs.prepare.outputs.semver }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Smoke-test Windows Engine CLI and stage installers
@@ -408,11 +458,16 @@ jobs:
             throw "Unexpected cadence-engine --help output (exit=$LASTEXITCODE): $help"
           }
           Write-Host $help
+          $doctor = (.\src-tauri\target\release\cadence-engine.exe --doctor --data-dir "$env:RUNNER_TEMP\doctor-smoke" 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $doctor.Contains("Cadence Engine Doctor")) {
+            throw "Unexpected cadence-engine --doctor output (exit=$LASTEXITCODE): $doctor"
+          }
+          Write-Host $doctor
 
           $semver = "${{ needs.prepare.outputs.semver }}"
           $nsisDir = "src-tauri\target\release\bundle\nsis"
           $desktopExe = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" |
-            Where-Object { $_.Name -ne "cadence-engine-setup.exe" } |
+            Where-Object { $_.Name -ne "cadence-engine-setup.exe" -and $_.Name -notlike "Cadence_*_x64-setup.exe" } |
             Select-Object -First 1
           if (-not $desktopExe) {
             throw "Desktop NSIS setup executable not found in $nsisDir"
@@ -423,6 +478,16 @@ jobs:
           }
 
           New-Item -ItemType Directory -Force -Path "staging-windows" | Out-Null
+          $suiteOut = "staging-windows\Cadence_${semver}_x64-setup.exe"
+          .\deploy\windows-suite\build-windows-suite.ps1 `
+            -DesktopInstaller $desktopExe.FullName `
+            -EngineInstaller $engineExe `
+            -Version $semver `
+            -OutputFile $suiteOut `
+            -RequireInstaller
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $suiteOut)) {
+            throw "Unified Windows suite installer build failed (exit=$LASTEXITCODE)"
+          }
           Copy-Item $desktopExe.FullName "staging-windows\Cadence.Desktop_${semver}_x64-setup.exe"
           Copy-Item $engineExe "staging-windows\Cadence.PlaybackEngine_${semver}_x64-setup.exe"
 
@@ -530,11 +595,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Linux tarballs
+      - name: Download Linux packages
         uses: actions/download-artifact@v4
         with:
           path: release-assets
-          pattern: linux-tarball-*
+          pattern: linux-packages-*
           merge-multiple: true
 
       - name: Download Windows installers
@@ -585,8 +650,12 @@ jobs:
         run: |
           cd release-assets
           rm -f cadence_checksums.txt
-          LC_ALL=C ls -1 | sort | xargs sha256sum > ../cadence_checksums.txt
+          find . -maxdepth 1 -type f ! -name cadence_checksums.txt -printf '%f\n' | LC_ALL=C sort | xargs -r -d '\n' sha256sum > ../cadence_checksums.txt
           mv ../cadence_checksums.txt cadence_checksums.txt
+          sha256sum -c cadence_checksums.txt
+          for req in install.sh install.py compose.yml compose.hardened.yml; do
+            grep -qE "^[0-9a-f]{64}  ${req}$" cadence_checksums.txt || { echo "::error::Missing ${req} in cadence_checksums.txt"; exit 1; }
+          done
           cat cadence_checksums.txt
 
       - name: Attest release artifact provenance
@@ -606,17 +675,19 @@ jobs:
 
           | Your Setup | Download |
           | :--- | :--- |
-          | **Single Windows PC** *(USB DAC / WASAPI Exclusive / ASIO / UPnP)* | \`Cadence.Desktop_${SEMVER}_x64-setup.exe\` + \`Cadence.PlaybackEngine_${SEMVER}_x64-setup.exe\` |
-          | **Linux / TrueNAS SCALE Audio Server + Windows Remote** | \`install.sh\` *(or \`Cadence.PlaybackEngine_${SEMVER}_Linux-setup.zip\`)* + \`Cadence.Desktop_${SEMVER}_x64-setup.exe\` |
+          | **Single Windows PC** *(USB DAC / WASAPI Exclusive / ASIO / UPnP)* | \`Cadence_${SEMVER}_x64-setup.exe\` *(All-in-One installer; uncheck Local Engine to connect to a NAS instead)* |
+          | **Linux / TrueNAS SCALE Audio Server + Windows Remote** | \`install.sh\` *(or \`.deb\` / \`.rpm\` / \`.tar.gz\` / \`Cadence.PlaybackEngine_${SEMVER}_Linux-setup.zip\`)* + \`Cadence.Desktop_${SEMVER}_x64-setup.exe\` |
+          | **Standalone Windows Playback Engine** *(headless / tray / Windows Service)* | \`Cadence.PlaybackEngine_${SEMVER}_x64-setup.exe\` |
           | **Phone / Tablet Remote** | Built-in Web PWA via QR code, or \`Cadence.Remote_${SEMVER}*.apk\` *(Android)* |
 
           ### Linux / TrueNAS Profiles
           - **Standard *(Default — \`compose.yml\`)*:** Supports dynamic in-app SMB mounting (\`mount.cifs\`) and optional Curate tag writes.
           - **Hardened Read-Only *(Optional — \`compose.hardened.yml\`)*:** Non-root \`UID/GID 568\`, \`IPC_LOCK\` only, AppArmor enforced, local/NAS \`/music:ro\`.
+          - **Native Packages (\`.deb\` / \`.rpm\`):** Installs \`/usr/bin/cadence-headless\` + hardened \`cadence-playback-engine.service\` (\`cadence\` user, zero FFmpeg dependencies).
 
           ### Verification & Upgrade Safety
-          - Verify downloads against \`cadence_checksums.txt\` (\`sha256sum -c cadence_checksums.txt\` / \`Get-FileHash\`).
-          - Back up the full engine data directory—including \`pairing-token\`—before upgrading.
+          - \`install.sh\` / \`install.py\` automatically verify downloads against \`cadence_checksums.txt\` before execution. Manually verify binaries with \`sha256sum -c cadence_checksums.txt\` / \`Get-FileHash\`.
+          - Back up before upgrading using \`--backup <tag>\` (includes \`cadence.db\`, node identity, TLS files, and \`pairing-token\`) and run \`--doctor\` afterward to verify database integrity and readiness.
           EOF
 
           PRERELEASE_FLAG=()

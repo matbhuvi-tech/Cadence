@@ -1,0 +1,25 @@
+[Unit]
+Description=Cadence Playback Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cadence
+Group=cadence
+EnvironmentFile=/etc/cadence/playback-engine.env
+ExecStart=/usr/bin/cadence-headless --dragonfish
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=infinity
+CapabilityBoundingSet=CAP_IPC_LOCK
+AmbientCapabilities=CAP_IPC_LOCK
+NoNewPrivileges=yes
+MemoryMax=4G
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/cadence
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+name: cadence-playback-engine
+arch: ${CADENCE_ARCH}
+platform: linux
+version: ${CADENCE_SEMVER}
+version_schema: semver
+section: sound
+priority: optional
+license: Apache-2.0
+homepage: https://github.com/matbhuvi-tech/Cadence
+maintainer: matbhuvi-tech <https://github.com/matbhuvi-tech/Cadence>
+description: |
+  Cadence Playback Engine — headless bit-perfect audiophile UPnP media server and RAM-pinned playback core.
+contents:
+  - src: ${CADENCE_BINARY}
+    dst: /usr/bin/cadence-headless
+    file_info:
+      mode: 0755
+  - src: deploy/playback-engine/nfpm/cadence-playback-engine.service
+    dst: /usr/lib/systemd/system/cadence-playback-engine.service
+    file_info:
+      mode: 0644
+  - dst: /etc/cadence
+    type: dir
+    file_info:
+      mode: 0750
+      owner: root
+      group: cadence
+  - src: deploy/playback-engine/playback-engine.env.example
+    dst: /etc/cadence/playback-engine.env
+    type: "config|noreplace"
+    file_info:
+      mode: 0640
+      owner: root
+      group: cadence
+  - dst: /var/lib/cadence
+    type: dir
+    file_info:
+      mode: 0700
+      owner: cadence
+      group: cadence
+scripts:
+  preinstall: deploy/playback-engine/nfpm/preinstall.sh
+  postinstall: deploy/playback-engine/nfpm/postinstall.sh
+  preremove: deploy/playback-engine/nfpm/preremove.sh
