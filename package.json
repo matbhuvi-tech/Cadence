@@ -29,6 +29,8 @@
     "test:core-e2e": "tsx scripts/qa/coreE2eGate.ts",
     "test:diagnostics": "tsx src/test/testDebugDiagnostics.ts",
     "test:settings": "tsx src/test/testCadenceSettingsModal.ts",
+    "test:upnp-delivery": "node --import tsx --test src/test/testUpnpDelivery.ts",
+    "test:upnp-delivery-ui": "tsx scripts/qa/upnpDeliveryQa.ts",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

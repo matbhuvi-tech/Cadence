@@ -514,6 +514,8 @@ impl CoreRateRegime {
 /// Lock-free, zero-allocation atomic pacing metrics for the Core UPnP streamer.
 #[derive(Debug, Default)]
 pub struct CorePacingMetrics {
+    pub delivery: super::upnp_delivery::DeliveryHistory,
+    pub pacer_disabled: AtomicBool,
     pub current_state: AtomicU8,
     pub current_regime: AtomicU8,
     pub lead_certainty: AtomicU8,
@@ -570,6 +572,19 @@ pub struct CorePacingSnapshot {
 }
 
 impl CorePacingMetrics {
+    pub fn delivery_snapshot(&self, request: &serde_json::Value) -> super::upnp_delivery::DeliverySnapshot {
+        let s = self.snapshot();
+        super::upnp_delivery::DeliverySnapshot {
+            stream_id: self.delivery.stream_id(), sampled_at_ms: self.delivery.sampled_at_ms(),
+            pacer_enabled: !self.pacer_disabled.load(Ordering::Relaxed), state: s.current_state,
+            bytes_sent: s.bytes_sent, realtime_bytes_per_sec: s.realtime_bytes_per_sec,
+            multiplier: s.current_multiplier, write_stalls: s.write_block_stalls,
+            schedule_stalls: s.schedule_lag_stalls, congestion_events: s.congestion_events,
+            flow_control_events: s.flow_control_events, tcp_samples: s.tcp_info_samples,
+            rtt_us: s.last_rtt_us, retrans_bytes: s.last_bytes_retrans,
+            capture: self.delivery.handle_request(request),
+        }
+    }
     pub fn reset_for_connection(&self) {
         self.preroll_chunks.store(0, Ordering::Relaxed);
         self.chunks_sent.store(0, Ordering::Relaxed);
@@ -630,6 +645,7 @@ pub struct CorePacer {
     clamped_to_steady: bool,
     is_metadata: bool,
     metrics: Arc<CorePacingMetrics>,
+    delivery_writer: Option<super::upnp_delivery::DeliveryWriter>,
     is_paused: Arc<AtomicBool>,
     horizon_bytes: f64,
     last_horizon_tick: Option<Instant>,
@@ -684,6 +700,7 @@ impl CorePacer {
                 steady_sndbuf: clamped_sndbuf,
                 clamped_to_steady: true,
                 is_metadata,
+                delivery_writer: (!is_metadata).then(|| super::upnp_delivery::DeliveryWriter::new(&metrics.delivery)),
                 metrics,
                 is_paused,
                 horizon_bytes: 0.0,
@@ -748,6 +765,7 @@ impl CorePacer {
             steady_sndbuf: clamped_sndbuf,
             clamped_to_steady: is_range_continuation,
             is_metadata: false,
+            delivery_writer: Some(super::upnp_delivery::DeliveryWriter::new(&metrics.delivery)),
             metrics,
             is_paused,
             horizon_bytes: seed_horizon_bytes,
@@ -786,6 +804,11 @@ impl CorePacer {
             self.metrics
                 .bytes_sent
                 .fetch_add(chunk_len as u64, Ordering::Relaxed);
+            if let Some(writer) = &mut self.delivery_writer {
+                writer.record(&self.metrics.delivery, chunk_len, || if self.metrics.pacer_disabled.load(Ordering::Relaxed) { 0 } else {
+                    (self.realtime_rate.unwrap_or(0.0) * self.active_pace_mult).round().max(0.0) as u64
+                });
+            }
         }
 
         if self.realtime_rate.is_none() || self.state == CorePacingState::Unpaced {
@@ -835,7 +858,7 @@ impl CorePacer {
             self.ceiling_relax_anchor = Some(resumed);
             return;
         }
-        if !self.config.disable_sleep_for_tests {
+        if !self.config.disable_sleep_for_tests && !self.metrics.pacer_disabled.load(Ordering::Relaxed) {
             if let Some(dur) = sleep_dur {
                 sleep_monotonic_duration(dur);
             }
@@ -1808,6 +1831,10 @@ impl CoreMediaServer {
 
     pub fn pacing_snapshot(&self) -> CorePacingSnapshot {
         self.pacing_metrics.snapshot()
+    }
+
+    pub(crate) fn pacing_metrics_arc(&self) -> Arc<CorePacingMetrics> {
+        Arc::clone(&self.pacing_metrics)
     }
 
     pub(crate) fn advertised_ip_addr(&self) -> Ipv4Addr {

@@ -54,6 +54,12 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
   admission (`LockedBytesArena`), and the Phase 5 paced UPnP HTTP media server and
   RS130 session coordinator (`upnp_session.rs`).
 - Plan and phase evidence: `docs/designs/OPTIONAL_LINUX_CORE.md`.
+- `src-tauri/src/core_runtime/upnp_delivery.rs` supplies bounded, RAM-only sender
+  capture shared by Windows and Linux/Core UPnP. `UpnpPacerPill.tsx` uses the active
+  engine's `player.upnp_delivery` / `player.upnp_pacer` operations and existing slow
+  event heartbeat. Detailed capture is opt-in, limited to 60 seconds, and stops
+  when the inspector closes or becomes hidden. Validation and hardware limits:
+  `reports/upnp-delivery-inspector-tdd.md`.
 
 ### Curation Workbench & Decision Trace Engine
 - Unifies defect triage queues, automated federated candidate resolution (MusicBrainz, Apple Music, Gemini AI), artwork inspection, and inline sidecar review in `UnifiedCurateCockpit.tsx`.
@@ -70,6 +76,8 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 - Frontend: `npm run build`
 - Optional Core contracts/adapters: `npm run test:core-services`
+- UPnP delivery status/lifecycle: `npm run test:upnp-delivery`; isolated browser QA:
+  `npm run test:upnp-delivery-ui`
 - Native backend: `cargo test --manifest-path src-tauri/Cargo.toml`
 - Windows Desktop installer: `npm run tauri:build -- --bundles nsis`
 - Windows Playback Engine binary (`src-tauri/target/release/cadence-engine.exe`): `cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --features engine-audio --bin cadence-engine`

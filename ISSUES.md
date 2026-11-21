@@ -29,3 +29,4 @@
 - [#41](https://github.com/matbhuvi-tech/Cadence/issues/41): DSD (`.dsf`/`.dff`) albums missing ID3v2 metadata in catalogue and fail Symphonia fingerprinting.
 
 - Pre-built Linux binaries and native packages: `nfpm.yaml` was already tracked despite a matching local exclude. Declare the Debian 12 glibc >= 2.36 baseline and runtime dependencies; validate Debian/RPM installation on both native CI architectures. Successful CI package generation remains to be verified.
+- UPnP pacing visibility: quiet active-output pill and opt-in sender delivery inspector implemented on `feat/upnp-delivery-inspector`. Validation and remaining hardware playback checks: [reports/upnp-delivery-inspector-tdd.md](reports/upnp-delivery-inspector-tdd.md).

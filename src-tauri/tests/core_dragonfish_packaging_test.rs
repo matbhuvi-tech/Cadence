@@ -213,6 +213,40 @@ fn http_post_json(
 }
 
 #[test]
+fn upnp_delivery_control_is_identity_scoped_bounded_and_can_toggle_pacing() {
+    let dirs = DragonfishTestDirs::create("delivery_control");
+    let mut node = DragonfishNode::bootstrap_with_platform(
+        dirs.base_config(), generous_dragonfish_probe(), FakeLocker::new(),
+    ).unwrap();
+    let identity = node.identity().clone();
+    let mut request = json!({"protocolVersion": 2, "engineId": identity.engine_id,
+        "libraryId": identity.library_id, "operation": "player.upnp_delivery"});
+    let call = |value: &Value| http_post_json(&dirs.app_data_dir, node.control_listen_addr(), "/v1/core", value).1;
+    let summary = call(&request);
+    assert_eq!(summary["ok"], true, "{summary}");
+    assert_eq!(summary["data"]["pacerEnabled"], true);
+    assert!(summary["data"]["capture"].is_null());
+    request["engineId"] = json!("wrong-engine");
+    request["captureAction"] = json!("start");
+    let rejected = call(&request);
+    assert_eq!(rejected["error"]["code"], "identity_mismatch");
+    request["engineId"] = json!(identity.engine_id);
+    request["includeCapture"] = json!(true);
+    let started = call(&request);
+    let id = started["data"]["capture"]["id"].as_u64().unwrap();
+    request["captureAction"] = json!("stop");
+    request["captureId"] = json!(id);
+    let stopped = call(&request);
+    assert_eq!(stopped["data"]["capture"]["complete"], true);
+    request = json!({"protocolVersion": 2, "engineId": identity.engine_id,
+        "libraryId": identity.library_id, "operation": "player.upnp_pacer", "enabled": false});
+    assert_eq!(call(&request)["data"]["pacerEnabled"], false);
+    request["operation"] = json!("player.upnp_delivery");
+    assert_eq!(call(&request)["data"]["pacerEnabled"], false);
+    node.shutdown().unwrap();
+}
+
+#[test]
 fn clean_install_persists_identity_cert_wal_db_and_serves_control_and_readiness() {
     let dirs = DragonfishTestDirs::create("clean_install");
     let cfg = dirs.base_config();

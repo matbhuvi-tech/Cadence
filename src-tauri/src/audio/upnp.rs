@@ -494,6 +494,21 @@ impl UpnpManager {
         self.pacing_metrics.snapshot()
     }
 
+    pub fn delivery_snapshot(&self, request: &serde_json::Value) -> crate::core_runtime::upnp_delivery::DeliverySnapshot {
+        let m = &self.pacing_metrics;
+        let s = m.snapshot();
+        crate::core_runtime::upnp_delivery::DeliverySnapshot {
+            stream_id: m.delivery.stream_id(), sampled_at_ms: m.delivery.sampled_at_ms(),
+            pacer_enabled: self.is_pacer_enabled(), state: s.current_state,
+            bytes_sent: s.bytes_sent, realtime_bytes_per_sec: s.realtime_bytes_per_sec,
+            multiplier: s.current_multiplier, write_stalls: s.write_block_stalls,
+            schedule_stalls: s.schedule_lag_stalls, congestion_events: s.congestion_events,
+            flow_control_events: s.flow_control_events, tcp_samples: s.tcp_info_samples,
+            rtt_us: s.last_rtt_us, retrans_bytes: s.last_bytes_retrans,
+            capture: m.delivery.handle_request(request),
+        }
+    }
+
     /// Resolve the local LAN IPv4 address of this machine
     pub fn get_local_lan_ip() -> String {
         if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
@@ -807,7 +822,7 @@ impl UpnpManager {
             source.sndbuf_bytes,
             is_contiguous_reconnect,
             is_range_continuation,
-            is_metadata_request || !UPNP_PACER_ENABLED.load(Ordering::Relaxed),
+            is_metadata_request,
             pacing_metrics,
             playback_paused,
         );

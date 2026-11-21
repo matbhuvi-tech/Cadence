@@ -31,6 +31,8 @@ import type {
   RemoteCurateFieldChange,
   RemoteCurateTransport,
 } from '../core/remoteCurate'
+import { parseDeliverySnapshot, type DeliverySnapshot } from '../core/upnpDelivery'
+import type { DeliveryCaptureOptions } from './upnpDeliveryCapture'
 
 export interface EngineRpcTarget {
   baseUrl: string
@@ -63,6 +65,8 @@ export type EngineArtworkFetchFn = (
 
 export interface EngineClient {
   readonly profile: EngineClientProfile
+  getUpnpDelivery(options?: DeliveryCaptureOptions): Promise<DeliverySnapshot>
+  setUpnpPacer(enabled: boolean): Promise<boolean>
   hello(): Promise<CoreDescriptor>
   fetchEnrichedCatalog(): Promise<{ revision: number; tracks: CoreCatalogTrack[] }>
   fsBrowse(path?: string): Promise<EngineFsBrowseResult>
@@ -214,6 +218,12 @@ export function createEngineClient(
 
   return {
     profile,
+    getUpnpDelivery: async (options = {}) => parseDeliverySnapshot(await call<unknown>('player.upnp_delivery', { ...options })),
+    setUpnpPacer: async (enabled) => {
+      const data = await call<{ pacerEnabled: unknown }>('player.upnp_pacer', { enabled })
+      if (typeof data?.pacerEnabled !== 'boolean') throw new CoreServiceError('invalid_payload')
+      return data.pacerEnabled
+    },
 
     async hello() {
       const data = await call<unknown>('core.hello')

@@ -25,6 +25,7 @@ use serde::Serialize;
 use super::stream_tuning;
 use crate::diag_log;
 use crate::diagnostics::DiagCategory;
+use crate::core_runtime::upnp_delivery::{DeliveryHistory, DeliveryWriter};
 
 /// Tuning parameters for the receiver-backpressure-driven UPnP pacing controller.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -241,6 +242,7 @@ impl RateRegime {
 /// zero heap allocations, locks, or synchronous I/O.
 #[derive(Debug, Default)]
 pub struct UpnpPacingMetrics {
+    pub delivery: DeliveryHistory,
     pub current_state: AtomicU8,
     pub current_regime: AtomicU8,
     pub lead_certainty: AtomicU8, // 0 = uncertain, 1 = measured
@@ -454,6 +456,7 @@ pub(crate) struct SynchronousPacer {
     clamped_to_steady: bool,
     is_metadata: bool,
     pub(crate) metrics: Arc<UpnpPacingMetrics>,
+    delivery_writer: Option<DeliveryWriter>,
     is_paused: Arc<AtomicBool>,
 
     // Horizon & virtual sleep clock (strictly 1.000x consumption timeline)
@@ -503,6 +506,7 @@ impl SynchronousPacer {
             steady_sndbuf: stream_tuning::MIN_SOCKET_SNDBUF_BYTES,
             clamped_to_steady: true,
             is_metadata,
+            delivery_writer: (!is_metadata).then(|| DeliveryWriter::new(&metrics.delivery)),
             metrics,
             is_paused,
             horizon_bytes: 0.0,
@@ -597,6 +601,7 @@ impl SynchronousPacer {
             steady_sndbuf: sndbuf_bytes,
             clamped_to_steady: is_range_continuation,
             is_metadata: false,
+            delivery_writer: Some(DeliveryWriter::new(&metrics.delivery)),
             metrics,
             is_paused,
             horizon_bytes: seed_horizon_bytes,
@@ -638,6 +643,11 @@ impl SynchronousPacer {
         if !self.is_metadata {
             self.metrics.chunks_sent.fetch_add(1, Ordering::Relaxed);
             self.metrics.bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
+            if let Some(writer) = &mut self.delivery_writer {
+                writer.record(&self.metrics.delivery, n, || if super::upnp::UPNP_PACER_ENABLED.load(Ordering::Relaxed) {
+                    (self.realtime_rate.unwrap_or(0.0) * self.active_pace_mult).round().max(0.0) as u64
+                } else { 0 });
+            }
         }
 
         if self.realtime_rate.is_none()

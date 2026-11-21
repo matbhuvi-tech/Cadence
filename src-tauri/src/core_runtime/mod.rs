@@ -11,6 +11,7 @@ pub mod platform;
 pub mod renderer_discovery;
 pub mod smb;
 pub mod upnp_session;
+pub mod upnp_delivery;
 #[cfg(feature = "engine-audio")]
 pub mod windows_engine;
 

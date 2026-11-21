@@ -34,6 +34,7 @@ import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath, getEndpointDisplayName } from '../../core/endpointRouting'
 import { CadenceLogo } from '../common/CadenceLogo'
+import { UpnpPacerPill } from './UpnpPacerPill'
 
 interface NowPlayingBarProps {
   onOpenSanctuary?: () => void
@@ -514,6 +515,16 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
               <Speaker className={`w-3.5 h-3.5 shrink-0 ${isEndpointUnavailable ? 'text-rose-400' : 'text-[#D4AF37]'}`} aria-hidden="true" />
               <span className="hidden 2xl:inline max-w-[96px] truncate text-[#D1D1D6]">{outputLabel}</span>
             </button>
+
+            {isCoreActive && coreSnapshot?.output?.transport === 'upnp' && engine?.engineClient && (
+              <UpnpPacerPill
+                key={`${engine.engineClient.profile.engineId}:${engine.engineClient.profile.libraryId}:${coreSnapshot.output.id}:${coreSnapshot.queue.currentEntryId}`}
+                client={engine.engineClient}
+                subscribe={engine.subscribeEngineEvents}
+                connected={engineConnected}
+                playing={effectiveIsPlaying}
+              />
+            )}
 
             {/* Volume Control */}
             <div className="transport-volume flex items-center gap-1 shrink-0">

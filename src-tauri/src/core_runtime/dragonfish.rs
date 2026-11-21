@@ -609,6 +609,25 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
         let adv_ip_str = advertised_ip.to_string();
         let buffers_ctrl = Arc::clone(&shared_buffers);
 
+        let pacing_metrics = media_server.pacing_metrics_arc();
+        let expected_engine = identity.engine_id.clone();
+        let expected_library = identity.library_id.clone();
+        let delivery_ops: ExtraV1OpHandler<_, _, _> = Arc::new(move |req, _rt| {
+            let op = req["operation"].as_str()?;
+            if !matches!(op, "player.upnp_delivery" | "player.upnp_pacer") { return None; }
+            if req["engineId"].as_str() != Some(expected_engine.as_str()) ||
+                req["libraryId"].as_str() != Some(expected_library.as_str()) {
+                return Some(json!({"ok": false, "error": {"code": "identity_mismatch"}}));
+            }
+            if op == "player.upnp_pacer" {
+                if let Some(enabled) = req["enabled"].as_bool() {
+                    pacing_metrics.pacer_disabled.store(!enabled, Ordering::Relaxed);
+                }
+                return Some(json!({"ok": true, "data": {"pacerEnabled": !pacing_metrics.pacer_disabled.load(Ordering::Relaxed)}}));
+            }
+            Some(json!({"ok": true, "data": pacing_metrics.delivery_snapshot(req)}))
+        });
+
         let control_join = std::thread::Builder::new()
             .name("cadence-dragonfish-control".into())
             .spawn(move || {
@@ -627,7 +646,7 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
                     tls_config,
                     allow_plaintext_tests,
                     false,
-                    None,
+                    Some(delivery_ops),
                 );
             })
             .map_err(|e| DragonfishError::StatePersistence(e.to_string()))?;
@@ -1286,9 +1305,27 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
     while !stop_flag.load(Ordering::Acquire) {
         // Bounded event-driven SSE subscribers share this control dispatcher;
         // no extra worker or progress polling is required. Slow readers drop.
-        let events=runtime.lock().map(|mut rt|rt.take_library_events()).unwrap_or_default();
+        let mut events=runtime.lock().map(|mut rt|rt.take_library_events()).unwrap_or_default();
         let heartbeat=last_heartbeat.elapsed()>=Duration::from_secs(10);
         if heartbeat {last_heartbeat=std::time::Instant::now();}
+        // Piggyback compact sender counters on the existing slow heartbeat.
+        // No subscriber means no diagnostic snapshot or serialization work.
+        if heartbeat && !event_clients.is_empty() {
+            if let Some(handler) = &extra_op_handler {
+                if let Ok(mut rt) = runtime.lock() {
+                    // Keep non-UPnP playback free of diagnostic heartbeat payloads.
+                    if rt.config.output.as_ref().is_some_and(|output| output.transport == "upnp") {
+                        let request = json!({"operation": "player.upnp_delivery", "engineId": identity.engine_id,
+                            "libraryId": identity.library_id, "protocolVersion": 2});
+                        if let Some(response) = handler(&request, &mut rt) {
+                            if response["ok"].as_bool() == Some(true) {
+                                events.push(json!({"event": "upnp.delivery", "data": response["data"]}));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if !events.is_empty() || heartbeat {
             let payload=if events.is_empty(){": keepalive\n\n".to_string()}else{events.iter().map(|e|format!("event: engine\ndata: {e}\n\n")).collect::<String>()};
             event_clients.retain_mut(|client|client.write_all(payload.as_bytes()).and_then(|_|client.flush()).is_ok());

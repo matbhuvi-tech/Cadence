@@ -639,13 +639,16 @@ impl WindowsEngineNode {
             let op = req.get("operation").and_then(Value::as_str)?;
             let req_engine = req.get("engineId").and_then(Value::as_str);
             let req_lib = req.get("libraryId").and_then(Value::as_str);
-            if matches!(op, "outputs.list" | "outputs.scan" | "output.select" | "player.volume" | "player.purity" | "player.upnp_pacer")
+            if matches!(op, "outputs.list" | "outputs.scan" | "output.select" | "player.volume" | "player.purity" | "player.upnp_pacer" | "player.upnp_delivery")
                 && (req_engine != Some(expected_engine_id.as_str())
                     || req_lib != Some(expected_library_id.as_str()))
             {
                 return Some(json!({"ok": false, "error": {"code": "identity_mismatch"}}));
             }
             match op {
+                "player.upnp_delivery" => {
+                    Some(json!({ "ok": true, "data": audio_for_ops.get_upnp_manager().delivery_snapshot(req) }))
+                }
                 "outputs.list" => {
                     let list = audio_for_ops.list_audio_endpoints();
                     Some(json!({ "ok": true, "data": { "outputs": list } }))

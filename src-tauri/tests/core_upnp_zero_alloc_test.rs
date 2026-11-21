@@ -60,6 +60,12 @@ fn reset_counters() {
 
 #[test]
 fn active_paced_streaming_loop_performs_zero_heap_allocations() {
+    for capture in [false, true] {
+        check_stream_allocations(capture);
+    }
+}
+
+fn check_stream_allocations(capture: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -105,6 +111,8 @@ fn active_paced_streaming_loop_performs_zero_heap_allocations() {
         Arc::clone(&paused),
     );
 
+    if capture { metrics.delivery.start_at(Instant::now()); }
+
     reset_counters();
     COUNTING_ENABLED.with(|c| c.set(true));
 
@@ -142,6 +150,11 @@ fn active_paced_streaming_loop_performs_zero_heap_allocations() {
     let received = reader_thread.join().unwrap();
     assert_eq!(received, payload_len);
     assert_eq!(metrics.snapshot().bytes_sent, payload_len as u64);
+    let history = metrics.delivery.snapshot_at(Instant::now());
+    assert_eq!(history.is_some(), capture);
+    if let Some(history) = history {
+        assert_eq!(history.bins.iter().map(|b| b.bytes).sum::<u64>(), payload_len as u64);
+    }
 }
 
 #[test]
