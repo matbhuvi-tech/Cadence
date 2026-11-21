@@ -8,6 +8,7 @@
     "dev:pwa": "npm run --prefix pwa dev",
     "build:pwa": "npm run --prefix pwa build",
     "build": "npm run build:pwa && tsc -b && vite build",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/windows-suite/build-windows-suite.ps1 -BuildComponents -RequireInstaller",
     "lint": "oxlint",
     "preview": "vite preview",
     "test:engine": "tsx src/test/verifyEngine.ts",
