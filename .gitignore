@@ -16,6 +16,8 @@ node_modules/
 dist/
 !src-tauri/src/remote/dist/
 dist-ssr/
+website/docs/.vitepress/dist/
+website/docs/.vitepress/cache/
 *.tsbuildinfo
 *.local
 *.local.ps1

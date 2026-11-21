@@ -14,6 +14,7 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 - `src/AGENTS.md`: Frontend components, contexts, domain core, hooks, services, onboarding, and contracts.
 - `src-tauri/AGENTS.md`: Native Rust backend, including the audio engine, SQLite database, scanner, curation storage, maintenance workers, and remote server.
 - `pwa/AGENTS.md`: Mobile Remote Progressive Web App (React 19 / Vite / Tailwind) served to local Wi-Fi handsets.
+- `website/`: VitePress GitHub Pages documentation site (`npm --prefix website run dev` / `npm --prefix website run build`).
 
 ## Build Invariants
 
@@ -32,7 +33,7 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 ## Global Side Effects
 
-- Manages a local SQLite database at `%APPDATA%/cadence.db`, including `compilation_provenance_cache` (parameter-hashed compilation soundtrack resolutions).
+- Playback Engines manage local SQLite databases at `%LOCALAPPDATA%\CadenceEngine\cadence.db` (Windows Playback Engine, shared by both Tray and installer-configured Windows Service modes, auto-migrating legacy `%APPDATA%\cadence.db` on first run) or `/var/lib/cadence/cadence.db` (Linux/TrueNAS, or `--data-dir`/`CADENCE_DATA_DIR`), including `compilation_provenance_cache` (parameter-hashed compilation soundtrack resolutions).
 - Modifies audio-file metadata tags (ID3v2 `TOAL`/`TORY`, FLAC Vorbis `ORIGINALALBUM`/`ORIGINALYEAR`, MP4 atoms) only through user-confirmed two-phase commit execution.
 - Binds local TCP ports for mobile remote control and UPnP streaming.
 
@@ -72,4 +73,6 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 - Native backend: `cargo test --manifest-path src-tauri/Cargo.toml`
 - Windows Desktop installer: `npm run tauri:build -- --bundles nsis`
 - Windows Playback Engine binary (`src-tauri/target/release/cadence-engine.exe`): `cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --features engine-audio --bin cadence-engine`
-- Windows Playback Engine NSIS installer (`src-tauri/target/release/bundle/nsis/cadence-engine-setup.exe`): `.\deploy\windows-engine\build-windows-engine.ps1` (pass `-SkipCargoBuild` if `cadence-engine.exe` is already built)
+- Windows Playback Engine NSIS installer (`src-tauri/target/release/bundle/nsis/cadence-engine-setup.exe`): `.\deploy\windows-engine\build-windows-engine.ps1 -RequireInstaller` (pass `-SkipCargoBuild` if `cadence-engine.exe` is already built; optional `-Version <semver>`)
+- Windows Unified Suite NSIS installer (`src-tauri/target/release/bundle/nsis/Cadence_<ver>_x64-setup.exe`, wrapping Desktop + Local Playback Engine): `.\deploy\windows-suite\build-windows-suite.ps1 -RequireInstaller` (after building both sub-installers)
+- Documentation website (GitHub Pages preview / static build): `npm --prefix website run dev` / `npm --prefix website run build`

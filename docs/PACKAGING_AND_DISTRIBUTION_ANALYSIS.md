@@ -132,13 +132,21 @@ Inspecting Cadence `v0.1.0-rc.2` alongside the repository shows **4 artifacts bu
    - Eliminated QEMU ARM64 compilation in favor of native `ubuntu-24.04` + `ubuntu-24.04-arm` digest builds merged via `docker buildx imagetools create`.
    - Added `cargo fetch` dependency caching, BuildKit cache mounts (`registry`, `git`, `target`), GHA build cache (`type=gha`), and `FROM scratch AS binary` extraction in `deploy/playback-engine/Dockerfile`.
 
-### P1 — Next High-Impact UX & Platform Maturity Steps
-5. **Unified Windows Installer (Component Checkboxes):** Single setup wizard offering Desktop + Local Playback Engine by default (uncheckable for remote NAS-engine users), plus Windows *Add/Remove Programs* (`Uninstall`) registry registration, Firewall rule setup, and optional Windows Service mode in `cadence-engine.nsi`.
-6. **Pre-Built Native Linux `.deb` & `.rpm` Packages:** Package `cadence-headless` + `cadence-playback-engine.service` cleanly using `cargo-deb` / `nfpm` (zero FFmpeg dependency).
-7. **Unified Engine CLI & Complete Backups:** Parity for `--version`, `--backup`, `--restore`, `--doctor` across `cadence-engine` and `cadence-headless`, plus optional encrypted/protected `pairing-token` inclusion in backups.
-8. **Cryptographic Digest Verification in `install.sh`:** Verify downloaded `install.py` and Compose files against `cadence_checksums.txt` before execution.
+### P1 — Implemented on `feat/packaging-p1-ux-platform`
+5. **Unified Windows Installer, Firewall Helper & Windows Service Mode:**
+   - Added [`deploy/windows-suite/cadence-suite.nsi`](../deploy/windows-suite/cadence-suite.nsi) and `build-windows-suite.ps1` producing `Cadence_<ver>_x64-setup.exe` with selectable components (*Cadence Desktop (Required)*, *Cadence Local Playback Engine (This PC)*, *Configure Windows Firewall*, and *Run Local Engine as Windows Service*).
+   - Added Windows *Installed Apps* (`Uninstall`) registry registration (`DisplayVersion`, `EstimatedSize`, `QuietUninstallString`), single-UAC `Configure-CadenceHost.ps1`, reversible Tray ↔ Service switching sharing `%LOCALAPPDATA%\CadenceEngine` (preserving user libraries and identities), and [`deploy/windows-engine/Configure-CadenceFirewall.ps1`](../deploy/windows-engine/Configure-CadenceFirewall.ps1) (Private profile LAN rules for TCP `4040`/`18890` and UDP `1900`/`5353`) in `cadence-engine.nsi`.
+   - Added native Windows SCM service support (`service install|uninstall|start|stop|status`, `--service-run`), SCM-backed service `--data-dir` discovery in `cadence-core` and `cadence-engine --doctor`, Start Menu GUI status dialogs (`--autostart` guard), and an embedded Windows 10/11 application manifest (`src-tauri/windows/cadence-engine.manifest`) to avoid Program Compatibility Assistant false warnings.
+6. **Pre-Built Native Linux `.deb` & `.rpm` Packages (`nfpm`):**
+   - Added [`deploy/playback-engine/nfpm/nfpm.yaml`](../deploy/playback-engine/nfpm/nfpm.yaml), hardened `cadence-playback-engine.service`, and `preinstall.sh`/`postinstall.sh`/`preremove.sh` creating system `cadence` user/group (preferring UID/GID `568`), `/etc/cadence/playback-engine.env`, and `/var/lib/cadence` (`0700`) with zero FFmpeg dependencies.
+   - Integrated pinned `goreleaser/nfpm` (`v2.49.0`) SHA256-verified packaging into `.github/workflows/release.yml` for `linux/amd64` and `linux/arm64` `.deb` and `.rpm` artifacts plus `dpkg-deb` smoke checks.
+7. **Unified Engine CLI & Complete Backups (`--doctor`, `--backup`/`--restore` Parity):**
+   - Added `src-tauri/src/core_runtime/doctor.rs` shared read-only diagnostics (`--doctor` checking data dir, identity/TLS/`pairing-token`, SQLite `PRAGMA integrity_check(20)` & `foreign_key_check`, memory/lock limits, and live readiness) and `--data-dir`/`--port`/`CADENCE_DATA_DIR` aliases across `cadence-headless` and `cadence-engine`.
+   - Extended `cadence-engine` with `--backup`, `--restore` (guarded against running daemon or Windows service), and `--doctor`, and updated `create_versioned_backup_at` / `restore_versioned_backup` to include `pairing-token` and `localhost-pairing.json` with `0o600` Unix permissions.
+8. **Cryptographic Digest Verification in `install.sh` & `install.py`:**
+   - Updated `deploy/playback-engine/install.sh` and `install.py` to fetch `cadence_checksums.txt` and verify `install.py` and remote `compose*.yml` templates via SHA256 fail-closed (unless `CADENCE_ALLOW_UNVERIFIED=1`), covered by expanded tests in `test_installer.py`.
 
 ### P2 — Ecosystem Scale
 9. **Winget Manifest Automation & Idle-Safe Update Check:** Automated Winget PRs on stable releases + strictly user-triggered/idle-only update check UI in Desktop.
 10. **Windows Authenticode & Production Android Release Distribution:** OSS code signing for Windows installers and release-signed Android APK (plus F-Droid / Obtainium metadata).
-11. **Structured `docs/installation/` Site & PR `nightly.link` Artifacts:** Dedicated platform pages + `docs/CONFIGURATION.md` reference + optional macOS thin-frontend `.dmg` evaluation.
+11. **Structured `docs/installation/` Site & PR `nightly.link` Artifacts:** Dedicated VitePress GitHub Pages site (`website/` + `.github/workflows/docs.yml`) providing platform installation pages, CLI/configuration reference, and backup/troubleshooting guides; remaining P2 items: PR `nightly.link` artifacts and optional macOS thin-frontend `.dmg` evaluation.

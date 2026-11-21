@@ -26,7 +26,8 @@
   <a href="#measured-proof-pcm--dsd256-telemetry">Measured Proof</a> •
   <a href="#cadence-audio-engine-principles">Engine Principles</a> •
   <a href="#features">Features</a> •
-  <a href="#download-and-install">Install</a>
+  <a href="#download-and-install">Install</a> •
+  <a href="https://matbhuvi-tech.github.io/Cadence/docs/installation/">Docs</a>
 </p>
 
 <br/>
@@ -220,17 +221,17 @@ Cadence uses an **Engine-First** architecture: the **Playback Engine** owns your
 
 | Your Setup | Download from [Releases](https://github.com/matbhuvi-tech/Cadence/releases) | Notes |
 | :--- | :--- | :--- |
-| **Single Windows PC** *(USB DAC via WASAPI Exclusive / ASIO, or UPnP)* | `Cadence.Desktop_<ver>_x64-setup.exe` **+** `Cadence.PlaybackEngine_<ver>_x64-setup.exe` | Install both on your PC. Desktop auto-discovers the local Windows Engine on `127.0.0.1:4040`. |
-| **Linux / TrueNAS SCALE Audio Server + Windows Remote** | `install.sh` *(or `Cadence.PlaybackEngine_<ver>_Linux-setup.zip`)* **+** `Cadence.Desktop_<ver>_x64-setup.exe` | Linux Engine pulls `ghcr.io/matbhuvi-tech/cadence-playback-engine` (`amd64`/`arm64`). Supports **Standard (SMB mounting — default)** or **Hardened Read-Only** (`UID 568`, optional). |
+| **Single Windows PC** *(USB DAC via WASAPI Exclusive / ASIO, or UPnP)* | `Cadence_<ver>_x64-setup.exe` *(All-in-One installer)* | Installs **Cadence Desktop** + **Local Playback Engine** (checked by default; uncheck to connect only to a NAS engine). Standalone installers (`Cadence.Desktop_*` and `Cadence.PlaybackEngine_*`) are also published. |
+| **Linux / TrueNAS SCALE Audio Server + Windows Remote** | `install.sh` *(or `.deb` / `.rpm` / `.tar.gz` / `Linux-setup.zip`)* **+** `Cadence_<ver>_x64-setup.exe` | Guided setup verifies `cadence_checksums.txt`, supports **Standard (SMB mounting — default)** or **Hardened Read-Only** (`UID 568`, optional), or bare-metal `.deb`/`.rpm` systemd packages. |
 | **Phone / Tablet Remote** *(iOS & Android)* | **Built-in Web PWA** *(zero install)* or `Cadence.Remote_<ver>.apk` *(Android)* | Open the **Remote** icon in Desktop and scan the QR code over Wi-Fi, or install the Android APK. |
 
 ### Quick Start
 
-1. Download the installers for your setup from the [**GitHub Releases**](https://github.com/matbhuvi-tech/Cadence/releases) page (verify checksums against `cadence_checksums.txt`).
-2. **Start your Playback Engine:**
-   - **Windows PC:** Run `Cadence.PlaybackEngine_<ver>_x64-setup.exe` (runs silently in your system tray).
-   - **Linux / TrueNAS SCALE:** Run `sh install.sh` (accept defaults for **Standard SMB** mode, or choose **Hardened Read-Only** for non-root `/music:ro` NAS mounts). See the [Linux Playback Engine guide](deploy/playback-engine/README.md) for full details.
-3. **Launch Cadence Desktop** (`Cadence.Desktop_<ver>_x64-setup.exe`), select your Playback Engine when prompted, and add your local, NAS, or SMB music folders via **Browse → Add Folder**.
+1. Download the installers for your setup from the [**GitHub Releases**](https://github.com/matbhuvi-tech/Cadence/releases) page (verify checksums against `cadence_checksums.txt`; `install.sh` verifies downloads automatically).
+2. **Install & start your Playback Engine:**
+   - **Windows PC:** Run `Cadence_<ver>_x64-setup.exe` (keep **Cadence Local Playback Engine** checked for single-PC playback; registers in *Installed Apps*, embeds a Windows 10/11 application manifest, and auto-starts in the tray). Optionally check **Configure Windows Firewall** for LAN/mobile access and **Run Local Engine as Windows Service** (shares `%LOCALAPPDATA%\CadenceEngine` cleanly across Tray ↔ Service switches with zero duplicate engine or lost library). Start Menu shortcuts also manage Firewall rules and database migration, and `cadence-engine --doctor` inspects health.
+   - **Linux / TrueNAS SCALE:** Run `sh install.sh` (accept defaults for **Standard SMB** mode, or choose **Hardened Read-Only** for non-root `/music:ro` NAS mounts), or install the native `.deb`/`.rpm` package directly with `apt`/`dnf`. See the [Linux Playback Engine guide](deploy/playback-engine/README.md) for full details.
+3. **Launch Cadence Desktop**, confirm your Playback Engine connection (`127.0.0.1:4040` locally or LAN discovery for NAS), and add your local, NAS, or SMB music folders via **Browse → Add Folder**.
 4. Choose your **WASAPI Exclusive** DAC or **UPnP/DLNA** network renderer, enable **Bit-Perfect Purity Mode**, and start listening.
 5. *(Optional)* Click the **Remote** icon in the top bar and scan the QR code with your phone on the same Wi-Fi network to launch **Cadence Remote**.
 
@@ -245,6 +246,7 @@ Cadence uses an **Engine-First** architecture: the **Playback Engine** owns your
 
 ## Documentation & Links
 
+- **[Cadence Documentation Website (GitHub Pages)](https://matbhuvi-tech.github.io/Cadence/docs/installation/):** Platform-by-platform installation hub, configuration reference, backup/restore, and troubleshooting guides.
 - **[Linux & TrueNAS Playback Engine Guide (`deploy/playback-engine/README.md`)](deploy/playback-engine/README.md):** Guided installation, Standard (SMB) vs. Hardened Read-Only Compose profiles, upgrades, and rollback.
 - **[Audio Playback & Streaming Optimizations (`docs/AUDIO_PLAYBACK_OPTIMIZATIONS.md`)](docs/AUDIO_PLAYBACK_OPTIMIZATIONS.md):** Full 6-layer architectural breakdown of `VirtualLock` memory pinning, MMCSS core isolation, and the 3-state adaptive UPnP pacer.
 - **[Cover Art Resolution Architecture (`docs/COVER_ART_RESOLUTION_ARCHITECTURE.md`)](docs/COVER_ART_RESOLUTION_ARCHITECTURE.md):** How Cadence resolves, caches, and serves high-resolution artwork without interrupting playback.

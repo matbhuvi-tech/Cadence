@@ -1,5 +1,7 @@
 # Cadence Playback Engine for Linux
 
+> 🌐 **Online Documentation:** Formatted setup, configuration, and troubleshooting guides are available on the [Cadence Documentation Site](https://matbhuvi-tech.github.io/Cadence/docs/installation/) ([Docker](https://matbhuvi-tech.github.io/Cadence/docs/installation/docker), [TrueNAS SCALE](https://matbhuvi-tech.github.io/Cadence/docs/installation/truenas), [Linux Native `.deb`/`.rpm`](https://matbhuvi-tech.github.io/Cadence/docs/installation/linux)).
+
 This package runs the headless Playback Engine and its UPnP renderer (`cadence-headless --dragonfish`). The image supports `linux/amd64` and `linux/arm64`. Linux host networking is required for discovery and for a renderer to reach the advertised media address. The engine listens on TCP 4040 (TLS control), TCP 18890 (media), and UDP 1900 (SSDP); do not expose them to the internet. The host LAN IPv4 must be reachable from controllers and the renderer.
 
 **Linux Host Requirements:** Requires Linux kernel **5.6+** (`openat2` path containment; unsupported kernels fail closed). Symlinks beneath library roots are rejected.
@@ -24,10 +26,11 @@ sh install.sh
 ```
 
 The wizard:
-1. Suggests the latest published release (including pre-releases) and the machine's LAN IPv4 address.
-2. Prompts you to choose **1. Standard (Default — SMB mounting & Curate read/write)** or **2. Hardened Read-Only (Non-root UID 568, `/music:ro`, no runtime SMB)**.
-3. Selects your music folder (optional in **Standard** mode if you plan to add SMB shares in Cadence; required in **Hardened Read-Only** mode) and a separate persistent engine data folder.
-4. Probes host directory permissions as UID/GID `568`, downloads/validates the matching Compose template (`compose.yml` or `compose.hardened.yml`), pulls the GHCR image, and starts the engine.
+1. Verifies downloaded release artifacts (`install.py` and remote `compose.yml` / `compose.hardened.yml` templates) against the release's `cadence_checksums.txt` manifest (failing closed on mismatch or missing manifest unless `CADENCE_ALLOW_UNVERIFIED=1` is explicitly set).
+2. Suggests the latest published release (including pre-releases) and the machine's LAN IPv4 address.
+3. Prompts you to choose **1. Standard (Default — SMB mounting & Curate read/write)** or **2. Hardened Read-Only (Non-root UID 568, `/music:ro`, no runtime SMB)**.
+4. Selects your music folder (optional in **Standard** mode if you plan to add SMB shares in Cadence; required in **Hardened Read-Only** mode) and a separate persistent engine data folder.
+5. Probes host directory permissions as UID/GID `568`, validates the Compose template, pulls the GHCR image, and starts the engine.
 
 - **Linux hosts:** On Debian/Ubuntu, missing `python3`, `curl`, `docker`, and Compose v2 packages are installed from configured `apt` repositories (an administrator password may be requested). On other distributions, install Docker Engine, the Compose v2 plugin, Python 3, and `curl` first, and ensure Docker is running.
 - **TrueNAS SCALE 25.10 or later:** Configure the Apps pool in TrueNAS first, then download `install.sh` to the NAS and run `sudo sh install.sh` in the TrueNAS shell. Provide existing paths under `/mnt` (the parent of a new data folder must already exist). The installer submits a custom app through TrueNAS middleware (`midclt`) so it appears under **Apps** without installing OS packages into TrueNAS. Grant UID/GID `568` read/traverse ACL access to music and write access to an existing data folder; a new data folder is assigned to `568:568`. Use the Apps screen for status and logs. TrueNAS 24.10/25.04 users can use the manual YAML method below; the automated API path has not been verified on those versions.
@@ -51,11 +54,23 @@ Modern TrueNAS SCALE uses Docker Compose. Prepare separate persistent datasets f
 
 ## Native Linux systemd
 
-Download the standalone `Cadence.PlaybackEngine_<ver>_linux_<arch>.tar.gz` binary archive from [Cadence Releases](https://github.com/matbhuvi-tech/Cadence/releases) (or build from source on a Linux build host with `cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --bin cadence-headless`). Install `cadence-headless` as `/usr/local/bin/cadence-headless`, create a non-root UID/GID `568` user, `/var/lib/cadence` writable by that identity, and a readable `/music` mount. Copy `playback-engine.env.example` to `/etc/cadence/playback-engine.env`, set the LAN address and paths, and install `cadence-playback-engine.service` to `/etc/systemd/system/`. Adjust `ReadWritePaths`, identity, and `MemoryMax` to match the host (music and data must be separate directories). Run `systemctl daemon-reload`, `systemctl enable --now cadence-playback-engine`, and inspect `journalctl -u cadence-playback-engine`. This setup assumes `systemd`, `cgroup v2`, and permission to grant `CAP_IPC_LOCK`.
+Pre-built **`.deb`** and **`.rpm`** packages are published for `amd64` and `arm64` (zero FFmpeg dependency) alongside standalone `.tar.gz` archives on [Cadence Releases](https://github.com/matbhuvi-tech/Cadence/releases):
+
+- **Debian / Ubuntu (`.deb`):** `sudo apt install ./Cadence.PlaybackEngine_<ver>_linux_<arch>.deb`
+- **Fedora / RHEL (`.rpm`):** `sudo dnf install ./Cadence.PlaybackEngine_<ver>_linux_<arch>.rpm`
+
+The package creates the system `cadence` user/group (preferring UID/GID `568`), `/var/lib/cadence` (`0700`), `/etc/cadence/playback-engine.env` (`0640`, preserved across upgrades), installs the binary at `/usr/bin/cadence-headless`, and installs `/usr/lib/systemd/system/cadence-playback-engine.service`. Edit `/etc/cadence/playback-engine.env` to set your LAN address and music roots, ensure `cadence` has read/traverse access to your music directory, then run:
+
+```sh
+sudo systemctl enable --now cadence-playback-engine
+sudo -u cadence cadence-headless --doctor --data-dir /var/lib/cadence
+```
+
+For manual installations from `Cadence.PlaybackEngine_<ver>_linux_<arch>.tar.gz` (or building from source with `cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --bin cadence-headless`), install `cadence-headless` as `/usr/local/bin/cadence-headless`, create a non-root UID/GID `568` user, `/var/lib/cadence` writable by that identity, and a readable `/music` mount. Copy `playback-engine.env.example` to `/etc/cadence/playback-engine.env`, install `deploy/playback-engine/cadence-playback-engine.service` to `/etc/systemd/system/`, adjust `ReadWritePaths` and `MemoryMax`, run `systemctl daemon-reload`, and start with `systemctl enable --now cadence-playback-engine`. Both setups assume `systemd`, `cgroup v2`, and permission to grant `CAP_IPC_LOCK`.
 
 ## Persistence, upgrades and rollback
 
-The data directory contains the SQLite database and WAL, engine identity, TLS keys/certificate, `pairing-token`, and backups. Preserve the **entire** directory, restrict access, and back it up separately from the music library. The built-in versioned backup includes a consistent SQLite snapshot and identity/TLS files, but **does not include `pairing-token`**; back up that secret separately or copy the entire stopped data directory.
+The data directory contains the SQLite database and WAL, engine identity, TLS keys/certificate, `pairing-token`, `localhost-pairing.json`, and backups. Versioned backups (`--backup <tag>` / `--restore <tag>`) create an atomic SQLite snapshot and include node identity, TLS files, `pairing-token`, and `localhost-pairing.json` (restoring secret files with `0600` permissions on Unix). Preserve the entire data directory, restrict access, and store copies separately from the music library.
 
 Before upgrading, stop playback and the service (`docker compose stop`), wait for it to exit, then run an offline backup using the **old** image:
 
@@ -63,10 +78,10 @@ Before upgrading, stop playback and the service (`docker compose stop`), wait fo
 docker compose run --rm --no-deps playback-engine --backup pre-upgrade-YYYYMMDD
 ```
 
-Use a unique tag (reusing a tag replaces that backup), take an independent copy/snapshot of the complete stopped data directory (including `pairing-token`), and record the old image tag/digest. Update `CADENCE_IMAGE` to the new published release tag, run `docker compose pull` and `docker compose up -d`, then verify logs, readiness, pairing, and playback. Never run `--backup` or `--restore` concurrently with the daemon.
+Use a unique tag (reusing a tag replaces that backup), verify you can access your backup files, and record the old image tag/digest. Update `CADENCE_IMAGE` to the new published release tag, run `docker compose pull` and `docker compose up -d`, then inspect status and run read-only diagnostics (`docker compose exec playback-engine /usr/local/bin/cadence-headless --doctor` or `sudo -u cadence cadence-headless --doctor --data-dir /var/lib/cadence`). Never run `--backup` or `--restore` concurrently with a running daemon.
 
-To roll back, stop the service, restore the complete pre-upgrade data-directory snapshot (including `pairing-token`)—or run the matching old image's `--restore pre-upgrade-YYYYMMDD` plus restore your saved token—pin `CADENCE_IMAGE` back to the old version, and start the service. For `systemd`, run `systemctl stop cadence-playback-engine`, invoke `/usr/local/bin/cadence-headless --app-data-dir /var/lib/cadence --backup <tag>` or `--restore <tag>` as UID `568`, and start the service again.
+To roll back, stop the service, restore with the matching old image's `--restore pre-upgrade-YYYYMMDD` (or restore a full data-directory snapshot), pin `CADENCE_IMAGE` back to the old version, and start the service. For `systemd`, run `systemctl stop cadence-playback-engine`, invoke `cadence-headless --data-dir /var/lib/cadence --backup <tag>` or `--restore <tag>` as user `cadence`, and start the service again (`--doctor` verifies SQLite integrity, identity/TLS/`pairing-token`, memory-lock limits, and live readiness).
 
 ## Publishing
 
-Pushing a version tag (`v*`) triggers [`.github/workflows/release.yml`](../../.github/workflows/release.yml), which verifies tests, builds native `linux/amd64` and `linux/arm64` OCI images (no QEMU emulation) + standalone Linux tarballs, Windows Desktop and Playback Engine NSIS installers, and the Android Remote APK, merges the multi-arch GHCR manifest (`ghcr.io/matbhuvi-tech/cadence-playback-engine`), attaches `cadence_checksums.txt` and build provenance attestations, and creates a **Draft** GitHub Release. Stable tags (`vX.Y.Z` without pre-release suffix) also update `:latest`. Ensure GHCR package visibility is configured as public by the repository owner.
+Pushing a version tag (`v*`) triggers [`.github/workflows/release.yml`](../../.github/workflows/release.yml), which verifies tests, builds native `linux/amd64` and `linux/arm64` OCI images (no QEMU emulation) + Linux `.tar.gz`/`.deb`/`.rpm` packages, Windows Unified Suite + standalone Desktop & Playback Engine NSIS installers, and the Android Remote APK, merges the multi-arch GHCR manifest (`ghcr.io/matbhuvi-tech/cadence-playback-engine`), attaches `cadence_checksums.txt` and build provenance attestations, and creates a **Draft** GitHub Release. Stable tags (`vX.Y.Z` without pre-release suffix) also update `:latest`. Ensure GHCR package visibility is configured as public by the repository owner.
