@@ -5,7 +5,7 @@ const base = process.env.CADENCE_DOCS_BASE || '/Cadence/'
 export default defineConfig({
   title: 'Cadence',
   description:
-    'Uncompromising bit-perfect audiophile playback engine, low-noise network transport, and local library curator.',
+    'Precision UPnP audio transport with RAM-backed playback, adaptive network pacing, and recorded PCM and DSD256 delivery measurements.',
   base,
   cleanUrls: true,
   lastUpdated: true,

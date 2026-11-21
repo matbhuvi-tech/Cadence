@@ -16,10 +16,14 @@ Once your Playback Engine is running (locally on Windows or on a Linux / TrueNAS
 
 ## 3. Select Your Audio Endpoint & Purity Mode
 
+::: tip Recommended: UPnP network playback
+Use a compatible UPnP/DLNA renderer on the same LAN. This is the path used for Cadence's [recorded PCM and DSD256 measurements](/docs/architecture/audio-engine#upnp-measurements). The engine sends audio directly to the renderer; Desktop and Mobile Remote provide control.
+:::
+
 1. Open **Settings → Audio Output** (or the bottom endpoint selector):
-   - **Windows Local DACs:** Choose **WASAPI Exclusive** (or **ASIO**) for hardware-direct delivery bypassing the Windows audio mixer.
-   - **Network Streamers (e.g. HiFi Rose RS130):** Choose your **UPnP/DLNA** renderer so Cadence's 3-state adaptive pacer streams directly to the transport.
-2. Enable **Bit-Perfect Purity Mode** to lock Unity Gain (`1.0`) and bypass software volume scaling and DSP resampling.
+   - **Recommended — Network Streamers (e.g. HiFi Rose RS130):** Choose your **UPnP/DLNA** renderer so Cadence's 3-state adaptive pacer streams directly to the transport.
+   - **Alternative — Windows Local DACs:** Choose **WASAPI Exclusive** (or **ASIO**) for hardware-direct delivery to a locally connected DAC.
+2. Enable **Bit-Perfect Purity Mode** where available. For UPnP, also check the renderer's volume and DSP settings: unchanged delivery by Cadence does not prevent processing inside the renderer.
 
 ## 4. Curate Metadata safely When Idle
 
