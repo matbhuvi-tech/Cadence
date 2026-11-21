@@ -42,3 +42,20 @@ scripts:
   preinstall: deploy/playback-engine/nfpm/preinstall.sh
   postinstall: deploy/playback-engine/nfpm/postinstall.sh
   preremove: deploy/playback-engine/nfpm/preremove.sh
+
+# Native binaries are built on Debian 12 (Bookworm); do not install on older glibc.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.36)
+      - libgcc-s1
+      - passwd
+      - systemd
+      - ca-certificates
+  rpm:
+    depends:
+      - glibc >= 2.36
+      - libgcc
+      - shadow-utils
+      - systemd
+      - ca-certificates

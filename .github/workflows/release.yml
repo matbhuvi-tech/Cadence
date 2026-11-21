@@ -282,6 +282,33 @@ jobs:
           dpkg-deb --info "staging-linux/Cadence.PlaybackEngine_${CADENCE_SEMVER}_linux_${CADENCE_ARCH}.deb"
           dpkg-deb --contents "staging-linux/Cadence.PlaybackEngine_${CADENCE_SEMVER}_linux_${CADENCE_ARCH}.deb"
 
+      - name: Verify package installation on baseline distributions
+        shell: bash
+        run: |
+          # These containers run on each native architecture runner. No service is
+          # started: installation, dependencies, hooks and CLI are checked offline.
+          docker run --rm -v "$PWD/staging-linux:/packages:ro" debian:bookworm-slim sh -ec '
+            apt-get update
+            apt-get install -y /packages/*.deb
+            cadence-headless --version
+            cadence-headless --help
+            test "$(stat -c %U:%G /var/lib/cadence)" = cadence:cadence
+            test "$(stat -c %a /var/lib/cadence)" = 700
+            test "$(stat -c %U:%G /etc/cadence/playback-engine.env)" = root:cadence
+            test "$(stat -c %a /etc/cadence/playback-engine.env)" = 640
+            dpkg-query -W cadence-playback-engine
+          '
+          docker run --rm -v "$PWD/staging-linux:/packages:ro" fedora:43 sh -ec '
+            dnf install -y /packages/*.rpm
+            cadence-headless --version
+            cadence-headless --help
+            test "$(stat -c %U:%G /var/lib/cadence)" = cadence:cadence
+            test "$(stat -c %a /var/lib/cadence)" = 700
+            test "$(stat -c %U:%G /etc/cadence/playback-engine.env)" = root:cadence
+            test "$(stat -c %a /etc/cadence/playback-engine.env)" = 640
+            rpm -q --requires cadence-playback-engine
+          '
+
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4
         with:

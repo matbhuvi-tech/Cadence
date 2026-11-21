@@ -150,3 +150,11 @@ Inspecting Cadence `v0.1.0-rc.2` alongside the repository shows **4 artifacts bu
 9. **Winget Manifest Automation & Idle-Safe Update Check:** Automated Winget PRs on stable releases + strictly user-triggered/idle-only update check UI in Desktop.
 10. **Windows Authenticode & Production Android Release Distribution:** OSS code signing for Windows installers and release-signed Android APK (plus F-Droid / Obtainium metadata).
 11. **Structured `docs/installation/` Site & PR `nightly.link` Artifacts:** Dedicated VitePress GitHub Pages site (`website/` + `.github/workflows/docs.yml`) providing platform installation pages, CLI/configuration reference, and backup/troubleshooting guides; remaining P2 items: PR `nightly.link` artifacts and optional macOS thin-frontend `.dmg` evaluation.
+
+
+### Native Linux packaging follow-up (2026-11-21)
+
+- `nfpm.yaml` is tracked in Git; the local `.git/info/exclude` wildcard does not remove tracked files. Added a local exception to make that intent explicit.
+- Standalone binaries and both package formats retain the Debian 12 build baseline: **glibc >= 2.36**, Linux kernel 5.6+, systemd/cgroup v2 for the service. Package-specific dependencies now prevent installation on older glibc hosts.
+- Release CI now installs each generated `.deb` on Debian 12 and `.rpm` on Fedora 43, checks CLI execution and installed ownership/modes on native amd64 and arm64 runners before artifact upload.
+- These are container-based packaging checks, not full systemd startup or audio playback validation. Successful CI generation and artifacts remain unverified until a workflow run completes.

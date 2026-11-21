@@ -27,3 +27,5 @@
 - [#39](https://github.com/matbhuvi-tech/Cadence/issues/39): Clicking Play on TrueNAS Core multi-track album immediately triggers `Connection lost`.
 - [#40](https://github.com/matbhuvi-tech/Cadence/issues/40): Core mode playback timer stays stuck at `00:00` while audio plays on RS130 (and Mobile Remote lacks passive Core sync).
 - [#41](https://github.com/matbhuvi-tech/Cadence/issues/41): DSD (`.dsf`/`.dff`) albums missing ID3v2 metadata in catalogue and fail Symphonia fingerprinting.
+
+- Pre-built Linux binaries and native packages: `nfpm.yaml` was already tracked despite a matching local exclude. Declare the Debian 12 glibc >= 2.36 baseline and runtime dependencies; validate Debian/RPM installation on both native CI architectures. Successful CI package generation remains to be verified.

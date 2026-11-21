@@ -1,6 +1,8 @@
 # Native Linux Installation (`.deb` / `.rpm` / `systemd`)
 
-For bare-metal Linux servers, Cadence publishes pre-built **`.deb`**, **`.rpm`**, and standalone **`.tar.gz`** archives for **`amd64`** and **`arm64`** on [**GitHub Releases**](https://github.com/matbhuvi-tech/Cadence/releases) — with **zero FFmpeg dependency**.
+**Native compatibility:** These dynamically linked binaries are built on Debian 12 and require **glibc >= 2.36** (including the tarball). Older hosts such as Ubuntu 22.04 and RHEL 9 cannot run them; use the container deployment instead. Packages declare their runtime dependencies. Native installs also require Linux kernel 5.6+, systemd and cgroup v2.
+
+For bare-metal Linux servers, the release workflow generates pre-built **`.deb`**, **`.rpm`**, and standalone **`.tar.gz`** archives for **`amd64`** and **`arm64`** on [**GitHub Releases**](https://github.com/matbhuvi-tech/Cadence/releases) — with **zero FFmpeg dependency**.
 
 ## System Requirements
 
