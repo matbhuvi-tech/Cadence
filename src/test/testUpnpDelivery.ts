@@ -23,7 +23,7 @@ test('quiet status needs observations; off, stale and stream changes never show 
 
 test('receiver pressure alone is not congestion or falling behind', () => {
   const result = assessDelivery(sample({ bytesSent: 14000000, flowControlEvents: 4 }), sample({ sampledAtMs: 0, bytesSent: 0 }), 3)
-  assert.notEqual(result.status, 'falling_behind')
+  assert.equal(result.status, 'stable')
   assert.match(result.explanation, /receiver/i)
 })
 
@@ -145,4 +145,9 @@ test('wire parser rejects invalid bins and the RPC client propagates errors', as
   }
   const offline = createEngineClient(profile, async () => ({ ok: false, error: { code: 'unavailable' } }))
   await assert.rejects(offline.getUpnpDelivery())
+})
+
+test('TCP observations alone preserve steady pacing', () => {
+ const prev = sample({ sampledAtMs: 0, bytesSent: 0 })
+ assert.equal(assessDelivery(sample({ retransBytes: 100 }), prev, 0).status, 'stable')
 })
