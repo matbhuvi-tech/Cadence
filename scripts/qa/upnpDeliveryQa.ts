@@ -138,7 +138,7 @@ try {
   await cdp.wait('window.qa && document.querySelector("[aria-haspopup=dialog]")')
   await cdp.wait('window.qa.calls.length === 1')
   await cdp.evaluate('window.qa.emit()')
-  await cdp.wait('document.body.textContent.includes("Pacer · Stable")')
+  await cdp.wait('document.body.textContent.includes("Pacer · Pacing steady")')
   assert.equal(await cdp.evaluate('window.qa.calls.some(c=>c.captureAction === "start")'),false,'closed pill must not collect history')
   await cdp.evaluate('document.querySelector("[aria-haspopup=dialog]").click()')
   await cdp.wait('document.querySelector("[role=dialog]") && window.qa.calls.some(c=>c.captureAction === "start")')
@@ -167,6 +167,7 @@ try {
   await cdp.wait('document.querySelector("[role=dialog]")')
   await cdp.evaluate('Object.defineProperty(document,"hidden",{configurable:true,value:true});document.dispatchEvent(new Event("visibilitychange"))')
   await cdp.wait('window.qa.calls.at(-1).captureAction === "stop"')
+  await sleep(500) // Let an in-flight capture start resolve and be stopped before counting.
   const hiddenCalls = await cdp.evaluate('window.qa.calls.length')
   await sleep(5200)
   assert.equal(await cdp.evaluate('window.qa.calls.length'), hiddenCalls, 'hidden inspector must not poll')

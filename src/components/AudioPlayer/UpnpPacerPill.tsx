@@ -187,7 +187,7 @@ export const UpnpPacerPill = memo(function UpnpPacerPill({ client, subscribe, co
           : <button type="button" disabled={!connected || !playing} onClick={() => { setCapture(null); setCaptureGeneration(n => n + 1) }} className="flex gap-1 items-center text-xs text-zinc-300 disabled:opacity-40"><RotateCcw size={13} />Capture again</button>}
       </div>
       <DeliveryGraph capture={capture} requiredRate={requiredRate} />
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400"><span className="text-[#d4af37]">— Sender writes</span><span className="text-indigo-300">┄ Pacing target</span><span>┄ Track average</span><span className="text-orange-300">│ Delay marker</span></div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400"><span className="text-[#d4af37]">— Measured send rate</span><span title="Current rate the pacer aims to send, including delivery headroom." className="text-indigo-300">┄ Intended send rate</span><span title="Average streaming bitrate; variable-bitrate files can vary during playback.">┄ Average track bitrate</span><span className="text-orange-300">│ Excess delay ≥25 ms</span></div>
       {capture && <p className="text-[10px] text-zinc-500 mt-2">{isCapturing ? 'Capturing' : 'Frozen'} at {(capture.elapsedMs / 1000).toFixed(1)}s. Chunked writes naturally vary by interval; buffering can create sender gaps.</p>}
       <div className="grid grid-cols-3 gap-3 border-t border-white/10 mt-4 pt-3 text-[11px]">
         <div><p className="text-zinc-500">Delivery / track</p><p className="mt-1 tabular-nums">{assessment.mbps?.toFixed(1) ?? '—'} / {requiredRate > 0 ? requiredRate.toFixed(1) : '—'} Mbps</p></div>

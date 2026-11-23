@@ -38,7 +38,7 @@ export interface DeliveryAssessment {
   mbps: number | null
 }
 export const deliveryLabels: Record<DeliveryStatus, string> = {
-  assessing: 'Assessing', off: 'Off', stable: 'Stable', uneven: 'Uneven', falling_behind: 'Falling behind',
+  assessing: 'Assessing', off: 'Off', stable: 'Pacing steady', uneven: 'Uneven', falling_behind: 'Falling behind',
 }
 
 export function parseDeliverySnapshot(raw: unknown): DeliverySnapshot {
@@ -87,11 +87,11 @@ export function assessDelivery(current: DeliverySnapshot | null, previous: Deliv
   const deficit = bytes / seconds < current.realtimeBytesPerSec * 0.95 && (network || scheduling || (writes && !receiver))
     ? deficitWindows + 1 : 0
   if (deficit >= 2) return result('falling_behind', 'Repeated delivery deficits and stalls observed. Reduce competing traffic or compare playback with pacing off.', deficit, mbps)
-  if (network || scheduling || (writes && !receiver)) {
+  if (scheduling || (writes && !receiver)) {
     return result('uneven', network ? 'TCP impairment observed; network contention is possible.' : scheduling
       ? 'Local scheduling delays observed on the playback engine.' : 'Audio writes stalled; the cause is uncertain.', deficit, mbps)
   }
-  if (receiver) return result('assessing', 'The receiver is regulating incoming data. This does not establish network congestion.', 0, mbps)
+  if (receiver) return result('stable', 'Pacing steady. The receiver is regulating incoming data; delivery rate can temporarily decrease while buffered audio continues.', 0, mbps)
   if (bytes / seconds < current.realtimeBytesPerSec * 0.95) return result('assessing', 'Delivery is below the track average; buffering and HTTP request boundaries may explain this.', 0, mbps)
-  return result('stable', 'No significant delivery stalls observed in the latest window. This is sender telemetry, not packet timing at the streamer.', 0, mbps)
+  return result('stable', network ? 'Pacing steady. TCP warning: transport impairment was observed without a sender timing disruption.' : 'No significant delivery stalls observed in the latest window. This is sender telemetry, not packet timing at the streamer.', 0, mbps)
 }
