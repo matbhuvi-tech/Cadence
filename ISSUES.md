@@ -33,3 +33,5 @@
 - [#51](https://github.com/matbhuvi-tech/Cadence/issues/51): Missing UPnP pacer pill after installing a stale unified suite. Installed desktop/engine were from 05:06–05:07 while a newer desktop installer existed. `npm run build:windows` now rebuilds both components and the suite; packaging rejects stale components and records artifact hashes. Recovery and payload verification: [reports/issue-51-windows-suite-rebuild.md](reports/issue-51-windows-suite-rebuild.md).
 
 - [#52](https://github.com/matbhuvi-tech/Cadence/issues/52): Separate healthy pacing from normal receiver regulation and TCP-only warnings; clarify graph legends without changing telemetry collection.
+
+- [#53](https://github.com/matbhuvi-tech/Cadence/issues/53): Engine remains paused after desktop restart; output dialog now provides an explicit Stop playback control and confirms idle state before unlocking controls. Discovery cooldown remains enforced.

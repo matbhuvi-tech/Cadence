@@ -318,7 +318,25 @@ export const AudioDeviceSelectorModal: React.FC<AudioDeviceSelectorModalProps> =
             <div className="flex flex-col gap-2" aria-label="Playback engine outputs">
               {engineOutputBusy && <span className="text-xs text-[#8E8E93]">Loading outputs…</span>}
               {engineOutputError && <span role="alert" className="text-xs text-rose-300">{engineOutputError}</span>}
-              {activeCoreSnapshot?.playback.activity !== 'idle' && <span className="text-xs text-[#8E8E93]">Stop playback to change output.</span>}
+              {activeCoreSnapshot?.playback.activity !== 'idle' && (
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-[#8E8E93]">The playback engine is {activeCoreSnapshot?.playback.activity ?? 'unavailable'}. Pausing keeps output controls locked.</span>
+                  <button type="button" disabled={engineOutputBusy || !engine.state.view.session.connected}
+                    className="shrink-0 rounded-lg border border-white/15 px-3 py-2 text-xs text-white disabled:opacity-50"
+                    onClick={async () => {
+                      setEngineOutputBusy(true)
+                      setEngineOutputError(null)
+                      try {
+                        await engine.coreStop()
+                        const stopped = await engine.coreRefreshSnapshot()
+                        if (stopped?.playback.activity !== 'idle') throw new Error('The engine has not confirmed playback stopped. Please retry.')
+                        setEngineOutputError('Playback stopped. Wait 30 seconds before scanning for renderers.')
+                      } catch (error) {
+                        setEngineOutputError(error instanceof Error ? error.message : 'Unable to stop engine playback.')
+                      } finally { setEngineOutputBusy(false) }
+                    }}>Stop playback</button>
+                </div>
+              )}
               {engineOutputs.map(output => (
                 <button key={output.id} type="button"
                   disabled={engineOutputBusy || !output.isAvailable || activeCoreSnapshot?.playback.activity !== 'idle'}
