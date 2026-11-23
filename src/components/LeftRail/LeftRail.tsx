@@ -20,9 +20,11 @@ import { AuditIssue, StorageMount, Track, Release, WatchedFolder, CanvasViewMode
 import { FacetSelections } from './FacetedFilters'
 import { AmbientCurationCapsule } from './AmbientCurationCapsule'
 import { FEATURES } from '../../config/features'
-import { useAudioPlayer } from '../../context/AudioPlayerContext'
+import { useEffectiveQueueControl, useOptionalEngineController } from '../../context/EngineControllerContext'
 import { graphEngine } from '../../core/graphEngine'
 import { CadenceArtworkFallback } from '../common/CadenceArtworkFallback'
+import { extractEngineArtworkReleaseId, useResolvedMediaUrl } from '../common/EngineArtworkImg'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 
 interface LeftRailProps {
   auditIssues?: AuditIssue[]
@@ -74,12 +76,21 @@ const LeftRailArtworkCard: React.FC<{
   onOpenSanctuary?: () => void
   onCollapse?: () => void
 }> = React.memo(({ onOpenSanctuary, onCollapse }) => {
-  const { currentTrack, currentRelease, isPlaying } = useAudioPlayer()
+  const { currentTrack, currentRelease, isPlaying, isCoreActive, pendingPlay } = useEffectiveQueueControl()
+  const engine = useOptionalEngineController()
   const [imgError, setImgError] = useState(false)
 
   const resolvedRelease =
     currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
-  const coverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+  const rawCoverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
+  const shouldBlockCoreArtFetch = isCoreActive && Boolean(pendingPlay)
+  const resolvedMediaUrl = useResolvedMediaUrl(rawCoverUrl, !shouldBlockCoreArtFetch)
+  const rawArtReleaseId = extractEngineArtworkReleaseId(rawCoverUrl)
+  const coverUrl = shouldBlockCoreArtFetch
+    ? rawArtReleaseId
+      ? (engine?.getCachedCoreArtworkUrl(rawArtReleaseId) ?? '')
+      : resolveMediaUrl(rawCoverUrl)
+    : resolvedMediaUrl
 
   useEffect(() => {
     setImgError(false)

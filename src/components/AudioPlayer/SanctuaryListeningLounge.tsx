@@ -11,12 +11,15 @@ import {
   Sparkles,
   Users,
 } from 'lucide-react'
-import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
+import { useAudioProgress } from '../../context/AudioPlayerContext'
+import { useEffectiveQueueControl, useOptionalEngineController } from '../../context/EngineControllerContext'
+import { useCorePlaybackClock } from '../../hooks/useCorePlaybackClock'
 import { graphEngine } from '../../core/graphEngine'
 import { describeSignalPath } from '../../core/endpointRouting'
 import { PanoramicAtmosphericBackdrop } from '../common/PanoramicAtmosphericBackdrop'
 import { CadenceArtworkFallback } from '../common/CadenceArtworkFallback'
-import { useResolvedMediaUrl } from '../common/EngineArtworkImg'
+import { extractEngineArtworkReleaseId, useResolvedMediaUrl } from '../common/EngineArtworkImg'
+import { resolveMediaUrl } from '../../services/tauriBridge'
 
 interface SanctuaryListeningLoungeProps {
   isOpen: boolean
@@ -30,14 +33,13 @@ const formatClockTime = (seconds: number) => {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
 }
 
-const SanctuaryScrubber: React.FC<{
-  fallbackDuration: number
+const SanctuaryScrubberView: React.FC<{
+  currentSeconds: number
+  durationSeconds: number
   onSeek: (seconds: number) => void
-}> = React.memo(({ fallbackDuration, onSeek }) => {
-  const { currentTime, duration } = useAudioProgress()
-  const effectiveDuration = duration > 0 ? duration : fallbackDuration
+}> = ({ currentSeconds, durationSeconds, onSeek }) => {
   const progressFraction =
-    effectiveDuration > 0 ? Math.max(0, Math.min(1, currentTime / effectiveDuration)) : 0
+    durationSeconds > 0 ? Math.max(0, Math.min(1, currentSeconds / durationSeconds)) : 0
 
   return (
     <div className="space-y-1.5">
@@ -46,22 +48,23 @@ const SanctuaryScrubber: React.FC<{
         tabIndex={0}
         aria-label="Playback progress"
         aria-valuemin={0}
-        aria-valuemax={Math.round(effectiveDuration)}
-        aria-valuenow={Math.round(currentTime)}
+        aria-valuemax={Math.round(durationSeconds)}
+        aria-valuenow={Math.round(currentSeconds)}
         className="h-1.5 bg-white/20 rounded-full overflow-hidden cursor-pointer relative group focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-4"
         onClick={(e) => {
+          if (durationSeconds <= 0) return
           const rect = e.currentTarget.getBoundingClientRect()
           const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-          onSeek(pct * effectiveDuration)
+          onSeek(pct * durationSeconds)
         }}
         onKeyDown={(e) => {
-          if (!effectiveDuration) return
+          if (!durationSeconds) return
           if (e.key === 'ArrowRight') {
             e.preventDefault()
-            onSeek(Math.min(effectiveDuration, currentTime + 5))
+            onSeek(Math.min(durationSeconds, currentSeconds + 5))
           } else if (e.key === 'ArrowLeft') {
             e.preventDefault()
-            onSeek(Math.max(0, currentTime - 5))
+            onSeek(Math.max(0, currentSeconds - 5))
           }
         }}
       >
@@ -71,10 +74,49 @@ const SanctuaryScrubber: React.FC<{
         />
       </div>
       <div className="flex items-center justify-between text-xs font-mono text-white/65 tabular-nums">
-        <span>{formatClockTime(currentTime)}</span>
-        <span>{formatClockTime(effectiveDuration)}</span>
+        <span>{formatClockTime(currentSeconds)}</span>
+        <span>{formatClockTime(durationSeconds)}</span>
       </div>
     </div>
+  )
+}
+
+const SanctuaryScrubber: React.FC<{
+  fallbackDuration: number
+  onSeek: (seconds: number) => void
+}> = React.memo(({ fallbackDuration, onSeek }) => {
+  const { currentTime, duration } = useAudioProgress()
+  const effectiveDuration = duration > 0 ? duration : fallbackDuration
+  return (
+    <SanctuaryScrubberView
+      currentSeconds={currentTime}
+      durationSeconds={effectiveDuration}
+      onSeek={onSeek}
+    />
+  )
+})
+
+const CoreSanctuaryScrubber: React.FC<{
+  positionSeconds: number
+  durationSeconds: number
+  isPlaying: boolean
+  isConnected: boolean
+  trackKey?: string | null
+  onSeek: (seconds: number) => void
+}> = React.memo(({ positionSeconds, durationSeconds, isPlaying, isConnected, trackKey, onSeek }) => {
+  const displaySeconds = useCorePlaybackClock({
+    corePositionSeconds: positionSeconds,
+    isPlaying,
+    isConnected,
+    durationSeconds,
+    trackKey,
+  })
+  return (
+    <SanctuaryScrubberView
+      currentSeconds={displaySeconds}
+      durationSeconds={durationSeconds}
+      onSeek={onSeek}
+    />
   )
 })
 
@@ -86,6 +128,8 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     currentTrack,
     currentRelease,
     isPlaying,
+    pendingPlay,
+    isLoadingTrack,
     volume,
     isMuted,
     streamTelemetry,
@@ -96,14 +140,19 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     isBitPerfect,
     outputSampleRate,
     deviceType,
-    togglePurityMode,
     togglePlayPause,
     nextTrack,
     prevTrack,
     seek,
     setVolume,
     toggleMute,
-  } = useAudioPlayer()
+    isCoreActive,
+    coreConnected,
+    corePositionSeconds,
+  } = useEffectiveQueueControl()
+  const engine = useOptionalEngineController()
+  const coreSnapshot = isCoreActive ? engine?.activeCoreSnapshot ?? null : null
+  const coreCurrentEntryId = coreSnapshot?.queue.currentEntryId ?? null
 
   const [imgError, setImgError] = useState(false)
 
@@ -122,7 +171,14 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
   const resolvedRelease =
     currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)
   const rawCoverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
-  const coverUrl = useResolvedMediaUrl(rawCoverUrl)
+  const shouldBlockCoreArtFetch = !isOpen || (isCoreActive && Boolean(pendingPlay))
+  const resolvedMediaUrl = useResolvedMediaUrl(rawCoverUrl, !shouldBlockCoreArtFetch)
+  const rawArtReleaseId = extractEngineArtworkReleaseId(rawCoverUrl)
+  const coverUrl = shouldBlockCoreArtFetch
+    ? rawArtReleaseId
+      ? (engine?.getCachedCoreArtworkUrl(rawArtReleaseId) ?? '')
+      : resolveMediaUrl(rawCoverUrl)
+    : resolvedMediaUrl
 
   useEffect(() => {
     setImgError(false)
@@ -132,9 +188,14 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
 
   const showCoverImage = Boolean(coverUrl) && !imgError
 
-  const isDsd = (streamTelemetry?.format || currentTrack?.format || '').toUpperCase().includes('DSD')
-  const isHiRes = Boolean(streamTelemetry?.isHighRes || currentTrack?.isHighRes)
-  const sampleRateKhz = streamTelemetry?.sampleRate ? `${streamTelemetry.sampleRate / 1000} kHz` : null
+  const activeFormat = (isCoreActive ? currentTrack?.format : streamTelemetry?.format || currentTrack?.format) || 'PCM'
+  const activeSampleRate = isCoreActive ? currentTrack?.sampleRate : streamTelemetry?.sampleRate
+  const activeBitDepth = isCoreActive ? currentTrack?.bitDepth : streamTelemetry?.bitDepth
+  const isDsd = activeFormat.toUpperCase().includes('DSD')
+  const isHiRes = isCoreActive
+    ? Boolean(currentTrack?.isHighRes)
+    : Boolean(streamTelemetry?.isHighRes || currentTrack?.isHighRes)
+  const sampleRateKhz = activeSampleRate ? `${activeSampleRate / 1000} kHz` : null
 
   const signalDesc = describeSignalPath({
     selectedEndpoint,
@@ -148,7 +209,9 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
     outputSampleRate,
   })
 
-  const isUnavailable = activeBackendEndpoint === null || signalDesc.transportLabel === 'Unavailable'
+  const isUnavailable = isCoreActive
+    ? !coreConnected || !coreSnapshot?.output
+    : activeBackendEndpoint === null || signalDesc.transportLabel === 'Unavailable'
 
   const footerTierLabel = isDsd
     ? 'DSD Direct'
@@ -160,9 +223,32 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
 
   const footerStatusLabel = isUnavailable
     ? 'Output Unavailable'
-    : signalDesc.isProvenBitPerfect
-      ? 'Optimal Playback'
-      : 'Standard Playback'
+    : isCoreActive
+      ? coreSnapshot?.output?.label || 'Optimal Playback'
+      : signalDesc.isProvenBitPerfect
+        ? 'Optimal Playback'
+        : 'Standard Playback'
+
+  const handleTogglePlayPause = () => {
+    if (isLoadingTrack) return
+    togglePlayPause()
+  }
+
+  const handleNextTrack = () => {
+    if (isCoreActive && engine) {
+      void engine.coreNextTrack()
+      return
+    }
+    nextTrack()
+  }
+
+  const handlePrevTrack = () => {
+    if (isCoreActive && engine) {
+      void engine.corePrevTrack()
+      return
+    }
+    prevTrack()
+  }
 
   const conductorName = currentTrack?.credits.find((c) => c.role === 'conductor')?.personName
   const ensembleName = currentTrack?.credits.find((c) => c.role === 'ensemble')?.personName
@@ -209,9 +295,9 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
               aria-hidden="true"
             />
             <span>
-              {streamTelemetry?.format || currentTrack?.format || 'PCM'}
+              {activeFormat}
               {sampleRateKhz ? ` · ${sampleRateKhz}` : ''}
-              {streamTelemetry?.bitDepth ? ` · ${streamTelemetry.bitDepth}-bit` : ''}
+              {activeBitDepth ? ` · ${activeBitDepth}-bit` : ''}
             </span>
           </div>
 
@@ -261,8 +347,8 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
               {currentTrack?.artistCredit || 'Unknown Artist'}
             </p>
             <p className="text-sm text-white/60 mt-0.5">
-              {currentRelease?.title || 'Release'}
-              {currentRelease?.releaseYear ? ` (${currentRelease.releaseYear})` : ''}
+              {resolvedRelease?.title || 'Release'}
+              {resolvedRelease?.releaseYear ? ` (${resolvedRelease.releaseYear})` : ''}
             </p>
           </div>
 
@@ -297,7 +383,18 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
 
       {/* Bottom Transport Controls & Scrubber */}
       <footer className="w-full max-w-2xl mx-auto space-y-4 z-10 shrink-0">
-        <SanctuaryScrubber fallbackDuration={fallbackDuration} onSeek={seek} />
+        {isCoreActive ? (
+          <CoreSanctuaryScrubber
+            positionSeconds={corePositionSeconds ?? 0}
+            durationSeconds={fallbackDuration}
+            isPlaying={isPlaying}
+            isConnected={coreConnected}
+            trackKey={coreCurrentEntryId ?? currentTrack?.id ?? null}
+            onSeek={seek}
+          />
+        ) : (
+          <SanctuaryScrubber fallbackDuration={fallbackDuration} onSeek={seek} />
+        )}
 
         <div className="flex items-center justify-between gap-4">
           <div className="w-36 text-xs text-white/55">
@@ -313,7 +410,7 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
           <div className="flex items-center gap-6">
             <button
               type="button"
-              onClick={prevTrack}
+              onClick={handlePrevTrack}
               aria-label="Previous track"
               className="p-2 text-white/70 hover:text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2 rounded-full"
               title="Previous Track"
@@ -322,7 +419,7 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
             </button>
             <button
               type="button"
-              onClick={togglePlayPause}
+              onClick={handleTogglePlayPause}
               aria-label={isPlaying ? 'Pause' : 'Play'}
               className="w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 backdrop-blur-md border border-white/25 text-white flex items-center justify-center hover:scale-105 active:scale-95 transition-all cursor-pointer shadow-xl focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2"
               title={isPlaying ? 'Pause' : 'Play'}
@@ -335,7 +432,7 @@ export const SanctuaryListeningLounge: React.FC<SanctuaryListeningLoungeProps> =
             </button>
             <button
               type="button"
-              onClick={nextTrack}
+              onClick={handleNextTrack}
               aria-label="Next track"
               className="p-2 text-white/70 hover:text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-white focus-visible:outline-offset-2 rounded-full"
               title="Next Track"

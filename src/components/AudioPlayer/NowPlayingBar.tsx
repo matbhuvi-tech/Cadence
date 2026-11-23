@@ -342,6 +342,9 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     ? !engineConnected || !coreSnapshot?.output
     : activeBackendEndpoint === null || deviceType === 'unavailable'
   const ledColor = isEndpointUnavailable ? '#F43F5E' : isDsd ? '#818CF8' : isHiRes ? '#F59E0B' : '#10B981'
+  const effectiveUpcomingCount = isCoreActive
+    ? (engine?.coreUpcomingEntries.length ?? 0)
+    : upcomingTracks.length
 
   if (!effectiveTrack && !isCoreActive && (topMode === 'curate' || topMode === 'maintain') && !isDeviceModalOpen && !isSignalPopoverOpen) {
     return null
@@ -636,7 +639,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             {/* Dedicated Now Playing Queue Toggle (Matching Mockup) */}
             <button
               onClick={() => toggleRightSidebar('queue')}
-              title={`Now Playing Queue (⌘U / Q) • ${upcomingTracks.length} upcoming`}
+              title={`Now Playing Queue (⌘U / Q) • ${effectiveUpcomingCount} upcoming`}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-xs font-medium transition-all cursor-pointer select-none ${isRightSidebarOpen && rightSidebarTab === 'queue'
                 ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 font-semibold shadow-sm shadow-emerald-500/20'
                 : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.06] text-[#8E8E93] hover:text-white'
@@ -644,9 +647,9 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             >
               <ListMusic className="w-3.5 h-3.5 text-emerald-400" />
               <span className="transport-secondary-label">Queue</span>
-              {upcomingTracks.length > 0 && (
+              {effectiveUpcomingCount > 0 && (
                 <span className="flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-emerald-500 px-1 text-[9px] font-mono font-bold text-black shadow-sm">
-                  {upcomingTracks.length}
+                  {effectiveUpcomingCount}
                 </span>
               )}
             </button>

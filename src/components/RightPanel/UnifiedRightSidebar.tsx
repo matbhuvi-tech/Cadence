@@ -751,15 +751,26 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                           title={isRowLoading ? resolveLoadingSubLabel(pendingPlay) : `Play "${trk.title}"`}
                           className="relative w-8 h-8 rounded-lg bg-neutral-900 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center select-none shadow-sm cursor-pointer active:scale-95 transition-transform group/thumb"
                         >
-                          {coverArt ? (
-                            <img
+                          {isCoreActive && isLoadingTrack ? (
+                            getOptimisticSafeCoverArt(trk) ? (
+                              <img
+                                src={getOptimisticSafeCoverArt(trk)}
+                                alt=""
+                                className="w-full h-full object-cover pointer-events-none select-none"
+                                draggable={false}
+                              />
+                            ) : (
+                              <Music2 className="w-4 h-4 text-neutral-600" />
+                            )
+                          ) : (
+                            <EngineArtworkImg
                               src={coverArt}
                               alt=""
+                              loading="lazy"
                               className="w-full h-full object-cover pointer-events-none select-none"
                               draggable={false}
+                              fallback={<Music2 className="w-4 h-4 text-neutral-600" />}
                             />
-                          ) : (
-                            <Music2 className="w-4 h-4 text-neutral-600" />
                           )}
                           {showRowSpinner ? (
                             <div className="absolute inset-0 flex items-center justify-center bg-black/55">

@@ -1,5 +1,24 @@
 # Issue Log
 
+## GitHub #54 — Core Engine mode: missing Left Rail artwork dock, Sanctuary Now Playing state, Queue badge count, and Up Next thumbnails
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/54
+- **Branch:** `fix/54-core-now-playing-queue-ui`
+- **Reported behavior:**
+  1. Left Rail artwork dock above the playback controls does not appear during Core Playback Engine playback.
+  2. Dedicated Now Playing screen (`SanctuaryListeningLounge`) displays `"No Track Selected"`, `"Unknown Artist"`, `00:00`, and `"Lossless · Output Unavailable"`.
+  3. Bottom `NowPlayingBar` Queue button is missing the green upcoming count badge even when tracks are queued.
+  4. Right sidebar "UP NEXT" queue rows render broken image icons instead of album cover thumbnails.
+- **Root causes:**
+  1. `LeftRailArtworkCard`, `SanctuaryListeningLounge`, and the `NowPlayingBar` Queue badge read local-only `AudioPlayerContext` state instead of `EngineControllerContext` (`useEffectiveQueueControl` / `useOptionalEngineController`).
+  2. `LeftRailArtworkCard`, `SanctuaryListeningLounge`, and `UnifiedRightSidebar` Up Next rows passed raw `cadence-art://` URLs directly to `<img>` instead of resolving them via `useResolvedMediaUrl` / `EngineArtworkImg`.
+- **Fix:**
+  1. Wired `LeftRailArtworkCard` (`src/components/LeftRail/LeftRail.tsx`) to `useEffectiveQueueControl()` and `useResolvedMediaUrl()` / `extractEngineArtworkReleaseId()` so the bottom-left artwork dock renders and resolves Core Engine cover art.
+  2. Wired `SanctuaryListeningLounge` (`src/components/AudioPlayer/SanctuaryListeningLounge.tsx`) to `useEffectiveQueueControl()`, `useOptionalEngineController()`, `CoreSanctuaryScrubber` (`useCorePlaybackClock`), and `useResolvedMediaUrl()`, displaying Core track/release metadata, connected output status, live elapsed time, and working transport controls.
+  3. Updated `NowPlayingBar` (`src/components/AudioPlayer/NowPlayingBar.tsx`) to derive the Queue button badge count and tooltip from `engine.coreUpcomingEntries.length` when `isCoreActive` is true.
+  4. Updated `UnifiedRightSidebar` (`src/components/RightPanel/UnifiedRightSidebar.tsx`) Up Next rows to render `<EngineArtworkImg>` (with pending-play cached fallback) instead of raw `<img>` tags.
+- **Status:** Implemented on `fix/54-core-now-playing-queue-ui`; unit tests and `npm run build` passed; pending user verification.
+
 ## GitHub #50 — Advertise human-readable build identity and prevent silent v2-to-v1 compatibility downgrade
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/50
