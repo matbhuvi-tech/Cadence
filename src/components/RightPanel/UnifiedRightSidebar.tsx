@@ -15,6 +15,7 @@ import {
   BookmarkPlus,
   MoreVertical,
   Music2,
+  Loader2,
 } from 'lucide-react'
 import { Track, Playlist, Release } from '../../core/types'
 import { useAudioProgress } from '../../context/AudioPlayerContext'
@@ -24,7 +25,9 @@ import {
   getEnginePlaylistDetails,
   listEnginePlaylists,
 } from '../../services/enginePlaylistService'
-import { EngineArtworkImg } from '../common/EngineArtworkImg'
+import { EngineArtworkImg, extractEngineArtworkReleaseId } from '../common/EngineArtworkImg'
+import { resolveMediaUrl } from '../../services/tauriBridge'
+import { resolveLoadingPillLabel, resolveLoadingSubLabel } from '../../core/pendingPlayState'
 
 interface UnifiedRightSidebarProps {
   allReleases?: Release[]
@@ -166,6 +169,8 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
     queue,
     isPlaying,
     isPaused,
+    pendingPlay,
+    isLoadingTrack,
     seek,
     isShuffle,
     toggleShuffle,
@@ -358,6 +363,22 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
     }
   }
 
+  const loadingPillLabel = resolveLoadingPillLabel(pendingPlay, isLoadingTrack)
+  const showLoadingChrome = Boolean(pendingPlay?.showSpinner) || (isLoadingTrack && !pendingPlay)
+
+  const getOptimisticSafeCoverArt = (t: Track): string | undefined => {
+    const raw = getTrackCoverArt(t)
+    if (!raw) return undefined
+    if (isCoreActive && isLoadingTrack) {
+      const rawId = extractEngineArtworkReleaseId(raw)
+      if (rawId) {
+        return engine?.getCachedCoreArtworkUrl(rawId) ?? undefined
+      }
+      return resolveMediaUrl(raw)
+    }
+    return raw
+  }
+
   // Quick Save Queue as Playlist
   const handleSaveQueue = async () => {
     onOpenCreatePlaylist(queue.length > 0 ? queue : currentTrack ? [currentTrack] : undefined)
@@ -446,26 +467,30 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
             {currentTrack ? (
               <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.03] p-3.5 shadow-lg group">
                 <div className="flex gap-3">
-                  {/* Artwork with Equalizer Indicator */}
+                  {/* Artwork with Loading Indicator */}
                   <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl bg-neutral-900 border border-white/10 flex items-center justify-center shadow-md">
-                    {getTrackCoverArt(currentTrack) ? (
-                      <img
+                    {isCoreActive && isLoadingTrack ? (
+                      getOptimisticSafeCoverArt(currentTrack) ? (
+                        <img
+                          src={getOptimisticSafeCoverArt(currentTrack)}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <Music2 className="h-6 w-6 text-neutral-600" />
+                      )
+                    ) : (
+                      <EngineArtworkImg
                         src={getTrackCoverArt(currentTrack)}
                         alt=""
                         className="h-full w-full object-cover"
+                        fallback={<Music2 className="h-6 w-6 text-neutral-600" />}
                       />
-                    ) : (
-                      <Music2 className="h-6 w-6 text-neutral-600" />
                     )}
 
-                    {/* Equalizer animation when playing */}
-                    {isPlaying && !isPaused && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-[1px]">
-                        <div className="flex items-end gap-0.5 h-4">
-                          <span className="w-1 bg-[#D4AF37] rounded-full animate-bounce h-2.5" />
-                          <span className="w-1 bg-[#D4AF37] rounded-full animate-bounce h-4 animation-delay-200" />
-                          <span className="w-1 bg-[#D4AF37] rounded-full animate-bounce h-2 animation-delay-400" />
-                        </div>
+                    {showLoadingChrome && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/45">
+                        <Loader2 className="h-5 w-5 text-[#D4AF37] animate-spin" />
                       </div>
                     )}
                   </div>
@@ -477,10 +502,21 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                         <h4 className="text-sm font-semibold text-white truncate">
                           {currentTrack.title}
                         </h4>
-                        <span className="flex items-center gap-1 rounded-full bg-[#D4AF37]/20 px-2 py-0.5 text-[9px] font-mono text-[#D4AF37] border border-[#D4AF37]/30 shrink-0">
-                          <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />
-                          {isPlaying && !isPaused ? 'Playing' : 'Paused'}
-                        </span>
+                        {loadingPillLabel ? (
+                          <span className="flex items-center gap-1 rounded-full bg-[#D4AF37]/20 px-2 py-0.5 text-[9px] font-mono text-[#D4AF37] border border-[#D4AF37]/30 shrink-0">
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full bg-[#D4AF37] ${
+                                showLoadingChrome ? 'animate-pulse' : ''
+                              }`}
+                            />
+                            {loadingPillLabel}
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1 rounded-full bg-[#D4AF37]/20 px-2 py-0.5 text-[9px] font-mono text-[#D4AF37] border border-[#D4AF37]/30 shrink-0">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />
+                            {isPlaying && !isPaused ? 'Playing' : 'Paused'}
+                          </span>
+                        )}
                       </div>
 
                       <p className="text-xs text-neutral-300 truncate mt-0.5">
@@ -549,15 +585,29 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                   </div>
                 </div>
 
-                {/* Scrubber / Progress Bar */}
-                <SidebarScrubber
-                  fallbackDuration={currentTrack.durationSeconds || 0}
-                  corePositionSeconds={corePositionSeconds}
-                  coreIsPlaying={isPlaying}
-                  coreConnected={isCoreActive ? coreConnected : true}
-                  coreTrackKey={currentTrack.id}
-                  onSeek={seek}
-                />
+                {/* Scrubber / Loading Status Bar */}
+                {isLoadingTrack ? (
+                  <div className="mt-3 pt-2 border-t border-white/5 space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-[#D4AF37]">
+                      <span>{resolveLoadingSubLabel(pendingPlay)}</span>
+                      <span className="text-neutral-400 tabular-nums">
+                        {formatClockTime(currentTrack.durationSeconds || 0)}
+                      </span>
+                    </div>
+                    <div className="relative h-1.5 bg-white/10 rounded-full overflow-hidden">
+                      <div className="h-full w-1/3 bg-[#D4AF37]/80 rounded-full" />
+                    </div>
+                  </div>
+                ) : (
+                  <SidebarScrubber
+                    fallbackDuration={currentTrack.durationSeconds || 0}
+                    corePositionSeconds={corePositionSeconds}
+                    coreIsPlaying={isPlaying}
+                    coreConnected={isCoreActive ? coreConnected : true}
+                    coreTrackKey={currentTrack.id}
+                    onSeek={seek}
+                  />
+                )}
               </div>
             ) : (
               <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.01] p-5 text-center text-xs text-neutral-500">
@@ -650,6 +700,16 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                   const albumTitle = getTrackAlbumTitle(trk)
                   const isMenuOpen = activeMenuIndex === idx
                   const isNearBottom = idx >= Math.max(0, upcomingTracks.length - 2)
+                  const rowEntryId = isCoreActive
+                    ? (engine?.coreUpcomingEntries[idx]?.entryId ?? null)
+                    : null
+                  const isRowLoading = Boolean(
+                    pendingPlay &&
+                      (rowEntryId
+                        ? pendingPlay.queueEntryId === rowEntryId
+                        : pendingPlay.track.id === trk.id),
+                  )
+                  const showRowSpinner = isRowLoading && Boolean(pendingPlay?.showSpinner)
 
                   return (
                     <div
@@ -662,7 +722,11 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                       onDragLeave={handleDragLeave}
                       onDrop={(e) => handleDrop(e, idx)}
                       onDragEnd={handleDragEnd}
-                      className="group relative flex items-center justify-between rounded-xl border border-white/5 bg-white/[0.02] p-2 transition-all cursor-grab active:cursor-grabbing hover:border-white/10 hover:bg-white/[0.04]"
+                      className={`group relative flex items-center justify-between rounded-xl border p-2 transition-all cursor-grab active:cursor-grabbing ${
+                        isRowLoading
+                          ? 'border-[#D4AF37]/60 bg-[#D4AF37]/[0.06]'
+                          : 'border-white/5 bg-white/[0.02] hover:border-white/10 hover:bg-white/[0.04]'
+                      }`}
                     >
                       {/* Left: Drag Handle, Index, Thumbnail, Track Details */}
                       <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -676,8 +740,17 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                           {idx + 1}
                         </span>
 
-                        {/* Artwork Thumbnail */}
-                        <div className="w-8 h-8 rounded-lg bg-neutral-900 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center pointer-events-none select-none shadow-sm">
+                        {/* Clickable Artwork Thumbnail / Instant Play & Loading Target */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            playUpcomingAtIndex(idx)
+                          }}
+                          aria-busy={showRowSpinner || undefined}
+                          title={isRowLoading ? resolveLoadingSubLabel(pendingPlay) : `Play "${trk.title}"`}
+                          className="relative w-8 h-8 rounded-lg bg-neutral-900 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center select-none shadow-sm cursor-pointer active:scale-95 transition-transform group/thumb"
+                        >
                           {coverArt ? (
                             <img
                               src={coverArt}
@@ -688,7 +761,16 @@ export const UnifiedRightSidebar: React.FC<UnifiedRightSidebarProps> = ({
                           ) : (
                             <Music2 className="w-4 h-4 text-neutral-600" />
                           )}
-                        </div>
+                          {showRowSpinner ? (
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/55">
+                              <Loader2 className="w-3.5 h-3.5 text-[#D4AF37] animate-spin" />
+                            </div>
+                          ) : (
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <Play className="w-3.5 h-3.5 text-white fill-white ml-0.5" />
+                            </div>
+                          )}
+                        </button>
 
                         {/* Track Details */}
                         <div className="min-w-0 flex-1 select-none pointer-events-none">

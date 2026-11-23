@@ -20,6 +20,7 @@ import {
   FolderOpen,
   Film,
   Sparkles,
+  Loader2,
 } from 'lucide-react'
 import { Track, Release } from '../../core/types'
 import {
@@ -107,6 +108,8 @@ interface AlbumCardData {
 
 interface AlbumCardItemProps {
   album: AlbumCardData
+  isLoading?: boolean
+  showLoadingSpinner?: boolean
   onSelectCard: (album: AlbumCardData) => void
   onSelectArtist: (artist: string, e: React.MouseEvent) => void
   onToggleFavorite: (album: AlbumCardData, e?: React.MouseEvent) => void
@@ -116,6 +119,8 @@ interface AlbumCardItemProps {
 
 const AlbumCardItem: React.FC<AlbumCardItemProps> = React.memo(({
   album,
+  isLoading = false,
+  showLoadingSpinner = false,
   onSelectCard,
   onSelectArtist,
   onToggleFavorite,
@@ -136,7 +141,7 @@ const AlbumCardItem: React.FC<AlbumCardItemProps> = React.memo(({
       <div
         className={`relative aspect-square w-full rounded-lg overflow-hidden bg-[#131418] apple-album-shadow mb-2.5 transition-shadow duration-300 ${
           album.variantsCount > 1 ? 'pressing-stack-layer' : ''
-        }`}
+        } ${isLoading ? 'ring-2 ring-[#D4AF37]/80' : ''}`}
       >
         {/* Fallback Artwork Background */}
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-[#1C1D24] via-[#14151B] to-[#0C0D10] text-[#636366] p-3 text-center">
@@ -208,16 +213,29 @@ const AlbumCardItem: React.FC<AlbumCardItemProps> = React.memo(({
         </div>
 
         {/* Hover Overlay: Play Button & Edit Trigger */}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover/card:opacity-100 transition-opacity duration-200 flex items-end justify-between p-3 z-10 pointer-events-none">
+        <div
+          className={`absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent transition-opacity duration-200 flex items-end justify-between p-3 z-10 pointer-events-none ${
+            isLoading ? 'opacity-100' : 'opacity-0 group-hover/card:opacity-100'
+          }`}
+        >
           <button
             onClick={(e) => {
               e.stopPropagation()
               onPlayAlbum(album)
             }}
-            className="w-10 h-10 rounded-full bg-white/95 hover:bg-white text-black flex items-center justify-center shadow-2xl hover:scale-105 active:scale-95 transition-transform cursor-pointer pointer-events-auto"
-            title="Play Album"
+            aria-busy={showLoadingSpinner || undefined}
+            className={`w-10 h-10 rounded-full flex items-center justify-center shadow-2xl hover:scale-105 active:scale-95 transition-transform cursor-pointer pointer-events-auto ${
+              showLoadingSpinner
+                ? 'bg-[#D4AF37] text-black'
+                : 'bg-white/95 hover:bg-white text-black'
+            }`}
+            title={isLoading ? 'Loading album to RAM…' : 'Play Album'}
           >
-            <Play className="w-4 h-4 fill-current ml-0.5" />
+            {showLoadingSpinner ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Play className="w-4 h-4 fill-current ml-0.5" />
+            )}
           </button>
 
           <button
@@ -303,7 +321,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
   splitReleaseIds = new Set<string>(),
   onToggleReleaseSplit,
 }) => {
-  const { playTrack, currentTrack, isPlaying, playNext, addToQueue } = useAudioPlayer()
+  const { playTrack, currentTrack, isPlaying, pendingPlay, playNext, addToQueue } = useAudioPlayer()
 
   const [internalActiveTab, setInternalActiveTab] = useState<EntityTab>('albums')
   const [searchFilter, setSearchFilter] = useState('')
@@ -696,7 +714,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
   const handlePlayAlbum = useCallback((album: AlbumCardData, trackList?: Track[]) => {
     const list = trackList || album.tracks
     if (list.length > 0) {
-      playTrack(list[0], list)
+      playTrack(list[0], list, album.release)
     }
   }, [playTrack])
 
@@ -718,7 +736,7 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
     const list = trackList || album.tracks
     if (list.length > 0) {
       const shuffled = [...list].sort(() => Math.random() - 0.5)
-      playTrack(shuffled[0], shuffled)
+      playTrack(shuffled[0], shuffled, album.release)
     }
   }
 
@@ -752,18 +770,30 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
     }
   }, [cardSize])
 
+  const loadingReleaseId = pendingPlay?.releaseId ?? pendingPlay?.track.releaseId ?? null
+  const loadingTrackId = pendingPlay?.track.id ?? null
+
   // Render a Single Album Card (Apple HIG Borderless Lockup)
-  const renderAlbumCard = (album: AlbumCardData) => (
-    <AlbumCardItem
-      key={album.id}
-      album={album}
-      onSelectCard={handleSelectAlbumCard}
-      onSelectArtist={handleSelectArtistFromCard}
-      onToggleFavorite={handleToggleFavorite}
-      onPlayAlbum={handlePlayAlbum}
-      onEditAlbum={handleEditAlbum}
-    />
-  )
+  const renderAlbumCard = (album: AlbumCardData) => {
+    const isCardLoading = Boolean(
+      pendingPlay &&
+        ((loadingReleaseId && album.id === loadingReleaseId) ||
+          (loadingTrackId && album.tracks.some((t) => t.id === loadingTrackId))),
+    )
+    return (
+      <AlbumCardItem
+        key={album.id}
+        album={album}
+        isLoading={isCardLoading}
+        showLoadingSpinner={isCardLoading && Boolean(pendingPlay?.showSpinner)}
+        onSelectCard={handleSelectAlbumCard}
+        onSelectArtist={handleSelectArtistFromCard}
+        onToggleFavorite={handleToggleFavorite}
+        onPlayAlbum={handlePlayAlbum}
+        onEditAlbum={handleEditAlbum}
+      />
+    )
+  }
 
   // Render the Album Detail Drill-down View
   const renderAlbumDetail = (album: AlbumCardData) => {

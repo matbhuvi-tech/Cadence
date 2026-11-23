@@ -25,10 +25,13 @@ import {
   Zap,
   AlertTriangle,
   Server,
+  Loader2,
 } from 'lucide-react'
 import { useAudioPlayer, useAudioProgress } from '../../context/AudioPlayerContext'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
-import { useResolvedMediaUrl } from '../common/EngineArtworkImg'
+import { extractEngineArtworkReleaseId, useResolvedMediaUrl } from '../common/EngineArtworkImg'
+import { resolveMediaUrl } from '../../services/tauriBridge'
+import { resolveLoadingSubLabel } from '../../core/pendingPlayState'
 import { useCorePlaybackClock } from '../../hooks/useCorePlaybackClock'
 import { AudioDeviceSelectorModal } from './AudioDeviceSelectorModal'
 import { graphEngine } from '../../core/graphEngine'
@@ -173,6 +176,8 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     currentTrack,
     currentRelease,
     isPlaying,
+    pendingPlay,
+    isLoadingTrack,
     volume,
     isMuted,
     repeatMode,
@@ -218,10 +223,15 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
       ? engine?.coreCatalogTracks.find((t) => t.id === coreCurrentEntry.trackId) ?? null
       : null
 
-  const effectiveTrack = isCoreActive ? coreTrack : currentTrack
-  const effectiveIsPlaying = isCoreActive
-    ? coreSnapshot?.playback.activity === 'playing'
-    : isPlaying
+  const isLoading = isLoadingTrack || (isCoreActive && coreSnapshot?.playback.activity === 'loading')
+  const showLoadingSpinner =
+    Boolean(pendingPlay?.showSpinner) || (isCoreActive && coreSnapshot?.playback.activity === 'loading')
+  const effectiveTrack = pendingPlay?.track ?? (isCoreActive ? coreTrack : currentTrack)
+  const effectiveIsPlaying = isLoading
+    ? false
+    : isCoreActive
+      ? coreSnapshot?.playback.activity === 'playing'
+      : isPlaying
   const effectiveRepeat = isCoreActive ? coreSnapshot?.queue.repeat ?? 'off' : repeatMode
   const effectiveShuffle = isCoreActive ? coreSnapshot?.queue.shuffle ?? false : isShuffle
   const corePositionSeconds = isCoreActive ? coreSnapshot?.playback.positionSeconds ?? 0 : 0
@@ -232,6 +242,7 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
     : getEndpointDisplayName(selectedEndpoint)
 
   const handleTogglePlayPause = () => {
+    if (isLoading) return
     if (isCoreActive && engine) {
       void engine.coreTogglePlayPause()
       return
@@ -284,13 +295,22 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
   const [isSignalPopoverOpen, setIsSignalPopoverOpen] = useState(false)
 
   const fallbackDuration = effectiveTrack?.durationSeconds || effectiveTrack?.duration || 0
-  const resolvedRelease = isCoreActive
-    ? (effectiveTrack?.releaseId
-      ? engine?.coreCatalogReleases.find((r) => r.id === effectiveTrack.releaseId) ?? null
-      : null)
-    : (currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null))
+  const resolvedRelease =
+    pendingPlay?.release ??
+    (isCoreActive
+      ? (effectiveTrack?.releaseId
+        ? engine?.coreCatalogReleases.find((r) => r.id === effectiveTrack.releaseId) ?? null
+        : null)
+      : (currentRelease || (currentTrack?.releaseId ? graphEngine.getReleaseById(currentTrack.releaseId) : null)))
   const rawCoverUrl = resolvedRelease?.coverArtUrl || resolvedRelease?.artwork?.frontCoverUrl
-  const coverUrl = useResolvedMediaUrl(rawCoverUrl)
+  const shouldBlockCoreArtFetch = isCoreActive && Boolean(pendingPlay)
+  const resolvedMediaUrl = useResolvedMediaUrl(rawCoverUrl, !shouldBlockCoreArtFetch)
+  const rawArtReleaseId = extractEngineArtworkReleaseId(rawCoverUrl)
+  const coverUrl = shouldBlockCoreArtFetch
+    ? rawArtReleaseId
+      ? (engine?.getCachedCoreArtworkUrl(rawArtReleaseId) ?? '')
+      : resolveMediaUrl(rawCoverUrl)
+    : resolvedMediaUrl
 
   const [imgError, setImgError] = useState(false)
 
@@ -397,10 +417,12 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
                 {effectiveTrack?.title || 'No Track Selected'}
               </span>
               <span
-                className="text-[11px] text-[#8E8E93] truncate leading-tight mt-0.5"
+                className={`text-[11px] truncate leading-tight mt-0.5 ${showLoadingSpinner ? 'text-[#D4AF37] font-medium' : 'text-[#8E8E93]'}`}
                 title={effectiveTrack?.artistCredit || 'Select a track to play'}
               >
-                {effectiveTrack?.artistCredit || 'Cadence Audiophile Player'}
+                {showLoadingSpinner
+                  ? resolveLoadingSubLabel(pendingPlay)
+                  : effectiveTrack?.artistCredit || 'Cadence Audiophile Player'}
               </span>
             </div>
           </div>
@@ -442,10 +464,19 @@ export const NowPlayingBar: React.FC<NowPlayingBarProps> = ({
             {/* Play / Pause Tactile Button */}
             <button
               onClick={handleTogglePlayPause}
-              title={effectiveIsPlaying ? 'Pause (Space)' : 'Play (Space)'}
+              aria-busy={showLoadingSpinner || undefined}
+              title={
+                showLoadingSpinner
+                  ? resolveLoadingSubLabel(pendingPlay)
+                  : effectiveIsPlaying
+                    ? 'Pause (Space)'
+                    : 'Play (Space)'
+              }
               className="w-8 h-8 rounded-full bg-white hover:bg-white/95 active:scale-95 text-black font-bold flex items-center justify-center shadow-lg transition-transform cursor-pointer shrink-0"
             >
-              {effectiveIsPlaying ? (
+              {showLoadingSpinner ? (
+                <Loader2 className="w-4 h-4 animate-spin text-black" />
+              ) : effectiveIsPlaying ? (
                 <Pause className="w-3.5 h-3.5 fill-black stroke-black" />
               ) : (
                 <Play className="w-3.5 h-3.5 fill-black stroke-black ml-0.5" />

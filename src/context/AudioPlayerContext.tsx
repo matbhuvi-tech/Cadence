@@ -4,6 +4,12 @@ import { tauriBridge, AudioStreamTelemetry, ScannedAudioFileInfo } from '../serv
 import { graphEngine } from '../core/graphEngine'
 import { emitDiag, setFrontendCaptureMode } from '../core/diagnostics'
 import {
+  PendingPlayTarget,
+  PENDING_SPINNER_DELAY_MS,
+  PENDING_SLOW_STORAGE_MS,
+  isDuplicatePendingPlay,
+} from '../core/pendingPlayState'
+import {
   AudioEndpoint,
   AudioEndpointInfo,
   EndpointRoutingState,
@@ -164,6 +170,15 @@ interface AudioPlayerContextType {
   queueIndex: number
   isPlaying: boolean
   isPaused: boolean
+  pendingPlay: PendingPlayTarget | null
+  isLoadingTrack: boolean
+  beginPendingPlay: (target: {
+    track: Track
+    release?: Release | null
+    releaseId?: string | null
+    queueEntryId?: string | null
+  }) => number | null
+  finishPendingPlay: (requestId: number) => void
   volume: number
   isMuted: boolean
   repeatMode: 'off' | 'all' | 'one'
@@ -242,6 +257,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [queueIndex, setQueueIndex] = useState<number>(-1)
   const [isPlaying, setIsPlaying] = useState<boolean>(false)
   const [isPaused, setIsPaused] = useState<boolean>(false)
+  const [pendingPlay, setPendingPlay] = useState<PendingPlayTarget | null>(null)
+  const pendingPlayRef = useRef<PendingPlayTarget | null>(null)
+  const pendingRequestIdRef = useRef<number>(0)
+  const spinnerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const slowStorageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [duration, setDuration] = useState<number>(0)
   const currentTimeRef = useRef<number>(0)
@@ -353,6 +373,83 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const latestHydrationRevisionRef = useRef<number>(0)
   const isInternalQueueUpdateRef = useRef<boolean>(false)
   const handleAutoAdvanceRef = useRef<() => void>(() => {})
+
+  const clearPendingTimers = useCallback(() => {
+    if (spinnerTimerRef.current !== null) {
+      clearTimeout(spinnerTimerRef.current)
+      spinnerTimerRef.current = null
+    }
+    if (slowStorageTimerRef.current !== null) {
+      clearTimeout(slowStorageTimerRef.current)
+      slowStorageTimerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      clearPendingTimers()
+    }
+  }, [clearPendingTimers])
+
+  const beginPendingPlay = useCallback(
+    (target: {
+      track: Track
+      release?: Release | null
+      releaseId?: string | null
+      queueEntryId?: string | null
+    }): number | null => {
+      if (isDuplicatePendingPlay(pendingPlayRef.current, target.track.id, target.queueEntryId)) {
+        return null
+      }
+      clearPendingTimers()
+      const requestId = ++pendingRequestIdRef.current
+      const next: PendingPlayTarget = {
+        requestId,
+        track: target.track,
+        release: target.release ?? null,
+        releaseId: target.releaseId ?? target.release?.id ?? target.track.releaseId ?? null,
+        queueEntryId: target.queueEntryId ?? null,
+        startedAtMs: Date.now(),
+        showSpinner: false,
+        isSlowStorage: false,
+      }
+      pendingPlayRef.current = next
+      setPendingPlay(next)
+
+      spinnerTimerRef.current = setTimeout(() => {
+        spinnerTimerRef.current = null
+        setPendingPlay((prev) => {
+          if (!prev || prev.requestId !== requestId || prev.showSpinner) return prev
+          const updated = { ...prev, showSpinner: true }
+          pendingPlayRef.current = updated
+          return updated
+        })
+      }, PENDING_SPINNER_DELAY_MS)
+
+      slowStorageTimerRef.current = setTimeout(() => {
+        slowStorageTimerRef.current = null
+        setPendingPlay((prev) => {
+          if (!prev || prev.requestId !== requestId || prev.isSlowStorage) return prev
+          const updated = { ...prev, showSpinner: true, isSlowStorage: true }
+          pendingPlayRef.current = updated
+          return updated
+        })
+      }, PENDING_SLOW_STORAGE_MS)
+
+      return requestId
+    },
+    [clearPendingTimers],
+  )
+
+  const finishPendingPlay = useCallback(
+    (requestId: number) => {
+      if (pendingPlayRef.current?.requestId !== requestId) return
+      clearPendingTimers()
+      pendingPlayRef.current = null
+      setPendingPlay(null)
+    },
+    [clearPendingTimers],
+  )
 
   const reconcileActiveTrack = useCallback((file: string | null | undefined) => {
     if (!file) return
@@ -750,22 +847,38 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Play track function
   const playTrack = useCallback(
     async (track: Track, queueContext?: Track[], release?: Release) => {
+      if (track.isOnline === false) {
+        console.warn(`[AudioPlayer] Cannot play track "${track.title}": storage mount is offline`)
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('cadence:toast', {
+              detail: `Cannot play "${track.title}": storage mount is offline`,
+            })
+          )
+        }
+        return
+      }
+
+      const resolvedRelease =
+        release ?? (track.releaseId ? graphEngine.getReleaseById(track.releaseId) ?? null : null)
+      const reqId = beginPendingPlay({
+        track,
+        release: resolvedRelease,
+        releaseId: resolvedRelease?.id ?? track.releaseId ?? null,
+      })
+      if (reqId === null) {
+        return
+      }
+
       if (externalPlaybackDelegateRef.current) {
-        await externalPlaybackDelegateRef.current.playTrack(track, queueContext, release)
+        try {
+          await externalPlaybackDelegateRef.current.playTrack(track, queueContext, release)
+        } finally {
+          finishPendingPlay(reqId)
+        }
         return
       }
       try {
-        if (track.isOnline === false) {
-          console.warn(`[AudioPlayer] Cannot play track "${track.title}": storage mount is offline`)
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(
-              new CustomEvent('cadence:toast', {
-                detail: `Cannot play "${track.title}": storage mount is offline`,
-              })
-            )
-          }
-          return
-        }
 
         let newQueue = queue
         if (queueContext && queueContext.length > 0) {
@@ -857,9 +970,11 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
             })
           )
         }
+      } finally {
+        finishPendingPlay(reqId)
       }
     },
-    [queue, handleAutoAdvance]
+    [queue, handleAutoAdvance, beginPendingPlay, finishPendingPlay]
   )
 
   const playTrackRef = useRef(playTrack)
@@ -1315,6 +1430,10 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       queueIndex,
       isPlaying,
       isPaused,
+      pendingPlay,
+      isLoadingTrack: pendingPlay !== null,
+      beginPendingPlay,
+      finishPendingPlay,
       volume,
       isMuted,
       repeatMode,
@@ -1379,6 +1498,9 @@ export const AudioPlayerProvider: React.FC<{ children: React.ReactNode }> = ({ c
       queueIndex,
       isPlaying,
       isPaused,
+      pendingPlay,
+      beginPendingPlay,
+      finishPendingPlay,
       volume,
       isMuted,
       repeatMode,

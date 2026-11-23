@@ -30,6 +30,10 @@ import {
   type CoreSnapshot,
   type EngineEventRecord,
 } from '../core/coreProtocol'
+import {
+  shouldClearPendingPlayFromSnapshot,
+  type PendingPlayTarget,
+} from '../core/pendingPlayState'
 import type { EngineActivity } from '../core/engineSession'
 import type { AudioEndpoint } from '../core/endpointRouting'
 
@@ -365,7 +369,16 @@ export const EngineControllerProvider: React.FC<{
   children: React.ReactNode
   storeOverride?: DesktopCoreControllerStore
 }> = ({ children, storeOverride }) => {
-  const { isPlaying, isPaused, stop, selectEndpoint, registerExternalPlaybackDelegate } = useAudioPlayer()
+  const {
+    isPlaying,
+    isPaused,
+    stop,
+    selectEndpoint,
+    registerExternalPlaybackDelegate,
+    pendingPlay,
+    beginPendingPlay,
+    finishPendingPlay,
+  } = useAudioPlayer()
 
   const activityRef = useRef<EngineActivity>('idle')
   activityRef.current = isPlaying && !isPaused ? 'playing' : isPaused ? 'paused' : 'idle'
@@ -747,6 +760,32 @@ export const EngineControllerProvider: React.FC<{
     }
   }, [isCoreActive, activeCoreSnapshot?.queue.entries, activeCoreSnapshot?.queue.currentEntryId, coreCatalogTracks])
 
+  const coreQueueEntriesRef = useRef(coreQueueEntries)
+  coreQueueEntriesRef.current = coreQueueEntries
+  const coreCurrentEntryIndexRef = useRef(coreCurrentEntryIndex)
+  coreCurrentEntryIndexRef.current = coreCurrentEntryIndex
+  const coreCatalogReleasesRef = useRef(coreCatalogReleases)
+  coreCatalogReleasesRef.current = coreCatalogReleases
+
+  useEffect(() => {
+    if (!isCoreActive) return
+    if (
+      shouldClearPendingPlayFromSnapshot(
+        pendingPlay,
+        activeCoreSnapshot?.playback.activity,
+        coreNowPlayingTrack?.id ?? null,
+      )
+    ) {
+      finishPendingPlay(pendingPlay!.requestId)
+    }
+  }, [
+    isCoreActive,
+    pendingPlay,
+    activeCoreSnapshot?.playback.activity,
+    coreNowPlayingTrack?.id,
+    finishPendingPlay,
+  ])
+
   const resolveCoreArtworkUrl = useCallback(
     async (rawReleaseId: string): Promise<string | null> => {
       if (!isCoreActive || !activeProfile || !artworkCacheRef.current) return null
@@ -866,12 +905,78 @@ export const EngineControllerProvider: React.FC<{
         }
       },
       coreStop: () => exec({ operation: 'playback.control', action: 'stop' }),
-      coreNextTrack: () => exec({ operation: 'queue.control', action: 'next' }),
-      corePrevTrack: () => exec({ operation: 'queue.control', action: 'previous' }),
+      coreNextTrack: async () => {
+        const entries = coreQueueEntriesRef.current
+        const curIdx = coreCurrentEntryIndexRef.current
+        const nextEntry = curIdx >= 0 && curIdx + 1 < entries.length ? entries[curIdx + 1] : null
+        if (!nextEntry) {
+          await exec({ operation: 'queue.control', action: 'next' })
+          return
+        }
+        const release = nextEntry.track.releaseId
+          ? coreCatalogReleasesRef.current.find((r) => r.id === nextEntry.track.releaseId) ?? null
+          : null
+        const reqId = beginPendingPlay({
+          track: nextEntry.track,
+          release,
+          releaseId: release?.id ?? nextEntry.track.releaseId ?? null,
+          queueEntryId: nextEntry.entryId,
+        })
+        if (reqId === null) return
+        try {
+          await exec({ operation: 'queue.control', action: 'next' })
+        } finally {
+          finishPendingPlay(reqId)
+        }
+      },
+      corePrevTrack: async () => {
+        const entries = coreQueueEntriesRef.current
+        const curIdx = coreCurrentEntryIndexRef.current
+        const prevEntry = curIdx > 0 ? entries[curIdx - 1] : null
+        if (!prevEntry) {
+          await exec({ operation: 'queue.control', action: 'previous' })
+          return
+        }
+        const release = prevEntry.track.releaseId
+          ? coreCatalogReleasesRef.current.find((r) => r.id === prevEntry.track.releaseId) ?? null
+          : null
+        const reqId = beginPendingPlay({
+          track: prevEntry.track,
+          release,
+          releaseId: release?.id ?? prevEntry.track.releaseId ?? null,
+          queueEntryId: prevEntry.entryId,
+        })
+        if (reqId === null) return
+        try {
+          await exec({ operation: 'queue.control', action: 'previous' })
+        } finally {
+          finishPendingPlay(reqId)
+        }
+      },
       coreSeek: (positionSeconds) =>
         exec({ operation: 'playback.control', action: 'seek', positionSeconds }),
-      coreJumpToEntry: (entryId) =>
-        exec({ operation: 'queue.control', action: 'jump', entryId }),
+      coreJumpToEntry: async (entryId) => {
+        const entry = coreQueueEntriesRef.current.find((e) => e.entryId === entryId)
+        if (!entry) {
+          await exec({ operation: 'queue.control', action: 'jump', entryId })
+          return
+        }
+        const release = entry.track.releaseId
+          ? coreCatalogReleasesRef.current.find((r) => r.id === entry.track.releaseId) ?? null
+          : null
+        const reqId = beginPendingPlay({
+          track: entry.track,
+          release,
+          releaseId: release?.id ?? entry.track.releaseId ?? null,
+          queueEntryId: entry.entryId,
+        })
+        if (reqId === null) return
+        try {
+          await exec({ operation: 'queue.control', action: 'jump', entryId })
+        } finally {
+          finishPendingPlay(reqId)
+        }
+      },
       coreRemoveQueueEntry: async (entryId) => {
         const snap = store.getState().view.snapshot
         if (!snap) return
@@ -942,6 +1047,8 @@ export const EngineControllerProvider: React.FC<{
     getCachedCoreArtworkUrl,
     artworkVersion,
     subscribeEngineEvents,
+    beginPendingPlay,
+    finishPendingPlay,
   ])
 
   return <EngineControllerContext.Provider value={value}>{children}</EngineControllerContext.Provider>
@@ -972,6 +1079,8 @@ export function useEffectiveQueueControl() {
         isCoreActive: false,
         coreConnected: true,
         corePositionSeconds: null as number | null,
+        pendingPlay: local.pendingPlay as PendingPlayTarget | null,
+        isLoadingTrack: local.isLoadingTrack,
         playUpcomingAtIndex: (upcomingIdx: number) => {
           const target = local.upcomingTracks[upcomingIdx]
           if (target) {
@@ -981,16 +1090,18 @@ export function useEffectiveQueueControl() {
       }
     }
 
-    const nowTrack = engine.coreNowPlayingTrack
+    const nowTrack = local.pendingPlay?.track ?? engine.coreNowPlayingTrack
     const nowRelease =
-      nowTrack?.releaseId
+      local.pendingPlay?.release ??
+      (nowTrack?.releaseId
         ? engine.coreCatalogReleases.find((r) => r.id === nowTrack.releaseId) ?? null
-        : null
+        : null)
     const upcomingTracks = engine.coreUpcomingEntries.map((e) => e.track)
     const queueTracks = engine.coreQueueEntries.map((e) => e.track)
     const repeatMode = coreSnap?.queue.repeat ?? 'off'
     const isShuffle = Boolean(coreSnap?.queue.shuffle)
     const curIndex = engine.coreCurrentEntryIndex >= 0 ? engine.coreCurrentEntryIndex : 0
+    const isCoreBackendLoading = coreSnap?.playback.activity === 'loading'
 
     return {
       ...local,
@@ -1003,6 +1114,8 @@ export function useEffectiveQueueControl() {
       upcomingTracks,
       isPlaying: coreSnap?.playback.activity === 'playing',
       isPaused: coreSnap?.playback.activity === 'paused',
+      pendingPlay: local.pendingPlay as PendingPlayTarget | null,
+      isLoadingTrack: local.isLoadingTrack || isCoreBackendLoading,
       isShuffle,
       repeatMode,
       corePositionSeconds: coreSnap?.playback.positionSeconds ?? 0,
