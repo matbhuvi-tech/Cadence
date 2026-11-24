@@ -12,6 +12,7 @@ description: |
   Cadence Playback Engine — headless bit-perfect audiophile UPnP media server and RAM-pinned playback core.
 contents:
   - src: ${CADENCE_BINARY}
+    expand: true
     dst: /usr/bin/cadence-headless
     file_info:
       mode: 0755
