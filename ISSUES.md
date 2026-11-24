@@ -35,4 +35,4 @@
 - [#52](https://github.com/matbhuvi-tech/Cadence/issues/52): Separate healthy pacing from normal receiver regulation and TCP-only warnings; clarify graph legends without changing telemetry collection.
 
 - [#53](https://github.com/matbhuvi-tech/Cadence/issues/53): Engine remains paused after desktop restart; output dialog now provides an explicit Stop playback control and confirms idle state before unlocking controls. Discovery cooldown remains enforced.
-`n- [#55](https://github.com/matbhuvi-tech/Cadence/issues/55): rc3 Linux CI rejected a valid 65536-byte loopback TCP window. Keep deterministic large/zero-window parsing checks and accept any nonzero window in the live smoke test.
+- [#55](https://github.com/matbhuvi-tech/Cadence/issues/55): rc3 Linux CI rejected a valid 65536-byte loopback TCP window. Keep deterministic large/zero-window parsing checks and accept any nonzero window in the live smoke test.
