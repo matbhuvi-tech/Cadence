@@ -5,12 +5,11 @@ ARG TARGETARCH
 WORKDIR /build
 
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
+COPY src-tauri/build.rs ./src-tauri/
+COPY src-tauri/src ./src-tauri/src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo fetch --locked --manifest-path src-tauri/Cargo.toml
-
-COPY src-tauri/build.rs ./src-tauri/
-COPY src-tauri/src ./src-tauri/src
 
 ARG CADENCE_VERSION=development
 ARG CADENCE_BUILD_TAG=""
