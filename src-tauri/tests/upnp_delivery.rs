@@ -92,3 +92,25 @@ fn expired_capture_and_restart_are_isolated() {
     assert_eq!(capture.bins[0].bytes, 1000);
     assert_eq!(capture.bins[0].max_gap_us, 0);
 }
+
+#[test]
+fn equal_chunks_preserve_early_and_late_intervals_across_bins() {
+    let h = DeliveryHistory::default();
+    let t = Instant::now();
+    let mut w = DeliveryWriter::new(&h);
+    h.start_at(t);
+    w.record_at(&h, t, 4096, 176400);
+    w.record_at(&h, t + Duration::from_micros(23219), 4096, 176400);
+    w.record_at(&h, t + Duration::from_micros(50000), 4096, 176400);
+    w.record_at(&h, t + Duration::from_micros(70000), 4096, 352800);
+    w.record_at(&h, t + Duration::from_micros(110000), 1024, 352800);
+    let c = h.snapshot_at(t + Duration::from_millis(200)).unwrap();
+    assert_eq!(c.bins[0].write_count, 4);
+    assert_eq!(c.bins[0].min_chunk_bytes, 4096);
+    assert_eq!(c.bins[0].max_chunk_bytes, 4096);
+    assert_eq!(c.bins[0].max_early_us, 3219);
+    assert_eq!(c.bins[0].max_delay_us, 3562);
+    assert_eq!(c.bins[1].min_expected_us, 11609);
+    assert_eq!(c.bins[1].max_delay_us, 28391);
+    assert_eq!(c.bins[1].min_chunk_bytes, 1024);
+}
