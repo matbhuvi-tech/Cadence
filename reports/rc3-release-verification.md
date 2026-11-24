@@ -12,3 +12,5 @@ Journey: an approved metadata change writes successfully on Linux while preservi
 ## Packaging corrections
 
 Run 45310025279 exposed Docker fetching before library source existed, and Android setup requesting the removed SDK tools package. Copy the source before Cargo fetch and request platform-tools explicitly. Runtime audio configuration is unchanged.
+
+Windows local library verification: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --nocapture --test-threads=1 passed all 127 tests. CI uses serial Windows test execution with visible panic output. The fast zero-allocation fixture waits 1 ms after allocation counting ends so its millisecond capture has a visible partial bin; allocation assertions remain unchanged.

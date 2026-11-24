@@ -150,6 +150,9 @@ fn check_stream_allocations(capture: bool) {
     let received = reader_thread.join().unwrap();
     assert_eq!(received, payload_len);
     assert_eq!(metrics.snapshot().bytes_sent, payload_len as u64);
+    // This fast fixture can finish within the capture clock's first millisecond.
+    // Let that partial bin become visible outside the measured allocation loop.
+    std::thread::sleep(Duration::from_millis(1));
     let history = metrics.delivery.snapshot_at(Instant::now());
     assert_eq!(history.is_some(), capture);
     if let Some(history) = history {

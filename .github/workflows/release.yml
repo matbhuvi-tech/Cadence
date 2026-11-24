@@ -458,7 +458,7 @@ jobs:
         run: |
           npm ci
           npm ci --prefix pwa
-          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo test --locked --manifest-path src-tauri/Cargo.toml -- --nocapture --test-threads=1
 
       - name: Build Windows Desktop and Playback Engine NSIS installers
         shell: pwsh
