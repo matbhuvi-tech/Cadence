@@ -156,7 +156,7 @@ jobs:
 
       - name: Run packaging and release script tests
         run: |
-          python3 -m unittest discover -s deploy/playback-engine -p test_installer.py -v
+          python3 -m unittest discover -s deploy/playback-engine -p "test_*.py" -v
           python3 -m unittest discover -s scripts/release -p "test_*.py" -v
           sh -n deploy/playback-engine/install.sh
           bash -n \
@@ -660,11 +660,13 @@ jobs:
           pathlib.Path('release-assets/install.sh').write_text(src.replace('__CADENCE_RELEASE_TAG__', tag), encoding='utf-8')
           PY
           cp deploy/playback-engine/install.py \
+             deploy/playback-engine/backup.py \
              deploy/playback-engine/compose.yml \
              deploy/playback-engine/compose.hardened.yml \
              release-assets/
           cp release-assets/install.sh \
              release-assets/install.py \
+             release-assets/backup.py \
              release-assets/compose.yml \
              release-assets/compose.hardened.yml \
              deploy/playback-engine/.env.example \
@@ -686,7 +688,7 @@ jobs:
           find . -maxdepth 1 -type f ! -name cadence_checksums.txt -printf '%f\n' | LC_ALL=C sort | xargs -r -d '\n' sha256sum > ../cadence_checksums.txt
           mv ../cadence_checksums.txt cadence_checksums.txt
           sha256sum -c cadence_checksums.txt
-          for req in install.sh install.py compose.yml compose.hardened.yml; do
+          for req in install.sh install.py backup.py compose.yml compose.hardened.yml; do
             grep -qE "^[0-9a-f]{64}  ${req}$" cadence_checksums.txt || { echo "::error::Missing ${req} in cadence_checksums.txt"; exit 1; }
           done
           cat cadence_checksums.txt

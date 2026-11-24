@@ -141,6 +141,9 @@ if [ -f "$script_dir/install.py" ]; then
     if [ -f "$script_dir/compose.hardened.yml" ]; then
       verify_sha256 "$script_dir/cadence_checksums.txt" "compose.hardened.yml" "$script_dir/compose.hardened.yml"
     fi
+    if [ -f "$script_dir/backup.py" ]; then
+      verify_sha256 "$script_dir/cadence_checksums.txt" "backup.py" "$script_dir/backup.py"
+    fi
     export CADENCE_CHECKSUMS_FILE="$script_dir/cadence_checksums.txt"
   fi
   run_installer "$script_dir/install.py"
@@ -195,6 +198,10 @@ if get_installer "$temp_dir/cadence_checksums.txt" "$base_url/cadence_checksums.
   if checksums_has_entry "$temp_dir/cadence_checksums.txt" "compose.hardened.yml"; then
     get_installer "$temp_dir/compose.hardened.yml" "$base_url/compose.hardened.yml"
     verify_sha256 "$temp_dir/cadence_checksums.txt" "compose.hardened.yml" "$temp_dir/compose.hardened.yml"
+  fi
+  if checksums_has_entry "$temp_dir/cadence_checksums.txt" "backup.py"; then
+    get_installer "$temp_dir/backup.py" "$base_url/backup.py"
+    verify_sha256 "$temp_dir/cadence_checksums.txt" "backup.py" "$temp_dir/backup.py"
   fi
   export CADENCE_CHECKSUMS_FILE="$temp_dir/cadence_checksums.txt"
 elif [ "${CADENCE_ALLOW_UNVERIFIED:-0}" = "1" ]; then
