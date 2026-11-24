@@ -36,3 +36,4 @@
 
 - [#53](https://github.com/matbhuvi-tech/Cadence/issues/53): Engine remains paused after desktop restart; output dialog now provides an explicit Stop playback control and confirms idle state before unlocking controls. Discovery cooldown remains enforced.
 - [#55](https://github.com/matbhuvi-tech/Cadence/issues/55): rc3 Linux CI rejected a valid 65536-byte loopback TCP window. Keep deterministic large/zero-window parsing checks and accept any nonzero window in the live smoke test.
+- [#56](https://github.com/matbhuvi-tech/Cadence/issues/56): Linux curation invalidates its /proc/self/fd directory anchor before replacement. rc3 run 45308571189 reproduced six failing curation tests; retain the Linux parent handle through replacement and verification.
