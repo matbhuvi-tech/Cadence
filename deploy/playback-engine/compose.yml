@@ -10,7 +10,7 @@ services:
     user: "0:0"
     read_only: true
     cap_drop: [ALL]
-    cap_add: [IPC_LOCK, SYS_ADMIN, DAC_READ_SEARCH]
+    cap_add: [IPC_LOCK, SYS_ADMIN, DAC_READ_SEARCH, DAC_OVERRIDE]
     ulimits:
       memlock:
         soft: -1

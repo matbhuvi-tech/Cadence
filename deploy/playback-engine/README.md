@@ -12,7 +12,7 @@ Cadence offers two Docker Compose profiles so you can choose between in-app SMB 
 
 | Profile | Template | User / Capabilities | Music Access | Runtime SMB Shares (`mount.cifs`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Standard *(Default)*** | `compose.yml` | `user: 0:0`, `IPC_LOCK`, `SYS_ADMIN`, `DAC_READ_SEARCH`, `apparmor:unconfined` | Read/Write (`CADENCE_MUSIC_READ_ONLY=false`); local folder optional | **Enabled** (add SMB shares directly inside Cadence UI) |
+| **Standard *(Default)*** | `compose.yml` | `user: 0:0`, `IPC_LOCK`, `SYS_ADMIN`, `DAC_READ_SEARCH`, `DAC_OVERRIDE`, `apparmor:unconfined` | Read/Write (`CADENCE_MUSIC_READ_ONLY=false`); local folder optional | **Enabled** (add SMB shares directly inside Cadence UI) |
 | **Hardened Read-Only *(Optional)*** | `compose.hardened.yml` | `user: 568:568`, `IPC_LOCK` only, AppArmor enforced | Read-Only (`:ro`, `CADENCE_MUSIC_READ_ONLY=true`); local/NAS folder required | **Disabled** (mount host/NAS folders at `/music` externally) |
 
 > **Why does the default Standard profile run as root with `SYS_ADMIN`?** Linux kernel `mount.cifs` requires `SYS_ADMIN` and `DAC_READ_SEARCH` inside the container to mount remote SMB shares on demand from the Cadence UI. The engine still keeps app-data files accessible to UID/GID `568` (`cadence`) for compatibility. If you already mount your NAS/local music on the host and do not need runtime SMB mounting or Curate tag writes, choose **Hardened Read-Only** (`compose.hardened.yml`).

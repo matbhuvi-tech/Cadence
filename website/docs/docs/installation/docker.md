@@ -16,7 +16,7 @@ The engine listens on TCP `4040` (HTTPS control/SSE), TCP `18890` (UPnP HTTP med
 
 | Profile | Template | Container User / Capabilities | Music Access | In-App SMB Mounting |
 | :--- | :--- | :--- | :--- | :--- |
-| **Standard *(Default)*** | `compose.yml` | `user: 0:0`, `IPC_LOCK`, `SYS_ADMIN`, `DAC_READ_SEARCH`, `apparmor:unconfined` | Read/Write (`/music` optional) | **Enabled** (`mount.cifs` from UI) |
+| **Standard *(Default)*** | `compose.yml` | `user: 0:0`, `IPC_LOCK`, `SYS_ADMIN`, `DAC_READ_SEARCH`, `DAC_OVERRIDE`, `apparmor:unconfined` | Read/Write (`/music` optional) | **Enabled** (`mount.cifs` from UI) |
 | **Hardened Read-Only *(Optional)*** | `compose.hardened.yml` | `user: 568:568`, `IPC_LOCK` only, AppArmor enforced | Read-Only (`/music:ro` required) | **Disabled** (host-mounted music) |
 
 > **Why does the Standard profile request `SYS_ADMIN`?** Linux kernel `mount.cifs` requires `SYS_ADMIN` and `DAC_READ_SEARCH` inside the container to mount SMB shares from the Cadence UI. The engine still keeps persistent files in `/var/lib/cadence` accessible to UID/GID `568` (`cadence`). Choose `compose.hardened.yml` if you mount shares on the host and do not need Curate file writes.
