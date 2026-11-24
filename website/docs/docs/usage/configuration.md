@@ -50,8 +50,8 @@ Cadence Engines are configured via command-line flags and `CADENCE_*` environmen
 ### Docker Compose Host Variables (`.env`)
 
 - `CADENCE_IMAGE` — Published GHCR image (`ghcr.io/matbhuvi-tech/cadence-playback-engine:<tag>`)
-- `CADENCE_HOST_DATA_DIR` — Existing writable host directory bound to `/var/lib/cadence`
-- `CADENCE_HOST_MUSIC_DIR` — Existing readable host music directory bound to `/music`
+- `CADENCE_HOST_MUSIC_DIR` — Existing readable host music directory bound to `/music` (optional in Standard SMB profile)
+- Internal app data (`/var/lib/cadence`) is stored automatically in the Docker-managed `cadence_data` persistent volume.
 
 ## CLI Flags
 

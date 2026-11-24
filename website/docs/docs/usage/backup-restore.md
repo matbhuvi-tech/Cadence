@@ -38,6 +38,26 @@ $dataDir = "$env:LOCALAPPDATA\CadenceEngine"
 & $exe --restore pre-upgrade-20261121 --data-dir $dataDir
 ```
 
+## Docker / TrueNAS: Export & Restore to a Custom Host Location (`backup.py`)
+
+Docker and TrueNAS installations store `/var/lib/cadence` inside the Docker-managed `cadence_data` persistent volume, which survives container recreations and upgrades.
+
+::: warning Deleting Volumes Wipes Engine State
+Running `docker compose down -v` or deleting the TrueNAS app with **Remove volumes** enabled permanently deletes `cadence_data` (your database, TLS keys, and pairing token). Export a backup first using `backup.py`.
+:::
+
+`install.sh` stages `backup.py` in your installation folder (`~/cadence-playback-engine` on Linux or `/mnt/<pool>/cadence-installation` on TrueNAS):
+
+```sh
+# Export an atomic backup archive (.tar.gz, mode 0600) to a custom host folder:
+sudo python3 backup.py export /mnt/tank/backups --stop
+
+# Restore from an exported backup archive (validates manifest & runs --doctor):
+sudo python3 backup.py restore /mnt/tank/backups/cadence-backup-YYYYMMDDTHHMMSSZ.tar.gz --stop
+```
+
+(`--stop` cleanly stops the engine before backing up/restoring and restarts it afterward.)
+
 ## Docker Compose Upgrade & Rollback
 
 ```sh
