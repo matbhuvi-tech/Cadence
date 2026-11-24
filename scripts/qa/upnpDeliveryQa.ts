@@ -89,7 +89,7 @@ const client = createEngineClient({engineId: 'qa-engine', libraryId: 'qa-library
     const elapsedMs = Math.min(60000, Math.floor(complete ? frozenMs : performance.now()-start))
     const bins = Array.from({length: Math.ceil(elapsedMs/100)}, (_, i) => ({offsetMs: i*100,
       durationMs: Math.min(100, elapsedMs-i*100), bytes: i%17 === 8 ? 0 : 280000,
-      targetBytesPerSec: enabled ? 2800000 : 0, maxGapUs: i%17 === 8 ? 100000 : 5800, maxDelayUs: i%17 === 8 ? 94000 : 0}))
+      writeCount: i%17 === 8 ? 0 : 68, minChunkBytes: 4096, maxChunkBytes: 4096, timingSamples: enabled && i%17 !== 8 ? 68 : 0, minExpectedUs: 1462, maxExpectedUs: 1462, maxEarlyUs: 30, targetBytesPerSec: enabled ? 2800000 : 0, maxGapUs: i%17 === 8 ? 100000 : 5800, maxDelayUs: i%17 === 8 ? 94000 : 0}))
     capture = {id: captureId, elapsedMs, complete: complete || elapsedMs>=60000, bins}
   }
   return {ok:true,data:snapshot(capture)}
@@ -144,6 +144,8 @@ try {
   await cdp.wait('document.querySelector("[role=dialog]") && window.qa.calls.some(c=>c.captureAction === "start")')
   await sleep(5200)
   await cdp.wait('document.querySelector("svg[role=img] path").getAttribute("d").length > 0')
+  assert.ok(await cdp.evaluate('document.body.textContent.includes("4096 bytes · consistent")'))
+  assert.ok(await cdp.evaluate('document.body.textContent.includes("1.462 ms")'))
   await cdp.screenshot('desktop.png')
   await cdp.evaluate('[...document.querySelectorAll("button")].find(b=>b.textContent === "Freeze").click()')
   await cdp.wait('window.qa.calls.at(-1).captureAction === "stop"')

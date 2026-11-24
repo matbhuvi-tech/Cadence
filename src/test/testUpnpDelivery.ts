@@ -151,3 +151,15 @@ test('TCP observations alone preserve steady pacing', () => {
  const prev = sample({ sampledAtMs: 0, bytesSent: 0 })
  assert.equal(assessDelivery(sample({ retransBytes: 100 }), prev, 0).status, 'stable')
 })
+
+
+test('timing detail requires complete finite measurements and supports older engines', () => {
+  const bin = {offsetMs: 0, durationMs: 100, bytes: 16384, targetBytesPerSec: 176400, maxGapUs: 23220, maxDelayUs: 1}
+  const raw = (extra: object) => sample({capture: {id: 1, elapsedMs: 100, complete: false, bins: [{...bin, ...extra}]}})
+  assert.doesNotThrow(() => parseDeliverySnapshot(raw({})))
+  const detail = {writeCount: 4, minChunkBytes: 4096, maxChunkBytes: 4096, timingSamples: 3, minExpectedUs: 23219, maxExpectedUs: 23219, maxEarlyUs: 10}
+  assert.doesNotThrow(() => parseDeliverySnapshot(raw(detail)))
+  for (const extra of [{writeCount: 4}, {...detail, maxEarlyUs: NaN}, {...detail, minChunkBytes: 8192}, {...detail, maxExpectedUs: -1}]) {
+    assert.throws(() => parseDeliverySnapshot(raw(extra)))
+  }
+})

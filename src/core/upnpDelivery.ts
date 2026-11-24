@@ -6,6 +6,13 @@ export interface DeliveryBin {
   targetBytesPerSec: number
   maxGapUs: number
   maxDelayUs: number
+  writeCount?: number
+  minChunkBytes?: number
+  maxChunkBytes?: number
+  timingSamples?: number
+  minExpectedUs?: number
+  maxExpectedUs?: number
+  maxEarlyUs?: number
 }
 export interface DeliveryCapture {
   id: number
@@ -59,6 +66,13 @@ export function parseDeliverySnapshot(raw: unknown): DeliverySnapshot {
     for (const b of c.bins) {
       if (!b || ![b.offsetMs, b.durationMs, b.bytes, b.targetBytesPerSec, b.maxGapUs, b.maxDelayUs].every(n => nonnegative(n) && Number.isSafeInteger(n)) ||
         b.durationMs <= 0 || b.durationMs > 100 || b.offsetMs < end || b.offsetMs + b.durationMs > c.elapsedMs) return fail()
+      const detailKeys = ['writeCount', 'minChunkBytes', 'maxChunkBytes', 'timingSamples', 'minExpectedUs', 'maxExpectedUs', 'maxEarlyUs'] as const
+      const hasDetail = detailKeys.some(key => b[key] !== undefined)
+      if (hasDetail && detailKeys.some(key => b[key] === undefined)) return fail()
+      for (const key of ['writeCount', 'minChunkBytes', 'maxChunkBytes', 'timingSamples', 'minExpectedUs', 'maxExpectedUs', 'maxEarlyUs'] as const) {
+        if (b[key] !== undefined && (!nonnegative(b[key]) || !Number.isSafeInteger(b[key]))) return fail()
+      }
+      if ((b.minChunkBytes ?? 0) > (b.maxChunkBytes ?? 0) || (b.minExpectedUs ?? 0) > (b.maxExpectedUs ?? 0)) return fail()
       end = b.offsetMs + b.durationMs
     }
   }

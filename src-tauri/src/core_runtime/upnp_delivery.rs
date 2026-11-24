@@ -17,6 +17,13 @@ struct Bin {
     gap: AtomicU64,
     delay: AtomicU64,
     target: AtomicU64,
+    write_count: AtomicU64,
+    min_chunk_bytes: AtomicU64,
+    max_chunk_bytes: AtomicU64,
+    timing_samples: AtomicU64,
+    min_expected_us: AtomicU64,
+    max_expected_us: AtomicU64,
+    max_early_us: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -55,6 +62,13 @@ pub struct DeliveryBin {
     pub target_bytes_per_sec: u64,
     pub max_gap_us: u64,
     pub max_delay_us: u64,
+    pub write_count: u64,
+    pub min_chunk_bytes: u64,
+    pub max_chunk_bytes: u64,
+    pub timing_samples: u64,
+    pub min_expected_us: u64,
+    pub max_expected_us: u64,
+    pub max_early_us: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +146,13 @@ impl DeliveryHistory {
             bin.gap.store(0, Ordering::Relaxed);
             bin.delay.store(0, Ordering::Relaxed);
             bin.target.store(0, Ordering::Relaxed);
+            bin.write_count.store(0, Ordering::Relaxed);
+            bin.min_chunk_bytes.store(0, Ordering::Relaxed);
+            bin.max_chunk_bytes.store(0, Ordering::Relaxed);
+            bin.timing_samples.store(0, Ordering::Relaxed);
+            bin.min_expected_us.store(0, Ordering::Relaxed);
+            bin.max_expected_us.store(0, Ordering::Relaxed);
+            bin.max_early_us.store(0, Ordering::Relaxed);
         }
         self.started_ms
             .store(self.millis_at(now), Ordering::Relaxed);
@@ -195,6 +216,13 @@ impl DeliveryHistory {
                 target_bytes_per_sec: last_target,
                 max_gap_us: read(&bin.gap).max(if bytes == 0 { duration_ms * 1000 } else { 0 }),
                 max_delay_us: read(&bin.delay),
+                write_count: read(&bin.write_count),
+                min_chunk_bytes: read(&bin.min_chunk_bytes),
+                max_chunk_bytes: read(&bin.max_chunk_bytes),
+                timing_samples: read(&bin.timing_samples),
+                min_expected_us: read(&bin.min_expected_us),
+                max_expected_us: read(&bin.max_expected_us),
+                max_early_us: read(&bin.max_early_us),
             });
         }
         Some(DeliveryCapture {
@@ -214,6 +242,13 @@ pub struct DeliveryWriter {
     bytes: u64,
     max_gap_us: u64,
     max_delay_us: u64,
+    write_count: u64,
+    min_chunk_bytes: u64,
+    max_chunk_bytes: u64,
+    timing_samples: u64,
+    min_expected_us: u64,
+    max_expected_us: u64,
+    max_early_us: u64,
     last_write: Option<Instant>,
     last_bytes: u64,
     last_target: u64,
@@ -229,6 +264,13 @@ impl DeliveryWriter {
             bin_index: usize::MAX,
             bytes: 0,
             max_gap_us: 0,
+            write_count: 0,
+            min_chunk_bytes: 0,
+            max_chunk_bytes: 0,
+            timing_samples: 0,
+            min_expected_us: 0,
+            max_expected_us: 0,
+            max_early_us: 0,
             last_write: None,
             max_delay_us: 0,
             last_bytes: 0,
@@ -280,6 +322,13 @@ impl DeliveryWriter {
             self.bytes = 0;
             self.max_gap_us = 0;
             self.max_delay_us = 0;
+            self.write_count = 0;
+            self.min_chunk_bytes = 0;
+            self.max_chunk_bytes = 0;
+            self.timing_samples = 0;
+            self.min_expected_us = 0;
+            self.max_expected_us = 0;
+            self.max_early_us = 0;
         }
         if let Some(last) = self.last_write {
             let gap = now
@@ -292,8 +341,23 @@ impl DeliveryWriter {
             if self.last_target > 0 {
                 let expected = self.last_bytes.saturating_mul(1_000_000) / self.last_target;
                 self.max_delay_us = self.max_delay_us.max(gap.saturating_sub(expected));
+                self.max_early_us = self.max_early_us.max(expected.saturating_sub(gap));
+                self.min_expected_us = if self.timing_samples == 0 {
+                    expected
+                } else {
+                    self.min_expected_us.min(expected)
+                };
+                self.max_expected_us = self.max_expected_us.max(expected);
+                self.timing_samples += 1;
             }
         }
+        self.min_chunk_bytes = if self.write_count == 0 {
+            bytes as u64
+        } else {
+            self.min_chunk_bytes.min(bytes as u64)
+        };
+        self.max_chunk_bytes = self.max_chunk_bytes.max(bytes as u64);
+        self.write_count += 1;
         self.last_write = Some(now);
         self.last_bytes = bytes as u64;
         self.last_target = target;
@@ -304,6 +368,34 @@ impl DeliveryWriter {
             .store(tag | target.min(u32::MAX as u64), Ordering::Release);
         bin.gap.store(tag | self.max_gap_us, Ordering::Release);
         bin.delay.store(tag | self.max_delay_us, Ordering::Release);
+        bin.write_count.store(
+            tag | self.write_count.min(u32::MAX as u64),
+            Ordering::Release,
+        );
+        bin.min_chunk_bytes.store(
+            tag | self.min_chunk_bytes.min(u32::MAX as u64),
+            Ordering::Release,
+        );
+        bin.max_chunk_bytes.store(
+            tag | self.max_chunk_bytes.min(u32::MAX as u64),
+            Ordering::Release,
+        );
+        bin.timing_samples.store(
+            tag | self.timing_samples.min(u32::MAX as u64),
+            Ordering::Release,
+        );
+        bin.min_expected_us.store(
+            tag | self.min_expected_us.min(u32::MAX as u64),
+            Ordering::Release,
+        );
+        bin.max_expected_us.store(
+            tag | self.max_expected_us.min(u32::MAX as u64),
+            Ordering::Release,
+        );
+        bin.max_early_us.store(
+            tag | self.max_early_us.min(u32::MAX as u64),
+            Ordering::Release,
+        );
         bin.bytes.store(tag | self.bytes, Ordering::Release);
     }
 }

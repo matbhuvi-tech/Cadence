@@ -15,31 +15,35 @@ interface Props {
 const mbps = (bytesPerSecond: number) => bytesPerSecond * 8 / 1e6
 
 /** Static SVG: no animation loop, chart library, hover polling, or broad context updates. */
-function DeliveryGraph({ capture, requiredRate }: { capture: DeliveryCapture | null; requiredRate: number }) {
-  // Incomplete bins can exaggerate the rate of a single chunk. Publish only
-  // complete 100 ms intervals; the partial tail appears in the next batch.
+function DeliveryGraph({ capture }: { capture: DeliveryCapture | null }) {
   const bins = capture?.bins.filter(b => b.durationMs === 100) ?? []
-  const width = 520, height = 180, left = 42, top = 14, bottom = 150, right = 508
-  const ceiling = Math.max(1, requiredRate * 1.3, ...bins.map(b => Math.max(mbps(b.bytes * 1000 / b.durationMs), mbps(b.targetBytesPerSec))))
-  const x = (ms: number) => left + ms / 60000 * (right - left)
-  const y = (rate: number) => bottom - rate / ceiling * (bottom - top)
-  // Step geometry preserves zero-rate intervals; curved interpolation would invent data.
-  const line = bins.map((b, i) => `${i === 0 ? 'M' : 'L'}${x(b.offsetMs)},${y(mbps(b.bytes * 1000 / b.durationMs))} L${x(b.offsetMs + b.durationMs)},${y(mbps(b.bytes * 1000 / b.durationMs))}`).join(' ')
-  const target = bins.filter(b => b.targetBytesPerSec > 0).map((b, i) => `${i === 0 ? 'M' : 'L'}${x(b.offsetMs)},${y(mbps(b.targetBytesPerSec))}`).join(' ')
-  return <svg viewBox={`0 0 ${width} ${height}`} className="w-full" role="img" aria-label="Sender delivery over sixty seconds in megabits per second; markers indicate excess pacing delays of at least 25 milliseconds">
-    {[0, 0.5, 1].map(fraction => <g key={fraction}>
-      <line x1={left} x2={right} y1={y(ceiling * fraction)} y2={y(ceiling * fraction)} stroke="#ffffff18" strokeDasharray="3 4" />
-      <text x={left - 7} y={y(ceiling * fraction) + 4} textAnchor="end" fill="#a1a1aa" fontSize="10">{(ceiling * fraction).toFixed(1)}</text>
-    </g>)}
-    {requiredRate > 0 && <line x1={left} x2={right} y1={y(requiredRate)} y2={y(requiredRate)} stroke="#a1a1aa" strokeDasharray="5 4" />}
-    <path d={target} fill="none" stroke="#a5b4fc" strokeWidth="1" strokeDasharray="4 3" />
-    <path d={line} fill="none" stroke="#d4af37" strokeWidth="1.5" />
-    {bins.filter(b => b.maxDelayUs >= 25000).map(b => <line key={b.offsetMs} x1={x(b.offsetMs)} x2={x(b.offsetMs)} y1={bottom - 5} y2={bottom} stroke="#fb923c" strokeWidth="2">
-      <title>{(b.offsetMs / 1000).toFixed(1)}s: excess pacing delay {(b.maxDelayUs / 1000).toFixed(0)} ms; sender gap {(b.maxGapUs / 1000).toFixed(0)} ms</title>
-    </line>)}
-    {[0, 15, 30, 45, 60].map(second => <text key={second} x={x(second * 1000)} y="169" textAnchor="middle" fill="#a1a1aa" fontSize="10">{second}s</text>)}
-    {bins.length === 0 && <text x="275" y="85" textAnchor="middle" fill="#a1a1aa" fontSize="12">Waiting for audio writes…</text>}
-  </svg>
+  const measured = bins.filter(b => (b.timingSamples ?? 0) > 0)
+  const writes = bins.filter(b => (b.writeCount ?? 0) > 0)
+  const minSize = writes.length ? Math.min(...writes.map(b => b.minChunkBytes!)) : 0
+  const maxSize = writes.length ? Math.max(...writes.map(b => b.maxChunkBytes!)) : 0
+  const minExpected = measured.length ? Math.min(...measured.map(b => b.minExpectedUs!)) / 1000 : 0
+  const maxExpected = measured.length ? Math.max(...measured.map(b => b.maxExpectedUs!)) / 1000 : 0
+  const range = Math.max(1, ...measured.map(b => Math.max(b.maxDelayUs, b.maxEarlyUs ?? 0) / 1000))
+  const x = (ms: number) => 45 + ms / 60000 * 460
+  const y = (ms: number) => 82 - ms / range * 60
+  const formatRange = (min: number, max: number, digits: number) => min === max ? min.toFixed(digits) : `${min.toFixed(digits)}–${max.toFixed(digits)}`
+  const envelope = measured.map(b => `M${x(b.offsetMs + 50)},${y(-((b.maxEarlyUs ?? 0) / 1000))} L${x(b.offsetMs + 50)},${y(b.maxDelayUs / 1000)}`).join(' ')
+  return <>
+    <div className="text-[11px] text-zinc-300 mt-3 flex flex-wrap gap-x-5 gap-y-1">
+      <span>Chunk size: {writes.length ? `${formatRange(minSize, maxSize, 0)} bytes · ${minSize === maxSize ? 'consistent' : 'varies'}` : 'waiting for measurements'}</span>
+      <span>Expected spacing: {measured.length ? `${formatRange(minExpected, maxExpected, 3)} ms` : 'unavailable'}</span>
+    </div>
+    <svg viewBox="0 0 520 180" className="w-full" role="img" aria-label="Sender timing deviation over sixty seconds; zero is expected spacing, positive is late and negative is early">
+      {[-1, 0, 1].map(f => <g key={f}>
+        <line x1="45" x2="505" y1={y(range * f)} y2={y(range * f)} stroke={f === 0 ? '#a5b4fc' : '#ffffff18'} strokeDasharray="4 3" />
+        <text x="38" y={y(range * f) + 4} textAnchor="end" fill="#a1a1aa" fontSize="10">{f > 0 ? '+' : ''}{(range * f).toFixed(1)}</text>
+      </g>)}
+      <path d={envelope} fill="none" stroke="#d4af37" strokeWidth="1.5" strokeLinecap="round" />
+      {bins.filter(b => b.bytes === 0).map(b => <rect key={b.offsetMs} x={x(b.offsetMs)} y="22" width={Math.max(1, x(b.offsetMs + b.durationMs) - x(b.offsetMs))} height="120" fill="#fb923c" opacity="0.4"><title>No sender writes in this interval; buffered playback may continue</title></rect>)}
+      {[0, 15, 30, 45, 60].map(second => <text key={second} x={x(second * 1000)} y="168" textAnchor="middle" fill="#a1a1aa" fontSize="10">{second}s</text>)}
+      {measured.length === 0 && <text x="275" y="65" textAnchor="middle" fill="#a1a1aa" fontSize="11">{bins.length ? 'Timing detail unavailable; update the playback engine or enable pacing.' : 'Waiting for audio writes…'}</text>}
+    </svg>
+  </>
 }
 
 export const UpnpPacerPill = memo(function UpnpPacerPill({ client, subscribe, connected, playing }: Props) {
@@ -182,13 +186,14 @@ export const UpnpPacerPill = memo(function UpnpPacerPill({ client, subscribe, co
       <p className="text-xs text-zinc-400 leading-relaxed mt-2">{!connected ? 'The active playback engine is disconnected.' : !playing ? 'Start playback to collect delivery observations.' : assessment.explanation}</p>
       {error && <p role="alert" className="mt-3 text-xs text-amber-300">{error}</p>}
       <div className="mt-5 flex justify-between items-center gap-3">
-        <div><h3 className="text-xs font-medium">Sender delivery · Mbps</h3><p className="text-[10px] text-zinc-500 mt-1">100 ms intervals · up to 60s after opening · refreshes every 5s</p></div>
+        <div><h3 className="text-xs font-medium">Sender timing deviation · ms</h3><p className="text-[10px] text-zinc-500 mt-1">100 ms intervals · up to 60s after opening · refreshes every 5s</p></div>
         {isCapturing ? <button type="button" onClick={() => { stopCapture.current?.(); setCapturing(false) }} className="flex gap-1 items-center text-xs text-zinc-300"><Pause size={13} />Freeze</button>
           : <button type="button" disabled={!connected || !playing} onClick={() => { setCapture(null); setCaptureGeneration(n => n + 1) }} className="flex gap-1 items-center text-xs text-zinc-300 disabled:opacity-40"><RotateCcw size={13} />Capture again</button>}
       </div>
-      <DeliveryGraph capture={capture} requiredRate={requiredRate} />
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400"><span className="text-[#d4af37]">— Measured send rate</span><span title="Current rate the pacer aims to send, including delivery headroom." className="text-indigo-300">┄ Intended send rate</span><span title="Average streaming bitrate; variable-bitrate files can vary during playback.">┄ Average track bitrate</span><span className="text-orange-300">│ Excess delay ≥25 ms</span></div>
-      {capture && <p className="text-[10px] text-zinc-500 mt-2">{isCapturing ? 'Capturing' : 'Frozen'} at {(capture.elapsedMs / 1000).toFixed(1)}s. Chunked writes naturally vary by interval; buffering can create sender gaps.</p>}
+      <DeliveryGraph capture={capture} />
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400"><span className="text-[#d4af37]">│ Early / late extremes</span><span className="text-indigo-300">┄ Expected spacing (zero)</span><span className="text-orange-300">│ No sender writes</span></div>
+      <p className="text-[10px] text-zinc-500 mt-2">Near zero means regular delivery. Positive is late; negative is early. Spacing follows each chunk’s size and active target rate; startup can differ.</p>
+      {capture && <p className="text-[10px] text-zinc-500 mt-2">{isCapturing ? 'Capturing' : 'Frozen'} at {(capture.elapsedMs / 1000).toFixed(1)}s. Each 100 ms group preserves timing extremes; gaps remain visible.</p>}
       <div className="grid grid-cols-3 gap-3 border-t border-white/10 mt-4 pt-3 text-[11px]">
         <div><p className="text-zinc-500">Delivery / track</p><p className="mt-1 tabular-nums">{assessment.mbps?.toFixed(1) ?? '—'} / {requiredRate > 0 ? requiredRate.toFixed(1) : '—'} Mbps</p></div>
         <div><p className="text-zinc-500">Late intervals ≥25ms</p><p className="mt-1 tabular-nums">{gapBins} · max gap {maxGap.toFixed(0)} ms</p></div>
