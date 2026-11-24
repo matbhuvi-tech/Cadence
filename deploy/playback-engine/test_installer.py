@@ -260,11 +260,12 @@ class InstallerTests(unittest.TestCase):
             commands = [call.args[0] for call in run.call_args_list]
             self.assertTrue(any('test -w /var/lib/cadence && test -r /music' in cmd[-1] for cmd in commands))
 
-    def test_legacy_bind_mount_redeploy_preserves_host_data_dir(self):
+    def test_legacy_bind_mount_redeploy_migrates_to_managed_volume(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             data_dir = root / 'legacy-data'
             data_dir.mkdir()
+            (data_dir / 'cadence.db').write_bytes(b'SQLite format 3\x00')
             install_dir = root / 'cadence-playback-engine'
             install_dir.mkdir()
             installer.write_env(install_dir / '.env', {
@@ -289,17 +290,25 @@ class InstallerTests(unittest.TestCase):
                  mock.patch.object(installer, 'docker_prefix', return_value=['docker']), \
                  mock.patch.object(installer, 'check_cifs_support'), \
                  mock.patch.object(installer, 'test_as_cadence', return_value=(True, '')) as mock_perm, \
+                 mock.patch.object(installer, 'migrate_legacy_host_data_to_volume') as mock_migrate, \
                  mock.patch.object(installer, 'run', return_value=result), \
                  mock.patch('builtins.input', side_effect=answers):
                 installer.main()
 
             env = installer.read_env_values(install_dir / '.env')
             compose = (install_dir / 'compose.yml').read_text(encoding='utf-8')
-            self.assertEqual(env['CADENCE_DATA_STORAGE'], 'bind')
-            self.assertEqual(env['CADENCE_HOST_DATA_DIR'], str(data_dir.resolve()))
-            self.assertIn('CADENCE_HOST_DATA_DIR', compose)
-            self.assertNotIn('cadence_data:', compose)
-            mock_perm.assert_called_once_with(data_dir, 'write')
+            self.assertEqual(env['CADENCE_DATA_STORAGE'], 'volume')
+            self.assertNotIn('CADENCE_HOST_DATA_DIR', env)
+            self.assertNotIn('CADENCE_HOST_DATA_DIR', compose)
+            self.assertIn('source: cadence_data', compose)
+            self.assertIn('volumes:\n  cadence_data:', compose)
+            mock_perm.assert_not_called()
+            mock_migrate.assert_called_once_with(
+                ['docker'],
+                'ghcr.io/matbhuvi-tech/cadence-playback-engine:v1.1.0',
+                str(data_dir),
+                truenas=False,
+            )
 
     def test_volume_redeploy_preserves_managed_volume(self):
         with tempfile.TemporaryDirectory() as d:

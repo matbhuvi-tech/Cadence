@@ -343,13 +343,6 @@ else:
 
 
 def check_permissions(data_path, music):
-    if data_path is not None:
-        success, error = test_as_cadence(data_path, 'write')
-        if not success:
-            raise InstallError(f'Cadence UID 568 cannot write to {data_path}: {error}. '
-                               'Choose a dedicated cadence-data directory, or grant UID 568 '
-                               'write permission using the TrueNAS ACL editor. '
-                               'No existing directory permissions were changed.')
     if music:
         success, error = test_as_cadence(music, 'read')
         if not success:
@@ -357,42 +350,85 @@ def check_permissions(data_path, music):
                                'Grant UID 568 read/traverse permissions using the TrueNAS ACL editor.')
 
 
-def apply_data_storage(compose, data_mode='volume'):
-    """Configure /var/lib/cadence as a Docker-managed volume (default) or legacy host bind mount."""
-    normalized = compose.replace('\r\n', '\n')
-    has_markers = '# DATA_VOLUME_START\n' in normalized and '# DATA_VOLUME_END\n' in normalized
-    if data_mode == 'volume':
-        if has_markers:
-            normalized = normalized.replace('      # DATA_VOLUME_START\n', '')
-            normalized = normalized.replace('      # DATA_VOLUME_END\n', '')
-            normalized = normalized.replace('# DATA_VOLUME_DEF_START\n', '')
-            normalized = normalized.replace('# DATA_VOLUME_DEF_END\n', '')
-            normalized = normalized.replace('# DATA_VOLUME_DEF_END', '')
-        elif 'CADENCE_HOST_DATA_DIR' in normalized:
-            raise InstallError('The selected Compose template requires a host data directory and does not support '
-                               'Docker-managed volumes. Use the updated compose.yml alongside install.py.')
-        return normalized
-    if data_mode != 'bind':
-        raise InstallError(f'Unsupported data storage mode: {data_mode}')
-    if not has_markers:
-        return normalized
-    bind_block = (
-        '      - type: bind\n'
-        '        source: ${CADENCE_HOST_DATA_DIR:?Set an existing writable data directory}\n'
-        '        target: /var/lib/cadence\n'
-        '        bind:\n'
-        '          create_host_path: false\n'
+def migrate_legacy_host_data_to_volume(docker, image_ref, legacy_data_dir, truenas=False):
+    """Migrate existing legacy host data dir into the Docker-managed cadence_data volume."""
+    legacy_path = Path(legacy_data_dir)
+    if not (legacy_path.is_dir() and (legacy_path / 'cadence.db').is_file()):
+        print(f'Legacy host data directory ({legacy_data_dir}) has no cadence.db; switching cleanly to Docker-managed volume (cadence_data).')
+        return
+    target_volume = f'ix-{APP}_cadence_data' if truenas else f'{APP}_cadence_data'
+    check = subprocess.run(
+        [*docker, 'run', '--rm', '--user', '0:0', '--entrypoint', '/bin/sh',
+         '-v', f'{target_volume}:/var/lib/cadence:ro',
+         image_ref, '-c', 'test -f /var/lib/cadence/cadence.db'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    pattern = r'(?m)^      # DATA_VOLUME_START\n.*?^      # DATA_VOLUME_END\n'
-    normalized, count = re.subn(pattern, bind_block, normalized, flags=re.DOTALL)
-    if not count:
-        raise InstallError('Could not configure host bind mount in the Compose template.')
-    def_pattern = r'(?m)\n?# DATA_VOLUME_DEF_START\n.*?^# DATA_VOLUME_DEF_END\n?'
-    normalized = re.sub(def_pattern, '', normalized, flags=re.DOTALL)
-    return normalized.rstrip('\n') + '\n'
+    if check.returncode == 0:
+        print(f'Docker-managed volume ({target_volume}) already contains cadence.db; keeping volume data and switching off {legacy_data_dir}.')
+        return
+    tag = 'auto-migrate-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    print(f'Migrating existing engine data from {legacy_data_dir} to Docker-managed volume ({target_volume})...')
+    if truenas:
+        subprocess.run(['midclt', 'call', '--job', 'app.stop', APP],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.run([*docker, 'stop', APP],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    run([*docker, 'volume', 'create', target_volume])
+    run([
+        *docker, 'run', '--rm', '--user', '0:0',
+        '-v', f'{legacy_path.resolve()}:/var/lib/cadence:rw',
+        image_ref, '--backup', tag,
+    ])
+    tar_proc = run(
+        [
+            *docker, 'run', '--rm', '--user', '0:0', '--entrypoint', '/bin/sh',
+            '-v', f'{legacy_path.resolve()}:/var/lib/cadence:ro',
+            image_ref, '-c', f'tar -czf - -C "/var/lib/cadence/backups/{tag}" .',
+        ],
+        capture_output=True,
+    )
+    stage_cmd = (
+        f'mkdir -p "/var/lib/cadence/backups/{tag}" '
+        f'&& tar -xzf - -C "/var/lib/cadence/backups/{tag}" '
+        f'&& chown -R 568:568 /var/lib/cadence'
+    )
+    run(
+        [
+            *docker, 'run', '--rm', '-i', '--user', '0:0', '--entrypoint', '/bin/sh',
+            '-v', f'{target_volume}:/var/lib/cadence:rw',
+            image_ref, '-c', stage_cmd,
+        ],
+        input=tar_proc.stdout,
+    )
+    run([
+        *docker, 'run', '--rm', '--user', '0:0',
+        '-v', f'{target_volume}:/var/lib/cadence:rw',
+        image_ref, '--restore', tag,
+    ])
+    run([
+        *docker, 'run', '--rm', '--user', '0:0', '--entrypoint', '/bin/sh',
+        '-v', f'{target_volume}:/var/lib/cadence:rw',
+        image_ref, '-c', 'chown -R 568:568 /var/lib/cadence',
+    ])
+    print(f'Migration complete. Original host folder left untouched as a backup copy: {legacy_data_dir}')
 
 
-def local_compose(music, profile='standard', data_mode='volume'):
+def apply_data_storage(compose):
+    """Ensure /var/lib/cadence uses the Docker-managed cadence_data volume."""
+    normalized = compose.replace('\r\n', '\n')
+    normalized = normalized.replace('      # DATA_VOLUME_START\n', '')
+    normalized = normalized.replace('      # DATA_VOLUME_END\n', '')
+    normalized = normalized.replace('# DATA_VOLUME_DEF_START\n', '')
+    normalized = normalized.replace('# DATA_VOLUME_DEF_END\n', '')
+    normalized = normalized.replace('# DATA_VOLUME_DEF_END', '')
+    if 'CADENCE_HOST_DATA_DIR' in normalized:
+        raise InstallError('The selected Compose template requires a host data directory and does not support '
+                           'Docker-managed volumes. Use the updated compose.yml alongside install.py.')
+    return normalized
+
+
+def local_compose(music, profile='standard'):
     """Use matching local Compose when supplied; support standard (SMB) and hardened profiles."""
     if profile not in ('standard', 'hardened'):
         raise InstallError(f'Unsupported deployment profile: {profile}')
@@ -413,7 +449,7 @@ def local_compose(music, profile='standard', data_mode='volume'):
         except InstallError:
             compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/{template_name}')
         verify_release_digest(template_name, compose, tag)
-    compose = apply_data_storage(compose, data_mode=data_mode)
+    compose = apply_data_storage(compose)
     if profile == 'hardened':
         if not music:
             raise InstallError('Hardened Read-Only mode requires an existing local or NAS music directory.')
@@ -589,18 +625,10 @@ def main():
                      existing_env.get('CADENCE_ADVERTISED_IP') or default_ip(), valid_address,
                      'Enter a reachable LAN IPv4 address (not loopback or link-local).')
     profile = choose_profile(existing_env.get('CADENCE_DEPLOYMENT_PROFILE', 'standard'))
+    legacy_data_dir = ''
     if existing_dir:
         music = existing_env.get('CADENCE_HOST_MUSIC_DIR', '')
-        existing_data = existing_env.get('CADENCE_HOST_DATA_DIR', '').strip()
-        existing_storage = existing_env.get('CADENCE_DATA_STORAGE', '').strip().lower()
-        if existing_storage == 'volume' and not existing_data:
-            data_mode = 'volume'
-            data = ''
-        else:
-            data_mode = 'bind'
-            data = existing_data
-            if not data or not Path(data).is_absolute():
-                raise InstallError('Existing installation has no valid data directory; stopping to protect its state.')
+        legacy_data_dir = existing_env.get('CADENCE_HOST_DATA_DIR', '').strip()
         if music and not Path(music).is_dir():
             raise InstallError(f'Previously configured music directory is missing: {music}')
         if profile == 'hardened' and not music:
@@ -608,15 +636,13 @@ def main():
             music = prompt_music_folder(truenas, profile)
         else:
             print(f'Keeping existing music directory: {music or "none (SMB-only)"}')
-        if data_mode == 'volume':
-            print('Keeping existing persistent data storage: Docker-managed volume (cadence_data)')
+        if legacy_data_dir:
+            print(f'Switching persistent engine data from legacy folder ({legacy_data_dir}) to Docker-managed volume (cadence_data).')
         else:
-            print(f'Keeping existing persistent data directory: {data}')
+            print('Persistent engine data: Docker-managed volume (cadence_data)')
         destination = existing_dir
     else:
         music = prompt_music_folder(truenas, profile)
-        data_mode = 'volume'
-        data = ''
         print('Persistent engine data: Docker-managed volume (cadence_data)')
         if truenas:
             pool = select_truenas_pool(music)
@@ -625,15 +651,10 @@ def main():
             destination = home / 'cadence-playback-engine'
         if (destination / '.env').exists() or (destination / 'compose.yml').exists():
             raise InstallError(f'Unexpected installation at {destination}; rerun after checking its identity.')
-    if data_mode == 'bind' and music and not paths_separate(data, music):
-        raise InstallError('The data and music folders must be separate and must not contain one another.')
-    if truenas:
-        if data_mode == 'bind' and Path('/mnt') not in Path(data).resolve().parents:
-            raise InstallError('On TrueNAS choose data and music paths beneath /mnt on persistent storage.')
-        if music and Path('/mnt') not in Path(music).resolve().parents:
-            raise InstallError('On TrueNAS choose data and music paths beneath /mnt on persistent storage.')
+    if truenas and music and Path('/mnt') not in Path(music).resolve().parents:
+        raise InstallError('On TrueNAS choose a music path beneath /mnt on persistent storage.')
     os.environ['CADENCE_ACTIVE_TAG'] = tag
-    compose = local_compose(music, profile, data_mode=data_mode)
+    compose = local_compose(music, profile)
     ensure_docker(truenas)
     docker = docker_prefix(truenas)
     run([*docker, 'pull', f'{IMAGE}:{tag}'])
@@ -644,17 +665,9 @@ def main():
         if existing.stdout.strip():
             raise InstallError('A Cadence Compose deployment exists but its managed configuration was not found.')
     destination.mkdir(parents=True, exist_ok=True)
-    data_path = None
-    if data_mode == 'bind':
-        data_path = Path(data)
-        if not data_path.exists():
-            if not data_path.parent.is_dir():
-                raise InstallError(f'The parent folder {data_path.parent} must already exist.')
-            run(privileged(['mkdir', '-m', '700', '--', str(data_path)]))
-            run(privileged(['chown', '568:568', str(data_path)]))
-        if not data_path.is_dir():
-            raise InstallError('The engine data path is not a directory.')
-    check_permissions(data_path, music)
+    check_permissions(None, music)
+    if legacy_data_dir:
+        migrate_legacy_host_data_to_volume(docker, f'{IMAGE}:{tag}', legacy_data_dir, truenas=truenas)
     compose_file = destination / 'compose.yml'
     backup_dir = backup_deployment_files(destination) if existing_dir else None
     compose_file.write_text(compose, encoding='utf-8')
@@ -662,12 +675,10 @@ def main():
         'CADENCE_IMAGE': f'{IMAGE}:{tag}',
         'CADENCE_ADVERTISED_IP': address,
         'CADENCE_DEPLOYMENT_PROFILE': profile,
-        'CADENCE_DATA_STORAGE': data_mode,
+        'CADENCE_DATA_STORAGE': 'volume',
         'CADENCE_HOST_MUSIC_DIR': str(Path(music).resolve()) if music else '',
         'CADENCE_LABEL': 'Cadence Playback Engine',
     }
-    if data_mode == 'bind' and data_path is not None:
-        env_values['CADENCE_HOST_DATA_DIR'] = str(data_path.resolve())
     write_env(destination / '.env', env_values)
     staged_backup = stage_backup_script(destination)
     command = [*docker, 'compose', '-p', APP, '--project-directory', str(destination), '-f', str(compose_file)]

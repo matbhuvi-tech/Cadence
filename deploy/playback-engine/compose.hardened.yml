@@ -25,11 +25,9 @@ services:
       CADENCE_BROWSE_ROOTS: /music
       CADENCE_MUSIC_READ_ONLY: "true"
     volumes:
-      # DATA_VOLUME_START
       - type: volume
         source: cadence_data
         target: /var/lib/cadence
-      # DATA_VOLUME_END
       - type: bind
         source: ${CADENCE_HOST_MUSIC_DIR:?Set an existing music directory}
         target: /music
@@ -37,7 +35,5 @@ services:
         bind:
           create_host_path: false
 
-# DATA_VOLUME_DEF_START
 volumes:
   cadence_data:
-# DATA_VOLUME_DEF_END

@@ -31,21 +31,20 @@ sh install.sh
 
 What the wizard does:
 
-1. Downloads `cadence_checksums.txt` over HTTPS (TLS 1.2+) and verifies `install.py` and remote `compose.yml` / `compose.hardened.yml` digests fail-closed before execution.
+1. Downloads `cadence_checksums.txt` over HTTPS (TLS 1.2+) and verifies `install.py`, `backup.py`, and remote `compose.yml` / `compose.hardened.yml` digests fail-closed before execution.
 2. Detects available releases (including pre-releases) and suggests your host's LAN IPv4 address.
 3. Prompts you to select **1. Standard (Default — SMB mounting)** or **2. Hardened Read-Only (Non-root UID 568)**.
-4. Checks UID/GID `568` read permissions on music and write permissions on data, validates `docker compose config`, pulls the image, and starts the container.
-5. On Debian/Ubuntu hosts, offers to install missing `python3`, `curl`, `docker`, or Compose v2 packages from `apt`. On re-runs over `~/cadence-playback-engine`, it backs up `.env` and `compose.yml` automatically and rolls back if validation fails.
+4. Configures `/var/lib/cadence` automatically on the Docker-managed `cadence_data` persistent volume (no host data-directory permission setup required), checks UID/GID `568` read permissions on `/music` if mounted, validates `docker compose config`, pulls the image, and starts the container.
+5. On Debian/Ubuntu hosts, offers to install missing `python3`, `curl`, `docker`, or Compose v2 packages from `apt`. On re-runs over `~/cadence-playback-engine`, it backs up `.env` and `compose.yml` automatically, migrates any legacy `CADENCE_HOST_DATA_DIR` install to `cadence_data`, and rolls back if validation fails.
 
 ## Option 2: Manual Docker Compose
 
-1. Create separate host directories for persistent engine data and music (never nested inside each other). Ensure UID/GID `568` has write access to the data folder and read/traverse access to the music folder.
+1. Internal engine data (`/var/lib/cadence`) is stored automatically in the Docker-managed `cadence_data` volume. If mounting a local `/music` folder, ensure UID/GID `568` has read/traverse access to it.
 2. Copy `deploy/playback-engine/.env.example` to `.env` alongside `compose.yml` (or `compose.hardened.yml`) and edit all values:
 
 ```dotenv
-CADENCE_IMAGE=ghcr.io/matbhuvi-tech/cadence-playback-engine:v0.1.0-rc.2
+CADENCE_IMAGE=ghcr.io/matbhuvi-tech/cadence-playback-engine:v0.1.0-rc.3
 CADENCE_ADVERTISED_IP=192.168.1.50
-CADENCE_HOST_DATA_DIR=/srv/cadence/data
 CADENCE_HOST_MUSIC_DIR=/srv/music
 CADENCE_LABEL=Cadence Playback Engine
 ```
