@@ -13,6 +13,10 @@ Cadence publishes a unified suite installer alongside standalone Desktop and Pla
 
 Both **Cadence Core** and **Cadence Playback Engine** register in **Windows Settings → Apps → Installed apps**.
 
+::: warning Update both components together
+When updating a local Windows installation with the suite, select both **Cadence Desktop** and **Cadence Local Playback Engine**. If you use standalone installers, download both from the same release. For an engine on another machine, update that host separately to the same release. See [Core UI and Playback Engine version mismatch](/docs/usage/troubleshooting#core-ui-and-playback-engine-version-mismatch) for verification and recovery.
+:::
+
 ## System Tray Mode vs. Windows Service Mode
 
 | Mode | Best For | Tray Icon | Shared Library Directory |

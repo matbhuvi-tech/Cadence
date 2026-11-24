@@ -35,6 +35,19 @@ Overall: HEALTHY
 
 ## Common Issues
 
+### Core UI and Playback Engine version mismatch
+
+**Symptoms:** The Playback Engine panel shows **Different build**, **Cadence Core update recommended**, **Playback Engine update recommended**, or **Catalog compatibility issue**. You may also see missing cover artwork, incomplete metadata, or unavailable features after updating only one component. An engine can remain **Connected** while these compatibility issues occur.
+
+**Check:** Compare **Engine** and **Core UI** in the Playback Engine panel. **Core UI** is the Cadence Core Desktop controller; **Engine** is the selected Playback Engine. **Matched** indicates matching reported builds. A **Different build** notice does not necessarily prevent playback, but using both components from the same release avoids version-related feature gaps. For source builds, build both from the same commit; the release version alone may not distinguish development builds.
+
+**Resolve:**
+
+1. Stop playback before updating.
+2. Download Cadence Core and the appropriate Playback Engine package from the same [GitHub release](https://github.com/matbhuvi-tech/Cadence/releases).
+3. Update both components. On Windows, use the suite with Desktop and Local Playback Engine selected, or install both standalone packages. For Linux, Docker, or TrueNAS engines, update the engine on its host using the corresponding [installation guide](/docs/installation/). Updating Desktop alone does not update a remote engine; for containers, select the matching release image tag.
+4. Restart the updated Engine and Cadence Core, reconnect, and check the reported versions and any remaining compatibility warning. Repeat for each engine you use.
+
 ### Windows: "Already running in the background as a Windows Service" dialog on Start Menu launch
 Windows Services execute in Session 0 and cannot show a notification-area tray icon in your desktop session. Open **Cadence Core** directly to connect. To switch back to the system tray icon, re-run `Cadence_<ver>_x64-setup.exe` (or `cadence-engine-setup.exe`) and uncheck **Windows Service**.
 

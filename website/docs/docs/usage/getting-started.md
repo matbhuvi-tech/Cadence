@@ -8,6 +8,10 @@ Once your Playback Engine is running (locally on Windows or on a Linux / TrueNAS
 2. **Local Windows Engine (Tray or Windows Service):** Desktop reads `localhost-pairing.json` automatically, pins the self-signed TLS certificate SHA-256 fingerprint, and connects to `https://127.0.0.1:4040`.
 3. **NAS / Linux Engine over LAN:** Wait for mDNS auto-discovery (`_cadence-core._tcp.local.`), or click **Add Engine by IP / Address** and enter `https://<engine-lan-ip>:4040` alongside the engine's `pairing-token` if manual verification is required.
 
+::: warning Check versions before continuing
+In the Playback Engine panel, compare **Engine** and **Core UI**. Use the same Cadence release for both; **Connected** confirms a connection, not full feature compatibility. If you see **Different build** or an update warning, follow [version checks and recovery](/docs/usage/troubleshooting#core-ui-and-playback-engine-version-mismatch).
+:::
+
 ## 2. Add Your Music Library
 
 1. Navigate to **Browse → Add Folder** in Cadence Desktop.

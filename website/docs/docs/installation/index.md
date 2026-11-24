@@ -2,6 +2,12 @@
 
 Download verified release artifacts from [**Cadence GitHub Releases**](https://github.com/matbhuvi-tech/Cadence/releases), then choose the guide matching your hardware and operating system.
 
+::: warning Keep Core UI and Playback Engine on the same release
+Install and update **Cadence Core** (the Desktop controller, labelled **Core UI** in the app) and every **Playback Engine** you use from the same release. Different versions or builds can cause compatibility issues, including missing cover artwork, incomplete metadata, or unavailable features, even when the engine shows **Connected**.
+
+This applies to local Windows engines and engines on separate Windows, Linux, Docker, or TrueNAS hosts. Updating Desktop does not update an engine on another machine. After connecting, compare **Engine** and **Core UI** in the Playback Engine panel. See [version checks and recovery](/docs/usage/troubleshooting#core-ui-and-playback-engine-version-mismatch).
+:::
+
 <div class="cadence-platform-grid">
   <a class="cadence-platform-card" href="./windows">
     <div>
