@@ -766,7 +766,16 @@ fn cadence_headless_dragonfish_daemon_healthcheck_backup_and_restore_cli_roundtr
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(healthy, "cadence-headless --healthcheck never succeeded");
+    if !healthy {
+        let _ = child.kill();
+        let output = child.wait_with_output().expect("collect failed daemon output");
+        panic!(
+            "cadence-headless --healthcheck never succeeded; daemon status: {}; stdout: {}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     let doctor_out = Command::new(exe)
         .arg("--doctor")

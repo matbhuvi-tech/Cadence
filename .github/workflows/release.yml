@@ -180,7 +180,11 @@ jobs:
           PY
 
       - name: Run headless Rust test suite
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
+        run: |
+          # The daemon integration test requires at least 16 MiB of lockable RAM.
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          ulimit -l
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
 
   build-linux-engine:
     name: Build Linux engine (${{ matrix.arch }})
