@@ -2981,13 +2981,14 @@ mod tests {
         let zero_wnd = core_tcp_sample_from_linux_tcp_info(&info, linux_612_len).unwrap();
         assert_eq!(zero_wnd.snd_wnd, 0);
 
-        // Verify live loopback socket query returns peer's real non-zero window (> 65536).
+        // A fresh loopback window depends on kernel configuration and can be 65536.
+        // Large-window parsing is checked deterministically above.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let client = std::net::TcpStream::connect(addr).unwrap();
         let (server, _peer) = listener.accept().unwrap();
         let live = query_socket_tcp_info(&server).expect("TCP_INFO must succeed on Linux loopback");
-        assert!(live.snd_wnd > 65_536, "expected real loopback snd_wnd > 65536, got {}", live.snd_wnd);
+        assert!(live.snd_wnd > 0, "expected an open loopback receive window, got {}", live.snd_wnd);
         drop(client);
     }
 
