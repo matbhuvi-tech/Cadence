@@ -772,9 +772,15 @@ pub fn execute_pending_jobs(
                 return Err(RemoteCurateError::Io(msg));
             }
         };
-        // Release Windows/SMB/NFS file & parent directory handles BEFORE atomic_replace()
-        // so renaming over the target file does not hit Access is denied (os error 5).
-        drop(target);
+        // Release the source before replacement, especially for Windows/SMB.
+        let AuthorizedTarget { source, _parent: parent, .. } = target;
+        drop(source);
+        // Linux paths are anchored through /proc/self/fd/<parent>. Keep that
+        // directory open through replacement, verification and any rollback.
+        #[cfg(target_os = "linux")]
+        let _parent_guard = parent;
+        #[cfg(not(target_os = "linux"))]
+        drop(parent);
 
         let disk_sha = sha256_hex(&disk_bytes);
         let journal: Option<(Vec<u8>, Vec<u8>)> = db
