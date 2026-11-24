@@ -291,23 +291,32 @@ def prompt_music_folder(truenas, profile):
                   'Enter an existing absolute folder path.')
 
 
+def select_truenas_pool(music=''):
+    """Determine the TrueNAS pool for installer-managed config (from music path or user selection)."""
+    if music:
+        return Path(music).resolve().relative_to('/mnt').parts[0]
+    pools = sorted((p for p in Path('/mnt').iterdir()
+                    if p.is_dir() and not p.name.startswith('.') and p.name not in
+                    ('ix-applications', 'ix-apps', '.system', 'iocage')),
+                   key=lambda p: p.name.casefold())
+    if not pools:
+        raise InstallError('No persistent storage pools were found under /mnt.')
+    if len(pools) == 1:
+        return pools[0].name
+    print('Storage pools (for Cadence installer configuration):')
+    for idx, item in enumerate(pools, 1):
+        print(f'  {idx}. {item}')
+    selected = prompt('Storage pool number', '1',
+                      lambda value: value.isdigit() and 1 <= int(value) <= len(pools))
+    return pools[int(selected) - 1].name
+
+
 def suggested_truenas_data_path(music):
     """Suggest an isolated dataset directory even if no local music is selected."""
-    if music:
-        pool = Path(music).resolve().relative_to('/mnt').parts[0]
-    else:
-        pools = sorted((p for p in Path('/mnt').iterdir()
-                        if p.is_dir() and not p.name.startswith('.') and p.name not in
-                        ('ix-applications', 'ix-apps', '.system', 'iocage')),
-                       key=lambda p: p.name.casefold())
-        if not pools:
-            return ''
-        print('Storage pools:')
-        for idx, item in enumerate(pools, 1):
-            print(f'  {idx}. {item}')
-        selected = prompt('Storage pool number', '1',
-                          lambda value: value.isdigit() and 1 <= int(value) <= len(pools))
-        pool = pools[int(selected) - 1].name
+    try:
+        pool = select_truenas_pool(music)
+    except InstallError:
+        return ''
     return str(Path('/mnt') / pool / 'cadence-data')
 
 
@@ -334,12 +343,13 @@ else:
 
 
 def check_permissions(data_path, music):
-    success, error = test_as_cadence(data_path, 'write')
-    if not success:
-        raise InstallError(f'Cadence UID 568 cannot write to {data_path}: {error}. '
-                           'Choose a dedicated cadence-data directory, or grant UID 568 '
-                           'write permission using the TrueNAS ACL editor. '
-                           'No existing directory permissions were changed.')
+    if data_path is not None:
+        success, error = test_as_cadence(data_path, 'write')
+        if not success:
+            raise InstallError(f'Cadence UID 568 cannot write to {data_path}: {error}. '
+                               'Choose a dedicated cadence-data directory, or grant UID 568 '
+                               'write permission using the TrueNAS ACL editor. '
+                               'No existing directory permissions were changed.')
     if music:
         success, error = test_as_cadence(music, 'read')
         if not success:
@@ -347,7 +357,42 @@ def check_permissions(data_path, music):
                                'Grant UID 568 read/traverse permissions using the TrueNAS ACL editor.')
 
 
-def local_compose(music, profile='standard'):
+def apply_data_storage(compose, data_mode='volume'):
+    """Configure /var/lib/cadence as a Docker-managed volume (default) or legacy host bind mount."""
+    normalized = compose.replace('\r\n', '\n')
+    has_markers = '# DATA_VOLUME_START\n' in normalized and '# DATA_VOLUME_END\n' in normalized
+    if data_mode == 'volume':
+        if has_markers:
+            normalized = normalized.replace('      # DATA_VOLUME_START\n', '')
+            normalized = normalized.replace('      # DATA_VOLUME_END\n', '')
+            normalized = normalized.replace('# DATA_VOLUME_DEF_START\n', '')
+            normalized = normalized.replace('# DATA_VOLUME_DEF_END\n', '')
+            normalized = normalized.replace('# DATA_VOLUME_DEF_END', '')
+        elif 'CADENCE_HOST_DATA_DIR' in normalized:
+            raise InstallError('The selected Compose template requires a host data directory and does not support '
+                               'Docker-managed volumes. Use the updated compose.yml alongside install.py.')
+        return normalized
+    if data_mode != 'bind':
+        raise InstallError(f'Unsupported data storage mode: {data_mode}')
+    if not has_markers:
+        return normalized
+    bind_block = (
+        '      - type: bind\n'
+        '        source: ${CADENCE_HOST_DATA_DIR:?Set an existing writable data directory}\n'
+        '        target: /var/lib/cadence\n'
+        '        bind:\n'
+        '          create_host_path: false\n'
+    )
+    pattern = r'(?m)^      # DATA_VOLUME_START\n.*?^      # DATA_VOLUME_END\n'
+    normalized, count = re.subn(pattern, bind_block, normalized, flags=re.DOTALL)
+    if not count:
+        raise InstallError('Could not configure host bind mount in the Compose template.')
+    def_pattern = r'(?m)\n?# DATA_VOLUME_DEF_START\n.*?^# DATA_VOLUME_DEF_END\n?'
+    normalized = re.sub(def_pattern, '', normalized, flags=re.DOTALL)
+    return normalized.rstrip('\n') + '\n'
+
+
+def local_compose(music, profile='standard', data_mode='volume'):
     """Use matching local Compose when supplied; support standard (SMB) and hardened profiles."""
     if profile not in ('standard', 'hardened'):
         raise InstallError(f'Unsupported deployment profile: {profile}')
@@ -368,6 +413,7 @@ def local_compose(music, profile='standard'):
         except InstallError:
             compose = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{tag}/deploy/playback-engine/{template_name}')
         verify_release_digest(template_name, compose, tag)
+    compose = apply_data_storage(compose, data_mode=data_mode)
     if profile == 'hardened':
         if not music:
             raise InstallError('Hardened Read-Only mode requires an existing local or NAS music directory.')
@@ -390,6 +436,36 @@ def local_compose(music, profile='standard'):
         compose = compose.replace('      # LOCAL_MUSIC_VOLUME_START\n', '')
         compose = compose.replace('      # LOCAL_MUSIC_VOLUME_END\n', '')
     return compose
+
+
+def stage_backup_script(destination):
+    """Copy or download backup.py into the installation directory when available."""
+    nearby = Path(__file__).resolve().with_name('backup.py')
+    installer_release = os.environ.get('CADENCE_INSTALLER_RELEASE', '').strip()
+    bootstrap_checksums = os.environ.get('CADENCE_CHECKSUMS_FILE', '').strip()
+    tag = os.environ.get('CADENCE_ACTIVE_TAG', '').strip()
+    allow_nearby = not (bootstrap_checksums and installer_release and tag and tag != installer_release)
+    target = destination / 'backup.py'
+    if allow_nearby and nearby.is_file():
+        shutil.copy2(nearby, target)
+        try:
+            target.chmod(0o755)
+        except OSError:
+            pass
+        return target
+    if not tag:
+        return None
+    try:
+        content = fetch(f'https://github.com/{REPOSITORY}/releases/download/{tag}/backup.py')
+    except InstallError:
+        return None
+    verify_release_digest('backup.py', content, tag)
+    target.write_text(content, encoding='utf-8')
+    try:
+        target.chmod(0o755)
+    except OSError:
+        pass
+    return target
 
 
 
@@ -515,9 +591,16 @@ def main():
     profile = choose_profile(existing_env.get('CADENCE_DEPLOYMENT_PROFILE', 'standard'))
     if existing_dir:
         music = existing_env.get('CADENCE_HOST_MUSIC_DIR', '')
-        data = existing_env.get('CADENCE_HOST_DATA_DIR', '')
-        if not data or not Path(data).is_absolute():
-            raise InstallError('Existing installation has no valid data directory; stopping to protect its state.')
+        existing_data = existing_env.get('CADENCE_HOST_DATA_DIR', '').strip()
+        existing_storage = existing_env.get('CADENCE_DATA_STORAGE', '').strip().lower()
+        if existing_storage == 'volume' and not existing_data:
+            data_mode = 'volume'
+            data = ''
+        else:
+            data_mode = 'bind'
+            data = existing_data
+            if not data or not Path(data).is_absolute():
+                raise InstallError('Existing installation has no valid data directory; stopping to protect its state.')
         if music and not Path(music).is_dir():
             raise InstallError(f'Previously configured music directory is missing: {music}')
         if profile == 'hardened' and not music:
@@ -525,25 +608,32 @@ def main():
             music = prompt_music_folder(truenas, profile)
         else:
             print(f'Keeping existing music directory: {music or "none (SMB-only)"}')
-        print(f'Keeping existing persistent data directory: {data}')
+        if data_mode == 'volume':
+            print('Keeping existing persistent data storage: Docker-managed volume (cadence_data)')
+        else:
+            print(f'Keeping existing persistent data directory: {data}')
         destination = existing_dir
     else:
         music = prompt_music_folder(truenas, profile)
-        default_data = suggested_truenas_data_path(music) if truenas else '/var/lib/cadence'
+        data_mode = 'volume'
+        data = ''
+        print('Persistent engine data: Docker-managed volume (cadence_data)')
         if truenas:
-            print(f'Recommended persistent engine data directory: {default_data}')
-        data = prompt('Persistent engine data folder', default_data,
-                      lambda value: Path(value).is_absolute(), 'Enter an absolute folder path.')
-        destination = Path(data).parent / 'cadence-installation' if truenas else home / 'cadence-playback-engine'
+            pool = select_truenas_pool(music)
+            destination = Path('/mnt') / pool / 'cadence-installation'
+        else:
+            destination = home / 'cadence-playback-engine'
         if (destination / '.env').exists() or (destination / 'compose.yml').exists():
             raise InstallError(f'Unexpected installation at {destination}; rerun after checking its identity.')
-    if music and not paths_separate(data, music):
+    if data_mode == 'bind' and music and not paths_separate(data, music):
         raise InstallError('The data and music folders must be separate and must not contain one another.')
-    if truenas and (Path('/mnt') not in Path(data).resolve().parents or
-                    (music and Path('/mnt') not in Path(music).resolve().parents)):
-        raise InstallError('On TrueNAS choose data and music paths beneath /mnt on persistent storage.')
+    if truenas:
+        if data_mode == 'bind' and Path('/mnt') not in Path(data).resolve().parents:
+            raise InstallError('On TrueNAS choose data and music paths beneath /mnt on persistent storage.')
+        if music and Path('/mnt') not in Path(music).resolve().parents:
+            raise InstallError('On TrueNAS choose data and music paths beneath /mnt on persistent storage.')
     os.environ['CADENCE_ACTIVE_TAG'] = tag
-    compose = local_compose(music, profile)
+    compose = local_compose(music, profile, data_mode=data_mode)
     ensure_docker(truenas)
     docker = docker_prefix(truenas)
     run([*docker, 'pull', f'{IMAGE}:{tag}'])
@@ -554,26 +644,32 @@ def main():
         if existing.stdout.strip():
             raise InstallError('A Cadence Compose deployment exists but its managed configuration was not found.')
     destination.mkdir(parents=True, exist_ok=True)
-    data_path = Path(data)
-    if not data_path.exists():
-        if not data_path.parent.is_dir():
-            raise InstallError(f'The parent folder {data_path.parent} must already exist.')
-        run(privileged(['mkdir', '-m', '700', '--', str(data_path)]))
-        run(privileged(['chown', '568:568', str(data_path)]))
-    if not data_path.is_dir():
-        raise InstallError('The engine data path is not a directory.')
+    data_path = None
+    if data_mode == 'bind':
+        data_path = Path(data)
+        if not data_path.exists():
+            if not data_path.parent.is_dir():
+                raise InstallError(f'The parent folder {data_path.parent} must already exist.')
+            run(privileged(['mkdir', '-m', '700', '--', str(data_path)]))
+            run(privileged(['chown', '568:568', str(data_path)]))
+        if not data_path.is_dir():
+            raise InstallError('The engine data path is not a directory.')
     check_permissions(data_path, music)
     compose_file = destination / 'compose.yml'
     backup_dir = backup_deployment_files(destination) if existing_dir else None
     compose_file.write_text(compose, encoding='utf-8')
-    write_env(destination / '.env', {
+    env_values = {
         'CADENCE_IMAGE': f'{IMAGE}:{tag}',
         'CADENCE_ADVERTISED_IP': address,
         'CADENCE_DEPLOYMENT_PROFILE': profile,
-        'CADENCE_HOST_DATA_DIR': str(data_path.resolve()),
+        'CADENCE_DATA_STORAGE': data_mode,
         'CADENCE_HOST_MUSIC_DIR': str(Path(music).resolve()) if music else '',
         'CADENCE_LABEL': 'Cadence Playback Engine',
-    })
+    }
+    if data_mode == 'bind' and data_path is not None:
+        env_values['CADENCE_HOST_DATA_DIR'] = str(data_path.resolve())
+    write_env(destination / '.env', env_values)
+    staged_backup = stage_backup_script(destination)
     command = [*docker, 'compose', '-p', APP, '--project-directory', str(destination), '-f', str(compose_file)]
     try:
         run([*command, 'config', '--quiet'])
@@ -602,6 +698,8 @@ def main():
         print(f'Engine is ready. Check status with: cd "{destination}" && docker compose -p {APP} ps')
     if backup_dir:
         print(f'Previous installer configuration: {backup_dir}')
+    if staged_backup:
+        print(f'Backup/restore helper: python3 "{staged_backup}" export <destination-folder>')
     print(f'Engine address: https://{address}:4040')
     print('If startup fails, check Apps > Cadence > Logs. Do not chmod or chown your entire library.')
 

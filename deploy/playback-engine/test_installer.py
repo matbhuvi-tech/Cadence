@@ -59,7 +59,6 @@ class InstallerTests(unittest.TestCase):
             values = {
                 'CADENCE_HOST_MUSIC_DIR': "/music/John's $ records",
                 'CADENCE_LABEL': 'Music #1',
-                'CADENCE_HOST_DATA_DIR': '/data',
                 'CADENCE_IMAGE': 'example/test:v1',
                 'CADENCE_ADVERTISED_IP': '192.168.1.12',
             }
@@ -70,8 +69,12 @@ class InstallerTests(unittest.TestCase):
                  str(path.with_name('compose.yml')), 'config', '--format', 'json'],
                 capture_output=True, text=True, check=True, env=env,
             )
-            service = json.loads(result.stdout)['services']['playback-engine']
+            parsed = json.loads(result.stdout)
+            service = parsed['services']['playback-engine']
             self.assertEqual(service['environment']['CADENCE_LABEL'], 'Music #1')
+            self.assertEqual(service['volumes'][0]['type'], 'volume')
+            self.assertEqual(service['volumes'][0]['source'], 'cadence_data')
+            self.assertIn('cadence_data', parsed.get('volumes', {}))
             # Compose escapes dollar signs when emitting a configuration for reuse.
             self.assertEqual(service['volumes'][1]['source'], "/music/John's $$ records")
 
@@ -82,7 +85,6 @@ class InstallerTests(unittest.TestCase):
             values = {
                 'CADENCE_HOST_MUSIC_DIR': "/music/John's $ records",
                 'CADENCE_LABEL': 'Music #1',
-                'CADENCE_HOST_DATA_DIR': '/data',
                 'CADENCE_IMAGE': 'example/test:v1',
                 'CADENCE_ADVERTISED_IP': '192.168.1.12',
             }
@@ -93,9 +95,13 @@ class InstallerTests(unittest.TestCase):
                  str(path.with_name('compose.hardened.yml')), 'config', '--format', 'json'],
                 capture_output=True, text=True, check=True, env=env,
             )
-            service = json.loads(result.stdout)['services']['playback-engine']
+            parsed = json.loads(result.stdout)
+            service = parsed['services']['playback-engine']
             self.assertEqual(service['user'], '568:568')
             self.assertEqual(service['environment']['CADENCE_MUSIC_READ_ONLY'], 'true')
+            self.assertEqual(service['volumes'][0]['type'], 'volume')
+            self.assertEqual(service['volumes'][0]['source'], 'cadence_data')
+            self.assertIn('cadence_data', parsed.get('volumes', {}))
             self.assertTrue(service['volumes'][1]['read_only'])
             self.assertEqual(service['volumes'][1]['source'], "/music/John's $$ records")
 
@@ -175,10 +181,9 @@ class InstallerTests(unittest.TestCase):
     def test_linux_first_install_standard_smb_default(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            (root / 'data').mkdir()
             result = types.SimpleNamespace(stdout='', returncode=0)
-            # Tag default, IP default, Profile default (Enter -> Standard), Music '-', Data path
-            answers = ['', '', '', '-', str(root / 'data')]
+            # Tag default, IP default, Profile default (Enter -> Standard), Music '-' (no data prompt!)
+            answers = ['', '', '', '-']
             with mock.patch.object(installer.sys, 'platform', 'linux'), \
                  mock.patch.object(os, 'uname', return_value=types.SimpleNamespace(machine='x86_64'), create=True), \
                  mock.patch.object(installer.shutil, 'which', return_value=None), \
@@ -190,7 +195,7 @@ class InstallerTests(unittest.TestCase):
                  mock.patch.object(installer, 'ensure_docker'), \
                  mock.patch.object(installer, 'docker_prefix', return_value=['docker']), \
                  mock.patch.object(installer, 'check_cifs_support') as mock_cifs, \
-                 mock.patch.object(installer, 'test_as_cadence', return_value=(True, '')), \
+                 mock.patch.object(installer, 'test_as_cadence', return_value=(True, '')) as mock_perm, \
                  mock.patch.object(installer, 'run', return_value=result) as run, \
                  mock.patch('builtins.input', side_effect=answers):
                 installer.main()
@@ -200,9 +205,16 @@ class InstallerTests(unittest.TestCase):
             self.assertIn('cadence-playback-engine:v1.2.3', env)
             self.assertIn('192.168.1.12', env)
             self.assertIn("CADENCE_DEPLOYMENT_PROFILE='standard'", env)
+            self.assertIn("CADENCE_DATA_STORAGE='volume'", env)
+            self.assertNotIn('CADENCE_HOST_DATA_DIR', env)
             self.assertIn('SYS_ADMIN', compose)
+            self.assertIn('source: cadence_data', compose)
+            self.assertIn('volumes:\n  cadence_data:', compose)
+            self.assertNotIn('DATA_VOLUME_START', compose)
             self.assertNotIn('LOCAL_MUSIC_VOLUME_START', compose)
             self.assertNotIn('target: /music', compose)
+            self.assertTrue((root / 'cadence-playback-engine' / 'backup.py').is_file())
+            mock_perm.assert_not_called()
             mock_cifs.assert_called_once_with(['docker'], 'ghcr.io/matbhuvi-tech/cadence-playback-engine:v1.2.3')
             commands = [call.args[0] for call in run.call_args_list]
             self.assertTrue(any(cmd[-1:] == ['pull'] for cmd in commands))
@@ -214,10 +226,9 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             (root / 'music').mkdir()
-            (root / 'data').mkdir()
             result = types.SimpleNamespace(stdout='', returncode=0)
-            # Tag default, IP default, Profile '2' (hardened), '-' rejected then real music dir, Data path
-            answers = ['', '', '2', '-', str(root / 'music'), str(root / 'data')]
+            # Tag default, IP default, Profile '2' (hardened), '-' rejected then real music dir (no data prompt!)
+            answers = ['', '', '2', '-', str(root / 'music')]
             with mock.patch.object(installer.sys, 'platform', 'linux'), \
                  mock.patch.object(os, 'uname', return_value=types.SimpleNamespace(machine='x86_64'), create=True), \
                  mock.patch.object(installer.shutil, 'which', return_value=None), \
@@ -229,7 +240,7 @@ class InstallerTests(unittest.TestCase):
                  mock.patch.object(installer, 'ensure_docker'), \
                  mock.patch.object(installer, 'docker_prefix', return_value=['docker']), \
                  mock.patch.object(installer, 'check_cifs_support') as mock_cifs, \
-                 mock.patch.object(installer, 'test_as_cadence', return_value=(True, '')), \
+                 mock.patch.object(installer, 'test_as_cadence', return_value=(True, '')) as mock_perm, \
                  mock.patch.object(installer, 'run', return_value=result) as run, \
                  mock.patch('builtins.input', side_effect=answers):
                 installer.main()
@@ -237,13 +248,96 @@ class InstallerTests(unittest.TestCase):
             env = (root / 'cadence-playback-engine' / '.env').read_text(encoding='utf-8')
             compose = (root / 'cadence-playback-engine' / 'compose.yml').read_text(encoding='utf-8')
             self.assertIn("CADENCE_DEPLOYMENT_PROFILE='hardened'", env)
+            self.assertIn("CADENCE_DATA_STORAGE='volume'", env)
+            self.assertNotIn('CADENCE_HOST_DATA_DIR', env)
             self.assertIn('user: "568:568"', compose)
             self.assertIn('CADENCE_MUSIC_READ_ONLY: "true"', compose)
+            self.assertIn('source: cadence_data', compose)
             self.assertNotIn('SYS_ADMIN', compose)
             self.assertNotIn('apparmor:unconfined', compose)
+            mock_perm.assert_called_once_with(str(root / 'music'), 'read')
             mock_cifs.assert_not_called()
             commands = [call.args[0] for call in run.call_args_list]
             self.assertTrue(any('test -w /var/lib/cadence && test -r /music' in cmd[-1] for cmd in commands))
+
+    def test_legacy_bind_mount_redeploy_preserves_host_data_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            data_dir = root / 'legacy-data'
+            data_dir.mkdir()
+            install_dir = root / 'cadence-playback-engine'
+            install_dir.mkdir()
+            installer.write_env(install_dir / '.env', {
+                'CADENCE_IMAGE': 'ghcr.io/matbhuvi-tech/cadence-playback-engine:v1.1.0',
+                'CADENCE_ADVERTISED_IP': '192.168.1.12',
+                'CADENCE_DEPLOYMENT_PROFILE': 'standard',
+                'CADENCE_HOST_DATA_DIR': str(data_dir),
+                'CADENCE_HOST_MUSIC_DIR': '',
+                'CADENCE_LABEL': 'Cadence Playback Engine',
+            })
+            (install_dir / 'compose.yml').write_text('services: {}\n', encoding='utf-8')
+            result = types.SimpleNamespace(stdout='', returncode=0)
+            # Confirm update, accept tag, accept IP, accept profile
+            answers = ['y', '', '', '']
+            with mock.patch.object(installer.sys, 'platform', 'linux'), \
+                 mock.patch.object(os, 'uname', return_value=types.SimpleNamespace(machine='x86_64'), create=True), \
+                 mock.patch.object(installer.shutil, 'which', return_value=None), \
+                 mock.patch.dict(os.environ, {'SUDO_USER': '', 'CADENCE_INSTALLER_RELEASE': ''}), \
+                 mock.patch.dict(sys.modules, {'pwd': types.SimpleNamespace()}), \
+                 mock.patch.object(pathlib.Path, 'home', return_value=root), \
+                 mock.patch.object(installer, 'ensure_docker'), \
+                 mock.patch.object(installer, 'docker_prefix', return_value=['docker']), \
+                 mock.patch.object(installer, 'check_cifs_support'), \
+                 mock.patch.object(installer, 'test_as_cadence', return_value=(True, '')) as mock_perm, \
+                 mock.patch.object(installer, 'run', return_value=result), \
+                 mock.patch('builtins.input', side_effect=answers):
+                installer.main()
+
+            env = installer.read_env_values(install_dir / '.env')
+            compose = (install_dir / 'compose.yml').read_text(encoding='utf-8')
+            self.assertEqual(env['CADENCE_DATA_STORAGE'], 'bind')
+            self.assertEqual(env['CADENCE_HOST_DATA_DIR'], str(data_dir.resolve()))
+            self.assertIn('CADENCE_HOST_DATA_DIR', compose)
+            self.assertNotIn('cadence_data:', compose)
+            mock_perm.assert_called_once_with(data_dir, 'write')
+
+    def test_volume_redeploy_preserves_managed_volume(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            install_dir = root / 'cadence-playback-engine'
+            install_dir.mkdir()
+            installer.write_env(install_dir / '.env', {
+                'CADENCE_IMAGE': 'ghcr.io/matbhuvi-tech/cadence-playback-engine:v1.2.0',
+                'CADENCE_ADVERTISED_IP': '192.168.1.12',
+                'CADENCE_DEPLOYMENT_PROFILE': 'standard',
+                'CADENCE_DATA_STORAGE': 'volume',
+                'CADENCE_HOST_MUSIC_DIR': '',
+                'CADENCE_LABEL': 'Cadence Playback Engine',
+            })
+            (install_dir / 'compose.yml').write_text('services: {}\n', encoding='utf-8')
+            result = types.SimpleNamespace(stdout='', returncode=0)
+            answers = ['y', '', '', '']
+            with mock.patch.object(installer.sys, 'platform', 'linux'), \
+                 mock.patch.object(os, 'uname', return_value=types.SimpleNamespace(machine='x86_64'), create=True), \
+                 mock.patch.object(installer.shutil, 'which', return_value=None), \
+                 mock.patch.dict(os.environ, {'SUDO_USER': '', 'CADENCE_INSTALLER_RELEASE': ''}), \
+                 mock.patch.dict(sys.modules, {'pwd': types.SimpleNamespace()}), \
+                 mock.patch.object(pathlib.Path, 'home', return_value=root), \
+                 mock.patch.object(installer, 'ensure_docker'), \
+                 mock.patch.object(installer, 'docker_prefix', return_value=['docker']), \
+                 mock.patch.object(installer, 'check_cifs_support'), \
+                 mock.patch.object(installer, 'test_as_cadence', return_value=(True, '')) as mock_perm, \
+                 mock.patch.object(installer, 'run', return_value=result), \
+                 mock.patch('builtins.input', side_effect=answers):
+                installer.main()
+
+            env = installer.read_env_values(install_dir / '.env')
+            compose = (install_dir / 'compose.yml').read_text(encoding='utf-8')
+            self.assertEqual(env['CADENCE_DATA_STORAGE'], 'volume')
+            self.assertNotIn('CADENCE_HOST_DATA_DIR', env)
+            self.assertIn('source: cadence_data', compose)
+            self.assertIn('volumes:\n  cadence_data:', compose)
+            mock_perm.assert_not_called()
 
     def test_parse_checksums_handles_standard_and_binary_prefixes(self):
         manifest = (
