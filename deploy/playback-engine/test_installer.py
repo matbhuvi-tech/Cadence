@@ -147,12 +147,25 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(payload['custom_app'])
             self.assertEqual(payload['custom_compose_config'], {'services': {}})
 
-        with mock.patch.object(installer, 'run') as run:
+        with mock.patch.object(installer, 'run', side_effect=[
+            types.SimpleNamespace(stdout=''),
+            types.SimpleNamespace(stdout=json.dumps([{'id': 'cadence-playback-engine', 'state': 'STOPPED'}])),
+            types.SimpleNamespace(stdout=''),
+        ]) as run:
             installer.deploy_truenas_app('{"services":{}}', existing=True)
-            args = run.call_args.args[0]
-            self.assertEqual(args[:5], ['midclt', 'call', '--job', 'app.update', 'cadence-playback-engine'])
-            payload = json.loads(args[5])
+            update_args = run.call_args_list[0].args[0]
+            self.assertEqual(update_args[:5], ['midclt', 'call', '--job', 'app.update', 'cadence-playback-engine'])
+            payload = json.loads(update_args[5])
             self.assertEqual(payload['custom_compose_config'], {'services': {}})
+            start_args = run.call_args_list[2].args[0]
+            self.assertEqual(start_args, ['midclt', 'call', '--job', 'app.start', 'cadence-playback-engine'])
+
+        with mock.patch.object(installer, 'run', side_effect=[
+            types.SimpleNamespace(stdout=''),
+            types.SimpleNamespace(stdout=json.dumps([{'id': 'cadence-playback-engine', 'state': 'RUNNING'}])),
+        ]) as run:
+            installer.deploy_truenas_app('{"services":{}}', existing=True)
+            self.assertEqual(len(run.call_args_list), 2)
 
     def test_existing_redeploy_backs_up_config_and_declined_redeploy_aborts(self):
         with tempfile.TemporaryDirectory() as d:

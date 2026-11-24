@@ -356,7 +356,7 @@ def migrate_legacy_host_data_to_volume(docker, image_ref, legacy_data_dir, truen
     if not (legacy_path.is_dir() and (legacy_path / 'cadence.db').is_file()):
         print(f'Legacy host data directory ({legacy_data_dir}) has no cadence.db; switching cleanly to Docker-managed volume (cadence_data).')
         return
-    target_volume = f'ix-{APP}_cadence_data' if truenas else f'{APP}_cadence_data'
+    target_volume = f'{APP}_cadence_data'
     check = subprocess.run(
         [*docker, 'run', '--rm', '--user', '0:0', '--entrypoint', '/bin/sh',
          '-v', f'{target_volume}:/var/lib/cadence:ro',
@@ -550,12 +550,23 @@ def docker_prefix(truenas=False):
     return prefix
 
 
+def ensure_truenas_app_running():
+    response = run(['midclt', 'call', 'app.query', json.dumps([['id', '=', APP]])],
+                   capture_output=True, text=True)
+    apps = json.loads(response.stdout) if getattr(response, 'stdout', None) and response.stdout.strip() else []
+    state = str(apps[0].get('state', '')).upper() if apps else ''
+    if state != 'RUNNING':
+        print('Starting Cadence TrueNAS app...')
+        run(['midclt', 'call', '--job', 'app.start', APP])
+
+
 def deploy_truenas_app(resolved_json, existing):
     config = json.loads(resolved_json)
     if existing:
         print('Updating existing Cadence TrueNAS app (same release tag allowed).')
         run(['midclt', 'call', '--job', 'app.update', APP,
              json.dumps({'custom_compose_config': config})])
+        ensure_truenas_app_running()
     else:
         print('Creating Cadence TrueNAS app.')
         payload = {'app_name': APP, 'custom_app': True, 'custom_compose_config': config}
