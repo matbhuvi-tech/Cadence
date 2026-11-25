@@ -91,6 +91,7 @@ const client = createEngineClient({engineId: 'qa-engine', libraryId: 'qa-library
       durationMs: Math.min(100, elapsedMs-i*100), bytes: i%17 === 8 ? 0 : 280000,
       writeCount: i%17 === 8 ? 0 : 68, minChunkBytes: 4096, maxChunkBytes: 4096, timingSamples: enabled && i%17 !== 8 ? 68 : 0, minExpectedUs: 1462, maxExpectedUs: 1462, maxEarlyUs: 30, targetBytesPerSec: enabled ? 2800000 : 0, maxGapUs: i%17 === 8 ? 100000 : 5800, maxDelayUs: i%17 === 8 ? 94000 : 0}))
     capture = {id: captureId, elapsedMs, complete: complete || elapsedMs>=60000, bins}
+    if (capture.complete) capture.deviation = {sampleCount: 100, meanUs: 125, medianUs: 42}
   }
   return {ok:true,data:snapshot(capture)}
 })
@@ -146,9 +147,12 @@ try {
   await cdp.wait('document.querySelector("svg[role=img] path").getAttribute("d").length > 0')
   assert.ok(await cdp.evaluate('document.body.textContent.includes("4096 bytes · consistent")'))
   assert.ok(await cdp.evaluate('document.body.textContent.includes("1.462 ms")'))
+  assert.ok(await cdp.evaluate('document.querySelector("svg[role=img]").textContent.includes("Deviation (ms)")'))
+  assert.equal(await cdp.evaluate('document.body.textContent.includes("Absolute timing deviation")'), false)
   await cdp.screenshot('desktop.png')
   await cdp.evaluate('[...document.querySelectorAll("button")].find(b=>b.textContent === "Freeze").click()')
   await cdp.wait('window.qa.calls.at(-1).captureAction === "stop"')
+  await cdp.wait('document.body.textContent.includes("Mean 0.125 ms · Median 0.042 ms")')
   const frozenCalls = await cdp.evaluate('window.qa.calls.length')
   await sleep(5200)
   assert.equal(await cdp.evaluate('window.qa.calls.length'), frozenCalls, 'freeze must cancel subsequent reads')

@@ -8,6 +8,8 @@ use std::time::Instant;
 const BIN_MS: u64 = 100;
 const CAPTURE_MS: u64 = 60_000;
 const BINS: usize = (CAPTURE_MS / BIN_MS) as usize;
+// Covers more than two minutes of 4 KiB DSD256 writes at the nominal rate.
+const MAX_DEVIATION_SAMPLES: usize = 131_072;
 
 #[derive(Debug, Default)]
 struct Bin {
@@ -36,6 +38,7 @@ pub struct DeliveryHistory {
     started_ms: AtomicU64,
     stopped_ms: AtomicU64,
     bins: [Bin; BINS],
+    deviations: Box<[AtomicU64]>,
 }
 
 impl Default for DeliveryHistory {
@@ -49,6 +52,9 @@ impl Default for DeliveryHistory {
             started_ms: AtomicU64::new(0),
             stopped_ms: AtomicU64::new(u64::MAX),
             bins: std::array::from_fn(|_| Bin::default()),
+            deviations: (0..MAX_DEVIATION_SAMPLES)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
         }
     }
 }
@@ -78,6 +84,16 @@ pub struct DeliveryCapture {
     pub elapsed_ms: u64,
     pub complete: bool,
     pub bins: Vec<DeliveryBin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deviation: Option<DeliveryDeviation>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryDeviation {
+    pub sample_count: usize,
+    pub mean_us: f64,
+    pub median_us: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,7 +126,7 @@ impl DeliveryHistory {
                 self.start_at(now);
             }
             Some("stop") => {
-                self.stop(request["captureId"].as_u64().unwrap_or(0));
+                self.stop_at(request["captureId"].as_u64().unwrap_or(0), now);
             }
             _ => {}
         }
@@ -160,9 +176,6 @@ impl DeliveryHistory {
         self.capture_id.store(id, Ordering::Release);
         self.active_capture.store(id, Ordering::Release);
         id
-    }
-    pub fn stop(&self, id: u64) -> bool {
-        self.stop_at(id, Instant::now())
     }
     pub fn stop_at(&self, id: u64, now: Instant) -> bool {
         if id == 0
@@ -225,12 +238,81 @@ impl DeliveryHistory {
                 max_early_us: read(&bin.max_early_us),
             });
         }
+        let complete = stopped != u64::MAX || elapsed >= CAPTURE_MS;
+        let deviation = if complete {
+            self.summarize_deviation(id, bins.iter().map(|bin| bin.timing_samples).sum())
+        } else {
+            None
+        };
         Some(DeliveryCapture {
             id,
             elapsed_ms,
-            complete: stopped != u64::MAX || elapsed >= CAPTURE_MS,
+            complete,
             bins,
+            deviation,
         })
+    }
+
+    fn summarize_deviation(&self, id: u64, count: u64) -> Option<DeliveryDeviation> {
+        if count == 0 || count > self.deviations.len() as u64 {
+            return None;
+        }
+        let count = count as usize;
+        let mut values = Vec::with_capacity(count);
+        let mut sum = 0u64;
+        for sample in &self.deviations[..count] {
+            let packed = sample.load(Ordering::Acquire);
+            if packed >> 32 != id {
+                return None;
+            }
+            let value = packed as u32;
+            sum += u64::from(value);
+            values.push(value);
+        }
+        let (lower, upper, _) = values.select_nth_unstable(count / 2);
+        let median_us = if count % 2 == 0 {
+            (f64::from(*lower.iter().max()?) + f64::from(*upper)) / 2.0
+        } else {
+            f64::from(*upper)
+        };
+        Some(DeliveryDeviation {
+            sample_count: count,
+            mean_us: sum as f64 / count as f64,
+            median_us,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn completed_capture_summarizes_absolute_write_timing_errors() {
+        let history = DeliveryHistory::default();
+        let mut writer = DeliveryWriter::new(&history);
+        let at = |ms| history.origin + Duration::from_millis(ms);
+        let id = history.start_at(at(0));
+        // At a 10 ms target these gaps deviate by 0, -1, +3, and +6 ms.
+        for ms in [1, 11, 20, 33, 49] {
+            writer.record_at(&history, at(ms), 1_000, 100_000);
+        }
+        assert!(history.snapshot_at(at(50)).unwrap().deviation.is_none());
+        assert!(history.stop_at(id, at(55)));
+        let deviation = history.snapshot_at(at(56)).unwrap().deviation.unwrap();
+        assert_eq!(deviation.sample_count, 4);
+        assert_eq!(deviation.mean_us, 2_500.0);
+        assert_eq!(deviation.median_us, 2_000.0);
+
+        history.start_at(at(100));
+        for ms in [101, 113, 212, 220] {
+            writer.record_at(&history, at(ms), 1_000, 100_000);
+        }
+        let deviation = history.snapshot_at(at(60_100)).unwrap().deviation.unwrap();
+        assert_eq!(deviation.sample_count, 3);
+        assert_eq!(deviation.mean_us, 31_000.0);
+        assert_eq!(deviation.median_us, 2_000.0);
     }
 }
 
@@ -246,6 +328,7 @@ pub struct DeliveryWriter {
     min_chunk_bytes: u64,
     max_chunk_bytes: u64,
     timing_samples: u64,
+    deviation_index: usize,
     min_expected_us: u64,
     max_expected_us: u64,
     max_early_us: u64,
@@ -268,6 +351,7 @@ impl DeliveryWriter {
             min_chunk_bytes: 0,
             max_chunk_bytes: 0,
             timing_samples: 0,
+            deviation_index: 0,
             min_expected_us: 0,
             max_expected_us: 0,
             max_early_us: 0,
@@ -315,6 +399,7 @@ impl DeliveryWriter {
             self.capture_id = id;
             self.bin_index = usize::MAX;
             self.last_write = None;
+            self.deviation_index = 0;
         }
         let index = (elapsed / BIN_MS) as usize;
         if self.bin_index != index {
@@ -340,6 +425,16 @@ impl DeliveryWriter {
             // over the preceding chunk's intended pacing interval is lateness.
             if self.last_target > 0 {
                 let expected = self.last_bytes.saturating_mul(1_000_000) / self.last_target;
+                if let Some(sample) = history.deviations.get(self.deviation_index) {
+                    let deviation = gap.abs_diff(expected);
+                    let packed = if deviation <= u64::from(u32::MAX) {
+                        (id << 32) | deviation
+                    } else {
+                        0
+                    };
+                    sample.store(packed, Ordering::Release);
+                    self.deviation_index += 1;
+                }
                 self.max_delay_us = self.max_delay_us.max(gap.saturating_sub(expected));
                 self.max_early_us = self.max_early_us.max(expected.saturating_sub(gap));
                 self.min_expected_us = if self.timing_samples == 0 {

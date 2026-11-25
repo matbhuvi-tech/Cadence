@@ -19,6 +19,7 @@ export interface DeliveryCapture {
   elapsedMs: number
   complete: boolean
   bins: DeliveryBin[]
+  deviation?: { sampleCount: number; meanUs: number; medianUs: number }
 }
 export interface DeliverySnapshot {
   streamId: number
@@ -63,6 +64,11 @@ export function parseDeliverySnapshot(raw: unknown): DeliverySnapshot {
     if (!c || !nonnegative(c.id) || c.id === 0 || !nonnegative(c.elapsedMs) || c.elapsedMs > 60000 ||
       typeof c.complete !== 'boolean' || !Array.isArray(c.bins) || c.bins.length > 600) return fail()
     let end = 0
+    if (c.deviation !== undefined) {
+      const d = c.deviation
+      if (!c.complete || !d || !Number.isSafeInteger(d.sampleCount) || d.sampleCount <= 0 ||
+        !nonnegative(d.meanUs) || !nonnegative(d.medianUs)) return fail()
+    }
     for (const b of c.bins) {
       if (!b || ![b.offsetMs, b.durationMs, b.bytes, b.targetBytesPerSec, b.maxGapUs, b.maxDelayUs].every(n => nonnegative(n) && Number.isSafeInteger(n)) ||
         b.durationMs <= 0 || b.durationMs > 100 || b.offsetMs < end || b.offsetMs + b.durationMs > c.elapsedMs) return fail()

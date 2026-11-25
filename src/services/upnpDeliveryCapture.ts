@@ -15,8 +15,9 @@ export function createDeliveryCapture(
     const timer = setTimeout(callback, ms)
     return () => clearTimeout(timer)
   } },
-): () => void {
+): (freeze?: boolean) => void {
   let stopped = false
+  let disposed = false
   let captureId: number | undefined
   let cancelTimer: (() => void) | undefined
   const stopRemote = () => {
@@ -44,10 +45,23 @@ export function createDeliveryCapture(
     }
   }
   void read(true)
-  return () => {
+  return (freeze = false) => {
+    if (!freeze) disposed = true
     if (stopped) return
     stopped = true
     cancelTimer?.()
-    stopRemote()
+    if (!freeze || captureId === undefined) {
+      stopRemote()
+      return
+    }
+    void request({ captureAction: 'stop', captureId, includeCapture: true }).then(snapshot => {
+      if (disposed) return
+      if (!snapshot.capture?.complete || snapshot.capture.id !== captureId) {
+        throw new Error('The stream or capture changed. Start a new capture to continue.')
+      }
+      publish(snapshot)
+    }).catch(error => {
+      if (!disposed) reportError(error instanceof Error ? error : new Error('Delivery capture unavailable.'))
+    })
   }
 }

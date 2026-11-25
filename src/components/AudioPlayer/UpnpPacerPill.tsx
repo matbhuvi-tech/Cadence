@@ -24,7 +24,7 @@ function DeliveryGraph({ capture }: { capture: DeliveryCapture | null }) {
   const minExpected = measured.length ? Math.min(...measured.map(b => b.minExpectedUs!)) / 1000 : 0
   const maxExpected = measured.length ? Math.max(...measured.map(b => b.maxExpectedUs!)) / 1000 : 0
   const range = Math.max(1, ...measured.map(b => Math.max(b.maxDelayUs, b.maxEarlyUs ?? 0) / 1000))
-  const x = (ms: number) => 45 + ms / 60000 * 460
+  const x = (ms: number) => 65 + ms / 60000 * 440
   const y = (ms: number) => 82 - ms / range * 60
   const formatRange = (min: number, max: number, digits: number) => min === max ? min.toFixed(digits) : `${min.toFixed(digits)}–${max.toFixed(digits)}`
   const envelope = measured.map(b => `M${x(b.offsetMs + 50)},${y(-((b.maxEarlyUs ?? 0) / 1000))} L${x(b.offsetMs + 50)},${y(b.maxDelayUs / 1000)}`).join(' ')
@@ -34,9 +34,10 @@ function DeliveryGraph({ capture }: { capture: DeliveryCapture | null }) {
       <span>Expected spacing: {measured.length ? `${formatRange(minExpected, maxExpected, 3)} ms` : 'unavailable'}</span>
     </div>
     <svg viewBox="0 0 520 180" className="w-full" role="img" aria-label="Sender timing deviation over sixty seconds; zero is expected spacing, positive is late and negative is early">
+      <text transform="translate(13 82) rotate(-90)" textAnchor="middle" fill="#d4d4d8" fontSize="11">Deviation (ms)</text>
       {[-1, 0, 1].map(f => <g key={f}>
-        <line x1="45" x2="505" y1={y(range * f)} y2={y(range * f)} stroke={f === 0 ? '#a5b4fc' : '#ffffff18'} strokeDasharray="4 3" />
-        <text x="38" y={y(range * f) + 4} textAnchor="end" fill="#a1a1aa" fontSize="10">{f > 0 ? '+' : ''}{(range * f).toFixed(1)}</text>
+        <line x1={x(0)} x2={x(60000)} y1={y(range * f)} y2={y(range * f)} stroke={f === 0 ? '#a5b4fc' : '#ffffff18'} strokeDasharray="4 3" />
+        <text x={x(0) - 7} y={y(range * f) + 4} textAnchor="end" fill="#a1a1aa" fontSize="10">{f > 0 ? '+' : ''}{(range * f).toFixed(1)}</text>
       </g>)}
       <path d={envelope} fill="none" stroke="#d4af37" strokeWidth="1.5" strokeLinecap="round" />
       {bins.filter(b => b.bytes === 0).map(b => <rect key={b.offsetMs} x={x(b.offsetMs)} y="22" width={Math.max(1, x(b.offsetMs + b.durationMs) - x(b.offsetMs))} height="120" fill="#fb923c" opacity="0.4"><title>No sender writes in this interval; buffered playback may continue</title></rect>)}
@@ -58,7 +59,7 @@ export const UpnpPacerPill = memo(function UpnpPacerPill({ client, subscribe, co
   const [visible, setVisible] = useState(() => !document.hidden)
   const previous = useRef<DeliverySnapshot | null>(null)
   const deficit = useRef(0)
-  const stopCapture = useRef<(() => void) | null>(null)
+  const stopCapture = useRef<((freeze?: boolean) => void) | null>(null)
   const panel = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const dialogId = useId()
@@ -186,14 +187,19 @@ export const UpnpPacerPill = memo(function UpnpPacerPill({ client, subscribe, co
       <p className="text-xs text-zinc-400 leading-relaxed mt-2">{!connected ? 'The active playback engine is disconnected.' : !playing ? 'Start playback to collect delivery observations.' : assessment.explanation}</p>
       {error && <p role="alert" className="mt-3 text-xs text-amber-300">{error}</p>}
       <div className="mt-5 flex justify-between items-center gap-3">
-        <div><h3 className="text-xs font-medium">Sender timing deviation · ms</h3><p className="text-[10px] text-zinc-500 mt-1">100 ms intervals · up to 60s after opening · refreshes every 5s</p></div>
-        {isCapturing ? <button type="button" onClick={() => { stopCapture.current?.(); setCapturing(false) }} className="flex gap-1 items-center text-xs text-zinc-300"><Pause size={13} />Freeze</button>
+        <div><h3 className="text-xs font-medium">Sender timing deviation</h3><p className="text-[10px] text-zinc-500 mt-1">100 ms intervals · up to 60s after opening · refreshes every 5s</p></div>
+        {isCapturing ? <button type="button" onClick={() => { stopCapture.current?.(true); setCapturing(false) }} className="flex gap-1 items-center text-xs text-zinc-300"><Pause size={13} />Freeze</button>
           : <button type="button" disabled={!connected || !playing} onClick={() => { setCapture(null); setCaptureGeneration(n => n + 1) }} className="flex gap-1 items-center text-xs text-zinc-300 disabled:opacity-40"><RotateCcw size={13} />Capture again</button>}
       </div>
       <DeliveryGraph capture={capture} />
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-zinc-400"><span className="text-[#d4af37]">│ Early / late extremes</span><span className="text-indigo-300">┄ Expected spacing (zero)</span><span className="text-orange-300">│ No sender writes</span></div>
       <p className="text-[10px] text-zinc-500 mt-2">Near zero means regular delivery. Positive is late; negative is early. Spacing follows each chunk’s size and active target rate; startup can differ.</p>
       {capture && <p className="text-[10px] text-zinc-500 mt-2">{isCapturing ? 'Capturing' : 'Frozen'} at {(capture.elapsedMs / 1000).toFixed(1)}s. Each 100 ms group preserves timing extremes; gaps remain visible.</p>}
+      {capture?.complete && (capture.deviation ? (
+        <p className="text-xs text-zinc-300 mt-3 tabular-nums">
+          Absolute timing deviation · Mean {(capture.deviation.meanUs / 1000).toFixed(3)} ms · Median {(capture.deviation.medianUs / 1000).toFixed(3)} ms
+        </p>
+      ) : <p className="text-xs text-zinc-500 mt-3">Mean and median timing deviation unavailable for this capture.</p>)}
       <div className="grid grid-cols-3 gap-3 border-t border-white/10 mt-4 pt-3 text-[11px]">
         <div><p className="text-zinc-500">Delivery / track</p><p className="mt-1 tabular-nums">{assessment.mbps?.toFixed(1) ?? '—'} / {requiredRate > 0 ? requiredRate.toFixed(1) : '—'} Mbps</p></div>
         <div><p className="text-zinc-500">Late intervals ≥25ms</p><p className="mt-1 tabular-nums">{gapBins} · max gap {maxGap.toFixed(0)} ms</p></div>
