@@ -96,9 +96,6 @@ jobs:
           path: coverage/
           retention-days: 14
 
-      - name: Run legacy deterministic frontend test suite
-        run: npm run test:legacy
-
   rust-linux-headless:
     name: Rust Linux Headless & Packaging Tests
     runs-on: ubuntu-24.04

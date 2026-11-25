@@ -1,0 +1,141 @@
+import assert from 'node:assert/strict'
+import { test  } from 'vitest'
+import type { MetadataFieldState, TrackCandidateState } from '../core/types'
+import { applyCurateTrackSelection, captureCurateDraft, captureCurateBaseline, migrateCurateDraft, restoreCurateDraft, mergeCurateProposal, selectCurateTrackFields } from '../core/curateDraft'
+
+const field = (selected: string): MetadataFieldState<string> => ({ selected, local: selected, source: 'local_fallback', confidence: 1 })
+const track: TrackCandidateState = {
+  trackId: 'track-1', trackNumber: 1, localTitle: 'Song', localArtists: 'Singer',
+  matchedTitle: 'Song', matchedArtists: 'Singer', confidence: 1, source: 'local_fallback',
+}
+const baseline = {
+  albumTitle: field('En Bommukutti Amavuku'), albumArtist: field('Ilaiyaraaja'),
+  composer: field('Ilaiyaraaja'), coverArt: field(''), genre: field('Tamil Film Soundtrack'),
+  year: { selected: 1988, local: 1988, source: 'local_fallback', confidence: 1 } as MetadataFieldState<number | undefined>,
+  tracks: [track],
+}
+
+test('restores an unstaged manual genre after reopening the album', () => {
+  const draft = captureCurateDraft({
+    ...baseline,
+    genre: { ...baseline.genre, selected: 'Tamil Soundtrack', userOverridden: true },
+  })
+  const restored = restoreCurateDraft(baseline, JSON.parse(JSON.stringify(draft)))
+  assert.equal(restored.genre.selected, 'Tamil Soundtrack')
+  assert.equal(restored.genre.local, 'Tamil Film Soundtrack')
+  assert.equal(restored.genre.userOverridden, true)
+})
+
+test('uses fresh proposals while preserving explicit field and per-track choices', () => {
+  const current = {
+    ...baseline,
+    genre: { ...baseline.genre, selected: 'Tamil Soundtrack', userOverridden: true },
+    tracks: [{ ...track, matchedTitle: 'My title', selectedOverrides: ['matchedTitle'] as const }],
+  }
+  const fresh = {
+    ...baseline,
+    albumTitle: { ...baseline.albumTitle, selected: 'Fresh album title' },
+    genre: { ...baseline.genre, local: 'Steered query genre', ai: 'Fresh genre', selected: 'Fresh genre' },
+    tracks: [{ ...track, matchedTitle: 'Fresh song title', matchedArtists: 'Fresh singer' }],
+  }
+  const merged = mergeCurateProposal(current, fresh)
+  assert.equal(merged.albumTitle.selected, 'Fresh album title')
+  assert.equal(merged.genre.selected, 'Tamil Soundtrack')
+  assert.equal(merged.genre.ai, 'Fresh genre')
+  assert.equal(merged.genre.local, 'Tamil Film Soundtrack')
+  assert.equal(merged.tracks[0].matchedTitle, 'My title')
+  assert.equal(merged.tracks[0].matchedArtists, 'Fresh singer')
+})
+
+test('retains a staged empty proposal without duplicating provider evidence', () => {
+  const draft = captureCurateDraft({
+    ...baseline,
+    userOverridden: true,
+    year: { ...baseline.year, selected: undefined, apple: 1990 },
+    tracks: [{ ...track, appleTitle: 'Provider song', matchedTitle: undefined }],
+  })
+  const stored = JSON.stringify(draft)
+  assert.equal(stored.includes('Provider song'), false)
+  assert.equal(stored.includes('1990'), false)
+  const restored = restoreCurateDraft(baseline, JSON.parse(stored))
+  assert.equal(restored.userOverridden, true)
+  assert.equal(restored.year.selected, undefined)
+  assert.equal(restored.tracks[0].matchedTitle, undefined)
+})
+
+test('tracks separate explicit song and provenance choices without duplicates', () => {
+  const title = selectCurateTrackFields(track, 'matchedTitle')
+  const withProvenance = selectCurateTrackFields({
+    ...title,
+    originalAlbum: 'Film',
+    originalYear: undefined,
+    provenanceSource: 'user_override',
+  }, 'matchedTitle', 'originalAlbum', 'originalYear')
+  assert.deepEqual(withProvenance.selectedOverrides, ['matchedTitle', 'originalAlbum', 'originalYear'])
+  const merged = mergeCurateProposal(
+    { ...baseline, tracks: [withProvenance] },
+    { ...baseline, tracks: [{ ...track, originalAlbum: 'Provider film', originalYear: 1999 }] },
+  )
+  assert.equal(merged.tracks[0].originalAlbum, 'Film')
+  assert.equal(merged.tracks[0].originalYear, undefined)
+  assert.equal(merged.tracks[0].provenanceSource, 'user_override')
+})
+
+test('reopens an older draft against the current baseline by track identity', () => {
+  const draft = captureCurateDraft({ ...baseline, tracks: [{ ...track, matchedTitle: 'My title' }] })
+  const current = {
+    ...baseline,
+    tracks: [{ ...track, trackId: 'new-track' }, { ...track, localTitle: 'Changed local title' }],
+  }
+  const restored = restoreCurateDraft(current, draft)
+  assert.equal(restored.tracks[0].matchedTitle, 'Song')
+  assert.equal(restored.tracks[1].matchedTitle, 'My title')
+  assert.equal(restored.tracks[1].localTitle, 'Changed local title')
+  assert.notEqual(captureCurateDraft(current).baseline, draft.baseline)
+})
+
+test('legacy proposals fall back to physical values while explicit edits survive migration', () => {
+  const legacy = captureCurateDraft({
+    ...baseline,
+    genre: { ...baseline.genre, selected: 'Old provider genre', source: 'single_provider_match' },
+    composer: { ...baseline.composer, selected: 'Manual composer', userOverridden: true },
+    tracks: [selectCurateTrackFields({
+      ...track, matchedTitle: 'Unverified song', matchedArtists: 'Manual singer',
+    }, 'matchedArtists')],
+  })
+  const restored = restoreCurateDraft(baseline, migrateCurateDraft(legacy, captureCurateBaseline(baseline)))
+  assert.equal(restored.genre.selected, baseline.genre.local)
+  assert.equal(restored.genre.requiresHumanReview, true)
+  assert.equal(restored.composer.selected, 'Manual composer')
+  assert.equal(restored.tracks[0].matchedTitle, track.localTitle)
+  assert.equal(restored.tracks[0].matchedArtists, 'Manual singer')
+  assert.equal(restored.tracks[0].requiresHumanReview, true)
+})
+
+test('applyCurateTrackSelection copies both title and artists and preserves them across proposal merge', () => {
+  const initial = {
+    ...track,
+    matchedTitle: 'Shallow (16_44_1_DSD256 PGGB)',
+    matchedArtists: 'Lady Gaga, Bradley Cooper',
+    appleTitle: 'Shallow',
+    appleArtists: 'Lady Gaga & Bradley Cooper',
+    requiresHumanReview: true,
+  }
+  const selected = applyCurateTrackSelection(initial, {
+    title: initial.appleTitle,
+    artists: initial.appleArtists,
+    source: 'single_provider_match',
+  })
+  assert.equal(selected.matchedTitle, 'Shallow')
+  assert.equal(selected.matchedArtists, 'Lady Gaga & Bradley Cooper')
+  assert.equal(selected.source, 'single_provider_match')
+  assert.equal(selected.requiresHumanReview, false)
+  assert.deepEqual(selected.selectedOverrides, ['matchedTitle', 'matchedArtists'])
+
+  const merged = mergeCurateProposal(
+    { ...baseline, tracks: [selected] },
+    { ...baseline, tracks: [{ ...track, matchedTitle: 'Shallow (16_44_1_DSD256 PGGB)', matchedArtists: 'Other Artist' }] },
+  )
+  assert.equal(merged.tracks[0].matchedTitle, 'Shallow')
+  assert.equal(merged.tracks[0].matchedArtists, 'Lady Gaga & Bradley Cooper')
+})

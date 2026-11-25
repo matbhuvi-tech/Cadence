@@ -53,7 +53,24 @@ export default defineConfig({
           environment: 'happy-dom',
           globals: false,
           include: ['src/**/*.test.{ts,tsx}'],
+          exclude: ['src/test/**/*.test.{ts,tsx}'],
           setupFiles: ['src/test/vitest.setup.ts'],
+        },
+      },
+      {
+        plugins: [react()],
+        define: {
+          __CADENCE_BUILD_INFO__: JSON.stringify(TEST_BUILD_INFO),
+        },
+        resolve: {
+          alias: SHARED_REACT_ALIAS,
+        },
+        test: {
+          name: 'desktop-node',
+          environment: 'node',
+          globals: false,
+          include: ['src/test/**/*.test.{ts,tsx}'],
+          setupFiles: ['src/test/vitest.node.setup.ts'],
         },
       },
       {

@@ -4,6 +4,6 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
     "types": ["vite/client", "node", "@testing-library/jest-dom"]
   },
-  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test/vitest.setup.ts", "pwa/src/**/*.test.ts", "pwa/src/**/*.test.tsx"],
-  "exclude": []
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test/vitest.setup.ts", "src/test/vitest.node.setup.ts", "src/test/vitestNodeCompat.ts", "pwa/src/**/*.test.ts", "pwa/src/**/*.test.tsx"],
+  "exclude": ["src/test/*.test.ts"]
 }
