@@ -243,3 +243,50 @@ jobs:
           cd pwa/android
           chmod +x ./gradlew
           ./gradlew assembleDebug --no-daemon
+
+  e2e-gate:
+    name: Cross-Platform E2E (Playwright + cadence-headless + PWA)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            pwa/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Install frontend & PWA dependencies and Playwright Chromium
+        run: |
+          npm ci
+          npm ci --prefix pwa
+          npx playwright install --with-deps chromium
+
+      - name: Build cadence-headless engine binary
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --bin cadence-headless
+
+      - name: Run Playwright E2E suite (Desktop + Mobile PWA + UPnP Inspector)
+        env:
+          CADENCE_ENGINE_BINARY: ${{ github.workspace }}/src-tauri/target/debug/cadence-headless
+          CADENCE_SKIP_CARGO_BUILD: '1'
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          npm run test:e2e
+
+      - name: Upload Playwright report & failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-e2e-artifacts
+          path: |
+            playwright-report/
+            test-results/playwright/
+          retention-days: 14

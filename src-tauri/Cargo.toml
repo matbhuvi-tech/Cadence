@@ -39,6 +39,11 @@ name = "remote_queue_test"
 path = "tests/remote_queue_test.rs"
 required-features = ["desktop"]
 
+[[test]]
+name = "scanner_engine_contract_test"
+path = "tests/scanner_engine_contract_test.rs"
+required-features = ["desktop"]
+
 [features]
 default = ["desktop", "bundled-sqlite"]
 bundled-sqlite = ["rusqlite/bundled"]
@@ -163,6 +168,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+proptest = "1"
 
 [profile.release]
 strip = "symbols"

@@ -35,6 +35,9 @@
     "test:core-services": "vitest run src/test/testCoreServices.test.ts",
     "test:core-session-protocol": "vitest run src/test/testCoreSessionProtocol.test.ts",
     "test:core-e2e": "tsx scripts/qa/coreE2eGate.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:upnp": "playwright test tests/e2e/upnp-delivery.spec.ts",
+    "test:e2e:core": "playwright test tests/e2e/core-and-pwa.spec.ts",
     "test:diagnostics": "vitest run src/test/testDebugDiagnostics.test.ts",
     "test:settings": "vitest run src/test/testCadenceSettingsModal.test.ts",
     "test:upnp-delivery": "vitest run src/test/testUpnpDelivery.test.ts",
@@ -59,6 +62,7 @@
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/cli": "^2.11.5",
