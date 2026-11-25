@@ -48,7 +48,7 @@ const filter = args.find(a => !a.startsWith('--'))
 
 const allFiles = fs
   .readdirSync(TEST_DIR)
-  .filter(f => /\.(ts|tsx)$/.test(f))
+  .filter(f => /\.(ts|tsx)$/.test(f) && !/\.test\.(ts|tsx)$/.test(f) && f !== 'vitest.setup.ts')
   .sort()
 
 let selectedFiles = allFiles.filter(file => {

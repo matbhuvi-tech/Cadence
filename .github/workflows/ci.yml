@@ -62,10 +62,42 @@ jobs:
         run: npm run lint
 
       - name: Type-check and build Desktop + PWA
-        run: npm run build
+        run: |
+          npm run build
+          npm run typecheck:tests
 
-      - name: Run unified frontend test suite
-        run: npm test
+      - name: Run Vitest unit & interactive UI suite with coverage
+        run: npm run test:coverage
+
+      - name: Publish frontend coverage summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            node -e "
+              const s = JSON.parse(require('fs').readFileSync('coverage/coverage-summary.json','utf8')).total;
+              const lines = [
+                '### Frontend & PWA Coverage (Vitest v8)',
+                '| Metric | Covered | Total | % |',
+                '| --- | ---: | ---: | ---: |',
+                ...['lines','statements','functions','branches'].map(k =>
+                  '| ' + k + ' | ' + s[k].covered + ' | ' + s[k].total + ' | ' + s[k].pct + '% |'
+                ),
+              ];
+              require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+            "
+          fi
+
+      - name: Upload frontend coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: coverage/
+          retention-days: 14
+
+      - name: Run legacy deterministic frontend test suite
+        run: npm run test:legacy
 
   rust-linux-headless:
     name: Rust Linux Headless & Packaging Tests
@@ -74,6 +106,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -84,11 +120,40 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
 
-      - name: Run headless Rust unit & integration tests
+      - name: Run headless Rust unit & integration tests with coverage
         run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           ulimit -l
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
+          cargo llvm-cov --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --summary-only --json --output-path rust-coverage.json
+
+      - name: Publish Rust headless coverage summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f rust-coverage.json ]; then
+            python3 -c "
+          import json, os
+          totals = json.load(open('rust-coverage.json'))['data'][0]['totals']
+          rows = [
+              '### Rust Linux Headless Coverage (cargo-llvm-cov)',
+              '| Metric | Covered | Total | % |',
+              '| --- | ---: | ---: | ---: |',
+          ]
+          for k in ('lines', 'functions', 'regions'):
+              m = totals[k]
+              rows.append(f'| {k} | {m[\"covered\"]} | {m[\"count\"]} | {m[\"percent\"]:.2f}% |')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('\n'.join(rows) + '\n')
+          "
+          fi
+
+      - name: Upload Rust coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-headless-coverage
+          path: rust-coverage.json
+          retention-days: 14
 
       - name: Build cadence-headless and run HTTP acceptance tests
         run: |
