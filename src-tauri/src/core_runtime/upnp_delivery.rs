@@ -177,6 +177,10 @@ impl DeliveryHistory {
         self.active_capture.store(id, Ordering::Release);
         id
     }
+    pub fn stop(&self, id: u64) -> bool {
+        self.stop_at(id, Instant::now())
+    }
+
     pub fn stop_at(&self, id: u64, now: Instant) -> bool {
         if id == 0
             || self

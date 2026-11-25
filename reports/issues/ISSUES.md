@@ -1,5 +1,12 @@
 # Issue Log
 
+## GitHub #58 — Release Rust tests cannot compile the UPnP capture stop test
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/58
+- **Branch:** `fix/58-upnp-capture-stop-api`
+- **Reported behavior:** The headless release test gate fails with E0599 because `tests/upnp_delivery.rs` calls `DeliveryHistory::stop`.
+- **Fix:** Restore `stop` as a wrapper around `stop_at` with the current time. The inspector still uses one timestamp for both freezing and reading its final capture.
+
 ## GitHub #54 — Core Engine mode: missing Left Rail artwork dock, Sanctuary Now Playing state, Queue badge count, and Up Next thumbnails
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/54
