@@ -147,12 +147,13 @@ jobs:
         with:
           workspaces: 'src-tauri -> target'
 
-      - name: Install frontend dependencies and build
+      - name: Install frontend dependencies, lint, build, and test
         run: |
           npm ci
           npm ci --prefix pwa
+          npm run lint
           npm run build
-          npm run test:core-services
+          npm test
 
       - name: Run packaging and release script tests
         run: |

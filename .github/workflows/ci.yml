@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: Detect changed subsystems
+    runs-on: ubuntu-24.04
+    outputs:
+      pwa: ${{ steps.filter.outputs.pwa }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "pwa=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -q '^pwa/'; then
+            echo "pwa=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pwa=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  frontend-and-pwa:
+    name: Frontend & PWA (Lint, Build, Tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            pwa/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix pwa
+
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Type-check and build Desktop + PWA
+        run: npm run build
+
+      - name: Run unified frontend test suite
+        run: npm test
+
+  rust-linux-headless:
+    name: Rust Linux Headless & Packaging Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Install ffmpeg for real-media acceptance fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Run headless Rust unit & integration tests
+        run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          ulimit -l
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite
+
+      - name: Build cadence-headless and run HTTP acceptance tests
+        run: |
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite --bin cadence-headless
+          CADENCE_ENGINE_BINARY="$PWD/src-tauri/target/debug/cadence-headless" \
+            python3 -m unittest discover -s tests/engine -v
+
+      - name: Run packaging and release script tests
+        run: |
+          python3 -m unittest discover -s deploy/playback-engine -p "test_*.py" -v
+          python3 -m unittest discover -s scripts/release -p "test_*.py" -v
+          sh -n deploy/playback-engine/install.sh
+          bash -n \
+            deploy/playback-engine/install.sh \
+            deploy/playback-engine/nfpm/preinstall.sh \
+            deploy/playback-engine/nfpm/postinstall.sh \
+            deploy/playback-engine/nfpm/preremove.sh
+
+  rust-windows-desktop:
+    name: Rust Windows Desktop & Engine Tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            pwa/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Build embedded PWA assets for desktop binary
+        run: |
+          npm ci --prefix pwa
+          npm run build:pwa
+
+      - name: Run Windows Desktop Rust test suite
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml -- --nocapture --test-threads=1
+
+      - name: Check Windows standalone playback engine build
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features engine-audio --bin cadence-engine
+
+  android-remote:
+    name: Android Remote APK Debug Build
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.pwa == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pwa/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('pwa/android/**/*.gradle*', 'pwa/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Sync Capacitor web assets and build debug APK
+        run: |
+          npm ci --prefix pwa
+          npm run --prefix pwa cap:sync
+          cd pwa/android
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon

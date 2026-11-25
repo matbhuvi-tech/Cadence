@@ -158,16 +158,24 @@ async function runStartupTestSuite() {
   }
 
   // ---------------------------------------------------------------------------
-  // TEST 3: Component Tree Mount & Render Verification (<App />)
+  // TEST 3: Component Tree Mount & Render Verification (<App /> + <AppContent />)
   // ---------------------------------------------------------------------------
   totalTests++
   try {
     setupBrowserMock()
-    const { App } = await import('../App')
-    const html = renderToString(React.createElement(App))
+    const { App, AppContent } = await import('../App')
+    const { AudioPlayerProvider } = await import('../context/AudioPlayerContext')
+    const bootHtml = renderToString(React.createElement(App))
+    if (!bootHtml || (!bootHtml.includes('Loading configuration') && bootHtml.length < 5000)) {
+      throw new Error(`Unexpected <App /> initial render (${bootHtml?.length || 0} characters)`)
+    }
+
+    const html = renderToString(
+      React.createElement(AudioPlayerProvider, null, React.createElement(AppContent)),
+    )
 
     if (!html || html.length < 5000) {
-      throw new Error(`Rendered HTML length is suspiciously small (${html?.length || 0} characters)`)
+      throw new Error(`Rendered <AppContent /> HTML length is suspiciously small (${html?.length || 0} characters)`)
     }
 
     // Verify key landmark UI components rendered in markup
@@ -185,7 +193,7 @@ async function runStartupTestSuite() {
       }
     }
 
-    console.log(`✅ [TEST 3 PASSED] <App /> mounted and rendered complete UI tree (${html.length.toLocaleString()} HTML bytes).`)
+    console.log(`✅ [TEST 3 PASSED] <App /> boot gate and <AppContent /> UI tree mounted cleanly (${html.length.toLocaleString()} HTML bytes).`)
     passedTests++
   } catch (err: any) {
     console.error('❌ [TEST 3 FAILED] <App /> failed to render:', err.message)
@@ -197,8 +205,11 @@ async function runStartupTestSuite() {
   totalTests++
   try {
     setupBrowserMock({ throwOnLocalStorage: true })
-    const { App } = await import('../App')
-    const html = renderToString(React.createElement(App))
+    const { AppContent } = await import('../App')
+    const { AudioPlayerProvider } = await import('../context/AudioPlayerContext')
+    const html = renderToString(
+      React.createElement(AudioPlayerProvider, null, React.createElement(AppContent)),
+    )
 
     if (!html || html.length < 5000) {
       throw new Error('Failed to render when localStorage throws SecurityError')
@@ -216,8 +227,11 @@ async function runStartupTestSuite() {
   totalTests++
   try {
     setupBrowserMock({ isTauri: true })
-    const { App } = await import('../App')
-    const html = renderToString(React.createElement(App))
+    const { AppContent } = await import('../App')
+    const { AudioPlayerProvider } = await import('../context/AudioPlayerContext')
+    const html = renderToString(
+      React.createElement(AudioPlayerProvider, null, React.createElement(AppContent)),
+    )
 
     if (!html || html.length < 5000) {
       throw new Error('Failed to render under simulated native Tauri environment')
