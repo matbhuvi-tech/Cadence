@@ -74,11 +74,12 @@ Cadence is a Windows desktop music player and catalog curation engine. It combin
 
 ## Verification
 
-- Frontend: `npm run build`
-- Optional Core contracts/adapters: `npm run test:core-services`
-- UPnP delivery status/lifecycle: `npm run test:upnp-delivery`; isolated browser QA:
-  `npm run test:upnp-delivery-ui`
-- Native backend: `cargo test --manifest-path src-tauri/Cargo.toml`
+- Frontend lint, type-check & build (Desktop + PWA): `npm run lint && npm run build && npm run typecheck:tests`
+- Frontend & PWA unit + interactive UI tests (Vitest): `npm test` (with v8 coverage: `npm run test:coverage`)
+- Cross-platform Playwright E2E (Desktop + Mobile PWA + `cadence-headless` + UPnP Inspector): `npm run test:e2e`
+- Native backend (Windows Desktop): `cargo test --locked --manifest-path src-tauri/Cargo.toml`
+- Native backend (Linux Headless + fuzz/contract tests): `cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --features bundled-sqlite`
+- Pre-release hardware sign-off (USB DAC, TrueNAS SCALE SMB, physical UPnP renderer, Android APK): [HARDWARE_RELEASE_CHECKLIST.md](docs/testing/HARDWARE_RELEASE_CHECKLIST.md)
 - Windows Desktop installer: `npm run tauri:build -- --bundles nsis`
 - Windows Playback Engine binary (`src-tauri/target/release/cadence-engine.exe`): `cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --features engine-audio --bin cadence-engine`
 - Windows Playback Engine NSIS installer (`src-tauri/target/release/bundle/nsis/cadence-engine-setup.exe`): `.\deploy\windows-engine\build-windows-engine.ps1 -RequireInstaller` (pass `-SkipCargoBuild` if `cadence-engine.exe` is already built; optional `-Version <semver>`)
