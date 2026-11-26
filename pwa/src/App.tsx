@@ -47,6 +47,7 @@ export function App() {
     clearServerProfile,
     leaveCoreAndClear,
     trustObservedCertificate,
+    coreSnapshot,
     coreCatalogTracks,
     outputLabel,
     lockScreenControls,
@@ -64,8 +65,10 @@ export function App() {
     isLoadingDevices,
     isChangingDevice,
     deviceError,
+    canRefreshOutputs,
     conflictEvent,
     setConflictEvent,
+    pendingCoreJump,
     deviceUnavailableEvent,
     setDeviceUnavailableEvent,
     refreshOutputDevices,
@@ -85,6 +88,7 @@ export function App() {
     removeFromQueue,
     clearQueue,
   } = useRemoteSocket();
+  const isLoadingTrack = coreSnapshot?.playback.activity === 'loading';
 
   // Project flat Core catalog tracks into Releases + per-release tracklists for full CatalogView parity
   const coreCatalog = useMemo(
@@ -193,7 +197,7 @@ export function App() {
       />
 
       {/* Network / Offline Notice Banner with Diagnostics & Retry */}
-      {(error || activeProfile.engineKind === 'core') && !isConnected && (
+      {error && !isConnected && !isConnecting && (
         <div
           role="status"
           aria-live="polite"
@@ -202,11 +206,9 @@ export function App() {
           <button
             type="button"
             onClick={() => setIsDiagnosticsOpen(true)}
-            className="min-w-0 flex-1 text-left truncate underline decoration-rose-400/40 underline-offset-2"
+            className="min-w-0 flex-1 text-left underline decoration-rose-400/40 underline-offset-2"
           >
-            {activeProfile.engineKind === 'core'
-              ? 'Connection lost. Playback may still be continuing.'
-              : connectionDiagnostic?.title || error}
+            {activeProfile.engineKind === 'core' ? error : connectionDiagnostic?.title || error}
           </button>
           <div className="flex items-center gap-1.5 shrink-0">
             <button
@@ -259,11 +261,9 @@ export function App() {
           <QueueView
             queue={queue}
             status={status}
-            conflictMessage={
-              conflictEvent
-                ? "⚠️ Queue changed while you were disconnected. Your reorder wasn't applied."
-                : null
-            }
+            conflictMessage={conflictEvent}
+            pendingEntryId={pendingCoreJump}
+            isLoadingTrack={isLoadingTrack}
             onClearConflict={() => setConflictEvent(null)}
             onResumePlayback={playPause}
             onJumpToIndex={jumpToQueueIndex}
@@ -294,6 +294,7 @@ export function App() {
       {/* Floating Mini-Player (Collapsible to zero height when stopped) */}
       <MiniPlayer
         status={status}
+        isLoadingTrack={isLoadingTrack}
         onExpand={() => setIsNowPlayingOpen(true)}
         onPlayPause={playPause}
       />
@@ -303,7 +304,7 @@ export function App() {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         queueCount={
-          (status.isPlaying || status.isPaused) && queue.items.length > 0
+          (status.isPlaying || status.isPaused || isLoadingTrack) && queue.items.length > 0
             ? Math.max(0, queue.items.length - 1)
             : queue.items.length
         }
@@ -328,6 +329,7 @@ export function App() {
             isLoadingDevices={isLoadingDevices}
             isChangingDevice={isChangingDevice}
             deviceError={deviceError}
+            canRefreshOutputs={canRefreshOutputs}
             onChangeOutputDevice={changeOutputDevice}
             onRefreshOutputDevices={refreshOutputDevices}
           />

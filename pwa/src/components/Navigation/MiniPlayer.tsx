@@ -4,16 +4,18 @@ import type { PlaybackStatus } from '../../types/remote';
 
 interface MiniPlayerProps {
   status: PlaybackStatus;
+  isLoadingTrack?: boolean;
   onExpand: () => void;
   onPlayPause: () => void;
 }
 
 export const MiniPlayer: React.FC<MiniPlayerProps> = ({
   status,
+  isLoadingTrack,
   onExpand,
   onPlayPause,
 }) => {
-  const isVisible = (status.isPlaying || status.isPaused) && Boolean(status.currentFile);
+  const isVisible = (status.isPlaying || status.isPaused || isLoadingTrack) && Boolean(status.currentFile);
   const stream = status.streamInfo;
   const title = stream?.title || (status.currentFile ? status.currentFile.split(/[\\/]/).pop() : 'No Track Loaded');
   const artist = stream?.artist || 'Unknown Artist';
@@ -58,7 +60,7 @@ export const MiniPlayer: React.FC<MiniPlayerProps> = ({
               )}
             </div>
             <p className="text-[11px] text-zinc-400 truncate">
-              {artist}
+              {isLoadingTrack ? 'Starting track…' : artist}
             </p>
           </div>
         </div>
@@ -67,6 +69,7 @@ export const MiniPlayer: React.FC<MiniPlayerProps> = ({
         <div className="flex items-center space-x-1 shrink-0" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={onPlayPause}
+            disabled={isLoadingTrack}
             className="w-11 h-11 flex items-center justify-center rounded-full text-zinc-200 hover:text-white active:scale-95 transition-transform"
             aria-label={status.isPlaying && !status.isPaused ? 'Pause' : 'Play'}
           >

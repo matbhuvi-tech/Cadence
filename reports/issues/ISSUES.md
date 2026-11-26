@@ -1,5 +1,14 @@
 # Issue Log
 
+## GitHub #62 — Mobile playback and queue feedback
+
+- **Issue** [Mobile Remote reports misleading output, connection, and queue errors during playback](https://github.com/matbhuvi-tech/Cadence/issues/62)
+- **Branch** `fix/62-mobile-remote-playback-feedback`
+- **Output** Core engines without the output-list operation can reject it with `invalid_payload`. The remote keeps the confirmed output visible in read-only mode. Malformed replies still produce a refresh prompt.
+- **Track transitions** The remote keeps the previous snapshot through one failed background refresh. A second consecutive failure surfaces reconnect. During engine-reported loading, the queue and mini-player show that the track is starting.
+- **Rapid selections** The remote sends one queue jump at a time, skips superseded taps, and retries the latest tap once after a conflict if that queue entry still exists. An entry removed by another controller produces a track-specific message.
+- **Verification** Five regressions failed on the original implementation. The targeted Vitest run passed 22 tests after the fix, including the removed-entry case. The existing Playwright suite passed three scenarios, including read-only output and confirmed queue selection at a mobile viewport. Targeted line coverage for the full hook and client was 43.73%. Physical Android and ROSE playback are pending user verification.
+
 ## GitHub #58 — Release Rust tests cannot compile the UPnP capture stop test
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/58

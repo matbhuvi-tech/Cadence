@@ -50,7 +50,7 @@ afterEach(() => {
 
 it('keeps the confirmed output when the engine does not expose an output list', async () => {
   const { result } = setup()
-  await waitFor(() => expect(result.current.isLoadingDevices).toBe(false))
+  await waitFor(() => expect(result.current.canRefreshOutputs).toBe(false))
   expect(result.current.outputDevices).toEqual(['Renderer'])
   expect(result.current.deviceError).toBeNull()
 })
@@ -98,4 +98,20 @@ it('coalesces quick taps and retries the latest entry by ID after a revision con
     .toEqual([['b', 1], ['c', 2], ['c', 3]])
   expect(result.current.queue.currentQueueEntryId).toBe('c')
   expect(result.current.conflictEvent).toBeNull()
+})
+
+it('never retries a removed entry at its old index', async () => {
+  const { client, result } = setup()
+  await waitFor(() => expect(result.current.isConnected).toBe(true))
+  const updated = {
+    ...snapshot, revision: 2,
+    queue: { ...snapshot.queue, entries: [snapshot.queue.entries[0], snapshot.queue.entries[2]] },
+  }
+  client.execute.mockRejectedValueOnce(new CoreClientError('stale_revision', undefined, updated))
+
+  await act(async () => { await result.current.jumpToQueueIndex(1, 'b') })
+
+  expect(client.execute).toHaveBeenCalledTimes(1)
+  expect(result.current.conflictEvent).toBe('That track was removed from the queue. Choose another track.')
+  expect(result.current.isConnected).toBe(true)
 })

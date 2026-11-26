@@ -84,7 +84,7 @@ describe('QueueView', () => {
     expect(screen.getByText('Queue modified by Desktop controller')).toBeInTheDocument()
 
     await user.click(screen.getByText('Freddie Freeloader'))
-    expect(onJumpToIndex).toHaveBeenCalledWith(1)
+    expect(onJumpToIndex).toHaveBeenCalledWith(1, 'qe-2')
 
     const removeButtons = screen.getAllByTitle('Remove from queue')
     await user.click(removeButtons[0])

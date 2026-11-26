@@ -230,7 +230,7 @@ test.describe.serial('Cadence Cross-Platform E2E: Desktop + PWA + cadence-headle
 
     await pwaPage.locator('input[placeholder*="192.168"]').fill('127.0.0.1')
     await pwaPage.locator('input[type="number"]').fill(String(stack.corePort))
-    await pwaPage.locator('input[placeholder*="4829"]').fill(stack.pairingToken)
+    await pwaPage.locator('input[placeholder*="Optional for Cadence Engine"], input[placeholder*="4829"]').fill(stack.pairingToken)
     await pwaPage.locator('button[type="submit"]').filter({ hasText: /Connect/i }).click()
 
     await expect(pwaPage.locator('body')).toContainText('E2E Gate Core')
@@ -245,5 +245,18 @@ test.describe.serial('Cadence Cross-Platform E2E: Desktop + PWA + cadence-headle
     const pwaQueueText = await pwaPage.locator('body').innerText()
     expect(pwaQueueText).toMatch(/DSD|DSF|FLAC/)
     expect(pwaQueueText).not.toMatch(/\bCORE\b/)
+
+    await pwaPage.getByRole('button', { name: 'Expand Now Playing' }).click()
+    await expect(pwaPage.getByText('Manage this output on the playback engine.')).toBeVisible()
+    const output = pwaPage.getByRole('combobox', { name: 'Output device' })
+    await expect(output).toBeDisabled()
+    await expect(output).toHaveValue(/ROSE/i)
+
+    await pwaPage.getByRole('button', { name: 'Dismiss Now Playing' }).click()
+    const queueTrack = pwaPage.getByRole('button', { name: /Variation 01/ })
+    await queueTrack.click()
+    await expect(queueTrack).toHaveAttribute('aria-current', 'true')
+    await expect(pwaPage.getByRole('button', { name: 'Expand Now Playing' })).toBeVisible()
+    await expect(pwaPage.getByText('The queue changed.', { exact: false })).toHaveCount(0)
   })
 })
