@@ -20,6 +20,7 @@ interface NowPlayingViewProps {
   isLoadingDevices: boolean;
   isChangingDevice: boolean;
   deviceError: string | null;
+  canRefreshOutputs?: boolean;
   onChangeOutputDevice: (deviceName: string) => void;
   onRefreshOutputDevices: () => void;
 }
@@ -63,6 +64,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   isLoadingDevices,
   isChangingDevice,
   deviceError,
+  canRefreshOutputs = true,
   onChangeOutputDevice,
   onRefreshOutputDevices,
 }) => {
@@ -305,21 +307,22 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
       <div className="w-full max-w-sm mx-auto bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-3 flex flex-col space-y-2 mb-2">
         <div className="flex items-center justify-between text-xs text-zinc-400">
           <span className="flex items-center gap-1.5 font-medium"><Speaker className="w-4 h-4 text-[#D4AF37]" />Output Device</span>
-          <button type="button" onClick={onRefreshOutputDevices} disabled={isLoadingDevices || isChangingDevice} aria-label="Refresh output devices" className="p-1 rounded text-zinc-400 hover:text-white disabled:opacity-50">
+          {canRefreshOutputs && <button type="button" onClick={onRefreshOutputDevices} disabled={isLoadingDevices || isChangingDevice} aria-label="Refresh output devices" className="flex min-h-12 min-w-12 items-center justify-center rounded text-zinc-400 hover:text-white disabled:opacity-50">
             <RefreshCw className={`w-3.5 h-3.5 ${isLoadingDevices ? 'animate-spin' : ''}`} />
-          </button>
+          </button>}
         </div>
         <select
           aria-label="Output device"
           value={status.activeDevice || ''}
           onChange={(event) => onChangeOutputDevice(event.target.value)}
-          disabled={isLoadingDevices || isChangingDevice || outputDevices.length === 0 || upnpRouteLocked}
+          disabled={!canRefreshOutputs || isLoadingDevices || isChangingDevice || outputDevices.length === 0 || upnpRouteLocked}
           className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 outline-none focus:border-[#D4AF37]/60 disabled:opacity-60"
         >
           {outputDevices.length === 0 ? <option value="">{isLoadingDevices ? 'Searching outputs…' : 'No output devices found'}</option> : null}
           {outputDevices.map((device) => <option key={device} value={device}>{device}</option>)}
         </select>
-        {upnpRouteLocked && <p className="text-[11px] text-zinc-500">Stop playback before switching UPnP renderers to keep the current stream uninterrupted.</p>}
+        {!canRefreshOutputs && <p className="text-[11px] text-zinc-400">Manage this output on the playback engine.</p>}
+        {canRefreshOutputs && upnpRouteLocked && <p className="text-[11px] text-zinc-500">Stop playback before switching UPnP renderers to keep the current stream uninterrupted.</p>}
         {deviceError && <p role="alert" className="text-[11px] text-rose-400">{deviceError}</p>}
         {isChangingDevice && <p className="text-[11px] text-zinc-500">Switching output…</p>}
       </div>

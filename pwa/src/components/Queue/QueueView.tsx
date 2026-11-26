@@ -6,9 +6,11 @@ interface QueueViewProps {
   queue: RemoteQueue;
   status: PlaybackStatus;
   conflictMessage?: string | null;
+  pendingEntryId?: string | null;
+  isLoadingTrack?: boolean;
   onClearConflict?: () => void;
   onResumePlayback?: () => void;
-  onJumpToIndex: (index: number) => void;
+  onJumpToIndex: (index: number, queueEntryId?: string) => void;
   onRemoveFromQueue: (index: number, trackId?: string, queueEntryId?: string) => void;
   onClearQueue: () => void;
 }
@@ -24,13 +26,15 @@ export const QueueView: React.FC<QueueViewProps> = ({
   queue,
   status,
   conflictMessage,
+  pendingEntryId,
+  isLoadingTrack,
   onClearConflict,
   onResumePlayback,
   onJumpToIndex,
   onRemoveFromQueue,
   onClearQueue,
 }) => {
-  const isPlaybackActive = (status.isPlaying || status.isPaused) && Boolean(status.currentFile);
+  const isPlaybackActive = (status.isPlaying || status.isPaused || isLoadingTrack) && Boolean(status.currentFile);
   const upcomingCount = isPlaybackActive && queue.items.length > 0 ? queue.items.length - 1 : queue.items.length;
   const totalDurationSecs = queue.items.reduce((acc, t) => acc + (t.durationSecs || 0), 0);
 
@@ -70,7 +74,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
         </div>
 
         {/* Stopped State Resume Action Deck */}
-        {!isPlaybackActive && queue.items.length > 0 && onResumePlayback && (
+        {!isPlaybackActive && !pendingEntryId && !isLoadingTrack && queue.items.length > 0 && onResumePlayback && (
           <div className="flex items-center justify-between p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
             <div className="flex items-center space-x-2">
               <span className="w-2 h-2 rounded-full bg-zinc-500" />
@@ -91,14 +95,14 @@ export const QueueView: React.FC<QueueViewProps> = ({
         {/* Conflict Warning Banner */}
         {conflictMessage && (
           <div className="flex items-center justify-between p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
-            <div className="flex items-center space-x-2 truncate">
+            <div role="status" className="flex items-center space-x-2 min-w-0">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-              <span className="truncate">{conflictMessage}</span>
+              <span>{conflictMessage}</span>
             </div>
             {onClearConflict && (
               <button
                 onClick={onClearConflict}
-                className="ml-2 px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 hover:text-white"
+                className="ml-2 min-h-12 px-2 rounded bg-zinc-800 text-zinc-300 hover:text-white"
               >
                 Dismiss
               </button>
@@ -125,6 +129,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
                 (!status.currentQueueEntryId && idx === queue.currentIndex));
             const isActivelyPlaying = isCurrent && status.isPlaying && !status.isPaused;
             const isPaused = isCurrent && status.isPaused;
+            const isPending = pendingEntryId ? item.queueEntryId === pendingEntryId : isCurrent && isLoadingTrack;
 
             return (
               <div
@@ -136,9 +141,11 @@ export const QueueView: React.FC<QueueViewProps> = ({
                 }`}
               >
                 {/* Clickable body to jump to track */}
-                <div
-                  onClick={() => onJumpToIndex(idx)}
-                  className="flex items-center space-x-3 flex-1 min-w-0 cursor-pointer"
+                <button
+                  type="button"
+                  onClick={() => onJumpToIndex(idx, item.queueEntryId)}
+                  aria-current={isCurrent || undefined}
+                  className="flex items-center space-x-3 flex-1 min-w-0 min-h-12 cursor-pointer text-left"
                 >
                   <div className="w-6 flex items-center justify-center shrink-0">
                     {isActivelyPlaying ? (
@@ -159,10 +166,12 @@ export const QueueView: React.FC<QueueViewProps> = ({
                       {item.title}
                     </p>
                     <p className="text-[11px] text-zinc-400 truncate mt-0.5">
-                      {item.artist} • <span className="text-zinc-500">{item.album}</span>
+                      {isPending ? <span role="status">Starting track…</span> : (
+                        <>{item.artist} • <span className="text-zinc-500">{item.album}</span></>
+                      )}
                     </p>
                   </div>
-                </div>
+                </button>
 
                 {/* Track Format Badge & Controls */}
                 <div className="flex items-center space-x-2 pl-2 shrink-0">

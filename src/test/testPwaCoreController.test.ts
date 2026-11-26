@@ -800,6 +800,7 @@ test('Issue #59: PWA Core mode supports tokenless pairing, catalog release proje
     },
   )
   const outputs = await v2Client.listOutputs()
+  assert.ok(outputs)
   assert.equal(outputs.length, 1)
   assert.equal(outputs[0]?.label, 'USB DAC')
   await v2Client.setOutput('dac1')

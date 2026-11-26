@@ -673,6 +673,11 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
 
     const errObj = assertRecord(obj.error);
     const code = typeof errObj.code === 'string' ? errObj.code : 'unavailable';
+    // Engines without the v2 output-list operation reject this request as an invalid payload.
+    if (payload.operation === 'outputs.list' &&
+        (code === 'invalid_payload' || code === 'incompatible_protocol')) {
+      throw new CoreClientError('unsupported_capability');
+    }
     if (code === 'stale_revision' && errObj.snapshot) {
       const authoritative = parseCoreSnapshot(errObj.snapshot, profile);
       throw new CoreClientError('stale_revision', undefined, authoritative);
@@ -773,15 +778,22 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
       return hydrateCatalog(parseCoreSnapshot(rawSnap, profile));
     },
 
-    async listOutputs(): Promise<CoreOutputDevice[]> {
+    async listOutputs(): Promise<CoreOutputDevice[] | null> {
       await ensureHello(false);
-      const raw = await requestCore({ protocolVersion: 2, operation: 'outputs.list' });
+      let raw: unknown;
+      try {
+        raw = await requestCore({ protocolVersion: 2, operation: 'outputs.list' });
+      } catch (err) {
+        if (err instanceof CoreClientError && err.code === 'unsupported_capability') return null;
+        throw err;
+      }
       const obj = assertRecord(raw);
-      const rawList = Array.isArray(obj.outputs) ? obj.outputs : [];
+      if (!Array.isArray(obj.outputs)) throw new CoreClientError('invalid_payload');
       const out: CoreOutputDevice[] = [];
-      for (const item of rawList) {
+      for (const item of obj.outputs) {
         if (!item || typeof item !== 'object') continue;
         const r = item as Record<string, unknown>;
+        if (r.isAvailable === false) continue;
         const id = typeof r.id === 'string' ? r.id.trim() : '';
         const label =
           typeof r.displayName === 'string' && r.displayName.trim()

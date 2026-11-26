@@ -84,6 +84,8 @@ export function hasCoreSnapshotChanged(
     prev.playback.takeoverRequired !== next.playback.takeoverRequired ||
     Boolean(prev.playback.externalPlayback) !== Boolean(next.playback.externalPlayback) ||
     prev.catalog.revision !== next.catalog.revision ||
+    prev.output?.id !== next.output?.id ||
+    prev.output?.label !== next.output?.label ||
     prev.queue.currentEntryId !== next.queue.currentEntryId ||
     prev.queue.entries.length !== next.queue.entries.length
   );
@@ -245,11 +247,9 @@ export function useRemoteSocket() {
   const [isLoadingDevices, setIsLoadingDevices] = useState(false);
   const [isChangingDevice, setIsChangingDevice] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
-  const [conflictEvent, setConflictEvent] = useState<{
-    currentRevision: number;
-    items: RemoteTrackItem[];
-    currentIndex: number;
-  } | null>(null);
+  const [canRefreshOutputs, setCanRefreshOutputs] = useState(true);
+  const [conflictEvent, setConflictEvent] = useState<string | null>(null);
+  const [pendingCoreJump, setPendingCoreJump] = useState<string | null>(null);
   const [deviceUnavailableEvent, setDeviceUnavailableEvent] = useState<{
     deviceName: string;
     availableDevices: string[];
@@ -262,7 +262,11 @@ export function useRemoteSocket() {
   const activeProfileRef = useRef<ServerProfile | null>(activeProfile);
   const coreSnapshotRef = useRef<CoreSnapshot | null>(coreSnapshot);
   const coreClientRef = useRef<ReturnType<typeof createPwaCoreClient> | null>(null);
+  const coreConnectAttemptRef = useRef<object | null>(null);
   const coreOutputsRef = useRef<CoreOutputDevice[]>([]);
+  const coreSyncFailuresRef = useRef(0);
+  const coreJumpTailRef = useRef(Promise.resolve(false));
+  const coreJumpRequestRef = useRef<object | null>(null);
   const corePlayerOverridesRef = useRef<{ volume?: number; purityMode?: boolean }>({});
   const lockScreenControlsRef = useRef<boolean>(lockScreenControls);
   const statusRef = useRef<PlaybackStatus>(status);
@@ -289,6 +293,10 @@ export function useRemoteSocket() {
   }, [activeProfile, coreSnapshot, lockScreenControls, status, isConnected]);
 
   const applyCoreSnapshot = useCallback((snap: CoreSnapshot, targetProfile?: ServerProfile) => {
+    const catalog = coreSnapshotRef.current?.catalog;
+    if (snap.catalog.nextCursor && catalog?.revision === snap.catalog.revision && !catalog.nextCursor) {
+      snap = { ...snap, catalog };
+    }
     coreSnapshotRef.current = snap;
     setCoreSnapshot(snap);
     const mapped = mapCoreSnapshotToPwa(snap, corePlayerOverridesRef.current);
@@ -356,15 +364,17 @@ export function useRemoteSocket() {
     ) {
       return null;
     }
+    const startingSnapshot = coreSnapshotRef.current;
+    const isCurrent = () =>
+      !manualDisconnectRef.current && isForegroundRef.current &&
+      coreClientRef.current === client && activeProfileRef.current &&
+      isSameProfileScope(activeProfileRef.current, target);
     try {
       const latest = await client.getSnapshot();
-      if (
-        manualDisconnectRef.current ||
-        !activeProfileRef.current ||
-        !isSameProfileScope(activeProfileRef.current, target)
-      ) {
-        return null;
-      }
+      if (!isCurrent()) return null;
+      const current = coreSnapshotRef.current;
+      if (current && current !== startingSnapshot && latest.revision <= current.revision) return current;
+      coreSyncFailuresRef.current = 0;
       if (latest.playback.activity !== 'loading') {
         clearCoreLoadingSettleTimer();
       }
@@ -374,15 +384,14 @@ export function useRemoteSocket() {
       setIsConnected(true);
       setError(null);
       return latest;
-    } catch {
-      if (
-        !manualDisconnectRef.current &&
-        activeProfileRef.current &&
-        isSameProfileScope(activeProfileRef.current, target) &&
-        coreClientRef.current === client
-      ) {
+    } catch (err) {
+      if (isCurrent() && coreSnapshotRef.current === startingSnapshot) {
+        const needsPairing = err instanceof CoreClientError &&
+          (err.code === 'untrusted_peer' || err.code === 'identity_mismatch');
+        coreSyncFailuresRef.current++;
+        if (!needsPairing && coreSyncFailuresRef.current < 2) return null;
         setIsConnected(false);
-        setError('Connection lost. Playback may still be continuing.');
+        setError(needsPairing ? err.message : 'Connection lost. Playback may still be continuing.');
       }
       return null;
     }
@@ -412,6 +421,20 @@ export function useRemoteSocket() {
     },
     [clearCoreLoadingSettleTimer, refreshCorePassiveSnapshot]
   );
+
+  const confirmCoreCommand = useCallback((snapshot: CoreSnapshot, profile: ServerProfile) => {
+    if (snapshot.revision >= (coreSnapshotRef.current?.revision ?? 0)) {
+      applyCoreSnapshot(snapshot, profile);
+      if (snapshot.playback.activity === 'loading') {
+        scheduleCoreLoadingSettleCheck();
+      } else {
+        clearCoreLoadingSettleTimer();
+      }
+    }
+    coreSyncFailuresRef.current = 0;
+    setIsConnected(true);
+    setError(null);
+  }, [applyCoreSnapshot, clearCoreLoadingSettleTimer, scheduleCoreLoadingSettleCheck]);
 
   const applyRemoteQueue = useCallback((remoteQueue: any) => {
     if (!remoteQueue || !Array.isArray(remoteQueue.items)) return;
@@ -474,12 +497,7 @@ export function useRemoteSocket() {
           setConflictEvent(null);
         } else if (data.type === 'QUEUE_CONFLICT') {
           applyRemoteQueue(data);
-          const currIdx = typeof data.current_index === 'number' ? data.current_index : -1;
-          setConflictEvent({
-            currentRevision: data.current_revision,
-            items: mapQueueItems(data.items || []),
-            currentIndex: currIdx,
-          });
+          setConflictEvent('The queue changed. Review the updated queue and try again.');
         } else if (data.type === 'DEVICE_UNAVAILABLE') {
           setDeviceUnavailableEvent({
             deviceName: data.device_name,
@@ -510,21 +528,24 @@ export function useRemoteSocket() {
     if (profile.engineKind === 'core') {
       const client = coreClientRef.current ?? createPwaCoreClient(profile);
       coreClientRef.current = client;
+      const isCurrent = () => coreClientRef.current === client && !manualDisconnectRef.current;
       setIsLoadingDevices(true);
       setDeviceError(null);
       try {
         const outputs = await client.listOutputs();
-        coreOutputsRef.current = outputs;
-        const labels = outputs.map((o) => o.label);
+        if (!isCurrent()) return;
+        setCanRefreshOutputs(outputs !== null);
+        coreOutputsRef.current = outputs ?? [];
+        const labels = coreOutputsRef.current.map((o) => o.label);
         const activeLabel = coreSnapshotRef.current?.output?.label;
         if (activeLabel && !labels.includes(activeLabel)) {
           labels.unshift(activeLabel);
         }
         setOutputDevices(labels);
-      } catch (err) {
-        setDeviceError(err instanceof Error ? err.message : 'Could not load Engine outputs.');
+      } catch {
+        if (isCurrent()) setDeviceError('Couldn’t refresh output devices. Tap refresh to try again.');
       } finally {
-        setIsLoadingDevices(false);
+        if (isCurrent()) setIsLoadingDevices(false);
       }
       return;
     }
@@ -557,10 +578,13 @@ export function useRemoteSocket() {
           await client.setOutput(targetId);
           await refreshCorePassiveSnapshot();
         } catch (err) {
-          setDeviceError(err instanceof Error ? err.message : 'Could not change Engine output.');
-          await refreshOutputDevices();
+          if (coreClientRef.current === client) {
+            setDeviceError(err instanceof CoreClientError && err.code === 'not_ready'
+              ? 'Stop playback before changing the output device.'
+              : 'Couldn’t switch output devices. Refresh the list and try again.');
+          }
         } finally {
-          setIsChangingDevice(false);
+          if (coreClientRef.current === client) setIsChangingDevice(false);
         }
         return;
       }
@@ -599,6 +623,20 @@ export function useRemoteSocket() {
         setOutputDevices([]);
       }
 
+      if (!currentProfile || !isSameProfileScope(currentProfile, profile) ||
+          currentProfile.token !== profile.token ||
+          currentProfile.certFingerprint !== profile.certFingerprint ||
+          currentProfile.trustInsecure !== profile.trustInsecure) {
+        coreConnectAttemptRef.current = null;
+        coreClientRef.current = null;
+        coreJumpRequestRef.current = null;
+        coreJumpTailRef.current = Promise.resolve(false);
+        setPendingCoreJump(null);
+        setCanRefreshOutputs(true);
+        setIsLoadingDevices(false);
+        setIsChangingDevice(false);
+      }
+      setConflictEvent(null);
       setError(null);
       setConnectionDiagnostic(null);
       setDeviceError(null);
@@ -667,7 +705,11 @@ export function useRemoteSocket() {
     saveActiveServerProfile(null);
     activeProfileRef.current = null;
     coreClientRef.current = null;
+    coreConnectAttemptRef.current = null;
     coreSnapshotRef.current = null;
+    coreJumpRequestRef.current = null;
+    coreJumpTailRef.current = Promise.resolve(false);
+    setPendingCoreJump(null);
     setCoreSnapshot(null);
     prevBaseUrlRef.current = '';
     setActiveProfileState(null);
@@ -729,18 +771,18 @@ export function useRemoteSocket() {
 
       // Direct Cadence Core v1/v2 control path (independent of Windows Desktop)
       if (target.engineKind === 'core') {
+        const attempt = {};
+        coreConnectAttemptRef.current = attempt;
+        const isCurrent = () => coreConnectAttemptRef.current === attempt &&
+          !manualDisconnectRef.current && isForegroundRef.current;
         try {
           await syncNativeServerProfile(target);
+          if (!isCurrent()) return;
           const client = createPwaCoreClient(target);
           const prepared = await client.prepare();
-          if (
-            manualDisconnectRef.current ||
-            !activeProfileRef.current ||
-            !isSameProfileScope(activeProfileRef.current, target)
-          ) {
-            return;
-          }
+          if (!isCurrent()) return;
           coreClientRef.current = client;
+          coreSyncFailuresRef.current = 0;
           const updatedProfile: ServerProfile = {
             ...target,
             label: prepared.descriptor.label || target.label,
@@ -761,6 +803,7 @@ export function useRemoteSocket() {
             clearCoreLoadingSettleTimer();
           }
         } catch (err) {
+          if (!isCurrent()) return;
           // Retain Core context cleanly on disconnect/error — never auto-fallback
           setIsConnected(false);
           setIsConnecting(false);
@@ -1076,12 +1119,13 @@ export function useRemoteSocket() {
   }, [connect]);
 
   useEffect(() => {
-    if (!activeProfile?.baseUrl || (activeProfile.engineKind !== 'core' && !activeProfile.token)) {
+    const profile = activeProfileRef.current;
+    if (!profile?.baseUrl || (profile.engineKind !== 'core' && !profile.token)) {
       return;
     }
 
     if (isForegroundRef.current) {
-      void connect(activeProfile);
+      void connect(profile);
     }
 
     return () => {
@@ -1093,7 +1137,13 @@ export function useRemoteSocket() {
       }
     };
   }, [
-    activeProfile,
+    activeProfile?.baseUrl,
+    activeProfile?.engineKind,
+    activeProfile?.engineId,
+    activeProfile?.libraryId,
+    activeProfile?.token,
+    activeProfile?.certFingerprint,
+    activeProfile?.trustInsecure,
     clearReconnectTimer,
     connect,
     detachAndCloseBrowserSocket,
@@ -1321,25 +1371,17 @@ export function useRemoteSocket() {
         const runCoreCommand = async (coreCmd: CoreClientCommand): Promise<CoreSnapshot | null> => {
           try {
             const updated = await client.execute(coreCmd);
-            applyCoreSnapshot(updated, profile);
-            setIsConnected(true);
-            setError(null);
+            if (coreClientRef.current !== client || manualDisconnectRef.current) return null;
+            confirmCoreCommand(updated, profile);
             setConflictEvent(null);
-            if (updated.playback.activity === 'loading') {
-              scheduleCoreLoadingSettleCheck();
-            } else {
-              clearCoreLoadingSettleTimer();
-            }
             return updated;
           } catch (err) {
+            if (coreClientRef.current !== client || manualDisconnectRef.current) return null;
             if (err instanceof CoreClientError && err.code === 'stale_revision' && err.snapshot) {
-              applyCoreSnapshot(err.snapshot, profile);
-              const mapped = mapCoreSnapshotToPwa(err.snapshot, corePlayerOverridesRef.current);
-              setConflictEvent({
-                currentRevision: err.snapshot.revision,
-                items: mapped.queue.items,
-                currentIndex: mapped.queue.currentIndex,
-              });
+              confirmCoreCommand(err.snapshot, profile);
+              setConflictEvent(coreCmd.operation === 'queue.replace'
+                ? 'The queue changed. Review the updated queue and try again.'
+                : 'Playback changed. Try the action again.');
               return null;
             }
             if (
@@ -1462,17 +1504,6 @@ export function useRemoteSocket() {
             commandId,
             expectedRevision: snap.revision,
           };
-        } else if (action === 'jump_to_queue_index' && typeof cmd.index === 'number') {
-          const entry = snap.queue.entries[cmd.index];
-          if (entry) {
-            coreCmd = {
-              operation: 'queue.control',
-              action: 'jump',
-              entryId: entry.entryId,
-              commandId,
-              expectedRevision: snap.revision,
-            };
-          }
         } else if (action === 'queue_track' && typeof cmd.file_path === 'string') {
           const newEntry = { entryId: `qe_${Date.now().toString(36)}`, trackId: cmd.file_path };
           const currIdx = snap.queue.currentEntryId
@@ -1574,7 +1605,7 @@ export function useRemoteSocket() {
       }
       return ok;
     },
-    [applyRemoteQueue, connect]
+    [applyRemoteQueue, confirmCoreCommand, connect]
   );
 
   const playPause = useCallback((): Promise<boolean> => {
@@ -1651,8 +1682,61 @@ export function useRemoteSocket() {
     [sendCommand, queue.revision]
   );
   const jumpToQueueIndex = useCallback(
-    (index: number) => sendCommand({ action: 'jump_to_queue_index', index }),
-    [sendCommand]
+    (index: number, queueEntryId?: string): Promise<boolean> => {
+      const profile = activeProfileRef.current;
+      if (profile?.engineKind !== 'core') {
+        return sendCommand({ action: 'jump_to_queue_index', index });
+      }
+      const client = coreClientRef.current;
+      const entryId = queueEntryId ?? coreSnapshotRef.current?.queue.entries[index]?.entryId;
+      if (!client || !entryId) return Promise.resolve(false);
+
+      const request = {};
+      const isCurrent = () => coreClientRef.current === client && !manualDisconnectRef.current;
+      const isLatest = () => isCurrent() && coreJumpRequestRef.current === request;
+      coreJumpRequestRef.current = request;
+      setPendingCoreJump(entryId);
+      setConflictEvent(null);
+
+      const jump = coreJumpTailRef.current.then(async () => {
+        for (let attempt = 0; attempt < 2 && isLatest(); attempt++) {
+          const current = coreSnapshotRef.current;
+          if (!current?.queue.entries.some((entry) => entry.entryId === entryId)) {
+            setConflictEvent('That track was removed from the queue. Choose another track.');
+            return false;
+          }
+          try {
+            const updated = await client.execute({
+              operation: 'queue.control',
+              action: 'jump',
+              entryId,
+              expectedRevision: current.revision,
+              commandId: `pwa_jump_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+            });
+            if (!isCurrent()) return false;
+            confirmCoreCommand(updated, profile);
+            return true;
+          } catch (err) {
+            if (!isCurrent()) return false;
+            if (err instanceof CoreClientError && err.code === 'stale_revision' && err.snapshot) {
+              confirmCoreCommand(err.snapshot, profile);
+              if (attempt === 0) continue;
+            }
+            if (isLatest()) setConflictEvent('Couldn’t play that track. Tap it to try again.');
+            return false;
+          }
+        }
+        return false;
+      }).finally(() => {
+        if (coreJumpRequestRef.current === request) {
+          coreJumpRequestRef.current = null;
+          setPendingCoreJump(null);
+        }
+      });
+      coreJumpTailRef.current = jump;
+      return jump;
+    },
+    [confirmCoreCommand, sendCommand]
   );
   const removeFromQueue = useCallback(
     (index?: number, trackId?: string, queueEntryId?: string) =>
@@ -1706,8 +1790,10 @@ export function useRemoteSocket() {
     isLoadingDevices,
     isChangingDevice,
     deviceError,
+    canRefreshOutputs,
     conflictEvent,
     setConflictEvent,
+    pendingCoreJump,
     deviceUnavailableEvent,
     setDeviceUnavailableEvent,
     refreshOutputDevices,
