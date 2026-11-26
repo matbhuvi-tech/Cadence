@@ -445,7 +445,17 @@ fn storage_bus_silence_blocks_admission_and_db_reload_during_playback_and_30s_co
     )
     .expect("open runtime");
 
-    let browse_root=ws.dir.with_extension("library");std::fs::create_dir(&browse_root).unwrap();
+    let raw_browse_root = ws.dir.with_extension("library");
+    std::fs::create_dir(&raw_browse_root).unwrap();
+    let browse_root = std::fs::canonicalize(&raw_browse_root).unwrap_or(raw_browse_root);
+    #[cfg(windows)]
+    let browse_root = PathBuf::from(
+        browse_root
+            .to_string_lossy()
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&browse_root.to_string_lossy())
+            .to_string(),
+    );
     runtime.configure_library(vec![browse_root.clone()]).unwrap();
     let v2 = |operation:&str, path:Option<&Path>| serde_json::to_vec(&json!({"protocolVersion":2,"engineId":"truenas-core","libraryId":"main-library","operation":operation,"path":path.map(|p|p.to_string_lossy())})).unwrap();
     let browse=v2("fs.browse",Some(&browse_root));
