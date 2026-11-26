@@ -230,7 +230,9 @@ test.describe.serial('Cadence Cross-Platform E2E: Desktop + PWA + cadence-headle
 
     await pwaPage.locator('input[placeholder*="192.168"]').fill('127.0.0.1')
     await pwaPage.locator('input[type="number"]').fill(String(stack.corePort))
-    await pwaPage.locator('input[placeholder*="4829"]').fill(stack.pairingToken)
+    await pwaPage
+      .locator('input[placeholder*="Optional for Cadence Engine"], input[placeholder*="4829"]')
+      .fill(stack.pairingToken)
     await pwaPage.locator('button[type="submit"]').filter({ hasText: /Connect/i }).click()
 
     await expect(pwaPage.locator('body')).toContainText('E2E Gate Core')

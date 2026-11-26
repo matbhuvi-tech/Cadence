@@ -781,7 +781,7 @@ test('Issue #59: PWA Core mode supports tokenless pairing, catalog release proje
           }),
         }
       }
-      if (req.operation === 'player.outputs') {
+      if (req.operation === 'outputs.list') {
         return {
           ok: true, status: 200, statusText: 'OK', errorKind: 'ok',
           body: JSON.stringify({
@@ -805,8 +805,8 @@ test('Issue #59: PWA Core mode supports tokenless pairing, catalog release proje
   await v2Client.setOutput('dac1')
   assert.equal(await v2Client.setVolume(0.75), 0.75)
   assert.equal(await v2Client.setPurity(false), false)
-  assert.ok(sentOps.includes('player.outputs'))
-  assert.ok(sentOps.includes('player.set_output'))
+  assert.ok(sentOps.includes('outputs.list'))
+  assert.ok(sentOps.includes('output.select'))
   assert.ok(sentOps.includes('player.volume'))
   assert.ok(sentOps.includes('player.purity'))
 })

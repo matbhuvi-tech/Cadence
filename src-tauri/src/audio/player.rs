@@ -145,13 +145,19 @@ struct EndpointInventory {
 impl EndpointInventory {
     fn from_host(upnp_manager: &UpnpManager) -> Self {
         let host = cpal::default_host();
-        let default_wasapi_name = host.default_output_device().and_then(|d| d.name().ok());
-        let has_default_wasapi = host.default_output_device().is_some();
-        let mut wasapi_names: Vec<String> = host
-            .output_devices()
-            .ok()
-            .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
-            .unwrap_or_default();
+        let default_device = host.default_output_device();
+        let has_default_wasapi = default_device.is_some();
+        let default_wasapi_name = default_device.and_then(|d| d.name().ok());
+        // On headless Windows Server runners with no active audio endpoints / stopped Audiosrv,
+        // avoid enumerating output_devices() through cpal's WASAPI backend.
+        let mut wasapi_names: Vec<String> = if has_default_wasapi {
+            host.output_devices()
+                .ok()
+                .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // Preserve insertion order while removing duplicate device names reported by driver wrappers.
         let mut deduped = Vec::with_capacity(wasapi_names.len());
         for name in wasapi_names.drain(..) {

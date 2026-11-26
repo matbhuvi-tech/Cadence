@@ -1548,8 +1548,11 @@ mod artwork_regression_tests {
     use super::*;
 
     fn fixture() -> (PathBuf, Library, PathBuf) {
-        let root = std::env::temp_dir().join(format!("cadence-art-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
+        let raw_root = std::env::temp_dir().join(format!("cadence-art-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&raw_root).unwrap();
+        // Canonicalize + normalize_root so Windows 8.3 short TEMP paths (e.g. RUNNER~1) and \\?\ prefixes
+        // match Library::open's authorized roots.
+        let root = normalize_root(std::fs::canonicalize(&raw_root).unwrap_or(raw_root));
         let wav = root.join("track.wav");
         let mut bytes = b"RIFF".to_vec();
         bytes.extend_from_slice(&40u32.to_le_bytes());

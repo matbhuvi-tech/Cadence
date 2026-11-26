@@ -775,7 +775,7 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
 
     async listOutputs(): Promise<CoreOutputDevice[]> {
       await ensureHello(false);
-      const raw = await requestCore({ protocolVersion: 2, operation: 'player.outputs' });
+      const raw = await requestCore({ protocolVersion: 2, operation: 'outputs.list' });
       const obj = assertRecord(raw);
       const rawList = Array.isArray(obj.outputs) ? obj.outputs : [];
       const out: CoreOutputDevice[] = [];
@@ -804,7 +804,7 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
 
     async setOutput(outputId: string): Promise<void> {
       await ensureHello(false);
-      await requestCore({ protocolVersion: 2, operation: 'player.set_output', outputId });
+      await requestCore({ protocolVersion: 2, operation: 'output.select', outputId });
     },
 
     async setVolume(volume: number): Promise<number> {

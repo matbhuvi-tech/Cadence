@@ -102,6 +102,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -111,6 +117,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: 'src-tauri -> target'
+
+      - name: Install Node test dependencies (tsx for cross-language contract test)
+        run: npm ci
 
       - name: Install ffmpeg for real-media acceptance fixtures
         run: |
@@ -189,8 +198,9 @@ jobs:
         with:
           workspaces: 'src-tauri -> target'
 
-      - name: Build embedded PWA assets for desktop binary
+      - name: Build embedded PWA assets and install Node test dependencies
         run: |
+          npm ci
           npm ci --prefix pwa
           npm run build:pwa
 
