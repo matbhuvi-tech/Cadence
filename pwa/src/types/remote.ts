@@ -1,5 +1,6 @@
 export interface AudioStreamInfo {
   filePath: string;
+  releaseId?: string | null;
   title?: string | null;
   artist?: string | null;
   album?: string | null;
@@ -7,6 +8,7 @@ export interface AudioStreamInfo {
   sampleRate?: number | null;
   bitDepth?: number | null;
   channels?: number | null;
+  drScore?: number | null;
   format: string;
   isHighRes: boolean;
 }
@@ -28,6 +30,7 @@ export interface PlaybackStatus {
 export interface RemoteTrackItem {
   queueEntryId?: string;
   id: string;
+  releaseId?: string;
   title: string;
   artist: string;
   album: string;
@@ -36,6 +39,7 @@ export interface RemoteTrackItem {
   format: string;
   sampleRate?: number | null;
   bitDepth?: number | null;
+  drScore?: number | null;
   isHighRes: boolean;
 }
 
@@ -188,6 +192,11 @@ export interface DiscoveredServer {
   protocol: string;
   baseUrl: string;
   fingerprint?: string;
+  engineKind?: EngineKind;
+  engineId?: string;
+  libraryId?: string;
+  label?: string;
+  version?: string;
 }
 
 export type DiagnosticErrorKind =

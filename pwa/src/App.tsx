@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import type { PluginListenerHandle } from '@capacitor/core';
 import { RefreshCw, AlertTriangle, Speaker } from 'lucide-react';
 import { useRemoteSocket } from './hooks/useRemoteSocket';
@@ -8,7 +8,7 @@ import { TabBar, TabId } from './components/Navigation/TabBar';
 import { MiniPlayer } from './components/Navigation/MiniPlayer';
 import { NowPlayingView } from './components/NowPlaying/NowPlayingView';
 import { CatalogView } from './components/Catalog/CatalogView';
-import { getArtworkUrl } from './services/api';
+import { projectCoreCatalogToReleases } from './services/coreRemoteClient';
 import { QueueView } from './components/Queue/QueueView';
 import { PairingView } from './components/Connection/PairingView';
 import { DiagnosticsSheet } from './components/Connection/DiagnosticsSheet';
@@ -85,6 +85,12 @@ export function App() {
     removeFromQueue,
     clearQueue,
   } = useRemoteSocket();
+
+  // Project flat Core catalog tracks into Releases + per-release tracklists for full CatalogView parity
+  const coreCatalog = useMemo(
+    () => projectCoreCatalogToReleases(coreCatalogTracks),
+    [coreCatalogTracks]
+  );
 
   // Browser fallback MediaSession (no-op on native Android where CadenceMediaService handles lock screen)
   useMediaSession({
@@ -224,73 +230,18 @@ export function App() {
 
       {/* Main Tab View (2-Tab Model: Catalog & Queue) */}
       <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {activeTab === 'catalog' && activeProfile.engineKind === 'core' && (
-          <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-2">
-            {coreCatalogTracks.length === 0 ? (
-              <div className="rounded-2xl bg-zinc-900/60 border border-zinc-800 p-5 text-center text-xs text-zinc-400">
-                No tracks reported in this Cadence Core library yet. Add or rescan music roots from Cadence Desktop.
-              </div>
-            ) : (
-              coreCatalogTracks.map((trk) => {
-                const isCurrent = status.currentFile === trk.id;
-                const artUrl = getArtworkUrl(trk.releaseId || trk.id, token, baseUrl);
-                return (
-                  <div
-                    key={trk.id}
-                    className={`rounded-2xl border px-3.5 py-3 flex items-center justify-between gap-3 ${
-                      isCurrent
-                        ? 'bg-[#D4AF37]/10 border-[#D4AF37]/40'
-                        : 'bg-zinc-900/60 border-zinc-800/80'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      {artUrl && (
-                        <div className="w-11 h-11 rounded-xl bg-zinc-900 border border-zinc-800/80 overflow-hidden shrink-0 relative">
-                          <img
-                            src={artUrl}
-                            alt={trk.album}
-                            loading="lazy"
-                            className="w-full h-full object-cover"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLElement).style.display = 'none';
-                            }}
-                          />
-                        </div>
-                      )}
-                      <div className="min-w-0">
-                        <p className="text-xs font-semibold text-zinc-100 truncate">{trk.title}</p>
-                        <p className="text-[11px] text-zinc-400 truncate">
-                          {trk.artist} · {trk.album}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => void queueTrack(trk.id)}
-                        className="px-2.5 py-1.5 rounded-lg bg-zinc-800 text-zinc-200 text-[11px] font-medium"
-                      >
-                        Queue
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void playTrack(trk.id)}
-                        className="px-3 py-1.5 rounded-lg bg-[#D4AF37] text-zinc-950 text-[11px] font-bold"
-                      >
-                        Play
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        )}
-
-        {activeTab === 'catalog' && activeProfile.engineKind !== 'core' && (
+        {activeTab === 'catalog' && (
           <CatalogView
             token={token}
             baseUrl={baseUrl}
+            engineKind={activeProfile.engineKind}
+            coreReleases={activeProfile.engineKind === 'core' ? coreCatalog.releases : undefined}
+            coreTracksByRelease={
+              activeProfile.engineKind === 'core' ? coreCatalog.tracksByRelease : undefined
+            }
+            onRefreshCoreCatalog={
+              activeProfile.engineKind === 'core' ? retryConnection : undefined
+            }
             activeTrackPath={
               status.isPlaying || status.isPaused ? (status.currentFile ?? null) : null
             }
@@ -365,6 +316,7 @@ export function App() {
             status={status}
             token={token}
             baseUrl={baseUrl}
+            engineKind={activeProfile.engineKind}
             onClose={() => setIsNowPlayingOpen(false)}
             onPlayPause={playPause}
             onNextTrack={nextTrack}

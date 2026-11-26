@@ -56,6 +56,7 @@ import org.json.JSONObject;
 public class CadenceRemotePlugin extends Plugin {
 
     private static final String MDNS_SERVICE_TYPE = "_cadence._tcp.";
+    private static final String MDNS_CORE_SERVICE_TYPE = "_cadence-core._tcp.";
     private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -121,6 +122,8 @@ public class CadenceRemotePlugin extends Plugin {
         String expectedFp = call.getString("fingerprint", "");
         boolean trustInsecure = Boolean.TRUE.equals(call.getBoolean("trustInsecure", false));
         int timeoutMs = call.getInt("timeoutMs", 3500);
+        String engineKind = call.getString("engineKind", "local");
+        final boolean isCore = "core".equalsIgnoreCase(engineKind);
 
         if (baseUrl == null || baseUrl.trim().isEmpty()) {
             call.reject("baseUrl is required");
@@ -136,7 +139,7 @@ public class CadenceRemotePlugin extends Plugin {
         executor.execute(() -> {
             long t0 = System.currentTimeMillis();
             AtomicReference<String> observedFp = new AtomicReference<>("");
-            // First inspect TLS + /ping using pinned verifier (unless trustInsecure), capturing observed SPKI
+            // Inspect TLS + endpoint using pinned verifier (unless trustInsecure), capturing observed cert DER/SPKI
             String pinForProbe = trustInsecure ? "" : expectedFp;
             OkHttpClient client = CadencePinnedStore.buildClient(
                 pinForProbe,
@@ -153,54 +156,138 @@ public class CadenceRemotePlugin extends Plugin {
             res.put("fingerprintMatches", JSONObject.NULL);
 
             try {
-                Request pingReq = new Request.Builder()
-                    .url(normalizedBase + "/api/remote/ping")
-                    .get()
-                    .build();
-                try (Response pingResp = client.newCall(pingReq).execute()) {
-                    res.put("reachable", true);
-                    res.put("httpStatus", pingResp.code());
-                    String obs = observedFp.get();
-                    res.put("certFingerprint", obs);
-                    if (expectedFp != null && !expectedFp.trim().isEmpty() && !obs.isEmpty()) {
-                        res.put(
-                            "fingerprintMatches",
-                            CadencePinnedStore.normalizeFingerprint(expectedFp).equals(obs)
-                        );
-                    }
-                    if (pingResp.body() != null && pingResp.isSuccessful()) {
-                        try {
-                            JSONObject pingJson = new JSONObject(pingResp.body().string());
-                            res.put("port", pingJson.optInt("port", parsed.getPort()));
-                            res.put("service", pingJson.optString("service", ""));
-                        } catch (Exception ignored) {}
-                    }
-                }
-
-                if (token != null && !token.trim().isEmpty()) {
-                    Request statusReq = new Request.Builder()
-                        .url(normalizedBase + "/api/remote/status?token=" + Uri.encode(token.trim()))
-                        .header("x-cadence-token", token.trim())
+                if (isCore) {
+                    Request healthReq = new Request.Builder()
+                        .url(normalizedBase + "/healthz")
                         .get()
                         .build();
-                    try (Response statusResp = client.newCall(statusReq).execute()) {
-                        res.put("httpStatus", statusResp.code());
-                        if (statusResp.isSuccessful()) {
+                    String observedEngineId = "";
+                    String observedLibraryId = "";
+                    String observedLabel = "";
+                    try (Response healthResp = client.newCall(healthReq).execute()) {
+                        res.put("reachable", true);
+                        res.put("httpStatus", healthResp.code());
+                        String obs = observedFp.get();
+                        res.put("certFingerprint", obs);
+                        if (expectedFp != null && !expectedFp.trim().isEmpty() && !obs.isEmpty()) {
+                            res.put(
+                                "fingerprintMatches",
+                                CadencePinnedStore.normalizeFingerprint(expectedFp).equals(obs)
+                            );
+                        }
+                        if (!healthResp.isSuccessful()) {
+                            res.put("errorKind", "http_error");
+                            res.put("errorMessage", "HTTP " + healthResp.code());
+                            res.put("latencyMs", System.currentTimeMillis() - t0);
+                            call.resolve(res);
+                            return;
+                        }
+                        if (healthResp.body() != null) {
+                            try {
+                                JSONObject healthJson = new JSONObject(healthResp.body().string());
+                                observedEngineId = healthJson.optString("engineId", "");
+                                observedLibraryId = healthJson.optString("libraryId", "");
+                                observedLabel = healthJson.optString("label", "");
+                                String healthFp = healthJson.optString("tlsFingerprintSha256", "");
+                                if (obs.isEmpty() && !healthFp.isEmpty()) {
+                                    res.put("certFingerprint", CadencePinnedStore.normalizeFingerprint(healthFp));
+                                }
+                                if (!observedEngineId.isEmpty()) res.put("engineId", observedEngineId);
+                                if (!observedLibraryId.isEmpty()) res.put("libraryId", observedLibraryId);
+                                if (!observedLabel.isEmpty()) res.put("label", observedLabel);
+                            } catch (Exception ignored) {}
+                        }
+                    }
+
+                    JSONObject helloPayload = new JSONObject();
+                    helloPayload.put("protocolVersion", 1);
+                    if (!observedEngineId.isEmpty()) helloPayload.put("engineId", observedEngineId);
+                    if (!observedLibraryId.isEmpty()) helloPayload.put("libraryId", observedLibraryId);
+                    helloPayload.put("operation", "core.hello");
+
+                    Request.Builder helloBuilder = new Request.Builder()
+                        .url(normalizedBase + "/v1/core")
+                        .post(RequestBody.create(helloPayload.toString(), JSON_MEDIA_TYPE));
+                    if (token != null && !token.trim().isEmpty()) {
+                        helloBuilder.header("x-cadence-token", token.trim());
+                    }
+
+                    try (Response helloResp = client.newCall(helloBuilder.build()).execute()) {
+                        res.put("httpStatus", helloResp.code());
+                        if (helloResp.isSuccessful()) {
+                            if (helloResp.body() != null) {
+                                try {
+                                    JSONObject env = new JSONObject(helloResp.body().string());
+                                    JSONObject data = env.optJSONObject("data");
+                                    if (data != null) {
+                                        if (data.has("engineId")) res.put("engineId", data.optString("engineId", observedEngineId));
+                                        if (data.has("libraryId")) res.put("libraryId", data.optString("libraryId", observedLibraryId));
+                                        if (data.has("label")) res.put("label", data.optString("label", observedLabel));
+                                    }
+                                } catch (Exception ignored) {}
+                            }
                             res.put("authenticated", true);
                             res.put("errorKind", "ok");
                             res.put("errorMessage", "");
-                        } else if (statusResp.code() == 401 || statusResp.code() == 403) {
+                        } else if (helloResp.code() == 401 || helloResp.code() == 403) {
                             res.put("authenticated", false);
                             res.put("errorKind", "unauthorized");
-                            res.put("errorMessage", "Pairing PIN was rejected by Cadence Desktop.");
+                            res.put("errorMessage", "Pairing token was rejected by Cadence Engine.");
                         } else {
                             res.put("errorKind", "http_error");
-                            res.put("errorMessage", "HTTP " + statusResp.code());
+                            res.put("errorMessage", "HTTP " + helloResp.code());
                         }
                     }
                 } else {
-                    res.put("errorKind", "ok");
-                    res.put("errorMessage", "");
+                    Request pingReq = new Request.Builder()
+                        .url(normalizedBase + "/api/remote/ping")
+                        .get()
+                        .build();
+                    try (Response pingResp = client.newCall(pingReq).execute()) {
+                        res.put("reachable", true);
+                        res.put("httpStatus", pingResp.code());
+                        String obs = observedFp.get();
+                        res.put("certFingerprint", obs);
+                        if (expectedFp != null && !expectedFp.trim().isEmpty() && !obs.isEmpty()) {
+                            res.put(
+                                "fingerprintMatches",
+                                CadencePinnedStore.normalizeFingerprint(expectedFp).equals(obs)
+                            );
+                        }
+                        if (pingResp.body() != null && pingResp.isSuccessful()) {
+                            try {
+                                JSONObject pingJson = new JSONObject(pingResp.body().string());
+                                res.put("port", pingJson.optInt("port", parsed.getPort()));
+                                res.put("service", pingJson.optString("service", ""));
+                            } catch (Exception ignored) {}
+                        }
+                    }
+
+                    if (token != null && !token.trim().isEmpty()) {
+                        Request statusReq = new Request.Builder()
+                            .url(normalizedBase + "/api/remote/status?token=" + Uri.encode(token.trim()))
+                            .header("x-cadence-token", token.trim())
+                            .get()
+                            .build();
+                        try (Response statusResp = client.newCall(statusReq).execute()) {
+                            res.put("httpStatus", statusResp.code());
+                            if (statusResp.isSuccessful()) {
+                                res.put("authenticated", true);
+                                res.put("errorKind", "ok");
+                                res.put("errorMessage", "");
+                            } else if (statusResp.code() == 401 || statusResp.code() == 403) {
+                                res.put("authenticated", false);
+                                res.put("errorKind", "unauthorized");
+                                res.put("errorMessage", "Pairing PIN was rejected by Cadence Desktop.");
+                            } else {
+                                res.put("errorKind", "http_error");
+                                res.put("errorMessage", "HTTP " + statusResp.code());
+                            }
+                        }
+                    } else {
+                        res.put("errorKind", "ok");
+                        res.put("errorMessage", "");
+                    }
                 }
             } catch (Exception e) {
                 String kind = CadenceRemoteStateHolder.classifyThrowable(e, 0);
@@ -209,7 +296,7 @@ public class CadenceRemotePlugin extends Plugin {
                     : CadenceRemoteStateHolder.extractObservedFingerprint(e);
                 res.put("certFingerprint", fp);
                 if ("cert_mismatch".equals(kind) || "cert_untrusted".equals(kind)) {
-                    // TCP + TLS handshake reached the desktop host, just failed trust verification
+                    // TCP + TLS handshake reached the host, just failed trust verification
                     res.put("reachable", true);
                     if (expectedFp != null && !expectedFp.trim().isEmpty() && !fp.isEmpty()) {
                         res.put(
@@ -339,6 +426,40 @@ public class CadenceRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void syncCoreMediaSession(PluginCall call) {
+        String engineId = call.getString("engineId", "");
+        String libraryId = call.getString("libraryId", "");
+        long revision = call.getInt("revision", 0);
+        boolean isPlaying = Boolean.TRUE.equals(call.getBoolean("isPlaying", false));
+        boolean isPaused = Boolean.TRUE.equals(call.getBoolean("isPaused", false));
+        String trackId = call.getString("trackId", "");
+        String artworkId = call.getString("artworkId", "");
+        String title = call.getString("title", "");
+        String artist = call.getString("artist", "");
+        String album = call.getString("album", "");
+        Double posObj = call.getDouble("positionSecs", 0.0);
+        Double durObj = call.getDouble("durationSecs", 0.0);
+        double posSecs = posObj != null ? posObj : 0.0;
+        double durSecs = durObj != null ? durObj : 0.0;
+        CadenceRemoteStateHolder.updateCorePlaybackSnapshot(
+            getContext(),
+            engineId,
+            libraryId,
+            revision,
+            isPlaying,
+            isPaused,
+            trackId,
+            artworkId,
+            title,
+            artist,
+            album,
+            posSecs,
+            durSecs
+        );
+        call.resolve();
+    }
+
+    @PluginMethod
     @SuppressWarnings("deprecation")
     public void discoverServers(PluginCall call) {
         int timeoutMs = Math.min(8000, Math.max(1000, call.getInt("timeoutMs", 3000)));
@@ -397,8 +518,24 @@ public class CadenceRemotePlugin extends Plugin {
                                 String fp = readAttr(attrs, "fp");
                                 String hostLabel = readAttr(attrs, "host");
                                 String mdnsHost = readAttr(attrs, "mdns");
-                                String proto = readAttr(attrs, "proto");
-                                if (proto.isEmpty()) proto = "https";
+                                String role = readAttr(attrs, "role");
+                                String engineId = readAttr(attrs, "engineId");
+                                String libraryId = readAttr(attrs, "libraryId");
+                                String label = readAttr(attrs, "label");
+                                String version = readAttr(attrs, "ver");
+                                String protocolAttr = readAttr(attrs, "protocol");
+                                String legacyProto = readAttr(attrs, "proto");
+                                String scheme = !protocolAttr.isEmpty()
+                                    ? protocolAttr.toLowerCase(Locale.US)
+                                    : ("http".equalsIgnoreCase(legacyProto) || "https".equalsIgnoreCase(legacyProto))
+                                        ? legacyProto.toLowerCase(Locale.US)
+                                        : "https";
+                                String svcType = resolved.getServiceType() == null ? "" : resolved.getServiceType();
+                                String engineKind = (svcType.contains("_cadence-core._tcp")
+                                    || "core".equalsIgnoreCase(role)
+                                    || !engineId.isEmpty())
+                                    ? "core"
+                                    : "local";
 
                                 if (ip != null && !ip.isEmpty() && port > 0) {
                                     String key = ip + ":" + port;
@@ -408,9 +545,14 @@ public class CadenceRemotePlugin extends Plugin {
                                     entry.put("mDnsHost", mdnsHost);
                                     entry.put("ip", ip);
                                     entry.put("port", port);
-                                    entry.put("protocol", proto);
-                                    entry.put("baseUrl", proto + "://" + ip + ":" + port);
+                                    entry.put("protocol", scheme);
+                                    entry.put("baseUrl", scheme + "://" + ip + ":" + port);
                                     entry.put("fingerprint", fp);
+                                    entry.put("engineKind", engineKind);
+                                    if (!engineId.isEmpty()) entry.put("engineId", engineId);
+                                    if (!libraryId.isEmpty()) entry.put("libraryId", libraryId);
+                                    if (!label.isEmpty()) entry.put("label", label);
+                                    if (!version.isEmpty()) entry.put("version", version);
                                     discovered.put(key, entry);
                                     notifyListeners("serviceDiscovered", entry);
                                 }
@@ -428,43 +570,43 @@ public class CadenceRemotePlugin extends Plugin {
             }
         };
 
-        final NsdManager.DiscoveryListener discoveryListener = new NsdManager.DiscoveryListener() {
-            @Override
-            public void onDiscoveryStarted(String regType) {}
+        final java.util.List<NsdManager.DiscoveryListener> activeListeners = new java.util.ArrayList<>();
+        String[] serviceTypes = new String[] { MDNS_CORE_SERVICE_TYPE, MDNS_SERVICE_TYPE };
+        for (String svcType : serviceTypes) {
+            NsdManager.DiscoveryListener listener = new NsdManager.DiscoveryListener() {
+                @Override
+                public void onDiscoveryStarted(String regType) {}
 
-            @Override
-            public void onServiceFound(NsdServiceInfo serviceInfo) {
-                if (isFinished.get()) return;
-                if (serviceInfo.getServiceType() != null
-                    && serviceInfo.getServiceType().contains("_cadence._tcp")) {
-                    resolveQueue.add(serviceInfo);
-                    processNext.run();
+                @Override
+                public void onServiceFound(NsdServiceInfo serviceInfo) {
+                    if (isFinished.get()) return;
+                    String foundType = serviceInfo.getServiceType();
+                    if (foundType != null
+                        && (foundType.contains("_cadence-core._tcp") || foundType.contains("_cadence._tcp"))) {
+                        resolveQueue.add(serviceInfo);
+                        processNext.run();
+                    }
                 }
-            }
 
-            @Override
-            public void onServiceLost(NsdServiceInfo serviceInfo) {}
+                @Override
+                public void onServiceLost(NsdServiceInfo serviceInfo) {}
 
-            @Override
-            public void onDiscoveryStopped(String serviceType) {}
+                @Override
+                public void onDiscoveryStopped(String serviceType) {}
 
-            @Override
-            public void onStartDiscoveryFailed(String serviceType, int errorCode) {
-                if (isFinished.compareAndSet(false, true)) {
-                    releaseLock(lockRef);
-                    JSObject out = new JSObject();
-                    out.put("servers", new JSArray());
-                    call.resolve(out);
-                }
-            }
+                @Override
+                public void onStartDiscoveryFailed(String serviceType, int errorCode) {}
 
-            @Override
-            public void onStopDiscoveryFailed(String serviceType, int errorCode) {}
-        };
+                @Override
+                public void onStopDiscoveryFailed(String serviceType, int errorCode) {}
+            };
+            try {
+                nsdManager.discoverServices(svcType, NsdManager.PROTOCOL_DNS_SD, listener);
+                activeListeners.add(listener);
+            } catch (Exception ignored) {}
+        }
 
-        try {
-            nsdManager.discoverServices(MDNS_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener);
-        } catch (Exception e) {
+        if (activeListeners.isEmpty()) {
             releaseLock(lockRef);
             JSObject out = new JSObject();
             out.put("servers", new JSArray());
@@ -474,9 +616,11 @@ public class CadenceRemotePlugin extends Plugin {
 
         mainHandler.postDelayed(() -> {
             if (isFinished.compareAndSet(false, true)) {
-                try {
-                    nsdManager.stopServiceDiscovery(discoveryListener);
-                } catch (Exception ignored) {}
+                for (NsdManager.DiscoveryListener l : activeListeners) {
+                    try {
+                        nsdManager.stopServiceDiscovery(l);
+                    } catch (Exception ignored) {}
+                }
                 releaseLock(lockRef);
 
                 JSArray list = new JSArray();

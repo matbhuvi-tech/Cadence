@@ -39,3 +39,4 @@
 - [#56](https://github.com/matbhuvi-tech/Cadence/issues/56): Linux curation invalidates its /proc/self/fd directory anchor before replacement. rc3 run 45308571189 reproduced six failing curation tests; retain the Linux parent handle through replacement and verification.
 
 - UPnP pacing graph: replace 100 ms throughput steps with observed early/late timing extremes and chunk-size/expected-spacing summaries. Pacer algorithms unchanged. Evidence: [reports/upnp-pacing-graph.md](reports/upnp-pacing-graph.md).
+- [#59](https://github.com/matbhuvi-tech/Cadence/issues/59): Mobile Android APK pairing PIN/QR broken and feature drift behind Standalone Playback Engine (Core v2).

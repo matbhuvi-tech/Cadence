@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Search, Disc3, RefreshCw } from 'lucide-react';
-import type { DbRelease } from '../../types/remote';
+import type { DbRelease, DbTrack, EngineKind } from '../../types/remote';
 import { fetchReleases, getArtworkUrl } from '../../services/api';
 import { buildProfileCacheKey } from '../../services/serverProfiles';
 import { FacetShelf } from './FacetShelf';
@@ -17,6 +17,10 @@ const releaseCache = new Map<string, DbRelease[]>();
 interface CatalogViewProps {
   token: string;
   baseUrl?: string;
+  engineKind?: EngineKind;
+  coreReleases?: DbRelease[];
+  coreTracksByRelease?: Map<string, DbTrack[]>;
+  onRefreshCoreCatalog?: () => Promise<void> | void;
   activeTrackPath?: string | null;
   isPlaybackPlaying?: boolean;
   onPlayRelease: (releaseId: string) => Promise<boolean> | boolean | void;
@@ -30,6 +34,10 @@ interface CatalogViewProps {
 export const CatalogView: React.FC<CatalogViewProps> = ({
   token,
   baseUrl,
+  engineKind,
+  coreReleases,
+  coreTracksByRelease,
+  onRefreshCoreCatalog,
   activeTrackPath = null,
   isPlaybackPlaying = false,
   onPlayRelease,
@@ -39,9 +47,12 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   onQueueTrack,
   onTriggerToast,
 }) => {
+  const isCoreMode = engineKind === 'core';
   const cacheKey = buildProfileCacheKey(baseUrl || '', token);
-  const [releases, setReleases] = useState<DbRelease[]>(() => releaseCache.get(cacheKey) ?? []);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [releases, setReleases] = useState<DbRelease[]>(() =>
+    isCoreMode ? coreReleases ?? [] : releaseCache.get(cacheKey) ?? []
+  );
+  const [loading, setLoading] = useState<boolean>(!isCoreMode);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [facets, setFacets] = useState<CatalogFacets>({});
   const [sortBy, setSortBy] = useState<SortBy>('year_desc');
@@ -50,6 +61,13 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadData = (force = false) => {
+    if (isCoreMode) {
+      if (force && onRefreshCoreCatalog) {
+        setLoading(true);
+        void Promise.resolve(onRefreshCoreCatalog()).finally(() => setLoading(false));
+      }
+      return;
+    }
     const cached = releaseCache.get(cacheKey);
     if (!force && cached) {
       setReleases(cached);
@@ -72,9 +90,19 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
   };
 
   useEffect(() => {
+    if (isCoreMode) {
+      setReleases(coreReleases ?? []);
+      setLoading(false);
+      setLoadError(null);
+    }
+  }, [isCoreMode, coreReleases]);
+
+  useEffect(() => {
     setSelectedRelease(null);
-    loadData();
-  }, [cacheKey]);
+    if (!isCoreMode) {
+      loadData();
+    }
+  }, [cacheKey, isCoreMode]);
 
   const availableLanguages = useMemo(() => getAvailableLanguages(releases), [releases]);
 
@@ -153,7 +181,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {filteredReleases.map((release) => {
-              const artUrl = getArtworkUrl(release.id, token, baseUrl);
+              const artUrl = getArtworkUrl(release.id, token, baseUrl, engineKind);
               const versionCount = release.versions ? release.versions.length : 0;
               return (
                 <div
@@ -209,6 +237,8 @@ export const CatalogView: React.FC<CatalogViewProps> = ({
         release={selectedRelease}
         token={token}
         baseUrl={baseUrl}
+        engineKind={engineKind}
+        preloadedTracks={selectedRelease && isCoreMode ? coreTracksByRelease?.get(selectedRelease.id) : undefined}
         activeTrackPath={activeTrackPath}
         isPlaybackPlaying={isPlaybackPlaying}
         onClose={() => setSelectedRelease(null)}

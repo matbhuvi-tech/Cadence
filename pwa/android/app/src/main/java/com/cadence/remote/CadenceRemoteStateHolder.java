@@ -84,6 +84,10 @@ public final class CadenceRemoteStateHolder {
 
     private static final AtomicBoolean mediaSessionEnabled = new AtomicBoolean(true);
     private static final AtomicBoolean isBackgrounded = new AtomicBoolean(false);
+    private static final AtomicBoolean isCoreMode = new AtomicBoolean(false);
+    private static volatile String coreEngineId = "";
+    private static volatile String coreLibraryId = "";
+    private static volatile long coreRevision = 0L;
 
     private static PlaybackSnapshot lastSnapshot = new PlaybackSnapshot(
         false, false, "", "Cadence", "Cadence Audiophile", "", 0.0, 0.0, 0L
@@ -173,6 +177,7 @@ public final class CadenceRemoteStateHolder {
         boolean heartbeat
     ) {
         initContext(ctx);
+        isCoreMode.set(false);
         CadencePinnedStore.setActiveProfile(baseUrl, token, fingerprint, trustInsecure);
 
         disconnectSocketOnly();
@@ -272,7 +277,37 @@ public final class CadenceRemoteStateHolder {
         return false;
     }
 
+    public static void updateCorePlaybackSnapshot(
+        Context ctx,
+        String engineId,
+        String libraryId,
+        long revision,
+        boolean playing,
+        boolean paused,
+        String trackId,
+        String artworkId,
+        String title,
+        String artist,
+        String album,
+        double posSecs,
+        double durSecs
+    ) {
+        initContext(ctx);
+        isCoreMode.set(true);
+        coreEngineId = engineId == null ? "" : engineId.trim();
+        coreLibraryId = libraryId == null ? "" : libraryId.trim();
+        coreRevision = Math.max(0L, revision);
+        String artKey = (artworkId != null && !artworkId.trim().isEmpty())
+            ? artworkId.trim()
+            : (trackId == null ? "" : trackId.trim());
+        updateSnapshot(playing, paused, artKey, title, artist, album, posSecs, durSecs);
+    }
+
     public static void dispatchPlaybackControl(String jsonCommand) {
+        if (isCoreMode.get()) {
+            IO_EXECUTOR.execute(() -> dispatchCorePlaybackControl(jsonCommand));
+            return;
+        }
         if (sendCommandJson(jsonCommand)) {
             return;
         }
@@ -292,6 +327,93 @@ public final class CadenceRemoteStateHolder {
                 }
             } catch (Exception ignored) {}
         });
+    }
+
+    private static void dispatchCorePlaybackControl(String jsonCommand) {
+        CadencePinnedStore.ServerProfile p = CadencePinnedStore.getActiveProfile();
+        if (p.baseUrl.isEmpty() || coreEngineId.isEmpty() || coreLibraryId.isEmpty()) return;
+        try {
+            JSONObject src = new JSONObject(jsonCommand);
+            String action = src.optString("action", "");
+            JSONObject payload = new JSONObject();
+            payload.put("protocolVersion", 1);
+            payload.put("engineId", coreEngineId);
+            payload.put("libraryId", coreLibraryId);
+            payload.put("commandId", "android_media_" + System.currentTimeMillis());
+            payload.put("expectedRevision", coreRevision);
+
+            if ("pause".equals(action) || "resume".equals(action) || "stop".equals(action)) {
+                payload.put("operation", "playback.control");
+                payload.put("action", action);
+            } else if ("seek".equals(action)) {
+                payload.put("operation", "playback.control");
+                payload.put("action", "seek");
+                payload.put("positionSeconds", Math.max(0.0, src.optDouble("position_secs", 0.0)));
+            } else if ("next_track".equals(action)) {
+                payload.put("operation", "queue.control");
+                payload.put("action", "next");
+            } else if ("prev_track".equals(action)) {
+                payload.put("operation", "queue.control");
+                payload.put("action", "previous");
+            } else {
+                return;
+            }
+
+            sendCoreControlRequest(p, payload, true);
+        } catch (Exception ignored) {}
+    }
+
+    private static void sendCoreControlRequest(
+        CadencePinnedStore.ServerProfile p,
+        JSONObject payload,
+        boolean allowStaleRetry
+    ) {
+        Request.Builder rb = new Request.Builder()
+            .url(p.baseUrl + "/v1/core")
+            .post(RequestBody.create(payload.toString(), JSON_MEDIA_TYPE));
+        if (!p.token.isEmpty()) {
+            rb.header("x-cadence-token", p.token);
+        }
+        try (Response resp = CadencePinnedStore.getActiveClient().newCall(rb.build()).execute()) {
+            if (!resp.isSuccessful() || resp.body() == null) return;
+            JSONObject env = new JSONObject(resp.body().string());
+            if (env.optBoolean("ok", false)) {
+                JSONObject data = env.optJSONObject("data");
+                if (data != null && data.has("revision")) {
+                    coreRevision = data.optLong("revision", coreRevision);
+                    JSONObject pb = data.optJSONObject("playback");
+                    if (pb != null) {
+                        String act = pb.optString("activity", "idle");
+                        double pos = pb.optDouble("positionSeconds", 0.0);
+                        PlaybackSnapshot prev;
+                        synchronized (LOCK) {
+                            prev = lastSnapshot;
+                        }
+                        updateSnapshot(
+                            "playing".equals(act),
+                            "paused".equals(act),
+                            prev.currentFile,
+                            prev.title,
+                            prev.artist,
+                            prev.album,
+                            pos,
+                            prev.durationSecs
+                        );
+                    }
+                }
+            } else if (allowStaleRetry) {
+                JSONObject err = env.optJSONObject("error");
+                if (err != null && "stale_revision".equals(err.optString("code", ""))) {
+                    JSONObject snap = err.optJSONObject("snapshot");
+                    if (snap != null && snap.has("revision")) {
+                        coreRevision = snap.optLong("revision", coreRevision);
+                        payload.put("expectedRevision", coreRevision);
+                        payload.put("commandId", "android_media_retry_" + System.currentTimeMillis());
+                        sendCoreControlRequest(p, payload, false);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     public static void disconnectSocket() {
@@ -433,13 +555,18 @@ public final class CadenceRemoteStateHolder {
     private static void fetchArtworkAsync(final String fileKey) {
         IO_EXECUTOR.execute(() -> {
             CadencePinnedStore.ServerProfile p = CadencePinnedStore.getActiveProfile();
-            if (p.baseUrl.isEmpty() || p.token.isEmpty() || fileKey.isEmpty()) return;
-            String url = p.baseUrl + "/api/remote/library/artwork/" + Uri.encode(fileKey) + "?token=" + Uri.encode(p.token);
-            Request req = new Request.Builder()
-                .url(url)
-                .header("x-cadence-token", p.token)
-                .get()
-                .build();
+            if (p.baseUrl.isEmpty() || fileKey.isEmpty()) return;
+            final boolean core = isCoreMode.get();
+            if (!core && p.token.isEmpty()) return;
+            String cleanKey = fileKey.startsWith("core_rel_") ? fileKey.substring("core_rel_".length()) : fileKey;
+            String url = core
+                ? (p.baseUrl + "/v1/artwork/" + Uri.encode(cleanKey) + (p.token.isEmpty() ? "" : "?token=" + Uri.encode(p.token)))
+                : (p.baseUrl + "/api/remote/library/artwork/" + Uri.encode(fileKey) + "?token=" + Uri.encode(p.token));
+            Request.Builder reqBuilder = new Request.Builder().url(url).get();
+            if (!p.token.isEmpty()) {
+                reqBuilder.header("x-cadence-token", p.token);
+            }
+            Request req = reqBuilder.build();
             try (Response resp = CadencePinnedStore.getActiveClient().newCall(req).execute()) {
                 if (!resp.isSuccessful() || resp.code() == 204 || resp.body() == null) return;
                 try (InputStream is = resp.body().byteStream()) {

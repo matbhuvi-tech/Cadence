@@ -643,3 +643,170 @@ test('Issue #40 hasCoreSnapshotChanged triggers passive sync updates on timer/ac
     true,
   )
 })
+
+test('Issue #59: PWA Core mode supports tokenless pairing, catalog release projection, v2 player controls, and /v1/artwork URLs', async () => {
+  const { createPwaCoreClient, projectCoreCatalogToReleases } = await import('../../pwa/src/services/coreRemoteClient')
+  const { getArtworkUrl } = await import('../../pwa/src/services/api')
+  const { probeCadenceServer } = await import('../../pwa/src/platform/cadenceBridge')
+  const { loadActiveServerProfile, saveActiveServerProfile } = await import('../../pwa/src/services/serverProfiles')
+
+  // 1. Saved Core profile with empty token restores cleanly
+  saveActiveServerProfile({
+    id: 'https://192.168.1.88:4040',
+    label: 'Living Room Engine',
+    baseUrl: 'https://192.168.1.88:4040',
+    port: 4040,
+    token: '',
+    engineKind: 'core',
+    engineId: 'core_lr',
+    libraryId: 'lib_lr',
+  })
+  const restored = loadActiveServerProfile(true)
+  assert.equal(restored?.baseUrl, 'https://192.168.1.88:4040')
+  assert.equal(restored?.engineKind, 'core')
+  assert.equal(restored?.token, '')
+
+  // 2. Core artwork URL uses /v1/artwork and strips core_rel_ prefix
+  assert.equal(
+    getArtworkUrl('core_rel_abc123', '', 'https://192.168.1.88:4040', 'core'),
+    'https://192.168.1.88:4040/v1/artwork/abc123',
+  )
+  assert.equal(
+    getArtworkUrl('abc123', 'tok99', 'https://192.168.1.88:4040', 'core'),
+    'https://192.168.1.88:4040/v1/artwork/abc123?token=tok99',
+  )
+
+  // 3. Tokenless Core probe succeeds against /healthz + /v1/core
+  const origFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const u = String(input)
+    if (u.endsWith('/healthz')) {
+      return new Response(
+        JSON.stringify({ ready: true, label: 'Win Engine', engineId: 'core_w', libraryId: 'lib_w' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        data: {
+          protocolVersion: 2,
+          engineId: 'core_w',
+          libraryId: 'lib_w',
+          label: 'Win Engine',
+          capabilities: ['catalog.read', 'session.read', 'playback.control', 'queue.write'],
+          ready: true,
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as typeof fetch
+  try {
+    const probe = await probeCadenceServer('http://127.0.0.1:4040', '', undefined, true, 3000, 'core')
+    assert.equal(probe.reachable, true)
+    assert.equal(probe.authenticated, true)
+    assert.equal(probe.engineId, 'core_w')
+  } finally {
+    globalThis.fetch = origFetch
+  }
+
+  // 4. Release projection groups tracks, sorts by trackNumber, and preserves format/DR metadata
+  const projected = projectCoreCatalogToReleases([
+    {
+      id: 't2',
+      releaseId: 'rel_1',
+      title: 'Second',
+      artist: 'Miles Davis',
+      album: 'Kind of Blue',
+      durationSeconds: 300,
+      format: 'DSF',
+      sampleRate: 2822400,
+      bitDepth: 1,
+      trackNumber: 2,
+      releaseYear: 1959,
+      dynamicRange: 13,
+    },
+    {
+      id: 't1',
+      releaseId: 'rel_1',
+      title: 'First',
+      artist: 'Miles Davis',
+      album: 'Kind of Blue',
+      durationSeconds: 240,
+      format: 'FLAC',
+      sampleRate: 96000,
+      bitDepth: 24,
+      trackNumber: 1,
+      releaseYear: 1959,
+      dynamicRange: 14,
+    },
+  ])
+  assert.equal(projected.releases.length, 1)
+  assert.equal(projected.releases[0]?.hasDsd, true)
+  assert.equal(projected.releases[0]?.hasHighRes, true)
+  assert.equal(projected.releases[0]?.hasFlac, true)
+  const relTracks = projected.tracksByRelease.get('rel_1') ?? []
+  assert.deepEqual(relTracks.map((t) => t.id), ['t1', 't2'])
+  assert.equal(relTracks[0]?.drScore, 14)
+
+  // 5. Core v2 player operations (listOutputs, setOutput, setVolume, setPurity)
+  const sentOps: string[] = []
+  const v2Client = createPwaCoreClient(
+    {
+      id: 'https://192.168.1.88:4040',
+      label: 'Win Engine',
+      baseUrl: 'https://192.168.1.88:4040',
+      port: 4040,
+      token: '',
+      engineKind: 'core',
+      engineId: 'core_w',
+      libraryId: 'lib_w',
+    },
+    async (_url, body) => {
+      const req = JSON.parse(body) as { operation: string }
+      sentOps.push(req.operation)
+      if (req.operation === 'core.hello') {
+        return {
+          ok: true, status: 200, statusText: 'OK', errorKind: 'ok',
+          body: JSON.stringify({
+            ok: true,
+            data: {
+              protocolVersion: 2,
+              engineId: 'core_w',
+              libraryId: 'lib_w',
+              label: 'Win Engine',
+              capabilities: ['catalog.read', 'session.read', 'playback.control', 'queue.write'],
+              ready: true,
+            },
+          }),
+        }
+      }
+      if (req.operation === 'player.outputs') {
+        return {
+          ok: true, status: 200, statusText: 'OK', errorKind: 'ok',
+          body: JSON.stringify({
+            ok: true,
+            data: { outputs: [{ id: 'dac1', displayName: 'USB DAC', transport: 'wasapi', isActive: true }] },
+          }),
+        }
+      }
+      if (req.operation === 'player.volume') {
+        return { ok: true, status: 200, statusText: 'OK', errorKind: 'ok', body: JSON.stringify({ ok: true, data: { volume: 0.75 } }) }
+      }
+      if (req.operation === 'player.purity') {
+        return { ok: true, status: 200, statusText: 'OK', errorKind: 'ok', body: JSON.stringify({ ok: true, data: { purityMode: false } }) }
+      }
+      return { ok: true, status: 200, statusText: 'OK', errorKind: 'ok', body: JSON.stringify({ ok: true, data: {} }) }
+    },
+  )
+  const outputs = await v2Client.listOutputs()
+  assert.equal(outputs.length, 1)
+  assert.equal(outputs[0]?.label, 'USB DAC')
+  await v2Client.setOutput('dac1')
+  assert.equal(await v2Client.setVolume(0.75), 0.75)
+  assert.equal(await v2Client.setPurity(false), false)
+  assert.ok(sentOps.includes('player.outputs'))
+  assert.ok(sentOps.includes('player.set_output'))
+  assert.ok(sentOps.includes('player.volume'))
+  assert.ok(sentOps.includes('player.purity'))
+})

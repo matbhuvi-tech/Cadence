@@ -30,6 +30,7 @@ import {
   isNativeAndroid,
   probeCadenceServer,
   scanPairingQrCode,
+  syncNativeServerProfile,
 } from '../../platform/cadenceBridge';
 
 interface PairingViewProps {
@@ -68,7 +69,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
   const [isScanningQr, setIsScanningQr] = useState(false);
 
   const [showManual, setShowManual] = useState(!nativeAndroid);
-  const [targetEngineKind, setTargetEngineKind] = useState<EngineKind>('local');
+  const [targetEngineKind, setTargetEngineKind] = useState<EngineKind>('core');
   const [scheme, setScheme] = useState<'https' | 'http'>('https');
   const [hostInput, setHostInput] = useState('');
   const [portInput, setPortInput] = useState('4040');
@@ -181,6 +182,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
                 : probe.label || candidate.label,
             certFingerprint: probe.certFingerprint || candidate.certFingerprint,
           };
+          await syncNativeServerProfile(seededCandidate);
           const client = createPwaCoreClient(seededCandidate);
           const prepared = await client.prepare();
           const finalizedCore: ServerProfile = {
@@ -193,6 +195,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
             capabilities: prepared.descriptor.capabilities,
             lastConnectedAt: Date.now(),
           };
+          await syncNativeServerProfile(finalizedCore);
           completeSelectionWithLeaveGuard(finalizedCore);
           return;
         } catch (err) {
@@ -201,7 +204,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
               ? err.message
               : 'Connected to host, but /v1/core handshake failed.';
           setFormError(msg);
-          setFormHint('Ensure the node exposes Cadence Core v1 capabilities and matching pairing credentials.');
+          setFormHint('Ensure the node exposes Cadence Core v1/v2 capabilities and matching pairing credentials.');
           return;
         }
       }
@@ -236,8 +239,10 @@ export const PairingView: React.FC<PairingViewProps> = ({
       }
 
       const { host, port, scheme: parsedScheme } = extractHostAndPort(parsed.baseUrl);
-      if (!parsed.token) {
+      const resolvedKind: EngineKind = parsed.engineKind ?? 'core';
+      if (!parsed.token && resolvedKind === 'local') {
         setShowManual(true);
+        setTargetEngineKind('local');
         setScheme(parsedScheme);
         setHostInput(host);
         setPortInput(String(port));
@@ -253,10 +258,10 @@ export const PairingView: React.FC<PairingViewProps> = ({
         mDnsHost: parsed.mDnsHost,
         fallbackIps: parsed.fallbackIps,
         port,
-        token: parsed.token,
+        token: parsed.token || '',
         certFingerprint: parsed.certFingerprint,
         trustInsecure: parsedScheme === 'http' ? true : parsed.trustInsecure,
-        engineKind: parsed.engineKind ?? targetEngineKind,
+        engineKind: resolvedKind,
         engineId: parsed.engineId,
         libraryId: parsed.libraryId,
         outputLabel: parsed.outputLabel,
@@ -291,6 +296,8 @@ export const PairingView: React.FC<PairingViewProps> = ({
     setSelectedDiscovered(server);
 
     const parsedScheme = server.protocol === 'http' ? 'http' : 'https';
+    const discoveredKind: EngineKind = server.engineKind ?? 'core';
+    setTargetEngineKind(discoveredKind);
     setScheme(parsedScheme);
     setHostInput(server.ip || server.mDnsHost || server.hostName);
     setPortInput(String(server.port || 4040));
@@ -299,16 +306,38 @@ export const PairingView: React.FC<PairingViewProps> = ({
     const matchingSaved = savedProfiles.find(
       (p) =>
         p.baseUrl === server.baseUrl ||
+        (server.engineId && p.engineId === server.engineId) ||
         (server.fingerprint && p.certFingerprint === server.fingerprint.toLowerCase())
     );
-    if (matchingSaved?.token) {
-      setPinInput(matchingSaved.token);
+    if (matchingSaved && (matchingSaved.token || discoveredKind === 'core')) {
+      setPinInput(matchingSaved.token || '');
       void verifyAndCompletePairing({
         ...matchingSaved,
         baseUrl: server.baseUrl,
         port: server.port || matchingSaved.port,
         mDnsHost: server.mDnsHost || matchingSaved.mDnsHost,
         certFingerprint: server.fingerprint || matchingSaved.certFingerprint,
+        engineKind: discoveredKind,
+        engineId: server.engineId || matchingSaved.engineId,
+        libraryId: server.libraryId || matchingSaved.libraryId,
+        label: server.label || matchingSaved.label,
+      });
+      return;
+    }
+
+    if (discoveredKind === 'core') {
+      void verifyAndCompletePairing({
+        id: server.baseUrl,
+        label: server.label || server.serviceName || server.hostName,
+        baseUrl: server.baseUrl,
+        mDnsHost: server.mDnsHost,
+        port: server.port || 4040,
+        token: '',
+        certFingerprint: server.fingerprint,
+        trustInsecure: parsedScheme === 'http',
+        engineKind: 'core',
+        engineId: server.engineId,
+        libraryId: server.libraryId,
       });
     }
   };
@@ -318,7 +347,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
     if (selectedDiscovered) {
       setSelectedDiscovered(null);
     }
-    if (val.includes('://') && val.includes('token=')) {
+    if (val.includes('://') && (val.includes('token=') || val.includes('kind=') || val.includes('fp='))) {
       const parsed = parsePairingInput(val);
       if (parsed?.baseUrl) {
         const { host, port, scheme: s } = extractHostAndPort(parsed.baseUrl);
@@ -341,10 +370,10 @@ export const PairingView: React.FC<PairingViewProps> = ({
     const portNum = Math.max(1, Math.min(65535, Number(portInput) || 4040));
 
     if (!trimmedHost) {
-      setFormError('Enter your Cadence Desktop IP address or .local hostname.');
+      setFormError('Enter your Cadence Engine IP address or .local hostname.');
       return;
     }
-    if (!trimmedPin) {
+    if (!trimmedPin && targetEngineKind === 'local') {
       setFormError('Enter the 4-digit pairing PIN from Cadence Desktop.');
       return;
     }
@@ -356,7 +385,10 @@ export const PairingView: React.FC<PairingViewProps> = ({
 
     const candidate: ServerProfile = {
       id: parsedUrl,
-      label: selectedDiscovered?.serviceName || (host.endsWith('.local') ? host.replace(/\.local$/i, '') : host),
+      label:
+        selectedDiscovered?.label ||
+        selectedDiscovered?.serviceName ||
+        (host.endsWith('.local') ? host.replace(/\.local$/i, '') : host),
       baseUrl: parsedUrl,
       mDnsHost: selectedDiscovered?.mDnsHost || (host.endsWith('.local') ? host : undefined),
       port,
@@ -364,6 +396,8 @@ export const PairingView: React.FC<PairingViewProps> = ({
       certFingerprint: selectedDiscovered?.fingerprint,
       trustInsecure: resolvedScheme === 'http' ? true : false,
       engineKind: targetEngineKind,
+      engineId: selectedDiscovered?.engineId,
+      libraryId: selectedDiscovered?.libraryId,
     };
 
     await verifyAndCompletePairing(candidate);
@@ -525,7 +559,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Wifi className="w-4 h-4 text-emerald-400" />
-                <span className="text-xs font-semibold text-zinc-200">Nearby Desktops on Wi-Fi</span>
+                <span className="text-xs font-semibold text-zinc-200">Nearby Engines on Wi-Fi</span>
               </div>
               <button
                 type="button"
@@ -541,8 +575,8 @@ export const PairingView: React.FC<PairingViewProps> = ({
             {discovered.length === 0 ? (
               <p className="text-[11px] text-zinc-500 py-1">
                 {isDiscovering
-                  ? 'Listening for _cadence._tcp servers on your local Wi-Fi...'
-                  : 'No servers advertised yet. Ensure Cadence Desktop Mobile Remote is enabled on the same Wi-Fi.'}
+                  ? 'Listening for _cadence-core._tcp and _cadence._tcp servers on your local Wi-Fi...'
+                  : 'No engines advertised yet. Ensure Cadence Playback Engine is running on the same Wi-Fi.'}
               </p>
             ) : (
               <div className="flex flex-col gap-2">
@@ -555,7 +589,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
                   >
                     <div className="min-w-0">
                       <p className="text-xs font-semibold text-zinc-100 truncate">
-                        {srv.serviceName || srv.hostName}
+                        {srv.label || srv.serviceName || srv.hostName}
                       </p>
                       <p className="text-[11px] font-mono text-zinc-400 truncate">
                         {srv.ip}:{srv.port}
@@ -563,7 +597,7 @@ export const PairingView: React.FC<PairingViewProps> = ({
                       </p>
                     </div>
                     <span className="shrink-0 px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-mono text-emerald-300">
-                      {srv.fingerprint ? 'HTTPS Pin' : srv.protocol.toUpperCase()}
+                      {srv.engineKind === 'core' ? 'Core Engine' : srv.fingerprint ? 'HTTPS Pin' : srv.protocol.toUpperCase()}
                     </span>
                   </button>
                 ))}
@@ -672,16 +706,16 @@ export const PairingView: React.FC<PairingViewProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-zinc-400 mb-1">
-                  4-Digit Pairing PIN
+                  {targetEngineKind === 'core' ? 'Pairing Token (Optional)' : '4-Digit Pairing PIN'}
                 </label>
                 <div className="relative flex items-center">
                   <KeyRound className="w-4 h-4 text-zinc-500 absolute left-3 pointer-events-none" />
                   <input
                     type="text"
-                    inputMode="numeric"
+                    inputMode={targetEngineKind === 'core' ? 'text' : 'numeric'}
                     value={pinInput}
                     onChange={(e) => setPinInput(e.target.value)}
-                    placeholder="e.g. 4829"
+                    placeholder={targetEngineKind === 'core' ? 'Optional for Cadence Engine' : 'e.g. 4829'}
                     className="w-full min-h-[44px] rounded-xl bg-zinc-950 border border-zinc-800 pl-9 pr-3 text-sm font-mono text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-[#D4AF37]"
                   />
                 </div>

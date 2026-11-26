@@ -54,6 +54,8 @@ export interface CoreHealthMetadata {
   protocolRevision?: number
   build?: CoreBuildInfo
   tlsFingerprintSha256?: string
+  advertisedIp?: string
+  controlPort?: number
   pinnedRs130Udn?: string | null
   musicReadOnly?: boolean
 }

@@ -58,9 +58,20 @@ async function requestJson<T>(
   return JSON.parse(res.body) as T;
 }
 
-export function getArtworkUrl(id: string, token: string, baseUrl?: string): string {
+export function getArtworkUrl(
+  id: string,
+  token: string,
+  baseUrl?: string,
+  engineKind?: 'local' | 'core'
+): string {
   if (!id) return '';
-  return `${resolveBaseUrl(baseUrl)}/api/remote/library/artwork/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
+  const cleanId = id.replace(/^core_rel_/, '');
+  const base = resolveBaseUrl(baseUrl);
+  if (engineKind === 'core') {
+    const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+    return `${base}/v1/artwork/${encodeURIComponent(cleanId)}${qs}`;
+  }
+  return `${base}/api/remote/library/artwork/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
 }
 
 export async function fetchOutputDevices(token: string, baseUrl?: string): Promise<string[]> {
