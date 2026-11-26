@@ -34,6 +34,7 @@ interface CadenceRemoteNativePlugin {
     fingerprint?: string;
     trustInsecure?: boolean;
     timeoutMs?: number;
+    engineKind?: EngineKind;
   }): Promise<ProbeResult>;
   httpRequest(options: {
     url: string;
@@ -52,6 +53,20 @@ interface CadenceRemoteNativePlugin {
   disconnectSocket(): Promise<void>;
   setBackgroundMode(options: { background: boolean; keepMediaSession: boolean }): Promise<void>;
   setMediaSessionEnabled(options: { enabled: boolean }): Promise<void>;
+  syncCoreMediaSession(options: {
+    engineId: string;
+    libraryId: string;
+    revision: number;
+    isPlaying: boolean;
+    isPaused: boolean;
+    trackId: string;
+    artworkId: string;
+    title: string;
+    artist: string;
+    album: string;
+    positionSecs: number;
+    durationSecs: number;
+  }): Promise<void>;
   discoverServers(options?: { timeoutMs?: number }): Promise<{ servers: DiscoveredServer[] }>;
   getNetworkDiagnostics(): Promise<NetworkDiagnostics>;
   requestNotificationPermission(): Promise<{ granted: boolean }>;
@@ -90,6 +105,28 @@ export async function syncNativeServerProfile(profile: ServerProfile | null): Pr
   });
 }
 
+export async function syncCoreNativeMediaSession(options: {
+  engineId: string;
+  libraryId: string;
+  revision: number;
+  isPlaying: boolean;
+  isPaused: boolean;
+  trackId: string;
+  artworkId: string;
+  title: string;
+  artist: string;
+  album: string;
+  positionSecs: number;
+  durationSecs: number;
+}): Promise<void> {
+  if (!isNativeAndroid()) return;
+  try {
+    await CadenceRemote.syncCoreMediaSession(options);
+  } catch {
+    // Non-fatal if OS restricts foreground media service
+  }
+}
+
 async function probeCoreNodeServer(
   cleanBase: string,
   token: string | undefined,
@@ -97,18 +134,22 @@ async function probeCoreNodeServer(
   trustInsecure: boolean,
   timeoutMs: number
 ): Promise<ProbeResult> {
+  if (isNativeAndroid()) {
+    return CadenceRemote.probeServer({
+      baseUrl: cleanBase,
+      token: token || '',
+      fingerprint,
+      trustInsecure,
+      timeoutMs,
+      engineKind: 'core',
+    });
+  }
+
   const t0 = performance.now();
   const sendProbe = async (
     url: string,
     opts: { method: 'GET' | 'POST'; headers?: Record<string, string>; body?: string }
   ): Promise<{ ok: boolean; status: number; body: string; errorKind: DiagnosticErrorKind; errorMessage?: string }> => {
-    if (isNativeAndroid()) {
-      const r = await CadenceRemote.httpRequest({ url, ...opts });
-      return {
-        ...r,
-        errorKind: (r.errorKind as DiagnosticErrorKind) || 'http_error',
-      };
-    }
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -189,27 +230,16 @@ async function probeCoreNodeServer(
     // Allow non-fatal parse fallback; /v1/core below enforces full protocol
   }
 
-  if (!token) {
-    return {
-      reachable: true,
-      authenticated: false,
-      httpStatus: healthRes.status,
-      label: observedLabel,
-      engineId: observedEngineId,
-      libraryId: observedLibraryId,
-      certFingerprint: observedFp,
-      errorKind: 'ok',
-      errorMessage: '',
-      latencyMs: Math.round(performance.now() - t0),
-    };
+  const helloHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token && token.trim()) {
+    helloHeaders['x-cadence-token'] = token.trim();
   }
 
   const helloRes = await sendProbe(`${cleanBase}/v1/core`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-cadence-token': token,
-    },
+    headers: helloHeaders,
     body: JSON.stringify({
       protocolVersion: 1,
       engineId: observedEngineId,

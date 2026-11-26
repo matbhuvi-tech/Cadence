@@ -1,9 +1,18 @@
 import type {
+  DbRelease,
+  DbTrack,
   PlaybackStatus,
   RemoteQueue,
   RemoteTrackItem,
   ServerProfile,
 } from '../types/remote';
+
+export interface CoreOutputDevice {
+  id: string;
+  label: string;
+  transport: string;
+  isActive?: boolean;
+}
 
 export const CORE_PROTOCOL_VERSION = 1;
 export const CORE_MAX_MESSAGE_BYTES = 1048576;
@@ -65,6 +74,7 @@ export interface CoreCatalogTrack {
   genreTags?: string[];
   folderName?: string;
   language?: string;
+  dynamicRange?: number;
   hasCoverArt?: boolean;
   fingerprintStatus?: string;
 }
@@ -291,6 +301,10 @@ function parseCoreCatalogTrack(item: unknown): CoreCatalogTrack {
       typeof t.folderName === 'string' && t.folderName.trim() ? t.folderName.trim() : undefined,
     language:
       typeof t.language === 'string' && t.language.trim() ? t.language.trim() : undefined,
+    dynamicRange:
+      typeof t.dynamicRange === 'number' && Number.isFinite(t.dynamicRange) && t.dynamicRange > 0
+        ? Math.round(t.dynamicRange)
+        : undefined,
     hasCoverArt: typeof t.hasCoverArt === 'boolean' ? t.hasCoverArt : undefined,
     fingerprintStatus:
       typeof t.fingerprintStatus === 'string' && t.fingerprintStatus.trim()
@@ -424,7 +438,103 @@ export function parseCoreSnapshot(
   };
 }
 
-export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
+export function projectCoreCatalogToReleases(tracks: readonly CoreCatalogTrack[]): {
+  releases: DbRelease[];
+  tracksByRelease: Map<string, DbTrack[]>;
+} {
+  const releaseMap = new Map<
+    string,
+    {
+      release: DbRelease;
+      formats: Set<string>;
+      tracks: DbTrack[];
+    }
+  >();
+
+  for (const ct of tracks) {
+    const releaseId =
+      ct.releaseId?.trim() ||
+      `core_rel_${ct.album.toLowerCase().replace(/[^a-z0-9]+/g, '_') || 'album'}`;
+    const rawFmt = (ct.format || 'FLAC').toUpperCase();
+    const isDsd = rawFmt === 'DSD' || rawFmt === 'DSF' || rawFmt === 'DFF';
+    const isHighRes = isDsd || (ct.sampleRate ?? 0) > 48000 || (ct.bitDepth ?? 0) > 16;
+    const isFlac = rawFmt === 'FLAC';
+    const displayFmt = isDsd ? 'DSD' : rawFmt;
+
+    let bucket = releaseMap.get(releaseId);
+    if (!bucket) {
+      const displayAlbumArtist = ct.isCompilation
+        ? 'Various Artists'
+        : ct.albumArtist?.trim() || ct.artist || 'Unknown Artist';
+      bucket = {
+        release: {
+          id: releaseId,
+          title: ct.edition ? `${ct.album} (${ct.edition})` : ct.album || 'Unknown Album',
+          folderPath: ct.folderName || '',
+          folderName: ct.folderName || ct.album || '',
+          artistCredit: displayAlbumArtist,
+          composerName: ct.composerName ?? null,
+          releaseYear: ct.releaseYear ?? null,
+          genreTags: ct.genreTags?.length ? ct.genreTags.join(', ') : null,
+          isCompilation: Boolean(ct.isCompilation),
+          hasDsd: isDsd,
+          hasHighRes: isHighRes,
+          hasFlac: isFlac,
+          formats: [displayFmt],
+        },
+        formats: new Set([displayFmt]),
+        tracks: [],
+      };
+      releaseMap.set(releaseId, bucket);
+    } else {
+      if (isDsd) bucket.release.hasDsd = true;
+      if (isHighRes) bucket.release.hasHighRes = true;
+      if (isFlac) bucket.release.hasFlac = true;
+      bucket.formats.add(displayFmt);
+      if (!bucket.release.releaseYear && ct.releaseYear) {
+        bucket.release.releaseYear = ct.releaseYear;
+      }
+      if (!bucket.release.composerName && ct.composerName) {
+        bucket.release.composerName = ct.composerName;
+      }
+    }
+
+    bucket.tracks.push({
+      id: ct.id,
+      releaseId,
+      filePath: ct.id,
+      fileName: ct.title,
+      title: ct.title,
+      artistCredit: ct.artist,
+      albumTitle: ct.album,
+      releaseYear: ct.releaseYear ?? null,
+      trackNumber: ct.trackNumber ?? bucket.tracks.length + 1,
+      durationSecs: ct.durationSeconds,
+      format: displayFmt,
+      sampleRate: ct.sampleRate ?? null,
+      bitDepth: ct.bitDepth ?? null,
+      drScore: ct.dynamicRange ?? null,
+      hasEmbeddedArt: Boolean(ct.hasCoverArt),
+      isOnline: true,
+    });
+  }
+
+  const releases: DbRelease[] = [];
+  const tracksByRelease = new Map<string, DbTrack[]>();
+  for (const [id, entry] of releaseMap.entries()) {
+    entry.release.formats = Array.from(entry.formats);
+    entry.tracks.sort((a, b) => (a.trackNumber ?? 0) - (b.trackNumber ?? 0));
+    releases.push(entry.release);
+    tracksByRelease.set(id, entry.tracks);
+  }
+
+  return { releases, tracksByRelease };
+}
+
+export function mapCoreSnapshotToPwa(
+  snapshot: CoreSnapshot,
+  playerOverrides?: { volume?: number; purityMode?: boolean }
+): {
   status: PlaybackStatus;
   queue: RemoteQueue;
   outputLabel: string | null;
@@ -439,12 +549,14 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
     return {
       queueEntryId: entry.entryId,
       id: entry.trackId,
+      releaseId: trk?.releaseId,
       title: trk?.title || entry.trackId,
       artist: trk?.artist || 'Unknown Artist',
       album: trk?.album || '',
       format: isDsd ? 'DSD' : rawFmt,
       sampleRate: trk?.sampleRate,
       bitDepth: trk?.bitDepth,
+      drScore: trk?.dynamicRange ?? null,
       durationSecs: trk?.durationSeconds ?? 0,
       filePath: entry.trackId,
       isHighRes,
@@ -465,13 +577,14 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
     currentQueueEntryId: activeItem?.queueEntryId ?? null,
     positionSecs: snapshot.playback.positionSeconds,
     durationSecs: activeItem?.durationSecs ?? 0,
-    volume: 1,
-    purityMode: true,
-    isBitPerfect: true,
+    volume: playerOverrides?.volume ?? 1,
+    purityMode: playerOverrides?.purityMode ?? true,
+    isBitPerfect: playerOverrides?.purityMode ?? true,
     activeDevice: snapshot.output?.label ?? null,
     streamInfo: activeItem
       ? {
         filePath: activeItem.id,
+        releaseId: activeItem.releaseId ?? null,
         title: activeItem.title,
         artist: activeItem.artist,
         album: activeItem.album,
@@ -479,6 +592,7 @@ export function mapCoreSnapshotToPwa(snapshot: CoreSnapshot): {
         format: activeItem.format || 'FLAC',
         sampleRate: activeItem.sampleRate,
         bitDepth: activeItem.bitDepth,
+        drScore: activeItem.drScore ?? null,
         isHighRes: activeItem.isHighRes,
       }
       : null,
@@ -657,6 +771,54 @@ export function createPwaCoreClient(profile: ServerProfile, postJson?: CorePostF
       }
       const rawSnap = await requestCore(command);
       return hydrateCatalog(parseCoreSnapshot(rawSnap, profile));
+    },
+
+    async listOutputs(): Promise<CoreOutputDevice[]> {
+      await ensureHello(false);
+      const raw = await requestCore({ protocolVersion: 2, operation: 'player.outputs' });
+      const obj = assertRecord(raw);
+      const rawList = Array.isArray(obj.outputs) ? obj.outputs : [];
+      const out: CoreOutputDevice[] = [];
+      for (const item of rawList) {
+        if (!item || typeof item !== 'object') continue;
+        const r = item as Record<string, unknown>;
+        const id = typeof r.id === 'string' ? r.id.trim() : '';
+        const label =
+          typeof r.displayName === 'string' && r.displayName.trim()
+            ? r.displayName.trim()
+            : typeof r.label === 'string' && r.label.trim()
+            ? r.label.trim()
+            : id;
+        const transport = typeof r.transport === 'string' ? r.transport : 'wasapi';
+        if (id) {
+          out.push({
+            id,
+            label,
+            transport,
+            isActive: Boolean(r.isActive),
+          });
+        }
+      }
+      return out;
+    },
+
+    async setOutput(outputId: string): Promise<void> {
+      await ensureHello(false);
+      await requestCore({ protocolVersion: 2, operation: 'player.set_output', outputId });
+    },
+
+    async setVolume(volume: number): Promise<number> {
+      await ensureHello(false);
+      const raw = await requestCore({ protocolVersion: 2, operation: 'player.volume', volume });
+      const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      return typeof obj.volume === 'number' ? obj.volume : volume;
+    },
+
+    async setPurity(enabled: boolean): Promise<boolean> {
+      await ensureHello(false);
+      const raw = await requestCore({ protocolVersion: 2, operation: 'player.purity', enabled });
+      const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      return typeof obj.purityMode === 'boolean' ? obj.purityMode : enabled;
     },
   };
 }

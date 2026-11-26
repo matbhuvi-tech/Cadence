@@ -15,6 +15,7 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
 }) => {
   const engine = useOptionalEngineController()
   const activeProfile = engine?.state.activeProfile ?? null
+  const activeEngineHealth = engine?.state.activeEngineHealth ?? null
   const [copied, setCopied] = useState(false)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -22,12 +23,30 @@ export const MobileRemoteModal: React.FC<MobileRemoteModalProps> = ({
     if (!activeProfile) return ''
     try {
       const url = new URL(activeProfile.baseUrl)
-      if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return ''
+      const isLoopback =
+        url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
+      let origin = url.origin
+      if (isLoopback) {
+        const advIp = activeEngineHealth?.advertisedIp?.trim() || ''
+        const isAdvLoopback =
+          !advIp || advIp === '127.0.0.1' || advIp === 'localhost' || advIp === '::1'
+        if (isAdvLoopback) return ''
+        const port = activeEngineHealth?.controlPort || url.port || '4040'
+        origin = `${url.protocol}//${advIp}:${port}`
+      }
       const params = new URLSearchParams()
+      params.set('kind', 'core')
       if (activeProfile.pairingToken) params.set('token', activeProfile.pairingToken)
-      if (activeProfile.certFingerprint) params.set('fp', activeProfile.certFingerprint)
+      const fp = activeProfile.certFingerprint || activeEngineHealth?.tlsFingerprintSha256
+      if (fp) params.set('fp', fp)
+      const engineId = activeProfile.engineId || activeEngineHealth?.engineId
+      if (engineId) params.set('engineId', engineId)
+      const libraryId = activeProfile.libraryId || activeEngineHealth?.libraryId
+      if (libraryId) params.set('libraryId', libraryId)
+      const label = activeProfile.label || activeEngineHealth?.label
+      if (label) params.set('label', label)
       const qs = params.toString()
-      return `${url.origin}/${qs ? `?${qs}` : ''}`
+      return `${origin}/${qs ? `?${qs}` : ''}`
     } catch {
       return ''
     }

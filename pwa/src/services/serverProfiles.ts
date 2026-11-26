@@ -134,15 +134,15 @@ export function isSameProfileScope(a: ServerProfile, b: ServerProfile): boolean 
 }
 
 export function loadActiveServerProfile(isNative: boolean): ServerProfile | null {
-  // Check URL query params first when loaded in browser mode from the desktop server
+  // Check URL query params first when loaded in browser mode from the desktop/engine server
   if (!isNative && typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
-    const urlToken = params.get('token')?.trim();
-    if (urlToken) {
+    const urlToken = params.get('token')?.trim() || '';
+    const kindParam = params.get('kind')?.trim().toLowerCase();
+    const engineKind = kindParam === 'core' ? 'core' : kindParam === 'local' ? 'local' : undefined;
+    if (urlToken || engineKind === 'core') {
       const origin = window.location.origin;
       const { host, port } = extractHostAndPort(origin);
-      const kindParam = params.get('kind')?.trim().toLowerCase();
-      const engineKind = kindParam === 'core' ? 'core' : kindParam === 'local' ? 'local' : undefined;
       const profile: ServerProfile = {
         id: origin,
         label: params.get('label')?.trim() || host || (engineKind === 'core' ? 'Cadence Core' : 'Cadence Desktop'),
@@ -167,8 +167,11 @@ export function loadActiveServerProfile(isNative: boolean): ServerProfile | null
     const raw = localStorage.getItem(ACTIVE_PROFILE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as ServerProfile;
-      if (parsed && parsed.baseUrl && parsed.token) {
-        return parsed;
+      if (parsed && parsed.baseUrl && (parsed.token || parsed.engineKind === 'core')) {
+        return {
+          ...parsed,
+          token: parsed.token || '',
+        };
       }
     }
   } catch {

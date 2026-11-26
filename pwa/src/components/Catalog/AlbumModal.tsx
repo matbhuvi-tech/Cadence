@@ -11,13 +11,15 @@ import {
   Pause,
   Check,
 } from 'lucide-react';
-import type { DbRelease, DbTrack, AlbumVersionSummary } from '../../types/remote';
+import type { DbRelease, DbTrack, AlbumVersionSummary, EngineKind } from '../../types/remote';
 import { fetchTracks, getArtworkUrl } from '../../services/api';
 
 interface AlbumModalProps {
   release: DbRelease | null;
   token: string;
   baseUrl?: string;
+  engineKind?: EngineKind;
+  preloadedTracks?: DbTrack[];
   activeTrackPath?: string | null;
   isPlaybackPlaying?: boolean;
   onClose: () => void;
@@ -48,6 +50,8 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
   release,
   token,
   baseUrl,
+  engineKind,
+  preloadedTracks,
   activeTrackPath = null,
   isPlaybackPlaying = false,
   onClose,
@@ -90,9 +94,17 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
     setQueuedTrackId(null);
   }, [release]);
 
-  // Fetch tracks whenever activeReleaseId changes
+  // Fetch tracks whenever activeReleaseId changes (or use preloaded Core tracks)
   useEffect(() => {
     if (!activeReleaseId) return;
+    if (engineKind === 'core' && preloadedTracks) {
+      setTracks(preloadedTracks);
+      setLoading(false);
+      setError(null);
+      setAcceptedTrack(null);
+      setQueuedTrackId(null);
+      return;
+    }
     setLoading(true);
     setError(null);
     setAcceptedTrack(null);
@@ -107,13 +119,13 @@ export const AlbumModal: React.FC<AlbumModalProps> = ({
         setLoading(false);
         console.error(err);
       });
-  }, [activeReleaseId, token, baseUrl]);
+  }, [activeReleaseId, token, baseUrl, engineKind, preloadedTracks]);
 
   if (!release) return null;
 
   const activeVersion = versions.find((v) => v.releaseId === activeReleaseId);
   const isSelectedOffline = activeVersion ? !activeVersion.isOnline : false;
-  const artworkUrl = getArtworkUrl(activeReleaseId || release.id, token, baseUrl);
+  const artworkUrl = getArtworkUrl(activeReleaseId || release.id, token, baseUrl, engineKind);
 
   const dispatchRemoteAction = async (
     action: () => Promise<boolean> | boolean | void,

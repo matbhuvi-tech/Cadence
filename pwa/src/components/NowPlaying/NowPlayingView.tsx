@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Disc3, Shield, ShieldAlert, RefreshCw, Speaker, ChevronDown } from 'lucide-react';
-import type { PlaybackStatus, AudioStreamInfo } from '../../types/remote';
+import type { PlaybackStatus, AudioStreamInfo, EngineKind } from '../../types/remote';
 import { getArtworkUrl } from '../../services/api';
 import { VolumeGuard } from './VolumeGuard';
 
@@ -8,6 +8,7 @@ interface NowPlayingViewProps {
   status: PlaybackStatus;
   token: string;
   baseUrl?: string;
+  engineKind?: EngineKind;
   onClose?: () => void;
   onPlayPause: () => void;
   onNextTrack: () => void;
@@ -50,6 +51,7 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   status,
   token,
   baseUrl,
+  engineKind,
   onClose,
   onPlayPause,
   onNextTrack,
@@ -130,8 +132,8 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
   const artistName = stream?.artist || 'Cadence Transport Engine';
   const albumName = stream?.album || 'Ready for Playback';
 
-  const artworkId = status.currentFile || '';
-  const artworkUrl = artworkId ? getArtworkUrl(artworkId, token, baseUrl) : '';
+  const artworkId = stream?.releaseId || status.currentFile || '';
+  const artworkUrl = artworkId ? getArtworkUrl(artworkId, token, baseUrl, engineKind) : '';
   const upnpRouteLocked = Boolean(status.isPlaying && status.activeDevice?.startsWith('[UPnP]'));
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -231,9 +233,11 @@ export const NowPlayingView: React.FC<NowPlayingViewProps> = ({
 
         {/* Dynamic Range Badge & Container Spec */}
         <div className="inline-flex items-center space-x-2 mt-2">
-          <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-[10px] font-mono font-bold text-amber-400">
-            DR 14
-          </span>
+          {typeof stream?.drScore === 'number' && stream.drScore > 0 && (
+            <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-[10px] font-mono font-bold text-amber-400">
+              DR {stream.drScore}
+            </span>
+          )}
           {stream && (
             <div className="inline-flex items-center space-x-1.5 px-3 py-0.5 rounded-full bg-zinc-900/90 border border-zinc-800 text-[11px] font-mono text-[#D4AF37]">
               <span className="w-1.5 h-1.5 rounded-full bg-[#D4AF37]" />

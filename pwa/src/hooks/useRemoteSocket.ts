@@ -24,6 +24,7 @@ import {
   mapCoreSnapshotToPwa,
   type CoreCatalogTrack,
   type CoreClientCommand,
+  type CoreOutputDevice,
   type CoreSnapshot,
 } from '../services/coreRemoteClient';
 import {
@@ -40,6 +41,7 @@ import {
   getAndroidNetworkDiagnostics,
   isNativeAndroid,
   probeCadenceServer,
+  syncCoreNativeMediaSession,
   syncNativeServerProfile,
 } from '../platform/cadenceBridge';
 
@@ -260,6 +262,8 @@ export function useRemoteSocket() {
   const activeProfileRef = useRef<ServerProfile | null>(activeProfile);
   const coreSnapshotRef = useRef<CoreSnapshot | null>(coreSnapshot);
   const coreClientRef = useRef<ReturnType<typeof createPwaCoreClient> | null>(null);
+  const coreOutputsRef = useRef<CoreOutputDevice[]>([]);
+  const corePlayerOverridesRef = useRef<{ volume?: number; purityMode?: boolean }>({});
   const lockScreenControlsRef = useRef<boolean>(lockScreenControls);
   const statusRef = useRef<PlaybackStatus>(status);
   const isConnectedRef = useRef<boolean>(isConnected);
@@ -287,16 +291,41 @@ export function useRemoteSocket() {
   const applyCoreSnapshot = useCallback((snap: CoreSnapshot, targetProfile?: ServerProfile) => {
     coreSnapshotRef.current = snap;
     setCoreSnapshot(snap);
-    const mapped = mapCoreSnapshotToPwa(snap);
+    const mapped = mapCoreSnapshotToPwa(snap, corePlayerOverridesRef.current);
     setStatus(mapped.status);
     setQueue(mapped.queue);
-    setOutputDevices(mapped.outputLabel ? [mapped.outputLabel] : []);
+    if (coreOutputsRef.current.length > 0) {
+      const labels = coreOutputsRef.current.map((o) => o.label);
+      if (mapped.outputLabel && !labels.includes(mapped.outputLabel)) {
+        labels.unshift(mapped.outputLabel);
+      }
+      setOutputDevices(labels);
+    } else {
+      setOutputDevices(mapped.outputLabel ? [mapped.outputLabel] : []);
+    }
     const current = targetProfile ?? activeProfileRef.current;
     if (current && mapped.outputLabel && current.outputLabel !== mapped.outputLabel) {
       const updatedProfile: ServerProfile = { ...current, outputLabel: mapped.outputLabel };
       activeProfileRef.current = updatedProfile;
       setActiveProfileState(updatedProfile);
       saveActiveServerProfile(updatedProfile);
+    }
+    if (isNativeAndroid()) {
+      const stream = mapped.status.streamInfo;
+      void syncCoreNativeMediaSession({
+        engineId: snap.engineId,
+        libraryId: snap.libraryId,
+        revision: snap.revision,
+        isPlaying: mapped.status.isPlaying,
+        isPaused: mapped.status.isPaused,
+        trackId: mapped.status.currentFile || '',
+        artworkId: stream?.releaseId || mapped.status.currentFile || '',
+        title: stream?.title || 'Cadence',
+        artist: stream?.artist || 'Cadence Playback Engine',
+        album: stream?.album || '',
+        positionSecs: mapped.status.positionSecs,
+        durationSecs: mapped.status.durationSecs,
+      });
     }
   }, []);
 
@@ -477,7 +506,29 @@ export function useRemoteSocket() {
 
   const refreshOutputDevices = useCallback(async () => {
     const profile = activeProfileRef.current;
-    if (!profile?.token || !profile.baseUrl) return;
+    if (!profile?.baseUrl) return;
+    if (profile.engineKind === 'core') {
+      const client = coreClientRef.current ?? createPwaCoreClient(profile);
+      coreClientRef.current = client;
+      setIsLoadingDevices(true);
+      setDeviceError(null);
+      try {
+        const outputs = await client.listOutputs();
+        coreOutputsRef.current = outputs;
+        const labels = outputs.map((o) => o.label);
+        const activeLabel = coreSnapshotRef.current?.output?.label;
+        if (activeLabel && !labels.includes(activeLabel)) {
+          labels.unshift(activeLabel);
+        }
+        setOutputDevices(labels);
+      } catch (err) {
+        setDeviceError(err instanceof Error ? err.message : 'Could not load Engine outputs.');
+      } finally {
+        setIsLoadingDevices(false);
+      }
+      return;
+    }
+    if (!profile.token) return;
     setIsLoadingDevices(true);
     setDeviceError(null);
     try {
@@ -492,7 +543,28 @@ export function useRemoteSocket() {
   const changeOutputDevice = useCallback(
     async (deviceName: string) => {
       const profile = activeProfileRef.current;
-      if (!profile?.token || !profile.baseUrl || !deviceName) return;
+      if (!profile?.baseUrl || !deviceName) return;
+      if (profile.engineKind === 'core') {
+        const client = coreClientRef.current ?? createPwaCoreClient(profile);
+        coreClientRef.current = client;
+        const matched = coreOutputsRef.current.find(
+          (o) => o.label === deviceName || o.id === deviceName
+        );
+        const targetId = matched?.id ?? deviceName;
+        setIsChangingDevice(true);
+        setDeviceError(null);
+        try {
+          await client.setOutput(targetId);
+          await refreshCorePassiveSnapshot();
+        } catch (err) {
+          setDeviceError(err instanceof Error ? err.message : 'Could not change Engine output.');
+          await refreshOutputDevices();
+        } finally {
+          setIsChangingDevice(false);
+        }
+        return;
+      }
+      if (!profile.token) return;
       setIsChangingDevice(true);
       setDeviceError(null);
       try {
@@ -504,7 +576,7 @@ export function useRemoteSocket() {
         setIsChangingDevice(false);
       }
     },
-    [refreshOutputDevices]
+    [refreshCorePassiveSnapshot, refreshOutputDevices]
   );
 
   const selectServerProfile = useCallback(
@@ -519,6 +591,8 @@ export function useRemoteSocket() {
         prevBaseUrlRef.current = profile.baseUrl;
         coreClientRef.current = null;
         coreSnapshotRef.current = null;
+        coreOutputsRef.current = [];
+        corePlayerOverridesRef.current = {};
         setCoreSnapshot(null);
         setStatus(INITIAL_STATUS);
         setQueue(INITIAL_QUEUE);
@@ -531,9 +605,7 @@ export function useRemoteSocket() {
       saveActiveServerProfile(profile);
       activeProfileRef.current = profile;
       setActiveProfileState(profile);
-      if (profile.engineKind !== 'core') {
-        void syncNativeServerProfile(profile);
-      }
+      void syncNativeServerProfile(profile);
     },
     [clearReconnectTimer]
   );
@@ -640,7 +712,7 @@ export function useRemoteSocket() {
   const connect = useCallback(
     async (profileOverride?: ServerProfile) => {
       const target = profileOverride ?? activeProfileRef.current;
-      if (!target || !target.baseUrl || !target.token) {
+      if (!target || !target.baseUrl || (target.engineKind !== 'core' && !target.token)) {
         setIsConnecting(false);
         setIsConnected(false);
         return;
@@ -655,9 +727,10 @@ export function useRemoteSocket() {
 
       setIsConnecting(true);
 
-      // Direct Cadence Core v1 control path (independent of Windows Desktop)
+      // Direct Cadence Core v1/v2 control path (independent of Windows Desktop)
       if (target.engineKind === 'core') {
         try {
+          await syncNativeServerProfile(target);
           const client = createPwaCoreClient(target);
           const prepared = await client.prepare();
           if (
@@ -681,6 +754,7 @@ export function useRemoteSocket() {
           setIsConnecting(false);
           setError(null);
           setConnectionDiagnostic(null);
+          void refreshOutputDevices();
           if (prepared.snapshot.playback.activity === 'loading') {
             scheduleCoreLoadingSettleCheck();
           } else {
@@ -1002,7 +1076,7 @@ export function useRemoteSocket() {
   }, [connect]);
 
   useEffect(() => {
-    if (!activeProfile?.baseUrl || !activeProfile.token) {
+    if (!activeProfile?.baseUrl || (activeProfile.engineKind !== 'core' && !activeProfile.token)) {
       return;
     }
 
@@ -1208,7 +1282,147 @@ export function useRemoteSocket() {
           return false;
         }
         const action = typeof cmd.action === 'string' ? cmd.action : '';
-        const commandId = `pwa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const makeCmdId = (tag: string) =>
+          `pwa_${tag}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+        // Engine v2 direct player controls (volume & purity)
+        if (action === 'set_volume' && typeof cmd.volume === 'number') {
+          try {
+            const actual = await client.setVolume(cmd.volume);
+            corePlayerOverridesRef.current = { ...corePlayerOverridesRef.current, volume: actual };
+            setStatus((prev) => ({ ...prev, volume: actual }));
+            return true;
+          } catch {
+            return false;
+          }
+        }
+        if (action === 'toggle_purity' && typeof cmd.enabled === 'boolean') {
+          try {
+            const actual = await client.setPurity(cmd.enabled);
+            corePlayerOverridesRef.current = { ...corePlayerOverridesRef.current, purityMode: actual };
+            setStatus((prev) => ({ ...prev, purityMode: actual, isBitPerfect: actual }));
+            return true;
+          } catch {
+            return false;
+          }
+        }
+
+        const resolveReleaseTracks = (releaseId: string) => {
+          const clean = releaseId.replace(/^core_rel_/, '');
+          const matched = snap.catalog.tracks.filter(
+            (t) =>
+              t.releaseId === releaseId ||
+              t.releaseId === clean ||
+              `core_rel_${t.album.toLowerCase().replace(/[^a-z0-9]+/g, '_') || 'album'}` === releaseId
+          );
+          return matched.sort((a, b) => (a.trackNumber ?? 0) - (b.trackNumber ?? 0));
+        };
+
+        const runCoreCommand = async (coreCmd: CoreClientCommand): Promise<CoreSnapshot | null> => {
+          try {
+            const updated = await client.execute(coreCmd);
+            applyCoreSnapshot(updated, profile);
+            setIsConnected(true);
+            setError(null);
+            setConflictEvent(null);
+            if (updated.playback.activity === 'loading') {
+              scheduleCoreLoadingSettleCheck();
+            } else {
+              clearCoreLoadingSettleTimer();
+            }
+            return updated;
+          } catch (err) {
+            if (err instanceof CoreClientError && err.code === 'stale_revision' && err.snapshot) {
+              applyCoreSnapshot(err.snapshot, profile);
+              const mapped = mapCoreSnapshotToPwa(err.snapshot, corePlayerOverridesRef.current);
+              setConflictEvent({
+                currentRevision: err.snapshot.revision,
+                items: mapped.queue.items,
+                currentIndex: mapped.queue.currentIndex,
+              });
+              return null;
+            }
+            if (
+              err instanceof CoreClientError &&
+              (err.code === 'takeover_required' ||
+                err.code === 'not_ready' ||
+                err.code === 'invalid_payload')
+            ) {
+              setIsConnected(true);
+              setError(err.message);
+              return null;
+            }
+            setIsConnected(false);
+            setError('Connection lost. Playback may still be continuing.');
+            return null;
+          }
+        };
+
+        // Release-level playback (replace queue with release tracks, then play target track)
+        if (
+          (action === 'play_release' && typeof cmd.release_id === 'string') ||
+          (action === 'play_track_in_release' &&
+            typeof cmd.release_id === 'string' &&
+            typeof cmd.track_id === 'string')
+        ) {
+          const relTracks = resolveReleaseTracks(cmd.release_id as string);
+          if (relTracks.length === 0) return false;
+          const targetTrackId =
+            action === 'play_track_in_release' ? (cmd.track_id as string) : relTracks[0].id;
+          const startIdx = Math.max(
+            0,
+            relTracks.findIndex((t) => t.id === targetTrackId)
+          );
+          const ordered = relTracks.slice(startIdx);
+          const newEntries = ordered.map((t, idx) => ({
+            entryId: `qe_${Date.now().toString(36)}_${idx}`,
+            trackId: t.id,
+          }));
+          const afterQueue = await runCoreCommand({
+            operation: 'queue.replace',
+            entries: newEntries,
+            commandId: makeCmdId('qrel'),
+            expectedRevision: snap.revision,
+          });
+          if (!afterQueue) return false;
+          const afterPlay = await runCoreCommand({
+            operation: 'playback.control',
+            action: 'play',
+            trackId: targetTrackId,
+            commandId: makeCmdId('play'),
+            expectedRevision: afterQueue.revision,
+          });
+          return Boolean(afterPlay);
+        }
+
+        if (action === 'queue_release' && typeof cmd.release_id === 'string') {
+          const relTracks = resolveReleaseTracks(cmd.release_id);
+          if (relTracks.length === 0) return false;
+          const added = relTracks.map((t, idx) => ({
+            entryId: `qe_${Date.now().toString(36)}_${idx}`,
+            trackId: t.id,
+          }));
+          const currIdx = snap.queue.currentEntryId
+            ? snap.queue.entries.findIndex((e) => e.entryId === snap.queue.currentEntryId)
+            : -1;
+          const nextEntries =
+            cmd.play_next === true && currIdx >= 0
+              ? [
+                  ...snap.queue.entries.slice(0, currIdx + 1),
+                  ...added,
+                  ...snap.queue.entries.slice(currIdx + 1),
+                ]
+              : [...snap.queue.entries, ...added];
+          const updated = await runCoreCommand({
+            operation: 'queue.replace',
+            entries: nextEntries,
+            commandId: makeCmdId('qadd'),
+            expectedRevision: snap.revision,
+          });
+          return Boolean(updated);
+        }
+
+        const commandId = makeCmdId(action || 'cmd');
         let coreCmd: CoreClientCommand | null = null;
         if (action === 'pause' || action === 'resume' || action === 'stop') {
           coreCmd = {
@@ -1260,56 +1474,70 @@ export function useRemoteSocket() {
             };
           }
         } else if (action === 'queue_track' && typeof cmd.file_path === 'string') {
-          const entries = [
-            ...snap.queue.entries,
-            { entryId: `qe_${Date.now().toString(36)}`, trackId: cmd.file_path },
-          ];
+          const newEntry = { entryId: `qe_${Date.now().toString(36)}`, trackId: cmd.file_path };
+          const currIdx = snap.queue.currentEntryId
+            ? snap.queue.entries.findIndex((e) => e.entryId === snap.queue.currentEntryId)
+            : -1;
+          const entries =
+            cmd.play_next === true && currIdx >= 0
+              ? [
+                  ...snap.queue.entries.slice(0, currIdx + 1),
+                  newEntry,
+                  ...snap.queue.entries.slice(currIdx + 1),
+                ]
+              : [...snap.queue.entries, newEntry];
           coreCmd = {
             operation: 'queue.replace',
             entries,
             commandId,
             expectedRevision: snap.revision,
           };
+        } else if (
+          action === 'reorder_queue' &&
+          typeof cmd.queue_entry_id === 'string' &&
+          typeof cmd.target_queue_entry_id === 'string'
+        ) {
+          const fromIdx = snap.queue.entries.findIndex((e) => e.entryId === cmd.queue_entry_id);
+          const toIdx = snap.queue.entries.findIndex((e) => e.entryId === cmd.target_queue_entry_id);
+          if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
+            const reordered = [...snap.queue.entries];
+            const [moved] = reordered.splice(fromIdx, 1);
+            reordered.splice(toIdx, 0, moved);
+            coreCmd = {
+              operation: 'queue.replace',
+              entries: reordered,
+              commandId,
+              expectedRevision: snap.revision,
+            };
+          }
+        } else if (action === 'remove_from_queue') {
+          const filtered = snap.queue.entries.filter((e, idx) => {
+            if (typeof cmd.queue_entry_id === 'string') return e.entryId !== cmd.queue_entry_id;
+            if (typeof cmd.index === 'number') return idx !== cmd.index;
+            if (typeof cmd.track_id === 'string') return e.trackId !== cmd.track_id;
+            return true;
+          });
+          coreCmd = {
+            operation: 'queue.replace',
+            entries: filtered,
+            commandId,
+            expectedRevision: snap.revision,
+          };
+        } else if (action === 'clear_queue') {
+          const kept = snap.queue.currentEntryId
+            ? snap.queue.entries.filter((e) => e.entryId === snap.queue.currentEntryId)
+            : [];
+          coreCmd = {
+            operation: 'queue.replace',
+            entries: kept,
+            commandId,
+            expectedRevision: snap.revision,
+          };
         }
 
         if (!coreCmd) return false;
-        try {
-          const updated = await client.execute(coreCmd);
-          applyCoreSnapshot(updated, profile);
-          setIsConnected(true);
-          setError(null);
-          setConflictEvent(null);
-          if (updated.playback.activity === 'loading') {
-            scheduleCoreLoadingSettleCheck();
-          } else {
-            clearCoreLoadingSettleTimer();
-          }
-          return true;
-        } catch (err) {
-          if (err instanceof CoreClientError && err.code === 'stale_revision' && err.snapshot) {
-            applyCoreSnapshot(err.snapshot, profile);
-            const mapped = mapCoreSnapshotToPwa(err.snapshot);
-            setConflictEvent({
-              currentRevision: err.snapshot.revision,
-              items: mapped.queue.items,
-              currentIndex: mapped.queue.currentIndex,
-            });
-            return false;
-          }
-          if (
-            err instanceof CoreClientError &&
-            (err.code === 'takeover_required' ||
-              err.code === 'not_ready' ||
-              err.code === 'invalid_payload')
-          ) {
-            setIsConnected(true);
-            setError(err.message);
-            return false;
-          }
-          setIsConnected(false);
-          setError('Connection lost. Playback may still be continuing.');
-          return false;
-        }
+        const updated = await runCoreCommand(coreCmd);
+        return Boolean(updated);
       }
 
       const payload = JSON.stringify(cmd);

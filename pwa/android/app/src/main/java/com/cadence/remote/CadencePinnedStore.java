@@ -152,8 +152,40 @@ public final class CadencePinnedStore {
         if (p.fingerprint.isEmpty()) {
             return false;
         }
-        String actual = computeSpkiSha256(cert);
-        return p.fingerprint.equals(actual);
+        return matchesExpectedFingerprint(cert, p.fingerprint);
+    }
+
+    public static boolean matchesExpectedFingerprint(X509Certificate cert, String expectedHex) {
+        String expected = normalizeFingerprint(expectedHex);
+        if (cert == null || expected.isEmpty()) return false;
+        String certDerSha256 = computeCertDerSha256(cert);
+        if (!certDerSha256.isEmpty() && expected.equals(certDerSha256)) {
+            return true;
+        }
+        String spkiSha256 = computeSpkiSha256(cert);
+        return !spkiSha256.isEmpty() && expected.equals(spkiSha256);
+    }
+
+    public static String computeCertDerSha256(X509Certificate cert) {
+        if (cert == null) return "";
+        try {
+            byte[] encoded = cert.getEncoded();
+            if (encoded == null) return "";
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(encoded);
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format(Locale.US, "%02x", b & 0xff));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    public static String computeObservedFingerprint(X509Certificate cert) {
+        String derFp = computeCertDerSha256(cert);
+        return !derFp.isEmpty() ? derFp : computeSpkiSha256(cert);
     }
 
     public static String computeSpkiSha256(X509Certificate cert) {
@@ -195,7 +227,7 @@ public final class CadencePinnedStore {
                 if (chain == null || chain.length == 0) {
                     throw new CertificateException("Empty server certificate chain");
                 }
-                String observed = computeSpkiSha256(chain[0]);
+                String observed = computeObservedFingerprint(chain[0]);
                 if (observedFingerprintOut != null && !observed.isEmpty()) {
                     observedFingerprintOut.set(observed);
                 }
@@ -204,10 +236,10 @@ public final class CadencePinnedStore {
                         systemTm.checkServerTrusted(chain, authType);
                         return;
                     } catch (CertificateException ignored) {
-                        // Self-signed LAN cert: fall through to explicit SPKI fingerprint verification
+                        // Self-signed LAN cert: fall through to explicit certificate/SPKI fingerprint verification
                     }
                 }
-                if (!expected.isEmpty() && expected.equals(observed)) {
+                if (!expected.isEmpty() && matchesExpectedFingerprint(chain[0], expected)) {
                     return;
                 }
                 if (allowTofu && expected.isEmpty()) {
@@ -230,11 +262,11 @@ public final class CadencePinnedStore {
                 Certificate[] peer = session.getPeerCertificates();
                 if (peer != null && peer.length > 0 && peer[0] instanceof X509Certificate) {
                     X509Certificate leaf = (X509Certificate) peer[0];
-                    String observed = computeSpkiSha256(leaf);
+                    String observed = computeObservedFingerprint(leaf);
                     if (observedFingerprintOut != null && !observed.isEmpty()) {
                         observedFingerprintOut.set(observed);
                     }
-                    if (!expected.isEmpty() && expected.equals(observed)) {
+                    if (!expected.isEmpty() && matchesExpectedFingerprint(leaf, expected)) {
                         return true;
                     }
                     if (allowTofu && expected.isEmpty()) {

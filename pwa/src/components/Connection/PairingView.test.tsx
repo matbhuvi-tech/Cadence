@@ -23,6 +23,7 @@ vi.mock('../../platform/cadenceBridge', () => ({
   discoverLanDesktops: vi.fn().mockResolvedValue([]),
   scanPairingQrCode: vi.fn().mockResolvedValue(null),
   cancelFallbackQrScan: vi.fn().mockResolvedValue(undefined),
+  syncNativeServerProfile: vi.fn().mockResolvedValue(undefined),
   probeCadenceServer: (...args: unknown[]) => probeCadenceServerMock(...args),
 }))
 
@@ -32,13 +33,15 @@ describe('PairingView', () => {
     probeCadenceServerMock.mockReset()
   })
 
-  it('validates missing host and PIN before probing', async () => {
+  it('validates missing host, and validates missing PIN only in legacy Cadence Desktop mode', async () => {
     const user = userEvent.setup()
     render(<PairingView onPaired={vi.fn()} />)
 
     await user.click(screen.getByRole('button', { name: 'Connect' }))
-    expect(screen.getByRole('alert')).toHaveTextContent(/Enter your Cadence Desktop IP address/i)
+    expect(screen.getByRole('alert')).toHaveTextContent(/Enter your Cadence Engine IP address/i)
 
+    // Switch explicitly to legacy Cadence Desktop mode -> requires 4-digit PIN
+    await user.click(screen.getByRole('button', { name: 'Cadence Desktop' }))
     await user.type(screen.getByPlaceholderText('192.168.1.42 or pc.local'), '192.168.1.42')
     await user.click(screen.getByRole('button', { name: 'Connect' }))
     expect(screen.getByRole('alert')).toHaveTextContent(/Enter the 4-digit pairing PIN/i)
@@ -52,9 +55,10 @@ describe('PairingView', () => {
 
     render(<PairingView onPaired={onPaired} />)
 
+    await user.click(screen.getByRole('button', { name: 'Cadence Desktop' }))
     const hostInput = screen.getByPlaceholderText('192.168.1.42 or pc.local')
     await user.click(hostInput)
-    await user.paste('https://192.168.1.50:4040/?token=4829')
+    await user.paste('https://192.168.1.50:4040/?token=4829&kind=local')
 
     expect(hostInput).toHaveValue('192.168.1.50')
     expect(screen.getByPlaceholderText('e.g. 4829')).toHaveValue('4829')
@@ -88,6 +92,7 @@ describe('PairingView', () => {
 
     render(<PairingView onPaired={onPaired} />)
 
+    await user.click(screen.getByRole('button', { name: 'Cadence Desktop' }))
     await user.type(screen.getByPlaceholderText('192.168.1.42 or pc.local'), '192.168.1.77')
     await user.type(screen.getByPlaceholderText('e.g. 4829'), '1234')
     await user.click(screen.getByRole('button', { name: 'Connect' }))
@@ -115,6 +120,7 @@ describe('PairingView', () => {
       />,
     )
 
+    await user.click(screen.getByRole('button', { name: 'Cadence Desktop' }))
     await user.type(screen.getByPlaceholderText('192.168.1.42 or pc.local'), '192.168.1.99')
     await user.type(screen.getByPlaceholderText('e.g. 4829'), '9999')
     await user.click(screen.getByRole('button', { name: 'Connect' }))
