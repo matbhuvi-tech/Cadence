@@ -166,9 +166,23 @@ class EngineAcceptance(unittest.TestCase):
         return self.op("catalog.page", cursor=None, limit=200)["tracks"]
 
     def test_every_new_route_requires_header_auth_not_url_tokens(self):
-        for path, method in [("/v1/core", "POST"), ("/v1/events", "GET"), ("/v1/artwork/release", "GET"), ("/v1/artwork/release?token=" + self.token, "GET")]:
-            status, _, _ = self.http(method, path, {"operation": "fs.browse"} if method == "POST" else None, auth=False)
-            self.assertEqual(status, 401, path)
+        # Pairing-token auth was removed for LAN-trusted direct access (commit e7f900e);
+        # verify direct routes respond cleanly without requiring auth headers or URL tokens.
+        status, _, body = self.http(
+            "POST",
+            "/v1/core",
+            {
+                "protocolVersion": 2,
+                "engineId": self.identity["engineId"],
+                "libraryId": self.identity["libraryId"],
+                "operation": "core.hello",
+            },
+            auth=False,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body).get("ok"), body)
+        status, _, _ = self.http("GET", "/v1/artwork/release", None, auth=False)
+        self.assertEqual(status, 404, "/v1/artwork/release")
 
     def test_authenticated_https_with_persisted_certificate(self):
         self.stop()
@@ -180,7 +194,9 @@ class EngineAcceptance(unittest.TestCase):
             check=True,
         )
         self.assertEqual(self.op("core.hello")["protocolVersion"], 2)
-        self.assertEqual(self.http("POST", "/v1/core", {}, auth=False)[0], 401)
+        status, _, body = self.http("POST", "/v1/core", {}, auth=False)
+        self.assertEqual(status, 200, body)
+        self.assertFalse(json.loads(body).get("ok"), body)
         self.assertEqual(len(self.scan()), 7)
 
     def test_scan_metadata_artwork_playlists_and_restart(self):

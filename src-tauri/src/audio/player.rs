@@ -142,8 +142,41 @@ struct EndpointInventory {
     upnp_devices: Vec<UpnpDevice>,
 }
 
+#[cfg(windows)]
+fn ensure_cpal_mta_enumerator() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        // cpal 0.15.3 caches IMMDeviceEnumerator in a process-wide OnceLock on the first
+        // thread that touches cpal::default_host(), initializing COM as STA on that thread.
+        // If that thread exits (e.g. a Rust test thread or short-lived worker), CoUninitialize()
+        // tears down its STA and leaves cpal's global enumerator dangling (STATUS_ACCESS_VIOLATION).
+        // Anchor cpal's enumerator once on a dedicated MTA thread whose COM apartment stays alive.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let _ = std::thread::Builder::new()
+            .name("cadence-com-mta-anchor".into())
+            .spawn(move || {
+                unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_MULTITHREADED,
+                    );
+                }
+                let _ = cpal::default_host().default_output_device();
+                let _ = tx.send(());
+                loop {
+                    std::thread::park();
+                }
+            });
+        let _ = rx.recv();
+    });
+}
+
+#[cfg(not(windows))]
+fn ensure_cpal_mta_enumerator() {}
+
 impl EndpointInventory {
     fn from_host(upnp_manager: &UpnpManager) -> Self {
+        ensure_cpal_mta_enumerator();
         let host = cpal::default_host();
         let default_device = host.default_output_device();
         let has_default_wasapi = default_device.is_some();
@@ -593,6 +626,7 @@ impl AudioEngine {
         });
 
         std::thread::spawn(move || {
+            ensure_cpal_mta_enumerator();
             let host = cpal::default_host();
             let initial_os_default = host.default_output_device();
             let mut active_os_default_name = initial_os_default.as_ref().and_then(|d| d.name().ok());

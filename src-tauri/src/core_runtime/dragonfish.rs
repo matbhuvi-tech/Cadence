@@ -1256,7 +1256,7 @@ pub(crate) fn run_control_listener_loop<R: Renderer, P: PlatformProbe, L: Memory
     control_port: u16,
     media_port: u16,
     music_read_only: bool,
-    pairing_token: String,
+    _pairing_token: String,
     tls_config: Arc<rustls::ServerConfig>,
     allow_plaintext_tests: bool,
     require_idle_admission: bool,
@@ -1787,6 +1787,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+#[allow(dead_code)]
 fn secret_matches(supplied: &str, expected: &str) -> bool {
     let left=Sha256::digest(supplied.as_bytes());
     let right=Sha256::digest(expected.as_bytes());
