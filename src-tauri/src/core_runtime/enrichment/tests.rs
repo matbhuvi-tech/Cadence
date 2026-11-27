@@ -975,3 +975,70 @@ fn paused_auto_enrichment_drains_user_override_only_when_transport_idle() {
     std::thread::sleep(Duration::from_millis(150));
     assert!(gate.is_transport_storage_idle(), "may resume once cooldown has elapsed");
 }
+
+#[test]
+fn empty_and_deep_subfolder_watched_roots_report_accurate_album_counts() {
+    let dir = temp_dir("cadence-empty-deep-root-counts");
+    let db = AppDb::new(dir.join("cadence.db")).unwrap();
+    let conn = db.conn.lock();
+    ensure_schema(&conn).unwrap();
+
+    let empty_root = "//192.168.1.6/Mathan/Music Collection/Master/Tamil";
+    let deep_root = "//192.168.1.6/Mathan/Music Collection/Master/Hindi";
+    let deep_album_dir = "//192.168.1.6/Mathan/Music Collection/Master/Hindi/1990s/AR Rahman/Roja";
+    let deep_track_file = format!("{deep_album_dir}/01.flac");
+
+    conn.execute(
+        "INSERT INTO storage_mounts(id, name, mount_path, mount_type, file_system, last_seen_timestamp)
+         VALUES('m_smb', 'NAS', '//192.168.1.6/Mathan', 'network_smb', 'cifs', CURRENT_TIMESTAMP)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO watched_folders(id, mount_id, folder_path, display_name, scan_mode, is_enabled)
+         VALUES('wf_empty', 'm_smb', ?1, 'Tamil', 'manual', 1),
+               ('wf_deep', 'm_smb', ?2, 'Hindi', 'manual', 1)",
+        params![empty_root, deep_root],
+    )
+    .unwrap();
+
+    // Initially empty: both global and per-root coverage must be 0%, never 100%.
+    let initial = compute_enrichment_status(&conn, "cooldown", Some(15), None, None, vec![]).unwrap();
+    assert_eq!(initial.total_albums, 0);
+    assert_eq!(initial.covered_albums, 0);
+    assert_eq!(initial.coverage_percent, 0);
+    assert_eq!(initial.artwork_coverage_percent, 0);
+    let empty_progress = initial.roots.iter().find(|r| r.folder_id == "wf_empty").unwrap();
+    assert_eq!(empty_progress.total_albums, 0);
+    assert_eq!(empty_progress.covered_albums, 0);
+    assert_eq!(empty_progress.coverage_percent, 0);
+    assert_eq!(empty_progress.artwork_coverage_percent, 0);
+
+    // Insert a release/track nested several subfolder levels below `wf_deep`.
+    conn.execute(
+        "INSERT INTO releases(id, title, folder_path, folder_name, artist_credit, created_at)
+         VALUES('rel_deep', 'Roja', ?1, 'Roja', 'A. R. Rahman', CURRENT_TIMESTAMP)",
+        params![deep_album_dir],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tracks(id, release_id, mount_id, folder_path, folder_name, file_path, file_name, file_size, mtime, title, artist_credit, album_title, track_number, disc_number, duration_secs, format, is_online, created_at)
+         VALUES('trk_deep', 'rel_deep', 'm_smb', ?1, 'Roja', ?2, '01.flac', 100, 1, 'Chinna Chinna Aasai', 'A. R. Rahman', 'Roja', 1, 1, 240.0, 'FLAC', 1, CURRENT_TIMESTAMP)",
+        params![deep_album_dir, deep_track_file],
+    )
+    .unwrap();
+
+    let after = compute_enrichment_status(&conn, "cooldown", Some(15), None, None, vec![]).unwrap();
+    assert_eq!(after.total_albums, 1);
+    assert_eq!(after.coverage_percent, 0);
+
+    let after_empty = after.roots.iter().find(|r| r.folder_id == "wf_empty").unwrap();
+    assert_eq!(after_empty.total_albums, 0);
+    assert_eq!(after_empty.coverage_percent, 0);
+    assert_eq!(after_empty.artwork_coverage_percent, 0);
+
+    let after_deep = after.roots.iter().find(|r| r.folder_id == "wf_deep").unwrap();
+    assert_eq!(after_deep.total_albums, 1);
+    assert_eq!(after_deep.pending_albums, 1);
+    assert_eq!(after_deep.coverage_percent, 0);
+}

@@ -23,6 +23,8 @@ import {
 import {
   findRootEnrichmentProgress,
   formatEnrichmentStateLabel,
+  formatRootEnrichmentHeadline,
+  getRootScanState,
 } from '../components/Modals/StorageManagerModal'
 import {
   extractCachedEnrichmentProposal,
@@ -662,4 +664,109 @@ test('Match Strip formats downloading/retrying staged cover art and Staged in Ca
     formatStripStatusBadge({ ...baseDetail, artworkStatus: 'user_override' }).label,
     'Staged in Cache',
   )
+})
+
+test('Watched Root scan state and headline avoid misleading 100% (0/0 albums) during/before scan', () => {
+  const emptyRoot = {
+    folderId: 'wf_tamil',
+    displayName: 'Tamil',
+    path: '//192.168.1.6/Mathan/Music Collection/Master/Tamil',
+    totalAlbums: 0,
+    coveredAlbums: 0,
+    coveragePercent: 0,
+    autoAppliedAlbums: 0,
+    needsReviewAlbums: 0,
+    noMatchAlbums: 0,
+    userLockedAlbums: 0,
+    pendingAlbums: 0,
+    failedAlbums: 0,
+    artworkCoveredAlbums: 0,
+    artworkCoveragePercent: 0,
+  }
+
+  assert.equal(
+    getRootScanState({ id: 'wf_tamil', lastScannedAt: null }, null),
+    'unscanned',
+  )
+  assert.equal(
+    getRootScanState(
+      { id: 'wf_tamil', lastScannedAt: null },
+      { status: 'running', folderId: 'wf_tamil', processed: 12 },
+    ),
+    'scanning',
+  )
+  assert.equal(
+    getRootScanState(
+      { id: 'wf_tamil', lastScannedAt: null },
+      {
+        status: 'running',
+        folderId: 'wf_other',
+        roots: [
+          { id: 'wf_other', path: '/music/other' },
+          { id: 'wf_tamil', path: '/music/tamil' },
+        ],
+      },
+    ),
+    'queued',
+  )
+  assert.equal(
+    getRootScanState(
+      { id: 'wf_tamil', lastScannedAt: null },
+      { status: 'running', folderId: 'wf_tamil', deferred: true },
+    ),
+    'deferred',
+  )
+  assert.equal(
+    getRootScanState({ id: 'wf_tamil', lastScannedAt: '2026-11-27T12:00:00Z' }, null),
+    'idle',
+  )
+
+  const scanningNoProcessed = formatRootEnrichmentHeadline(emptyRoot, 'scanning', 0)
+  assert.equal(scanningNoProcessed.headline, 'Scanning subfolders… · 0 albums indexed yet')
+  assert.equal(scanningNoProcessed.showArtPercent, false)
+  assert.equal(scanningNoProcessed.barPercent, 0)
+  assert.equal(scanningNoProcessed.barTone, 'neutral')
+
+  const scanningWithProcessed = formatRootEnrichmentHeadline(emptyRoot, 'scanning', 142)
+  assert.equal(
+    scanningWithProcessed.headline,
+    'Scanning subfolders… (142 items checked) · 0 albums indexed yet',
+  )
+  assert.equal(scanningWithProcessed.showArtPercent, false)
+  assert.equal(scanningWithProcessed.barPercent, 0)
+  assert.equal(scanningWithProcessed.barTone, 'neutral')
+
+  const queued = formatRootEnrichmentHeadline(emptyRoot, 'queued')
+  assert.equal(queued.headline, 'Scan queued · Waiting to index subfolders')
+  assert.equal(queued.barTone, 'neutral')
+
+  const deferred = formatRootEnrichmentHeadline(emptyRoot, 'deferred')
+  assert.equal(deferred.headline, 'Scan paused during playback/cooldown · 0 albums indexed yet')
+  assert.equal(deferred.barTone, 'neutral')
+
+  const unscanned = formatRootEnrichmentHeadline(emptyRoot, 'unscanned')
+  assert.equal(unscanned.headline, 'Not scanned yet · Run Quick Rescan to index subfolders')
+  assert.equal(unscanned.barTone, 'neutral')
+
+  const idleEmpty = formatRootEnrichmentHeadline(emptyRoot, 'idle')
+  assert.equal(idleEmpty.headline, 'No albums indexed (0 albums)')
+  assert.equal(idleEmpty.barTone, 'neutral')
+
+  const partial = formatRootEnrichmentHeadline(
+    { ...emptyRoot, totalAlbums: 10, coveredAlbums: 5, coveragePercent: 50 },
+    'idle',
+  )
+  assert.equal(partial.headline, 'Auto-Enrich 50% (5/10 albums)')
+  assert.equal(partial.showArtPercent, true)
+  assert.equal(partial.barPercent, 50)
+  assert.equal(partial.barTone, 'gold')
+
+  const complete = formatRootEnrichmentHeadline(
+    { ...emptyRoot, totalAlbums: 10, coveredAlbums: 10, coveragePercent: 100 },
+    'idle',
+  )
+  assert.equal(complete.headline, 'Auto-Enrich 100% (10/10 albums)')
+  assert.equal(complete.showArtPercent, true)
+  assert.equal(complete.barPercent, 100)
+  assert.equal(complete.barTone, 'emerald')
 })

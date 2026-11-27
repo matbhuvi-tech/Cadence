@@ -1,5 +1,21 @@
 # Issue Log
 
+## GitHub #64 — Watched root shows misleading 100% (0/0 albums) during/before nested subfolder scanning
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/64
+- **Branch:** `fix/64-watched-root-scan-album-count`
+- **Reported behavior:** Adding a watched root with leaf album folders nested several levels deep shows `0 tracks`, `Auto-Enrich 100% (0/0 albums) · Art 100%`, and a full green progress bar before/during scanning, making it look like subfolder scanning skipped nested albums.
+- **Root causes:**
+  1. `src-tauri/src/core_runtime/enrichment/schema.rs` (`pct()`) returned `100` when `total == 0`, causing empty/unscanned/scanning roots to report `100%` metadata and artwork coverage.
+  2. `src-tauri/src/core_runtime/library.rs` (`step()`) recursively traverses nested subfolders depth-first, but did not update `self.scan["folderId"]` when advancing across roots in multi-root scans.
+  3. `StorageManagerModal.tsx` and `AutoEnrichmentPanel.tsx` rendered `Auto-Enrich 100% (0/0 albums)` + a full green bar for `totalAlbums === 0`, lacked per-root `Scanning…` / `Queued` / `Scan Paused` indicators, and only refreshed folder/enrichment counts on terminal scan events.
+- **Changes:**
+  1. `src-tauri/src/core_runtime/enrichment/schema.rs`: Updated `pct()` to return `0` when `total == 0`.
+  2. `src-tauri/src/core_runtime/library.rs`: Updated `step()` to set `self.scan["folderId"]` to the active root `folder_id` on each step.
+  3. `src/core/coreProtocol.ts`, `src/components/Modals/StorageManagerModal.tsx`, `src/components/Curate/AutoEnrichmentPanel.tsx`: Added `getRootScanState` and `formatRootEnrichmentHeadline`, static per-root scan badges (`Scanning…`, `Queued`, `Scan Paused`), event-driven mid-scan progress refreshes (every 100 processed items), and explicit non-100% empty/scanning/unscanned copy.
+  4. `src-tauri/src/core_runtime/enrichment/tests.rs` & `src/test/testAutomatedEnrichment.test.ts`: Added Rust and Vitest coverage for empty roots, deep subfolder album matching, and root scan state/headline formatting.
+- **Status:** Implemented on `fix/64-watched-root-scan-album-count`; awaiting verification.
+
 ## Support & Self-Diagnostics UX Redesign (`feat/support-troubleshooting-ux-redesign`)
 
 - **Reported behavior:** Support & Self-Diagnostics exposed developer jargon (`Webhook Ready`, `Redact OS username`, `Zero-allocation lock-free ring buffer`), presented all three stages simultaneously without visual hierarchy, ignored `doctorReports` / detailed `databaseLineage` metrics in the UI, returned a misleading `NO_OBVIOUS_LOCAL_FAULT` for runtime audio issues, and only allowed fixed dropdown selection.

@@ -618,7 +618,7 @@ struct BucketCounts {
 
 fn pct(part: usize, total: usize) -> u8 {
     if total == 0 {
-        return 100;
+        return 0;
     }
     ((part * 100) / total).min(100) as u8
 }

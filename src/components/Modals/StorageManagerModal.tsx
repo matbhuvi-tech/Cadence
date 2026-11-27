@@ -50,6 +50,93 @@ export function findRootEnrichmentProgress(
   return status?.roots.find((r) => r.folderId === folderId) ?? null
 }
 
+export type RootScanState = 'scanning' | 'queued' | 'deferred' | 'unscanned' | 'idle'
+
+export function getRootScanState(
+  folder: Pick<EngineFolderRecord, 'id' | 'lastScannedAt'>,
+  scanStatus: EngineScanStatus | null,
+): RootScanState {
+  if (scanStatus?.status === 'running' && scanStatus.folderId === folder.id) {
+    return scanStatus.deferred ? 'deferred' : 'scanning'
+  }
+  if (
+    (scanStatus?.status === 'queued' || scanStatus?.status === 'running') &&
+    (scanStatus.folderId === folder.id ||
+      scanStatus.roots?.some((r) => r.id === folder.id))
+  ) {
+    if (scanStatus.status === 'queued') {
+      return scanStatus.deferred ? 'deferred' : 'queued'
+    }
+    return 'queued'
+  }
+  if (folder.lastScannedAt === null) {
+    return 'unscanned'
+  }
+  return 'idle'
+}
+
+export function formatRootEnrichmentHeadline(
+  rootProgress: RootEnrichmentProgress,
+  scanState: RootScanState,
+  processed?: number,
+): {
+  headline: string
+  showArtPercent: boolean
+  barPercent: number
+  barTone: 'emerald' | 'gold' | 'neutral'
+} {
+  if (rootProgress.totalAlbums === 0) {
+    switch (scanState) {
+      case 'scanning':
+        return {
+          headline:
+            processed && processed > 0
+              ? `Scanning subfolders… (${processed.toLocaleString()} items checked) · 0 albums indexed yet`
+              : 'Scanning subfolders… · 0 albums indexed yet',
+          showArtPercent: false,
+          barPercent: 0,
+          barTone: 'neutral',
+        }
+      case 'queued':
+        return {
+          headline: 'Scan queued · Waiting to index subfolders',
+          showArtPercent: false,
+          barPercent: 0,
+          barTone: 'neutral',
+        }
+      case 'deferred':
+        return {
+          headline: 'Scan paused during playback/cooldown · 0 albums indexed yet',
+          showArtPercent: false,
+          barPercent: 0,
+          barTone: 'neutral',
+        }
+      case 'unscanned':
+        return {
+          headline: 'Not scanned yet · Run Quick Rescan to index subfolders',
+          showArtPercent: false,
+          barPercent: 0,
+          barTone: 'neutral',
+        }
+      default:
+        return {
+          headline: 'No albums indexed (0 albums)',
+          showArtPercent: false,
+          barPercent: 0,
+          barTone: 'neutral',
+        }
+    }
+  }
+
+  const pct = Math.max(0, Math.min(100, rootProgress.coveragePercent))
+  return {
+    headline: `Auto-Enrich ${pct}% (${rootProgress.coveredAlbums}/${rootProgress.totalAlbums} albums)`,
+    showArtPercent: true,
+    barPercent: pct,
+    barTone: pct >= 100 ? 'emerald' : 'gold',
+  }
+}
+
 export function formatEnrichmentStateLabel(status: EngineEnrichmentStatus): string {
   switch (status.state) {
     case 'active':
@@ -154,12 +241,14 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
         if (typeof next.status !== 'string') return
         const isTerminal = next.status === 'completed' || next.status === 'failed'
         const processed = typeof next.processed === 'number' ? next.processed : 0
-        if (isTerminal || processed % 25 === 0) {
+        if (isTerminal || processed <= 1 || processed % 25 === 0) {
           setScanStatus(next)
         }
         if (isTerminal) {
           scheduleRefresh()
           onRefreshLibrary()
+        } else if (processed > 0 && processed % 100 === 0) {
+          scheduleRefresh()
         }
       } else if (ev.event === 'catalog.changed' || ev.event === 'enrichment.updated') {
         scheduleRefresh()
@@ -363,7 +452,9 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                 <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
                 <span className="text-white/40">Auto-Enrich:</span>
                 <span className="font-mono font-semibold text-emerald-300">
-                  {enrichmentStatus.coveragePercent}% ({enrichmentStatus.coveredAlbums}/{enrichmentStatus.totalAlbums})
+                  {enrichmentStatus.totalAlbums === 0
+                    ? 'No albums indexed'
+                    : `${enrichmentStatus.coveragePercent}% (${enrichmentStatus.coveredAlbums}/${enrichmentStatus.totalAlbums})`}
                 </span>
                 <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] text-white/75">
                   {formatEnrichmentStateLabel(enrichmentStatus)}
@@ -664,7 +755,20 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
               <div className="space-y-2">
                 {displayedFolders.map((f) => {
                   const rootProgress = findRootEnrichmentProgress(enrichmentStatus, f.id)
-                  const pct = rootProgress ? Math.max(0, Math.min(100, rootProgress.coveragePercent)) : 0
+                  const rootScanState = getRootScanState(f, scanStatus)
+                  const progressDisplay = rootProgress
+                    ? formatRootEnrichmentHeadline(
+                        rootProgress,
+                        rootScanState,
+                        scanStatus?.folderId === f.id ? scanStatus.processed : undefined,
+                      )
+                    : null
+                  const barFillClass =
+                    progressDisplay?.barTone === 'emerald'
+                      ? 'bg-emerald-400'
+                      : progressDisplay?.barTone === 'gold'
+                        ? 'bg-[#D4AF37]'
+                        : 'bg-white/20'
                   return (
                     <div
                       key={f.id}
@@ -698,6 +802,21 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                               >
                                 {f.online ? 'Online' : 'Offline'}
                               </span>
+                              {rootScanState === 'scanning' && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#D4AF37]/20 text-[#D4AF37]">
+                                  Scanning…
+                                </span>
+                              )}
+                              {rootScanState === 'queued' && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-white/[0.08] text-white/70">
+                                  Queued
+                                </span>
+                              )}
+                              {rootScanState === 'deferred' && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/20 text-amber-300">
+                                  Scan Paused
+                                </span>
+                              )}
                               <span className="text-[10px] text-white/45 font-mono">
                                 {f.trackCount.toLocaleString()} tracks · {f.scanMode}
                               </span>
@@ -749,7 +868,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                         </div>
                       </div>
 
-                      {rootProgress && (
+                      {rootProgress && progressDisplay && (
                         <div
                           className="pl-11 space-y-1.5"
                           data-testid={`watched-root-progress-${f.id}`}
@@ -757,30 +876,32 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
                             <div className="flex items-center gap-2">
                               <span className="font-mono font-semibold text-white">
-                                Auto-Enrich {pct}% ({rootProgress.coveredAlbums}/{rootProgress.totalAlbums} albums)
+                                {progressDisplay.headline}
                               </span>
-                              <span className="text-white/45 font-mono">
-                                · Art {rootProgress.artworkCoveragePercent}%
-                              </span>
+                              {progressDisplay.showArtPercent && (
+                                <span className="text-white/45 font-mono">
+                                  · Art {rootProgress.artworkCoveragePercent}%
+                                </span>
+                              )}
                             </div>
-                            <span className="text-[10px] font-mono text-white/50">
-                              Auto: {rootProgress.autoAppliedAlbums} · Review: {rootProgress.needsReviewAlbums} · No Match: {rootProgress.noMatchAlbums} · Locked: {rootProgress.userLockedAlbums} · Pending: {rootProgress.pendingAlbums}
-                              {rootProgress.failedAlbums > 0 ? ` · Retrying: ${rootProgress.failedAlbums}` : ''}
-                            </span>
+                            {rootProgress.totalAlbums > 0 && (
+                              <span className="text-[10px] font-mono text-white/50">
+                                Auto: {rootProgress.autoAppliedAlbums} · Review: {rootProgress.needsReviewAlbums} · No Match: {rootProgress.noMatchAlbums} · Locked: {rootProgress.userLockedAlbums} · Pending: {rootProgress.pendingAlbums}
+                                {rootProgress.failedAlbums > 0 ? ` · Retrying: ${rootProgress.failedAlbums}` : ''}
+                              </span>
+                            )}
                           </div>
                           <div
                             role="progressbar"
                             aria-label={`Auto-Enrich coverage for ${f.displayName}`}
                             aria-valuemin={0}
                             aria-valuemax={100}
-                            aria-valuenow={pct}
+                            aria-valuenow={progressDisplay.barPercent}
                             className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden"
                           >
                             <div
-                              className={`h-full rounded-full ${
-                                pct >= 100 ? 'bg-emerald-400' : 'bg-[#D4AF37]'
-                              }`}
-                              style={{ width: `${pct}%` }}
+                              className={`h-full rounded-full ${barFillClass}`}
+                              style={{ width: `${progressDisplay.barPercent}%` }}
                             />
                           </div>
                         </div>

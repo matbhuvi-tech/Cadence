@@ -649,6 +649,7 @@ impl Library {
             return Ok(false);
         };
         self.scan["status"] = json!("running");
+        self.scan["folderId"] = json!(&folder_id);
         let result = self.scan_path(&folder_id, &path);
         if let Err(error) = result {
             self.scan["errorCount"] = json!(self.scan["errorCount"].as_u64().unwrap_or(0) + 1);

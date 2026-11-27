@@ -87,6 +87,7 @@ export interface EngineScanStatus {
   errors?: Array<string | EngineScanError>
   forceFull?: boolean
   deferred?: boolean
+  roots?: Array<{ id: string; path: string }>
 }
 
 export interface EngineScanError {
