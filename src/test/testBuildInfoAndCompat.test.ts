@@ -459,6 +459,10 @@ test('createDesktopCoreControllerStore surfaces v2_catalog_degraded warning when
     assert.equal(outcome, 'activated')
     const state = store.getState()
     assert.equal(state.activeEngineBuild?.display, engineBuild.display)
+    assert.equal(state.catalogHealth?.status, 'degraded')
+    assert.equal(state.catalogHealth?.cause, 'invalid_metadata')
+    assert.ok(state.catalogHealth?.reason && state.catalogHealth.reason.length > 0)
+    assert.equal(/protocol v2|hydration|invalid_payload|\bv1\b/i.test(state.catalogHealth?.reason ?? ''), false)
     assert.equal(state.compatibilityWarning?.severity, 'warning')
     assert.equal(state.compatibilityWarning?.reason, 'v2_catalog_degraded')
     assert.equal(state.hydratedCatalogTracks.length, 1)
@@ -489,10 +493,46 @@ test('createDesktopCoreControllerStore hydrates additive v2 tracks with hasCover
     assert.equal(outcome, 'activated')
     const state = store.getState()
     assert.equal(state.activeEngineBuild?.display, engineBuild.display)
+    assert.equal(state.catalogHealth?.status, 'healthy')
     assert.equal(state.hydratedCatalogTracks.length, 1)
     assert.equal(state.hydratedCatalogTracks[0].hasCoverArt, true)
     assert.notEqual(state.compatibilityWarning?.severity, 'warning')
   } finally {
     store.dispose()
   }
+})
+
+test('parseCoreV2CatalogPage accepts multi-line lyrics and tag whitespace while still rejecting NUL control chars', () => {
+  const trackWithLyrics = {
+    id: 'trk_lyrics_1',
+    title: 'Bohemian Rhapsody',
+    artist: 'Queen',
+    album: 'A Night at the Opera',
+    durationSeconds: 354,
+    releaseId: 'rel_queen_1',
+    hasCoverArt: true,
+    composerName: 'Freddie Mercury\n(Arr. Queen)',
+    genreTags: ['Rock\tClassic'],
+    lyrics: 'Is this the real life?\r\nIs this just fantasy?\n\tCaught in a landslide',
+  }
+
+  const parsed = parseCoreV2CatalogPage({
+    revision: 2,
+    nextCursor: null,
+    tracks: [trackWithLyrics],
+  })
+  assert.equal(parsed.tracks.length, 1)
+  assert.equal(parsed.tracks[0].lyrics, trackWithLyrics.lyrics)
+  assert.equal(parsed.tracks[0].hasCoverArt, true)
+
+  // NUL / non-whitespace control characters remain rejected
+  assert.throws(
+    () =>
+      parseCoreV2CatalogPage({
+        revision: 2,
+        nextCursor: null,
+        tracks: [{ ...trackWithLyrics, lyrics: 'bad\u0000lyrics' }],
+      }),
+    CoreServiceError,
+  )
 })

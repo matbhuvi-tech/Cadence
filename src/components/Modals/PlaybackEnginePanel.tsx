@@ -50,13 +50,23 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
   const stagingError = state?.stagingError ?? null
   const lastError = state?.lastError ?? null
   const engineBuild = state?.activeEngineBuild ?? null
-  const compatWarning = state?.compatibilityWarning ?? null
+  const catalogHealth = state?.catalogHealth ?? (isCoreActive && isConnected ? { status: 'healthy' as const } : null)
   const activeDescriptor = state?.activeDescriptor ?? null
   const activeHealth = state?.activeEngineHealth ?? null
   const activeProtocolVersion =
     activeDescriptor?.protocolVersion ?? activeHealth?.protocolVersion ?? 1
   const activeProtocolRevision =
     activeDescriptor?.protocolRevision ?? activeHealth?.protocolRevision ?? null
+  const buildCompat = isCoreActive
+    ? evaluateEngineCompatibility({
+        coreBuild: CORE_BUILD_INFO,
+        coreProtocolRevision: CORE_PROTOCOL_V2_REVISION,
+        engineBuild,
+        engineProtocolVersion: activeDescriptor?.protocolVersion ?? activeHealth?.protocolVersion ?? null,
+        engineProtocolRevision: activeProtocolRevision,
+        v2CatalogDegraded: false,
+      })
+    : null
   const stagedCompat = staged
     ? evaluateEngineCompatibility({
         coreBuild: CORE_BUILD_INFO,
@@ -153,6 +163,22 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
               <span>Audio output: {activeOutputLabel}</span>
             </div>
 
+            {isCoreActive && isConnected && catalogHealth && (
+              <div className="flex items-center gap-2 text-xs text-white/75">
+                <HardDrive className="h-3.5 w-3.5 text-[#D4AF37] shrink-0" aria-hidden="true" />
+                <span>Catalog Health:</span>
+                {catalogHealth.status === 'healthy' ? (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
+                    Healthy
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/35 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+                    Degraded
+                  </span>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-white/65 pt-0.5">
               {isCoreActive && (
                 <span title={engineBuild?.commitSummary || undefined}>
@@ -166,17 +192,17 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
                 Core UI:{' '}
                 <span className="font-mono text-white/90">{CORE_BUILD_INFO.display}</span>
               </span>
-              {isCoreActive && isConnected && engineBuild && !compatWarning && (
+              {isCoreActive && isConnected && engineBuild && !buildCompat && (
                 <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
                   Matched
                 </span>
               )}
-              {isCoreActive && compatWarning?.severity === 'info' && (
+              {isCoreActive && buildCompat?.severity === 'info' && (
                 <span className="rounded-full border border-white/15 bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium text-white/80">
                   Different build
                 </span>
               )}
-              {isCoreActive && compatWarning?.severity === 'warning' && (
+              {isCoreActive && buildCompat?.severity === 'warning' && (
                 <span className="rounded-full border border-amber-500/35 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200">
                   Update recommended
                 </span>
@@ -229,10 +255,17 @@ export const PlaybackEnginePanel: React.FC<PlaybackEnginePanelProps> = ({ onEngi
           </div>
         )}
 
-        {isCoreActive && isConnected && compatWarning?.severity === 'warning' && (
+        {isCoreActive && isConnected && catalogHealth?.status === 'degraded' && catalogHealth.reason && (
           <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2 text-xs text-amber-200">
             <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
-            <span>{compatWarning.detail}</span>
+            <span>{catalogHealth.reason}</span>
+          </div>
+        )}
+
+        {isCoreActive && isConnected && buildCompat?.severity === 'warning' && (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-950/25 px-3 py-2 text-xs text-amber-200">
+            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+            <span>{buildCompat.detail}</span>
           </div>
         )}
       </div>

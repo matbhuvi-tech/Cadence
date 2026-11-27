@@ -1,6 +1,9 @@
 import {
   CORE_BUILD_INFO,
+  describeCatalogDegradation,
   evaluateEngineCompatibility,
+  type CatalogDegradationCause,
+  type CatalogHealth,
   type CoreBuildInfo,
   type EngineCompatibilityWarning,
 } from '../core/buildInfo'
@@ -113,6 +116,7 @@ export interface CoreControllerState {
   activeDescriptor: CoreDescriptor | null
   activeEngineHealth: CoreHealthMetadata | null
   activeEngineBuild: CoreBuildInfo | null
+  catalogHealth: CatalogHealth | null
   compatibilityWarning: EngineCompatibilityWarning | null
   musicReadOnly: boolean | null
   stagedCandidate: StagedCoreCandidate | null
@@ -562,10 +566,22 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
                 void hydrateCatalogTracks(activeCoreService, nextSnap, activeCoreProfile)
                   .then((hydrated) => {
                     if (disposed) return
+                    const activeDescriptor = hydrated.descriptor ?? state.activeDescriptor
+                    const activeEngineBuild = activeDescriptor?.build ?? state.activeEngineHealth?.build ?? null
+                    const compatibilityWarning = buildCompatibilityWarning(
+                      activeDescriptor,
+                      state.activeEngineHealth,
+                      activeEngineBuild,
+                      hydrated.v2Degraded,
+                      hydrated.catalogHealth.reason ?? null,
+                    )
                     state = {
                       ...state,
                       hydratedCatalogTracks: hydrated.tracks,
-                      activeDescriptor: hydrated.descriptor ?? state.activeDescriptor,
+                      activeDescriptor,
+                      activeEngineBuild,
+                      catalogHealth: hydrated.catalogHealth,
+                      compatibilityWarning,
                     }
                     emit()
                   })
@@ -600,6 +616,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     activeDescriptor: null,
     activeEngineHealth: null,
     activeEngineBuild: null,
+    catalogHealth: null,
     compatibilityWarning: null,
     musicReadOnly: null,
     stagedCandidate: null,
@@ -646,6 +663,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     health: CoreHealthMetadata | null,
     engineBuild: CoreBuildInfo | null,
     v2CatalogDegraded: boolean,
+    v2CatalogDegradedReason: string | null = null,
   ): EngineCompatibilityWarning | null {
     const engineProtocolVersion = descriptor?.protocolVersion ?? health?.protocolVersion ?? null
     if (!descriptor && !health && !v2CatalogDegraded) {
@@ -658,6 +676,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       engineProtocolVersion,
       engineProtocolRevision: descriptor?.protocolRevision ?? health?.protocolRevision ?? null,
       v2CatalogDegraded,
+      v2CatalogDegradedReason,
     })
   }
 
@@ -715,13 +734,45 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
     }
   }
 
+  function classifyCatalogDegradationError(err: unknown): CatalogDegradationCause {
+    if (err instanceof CoreServiceError) {
+      if (err.code === 'incompatible_protocol' || err.code === 'unsupported_capability') {
+        return 'unsupported_engine'
+      }
+      if (err.code === 'deferred_until_idle') {
+        return 'engine_busy'
+      }
+      if (err.code === 'unavailable') {
+        return 'connection_interrupted'
+      }
+      if (err.code === 'invalid_payload') {
+        if (/\b(bytes?|too large|size limit|1\s*mb|1048576)\b/i.test(err.message)) {
+          return 'payload_too_large'
+        }
+        return 'invalid_metadata'
+      }
+    }
+    if (err instanceof Error && /timeout|network|abort|fetch|connect|socket|closed|unavailable/i.test(err.message)) {
+      return 'connection_interrupted'
+    }
+    return 'unknown'
+  }
+
   async function hydrateCatalogTracks(
     service: EngineService,
     snapshot: CoreSnapshot | null,
     profile?: SavedCoreProfile | null,
-  ): Promise<{ tracks: CoreCatalogTrack[]; descriptor: CoreDescriptor | null; v2Degraded: boolean }> {
-    if (!snapshot) return { tracks: [], descriptor: null, v2Degraded: false }
+  ): Promise<{
+    tracks: CoreCatalogTrack[]
+    descriptor: CoreDescriptor | null
+    v2Degraded: boolean
+    catalogHealth: CatalogHealth
+  }> {
+    if (!snapshot) {
+      return { tracks: [], descriptor: null, v2Degraded: false, catalogHealth: { status: 'healthy' } }
+    }
     let hello: CoreDescriptor | null = null
+    let degradationCause: CatalogDegradationCause | null = null
     if (profile && options.httpBridge) {
       const client = createEngineClient(profile, (target, body) =>
         httpBridge.postCoreRequest(target, body),
@@ -734,10 +785,19 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       if (hello?.protocolVersion === 2) {
         try {
           const enriched = await client.fetchEnrichedCatalog()
-          return { tracks: enriched.tracks, descriptor: hello, v2Degraded: false }
-        } catch {
-          // Fall back to v1 pagination so playback continues, while surfacing v2 degradation
+          return {
+            tracks: enriched.tracks,
+            descriptor: hello,
+            v2Degraded: false,
+            catalogHealth: { status: 'healthy' },
+          }
+        } catch (err) {
+          degradationCause = classifyCatalogDegradationError(err)
+          console.warn('[Cadence] Full catalog load fell back to basic mode:', err)
+          // Fall back to v1 pagination so playback continues, while surfacing catalog degradation
         }
+      } else if (hello && hello.protocolVersion < 2) {
+        degradationCause = 'unsupported_engine'
       }
     }
     const merged: CoreCatalogTrack[] = [...snapshot.catalog.tracks]
@@ -758,10 +818,19 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
       }
       cursor = page.nextCursor
     }
+    const v2Degraded = hello?.protocolVersion === 2
+    const catalogHealth: CatalogHealth = degradationCause
+      ? {
+          status: 'degraded',
+          cause: degradationCause,
+          reason: describeCatalogDegradation(degradationCause),
+        }
+      : { status: 'healthy' }
     return {
       tracks: merged,
       descriptor: hello,
-      v2Degraded: hello?.protocolVersion === 2,
+      v2Degraded,
+      catalogHealth,
     }
   }
 
@@ -809,6 +878,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           tracks: view.snapshot?.catalog.tracks ?? [],
           descriptor: null,
           v2Degraded: false,
+          catalogHealth: { status: 'healthy' } as CatalogHealth,
         })),
         probeProfileHealthSafe(profile),
       ])
@@ -818,6 +888,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         health,
         activeEngineBuild,
         hydrated.v2Degraded,
+        hydrated.catalogHealth.reason ?? null,
       )
       const outLabel = view.snapshot?.output?.label ?? 'Unassigned'
       state = {
@@ -828,6 +899,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         activeDescriptor: hydrated.descriptor,
         activeEngineHealth: health,
         activeEngineBuild,
+        catalogHealth: hydrated.catalogHealth,
         compatibilityWarning,
         musicReadOnly: typeof health?.musicReadOnly === 'boolean' ? health.musicReadOnly : state.musicReadOnly,
         isBusy: false,
@@ -1118,6 +1190,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           activeDescriptor: null,
           activeEngineHealth: null,
           activeEngineBuild: null,
+          catalogHealth: null,
           compatibilityWarning: null,
           musicReadOnly: null,
           switchPrompt: null,
@@ -1183,6 +1256,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           activeDescriptor: null,
           activeEngineHealth: null,
           activeEngineBuild: null,
+          catalogHealth: null,
           compatibilityWarning: null,
           musicReadOnly: null,
           isBusy: false,
@@ -1212,12 +1286,14 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         let hydratedCatalogTracks = state.hydratedCatalogTracks
         let activeDescriptor = state.activeDescriptor
         let v2Degraded = false
+        let catalogHealth: CatalogHealth = state.catalogHealth ?? { status: 'healthy' }
         if (activeCoreService) {
           try {
             const hydrated = await hydrateCatalogTracks(activeCoreService, nextView.snapshot, activeCoreProfile)
             hydratedCatalogTracks = hydrated.tracks
             if (hydrated.descriptor) activeDescriptor = hydrated.descriptor
             v2Degraded = hydrated.v2Degraded
+            catalogHealth = hydrated.catalogHealth
           } catch {
             // Preserve previously hydrated catalog on transient failure
           }
@@ -1230,6 +1306,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           activeEngineHealth,
           activeEngineBuild,
           v2Degraded,
+          catalogHealth.reason ?? null,
         )
         state = {
           ...state,
@@ -1238,6 +1315,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
           activeDescriptor,
           activeEngineHealth,
           activeEngineBuild,
+          catalogHealth,
           compatibilityWarning,
           musicReadOnly: typeof health?.musicReadOnly === 'boolean' ? health.musicReadOnly : state.musicReadOnly,
           isBusy: false,
@@ -1390,6 +1468,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         state.activeEngineHealth,
         activeEngineBuild,
         hydrated.v2Degraded,
+        hydrated.catalogHealth.reason ?? null,
       )
       state = {
         ...state,
@@ -1397,6 +1476,7 @@ export function createDesktopCoreControllerStore(options: DesktopCoreControllerS
         hydratedCatalogTracks: hydrated.tracks,
         activeDescriptor,
         activeEngineBuild,
+        catalogHealth: hydrated.catalogHealth,
         compatibilityWarning,
       }
       emit()

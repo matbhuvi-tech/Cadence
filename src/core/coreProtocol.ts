@@ -234,8 +234,21 @@ function token(value: unknown): asserts value is string {
   requireValue(typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value))
 }
 
-function text(value: unknown, max = 1024): asserts value is string {
-  requireValue(typeof value === 'string' && value.length <= max && !Array.from(value).some(char => char.charCodeAt(0) < 32))
+function hasDisallowedControlChars(value: string, allowWhitespaceControls: boolean): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code < 32) {
+      if (allowWhitespaceControls && (code === 9 || code === 10 || code === 13)) {
+        continue
+      }
+      return true
+    }
+  }
+  return false
+}
+
+function text(value: unknown, max = 1024, allowWhitespaceControls = false): asserts value is string {
+  requireValue(typeof value === 'string' && value.length <= max && !hasDisallowedControlChars(value, allowWhitespaceControls))
 }
 
 function seconds(value: unknown): asserts value is number {
@@ -370,9 +383,9 @@ function optionalPositiveInt(value: unknown, max: number): void {
   requireValue(typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= max)
 }
 
-function optionalNullableText(value: unknown, max = 1024): void {
+function optionalNullableText(value: unknown, max = 1024, allowWhitespaceControls = false): void {
   if (value === undefined || value === null) return
-  text(value, max)
+  text(value, max, allowWhitespaceControls)
 }
 
 function optionalNullableInt(value: unknown, min: number, max: number): void {
@@ -389,30 +402,35 @@ function validateCatalogTrack(value: unknown, allowUnknownKeys: boolean): CoreCa
   } else {
     track = fields(value, [...REQUIRED_TRACK_KEYS], [...OPTIONAL_TRACK_KEYS])
   }
-  token(track.id); text(track.title); text(track.artist); text(track.album); seconds(track.durationSeconds)
+  const allowTagWhitespace = allowUnknownKeys
+  token(track.id)
+  text(track.title, 1024, allowTagWhitespace)
+  text(track.artist, 1024, allowTagWhitespace)
+  text(track.album, 1024, allowTagWhitespace)
+  seconds(track.durationSeconds)
   if (track.releaseId !== undefined) token(track.releaseId)
-  if (track.albumArtist !== undefined) text(track.albumArtist)
+  if (track.albumArtist !== undefined) text(track.albumArtist, 1024, allowTagWhitespace)
   if (track.isCompilation !== undefined) requireValue(typeof track.isCompilation === 'boolean')
-  if (track.edition !== undefined) text(track.edition)
+  if (track.edition !== undefined) text(track.edition, 1024, allowTagWhitespace)
   if (track.format !== undefined) text(track.format, 32)
   optionalPositiveInt(track.sampleRate, 90_316_800)
   optionalPositiveInt(track.bitDepth, 64)
   optionalPositiveInt(track.trackNumber, 9999)
   optionalPositiveInt(track.discNumber, 999)
   optionalPositiveInt(track.releaseYear, 9999)
-  optionalNullableText(track.composerName)
-  optionalNullableText(track.folderName)
-  optionalNullableText(track.folderPath, 4096)
-  optionalNullableText(track.fileName, 512)
-  optionalNullableText(track.language, 64)
+  optionalNullableText(track.composerName, 1024, allowTagWhitespace)
+  optionalNullableText(track.folderName, 1024, allowTagWhitespace)
+  optionalNullableText(track.folderPath, 4096, allowTagWhitespace)
+  optionalNullableText(track.fileName, 512, allowTagWhitespace)
+  optionalNullableText(track.language, 64, allowTagWhitespace)
   optionalNullableInt(track.dynamicRange, 0, 100)
   if (track.hasCoverArt !== undefined) requireValue(typeof track.hasCoverArt === 'boolean')
   optionalNullableText(track.provenanceStatus, 64)
-  optionalNullableText(track.lyrics, 262_144)
+  optionalNullableText(track.lyrics, 262_144, true)
   optionalNullableText(track.fingerprintStatus, 64)
   if (track.genreTags !== undefined) {
     requireValue(Array.isArray(track.genreTags) && track.genreTags.length <= 32)
-    for (const tag of track.genreTags) text(tag, 128)
+    for (const tag of track.genreTags) text(tag, 128, allowTagWhitespace)
   }
 
   const sanitized: Record<string, unknown> = {

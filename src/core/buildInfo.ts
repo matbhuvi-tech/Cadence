@@ -8,6 +8,37 @@ export interface CoreBuildInfo {
   display: string
 }
 
+export type CatalogDegradationCause =
+  | 'unsupported_engine'
+  | 'invalid_metadata'
+  | 'payload_too_large'
+  | 'connection_interrupted'
+  | 'engine_busy'
+  | 'unknown'
+
+export interface CatalogHealth {
+  status: 'healthy' | 'degraded'
+  cause?: CatalogDegradationCause
+  reason?: string
+}
+
+export function describeCatalogDegradation(cause: CatalogDegradationCause): string {
+  switch (cause) {
+    case 'unsupported_engine':
+      return "Your Playback Engine is running an older version that doesn't provide full album artwork and track details. Update your Playback Engine to restore complete library info."
+    case 'invalid_metadata':
+      return "Some track details from your Playback Engine couldn't be read, so Cadence loaded a basic track list instead. Playback still works, but cover art and extra details may be missing."
+    case 'payload_too_large':
+      return "A batch of library details was too large to load in full, so Cadence loaded a basic track list instead. Playback still works, but cover art and extra details may be missing."
+    case 'connection_interrupted':
+      return 'The connection to your Playback Engine was interrupted while loading full album details, so Cadence loaded a basic track list instead. Try reconnecting to refresh.'
+    case 'engine_busy':
+      return 'Your Playback Engine paused full library loading while music is playing. Pause playback briefly and refresh to load complete cover art and track details.'
+    default:
+      return "Cadence couldn't load full album artwork and track details from your Playback Engine, so a basic track list was loaded instead. Playback still works normally."
+  }
+}
+
 export interface EngineCompatibilityWarning {
   severity: 'warning' | 'info'
   reason: 'v2_catalog_degraded' | 'core_older' | 'engine_older' | 'build_mismatch'
@@ -184,6 +215,7 @@ export function evaluateEngineCompatibility(params: {
   engineProtocolVersion?: number | null
   engineProtocolRevision?: number | null
   v2CatalogDegraded?: boolean
+  v2CatalogDegradedReason?: string | null
 }): EngineCompatibilityWarning | null {
   const {
     coreBuild,
@@ -192,15 +224,15 @@ export function evaluateEngineCompatibility(params: {
     engineProtocolVersion = null,
     engineProtocolRevision = null,
     v2CatalogDegraded = false,
+    v2CatalogDegradedReason = null,
   } = params
 
   if (v2CatalogDegraded) {
-    const engineLabel = engineBuild?.display ?? 'older unversioned build'
     return {
       severity: 'warning',
       reason: 'v2_catalog_degraded',
-      title: 'Catalog compatibility issue',
-      detail: `Protocol v2 catalog hydration fell back to v1 (${engineLabel} vs Cadence Core ${coreBuild.display}). Cover art or metadata may be incomplete until updated.`,
+      title: 'Catalog health degraded',
+      detail: v2CatalogDegradedReason || describeCatalogDegradation('unknown'),
       coreBuild,
       engineBuild,
     }

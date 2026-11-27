@@ -1,5 +1,21 @@
 # Issue Log
 
+## GitHub #65 — Protocol v2 catalog hydration degrades to v1 on multi-line lyrics/tags and lacks user-friendly Catalog Health UI
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/65
+- **Branch:** `fix/65-v2-catalog-hydration-and-health-ui`
+- **Reported behavior:** When Windows Desktop connects to TrueNAS Playback Engine (both on `v0.1.0-rc.4`, commit `cfadb87`, Protocol `v2 rev 2`), Settings -> Playback Engine displays an amber `Update recommended` badge and `Protocol v2 catalog hydration fell back to v1` warning.
+- **Root causes:**
+  1. `src/core/coreProtocol.ts` validated `track.lyrics` and enriched catalog text fields via `text()`, which rejected any character with `charCodeAt(0) < 32` — including `\n`, `\r`, and `\t`. Any track with multi-line lyrics or tab/newline characters in tags caused `parseCoreV2CatalogPage()` to throw `invalid_payload`, aborting v2 catalog hydration and falling back to v1.
+  2. `src/services/coreControllerTransport.ts` silently swallowed the v2 hydration error without recording a user-friendly reason or updating `catalogHealth`.
+  3. `src/components/Modals/PlaybackEnginePanel.tsx` mapped `v2_catalog_degraded` to `Update recommended` even when Engine and Core UI builds matched, and had no dedicated `Catalog Health` status indicator.
+- **Changes:**
+  1. `src/core/coreProtocol.ts`: Allowed `\t`, `\n`, and `\r` in `lyrics` and in v2 enriched catalog text fields while still rejecting NUL and other non-whitespace control characters and keeping v1 strictness intact.
+  2. `src/core/buildInfo.ts` & `src/services/coreControllerTransport.ts`: Added structured `CatalogHealth` (`healthy` / `degraded` + plain-language, jargon-free `describeCatalogDegradation()` reasons) and error classification + diagnostic warning log on v2 catalog fallback across activation, reconnect, catalog refresh, and passive sync.
+  3. `src/components/Modals/PlaybackEnginePanel.tsx`: Added a `Catalog Health` row showing `Healthy` or `Degraded` (with the plain-language reason when degraded) and separated version compatibility badges from catalog health so matching builds show `Matched` instead of `Update recommended`.
+  4. `src/test/testBuildInfoAndCompat.test.ts`: Added unit tests for multi-line lyrics/tag validation, `CatalogHealth` state propagation, and jargon-free degraded reasons.
+- **Status:** Implemented on `fix/65-v2-catalog-hydration-and-health-ui`; awaiting user verification.
+
 ## GitHub #64 — Watched root shows misleading 100% (0/0 albums) during/before nested subfolder scanning
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/64
