@@ -59,12 +59,12 @@ impl Library {
     pub fn open(db: AppDb, roots: Vec<PathBuf>) -> Result<Self> {
         let roots: Vec<PathBuf> = roots
             .iter()
-            .map(|p| {
-                p.canonicalize()
-                    .map(normalize_root)
-                    .map_err(|e| e.to_string())
+            .filter_map(|p| match p.canonicalize() {
+                Ok(canon) => Some(normalize_root(canon)),
+                Err(_) if p.is_absolute() => Some(normalize_root(p.clone())),
+                Err(_) => None,
             })
-            .collect::<Result<_>>()?;
+            .collect();
         if roots.is_empty() {
             return Err("No authorized browse roots".into());
         }
@@ -328,8 +328,37 @@ impl Library {
         }
         if op == "folders.scan.status" {
             let mut status = self.scan.clone();
-            status["deferred"] = json!(!idle);
+            status["deferred"] = json!(!idle && !self.pending.is_empty());
             return Ok(status);
+        }
+        if op == "folders.list" {
+            let conn = self.db.conn.lock();
+            let mut stmt = conn.prepare("SELECT id, folder_path, display_name, scan_mode, last_scanned_timestamp, (SELECT count(*) FROM tracks t WHERE t.mount_id=w.mount_id) FROM watched_folders w ORDER BY folder_path").map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, i64>(5)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut folders = Vec::new();
+            for row in rows {
+                let (id, path, name, mode, last, count) = row.map_err(|e| e.to_string())?;
+                let online = if idle {
+                    self.open_path(Path::new(&path))
+                        .and_then(|f| f.metadata().map_err(|e| e.to_string()))
+                        .is_ok_and(|m| m.is_dir())
+                } else {
+                    true
+                };
+                folders.push(json!({"id":id,"path":path,"displayName":name,"scanMode":mode,"lastScannedAt":last,"trackCount":count,"online":online}));
+            }
+            return Ok(json!({"folders":folders}));
         }
         if op == "engine.events" {
             return Ok(json!({"events":self.take_events()}));
@@ -374,32 +403,6 @@ impl Library {
                 self.browse_cache.clear();
                 Ok(json!({"id":id}))
             }
-            "folders.list" => {
-                let conn = self.db.conn.lock();
-                let mut stmt = conn.prepare("SELECT id, folder_path, display_name, scan_mode, last_scanned_timestamp, (SELECT count(*) FROM tracks t WHERE t.mount_id=w.mount_id) FROM watched_folders w ORDER BY folder_path").map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map([], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, String>(3)?,
-                            r.get::<_, Option<String>>(4)?,
-                            r.get::<_, i64>(5)?,
-                        ))
-                    })
-                    .map_err(|e| e.to_string())?;
-                let mut folders = Vec::new();
-                for row in rows {
-                    let (id, path, name, mode, last, count) = row.map_err(|e| e.to_string())?;
-                    let online = self
-                        .open_path(Path::new(&path))
-                        .and_then(|f| f.metadata().map_err(|e| e.to_string()))
-                        .is_ok_and(|m| m.is_dir());
-                    folders.push(json!({"id":id,"path":path,"displayName":name,"scanMode":mode,"lastScannedAt":last,"trackCount":count,"online":online}));
-                }
-                Ok(json!({"folders":folders}))
-            }
             "folders.remove" => {
                 let id = required(req, "folderId")?;
                 if self.scan["folderId"].as_str() == Some(id) && !self.pending.is_empty() {
@@ -415,8 +418,10 @@ impl Library {
                 Ok(json!({"removed":true}))
             }
             "folders.scan" => {
-                if !self.pending.is_empty() {
-                    return Err("Scan already queued".into());
+                for smb_root in crate::core_runtime::smb::remount_persisted_shares(&self.db) {
+                    if !self.roots.contains(&smb_root) {
+                        self.roots.push(smb_root);
+                    }
                 }
                 let conn = self.db.conn.lock();
                 let id = req.get("folderId").and_then(Value::as_str);
@@ -434,6 +439,25 @@ impl Library {
                 if roots.is_empty() {
                     return Err("Folder not found".into());
                 }
+                drop(stmt);
+                drop(conn);
+
+                if !self.pending.is_empty() {
+                    if let Some(scan_roots) = self.scan["roots"].as_array_mut() {
+                        for (rid, rpath) in roots {
+                            let already = scan_roots
+                                .iter()
+                                .any(|r| r["id"].as_str() == Some(rid.as_str()));
+                            if !already {
+                                scan_roots.push(json!({"id": rid, "path": rpath}));
+                                self.pending.push_back((rid, rpath));
+                            }
+                        }
+                    }
+                    self.persist()?;
+                    return Ok(self.scan.clone());
+                }
+
                 // One durable job at a time; absent folderId queues all roots as jobs.
                 let root_jobs = roots
                     .iter()
@@ -442,10 +466,11 @@ impl Library {
                 self.pending = roots.into();
                 let (id, path) = self.pending.front().unwrap();
                 self.scan = json!({"status":"queued","folderId":id,"path":path,"processed":0,"errorCount":0,"errors":[],"forceFull":req["forceFull"].as_bool().unwrap_or(false),"roots":root_jobs});
-                conn.execute("DELETE FROM engine_scan_seen", [])
+                self.db
+                    .conn
+                    .lock()
+                    .execute("DELETE FROM engine_scan_seen", [])
                     .map_err(|e| e.to_string())?;
-                drop(stmt);
-                drop(conn);
                 self.persist()?;
                 Ok(self.scan.clone())
             }
@@ -665,13 +690,19 @@ impl Library {
             let failed = self.scan["errorCount"].as_u64().unwrap_or(0) > 0
                 || self.scan["errors"].as_array().is_some_and(|v| !v.is_empty());
             self.scan["status"] = json!(if failed { "failed" } else { "completed" });
-            if !failed {
-                if let Some(roots) = self.scan["roots"].as_array() {
-                    for root in roots {
-                        let conn = self.db.conn.lock();
-                        conn.execute("UPDATE tracks SET is_online=0 WHERE mount_id=(SELECT mount_id FROM watched_folders WHERE id=?1) AND id NOT IN (SELECT track_id FROM engine_scan_seen WHERE folder_id=?1)",params![root["id"].as_str()]).map_err(|e|e.to_string())?;
-                        conn.execute("UPDATE watched_folders SET last_scanned_timestamp=CURRENT_TIMESTAMP WHERE id=?1",params![root["id"].as_str()]).map_err(|e|e.to_string())?;
+            if let Some(roots) = self.scan["roots"].as_array() {
+                for root in roots {
+                    let Some(root_id) = root["id"].as_str() else {
+                        continue;
+                    };
+                    let root_online = root["path"]
+                        .as_str()
+                        .is_some_and(|p| self.open_path(Path::new(p)).is_ok());
+                    let conn = self.db.conn.lock();
+                    if root_online {
+                        conn.execute("UPDATE tracks SET is_online=0 WHERE mount_id=(SELECT mount_id FROM watched_folders WHERE id=?1) AND id NOT IN (SELECT track_id FROM engine_scan_seen WHERE folder_id=?1)",params![root_id]).map_err(|e|e.to_string())?;
                     }
+                    conn.execute("UPDATE watched_folders SET last_scanned_timestamp=CURRENT_TIMESTAMP WHERE id=?1",params![root_id]).map_err(|e|e.to_string())?;
                 }
             }
             self.browse_cache.clear();
@@ -1745,6 +1776,70 @@ mod artwork_regression_tests {
         assert!(
             throttled_count > 0,
             "chaos flood exceeding token bucket during playback must be throttled with deferred_until_idle"
+        );
+    }
+
+    #[test]
+    fn folders_list_succeeds_while_not_idle_and_scan_appends_and_updates_timestamp_despite_errors() {
+        let (root, mut lib, _wav) = fixture();
+
+        // 1. folders.list must still return saved roots during playback/cooldown (idle = false)
+        let listed = lib.request("folders.list", &json!({}), false).unwrap();
+        let folders = listed["folders"].as_array().unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0]["id"], "w");
+
+        // 2. Historical/idle scan status must not report deferred = true when no scan is pending
+        let idle_status = lib.request("folders.scan.status", &json!({}), false).unwrap();
+        assert_eq!(idle_status["deferred"], false);
+
+        // 3. Add a second watched folder containing a corrupt WAV file
+        let sub_dir = root.join("Tamil");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(sub_dir.join("broken.wav"), b"RIFF\x10\x00\x00\x00WAVEnot-a-valid-wav").unwrap();
+        {
+            let conn = lib.db.conn.lock();
+            conn.execute(
+                "INSERT INTO watched_folders(id, mount_id, folder_path, display_name, scan_mode) VALUES('w2', 'm', ?1, 'Tamil', 'manual')",
+                params![sub_dir.to_string_lossy()],
+            )
+            .unwrap();
+        }
+
+        // Start scan on `w`
+        let first = lib
+            .request("folders.scan", &json!({ "folderId": "w" }), true)
+            .unwrap();
+        assert_eq!(first["status"], "queued");
+
+        // While `w` is still pending, scanning `w2` appends instead of failing with "Scan already queued"
+        let appended = lib
+            .request("folders.scan", &json!({ "folderId": "w2" }), true)
+            .unwrap();
+        let roots_arr = appended["roots"].as_array().unwrap();
+        assert_eq!(roots_arr.len(), 2);
+
+        // Active pending scan reports deferred = true when idle = false
+        let active_deferred = lib.request("folders.scan.status", &json!({}), false).unwrap();
+        assert_eq!(active_deferred["deferred"], true);
+
+        // Drain the scan queue
+        while lib.step().is_ok_and(|completed| !completed) {}
+
+        // Even though `broken.wav` caused a file error, `last_scanned_timestamp` is updated on `w2`
+        let ts: Option<String> = lib
+            .db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT last_scanned_timestamp FROM watched_folders WHERE id = 'w2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            ts.is_some(),
+            "last_scanned_timestamp must be updated even when individual files error"
         );
     }
 }

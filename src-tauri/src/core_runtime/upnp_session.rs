@@ -1665,6 +1665,8 @@ pub(crate) struct ActiveMediaSession {
     pub(crate) pacer_config: Option<CorePacerConfig>,
     pub(crate) has_streamed_audio: AtomicBool,
     pub(crate) last_audio_end_offset: AtomicU64,
+    pub(crate) saw_playing: AtomicBool,
+    pub(crate) stopped_polls: AtomicU32,
     pub(crate) cancelled: AtomicBool,
     pub(crate) playback_clock: Mutex<PlaybackClockState>,
 }
@@ -2188,6 +2190,8 @@ impl Renderer for UpnpBridgeRenderer {
                     pacer_config: Some(self.pacer_config),
                     has_streamed_audio: AtomicBool::new(false),
                     last_audio_end_offset: AtomicU64::new(0),
+                    saw_playing: AtomicBool::new(false),
+                    stopped_polls: AtomicU32::new(0),
                     cancelled: AtomicBool::new(false),
                     playback_clock: Mutex::new(PlaybackClockState {
                         base_position_secs: 0.0,
@@ -2224,6 +2228,7 @@ impl Renderer for UpnpBridgeRenderer {
                         if let Ok(mut tok_guard) = s.run_token.lock() {
                             *tok_guard = token.clone();
                         }
+                        s.stopped_polls.store(0, Ordering::Release);
                         s.mark_resumed();
                     }
                 }
@@ -2246,6 +2251,7 @@ impl Renderer for UpnpBridgeRenderer {
                         if let Ok(mut tok_guard) = s.run_token.lock() {
                             *tok_guard = token.clone();
                         }
+                        s.stopped_polls.store(0, Ordering::Release);
                         s.mark_seek(*position_seconds, is_paused);
                     }
                 }
@@ -2515,6 +2521,8 @@ pub(crate) fn apply_reconcile_probe_to_runtime<R: Renderer, P: PlatformProbe, L:
     let pos = parse_rel_time_seconds(&probe.rel_time);
     match probe.transport_state.as_str() {
         "PLAYING" => {
+            session.saw_playing.store(true, Ordering::Release);
+            session.stopped_polls.store(0, Ordering::Release);
             paused_flag.store(false, Ordering::Release);
             let effective_pos = session.effective_playing_position(pos);
             let changed = rt
@@ -2527,6 +2535,7 @@ pub(crate) fn apply_reconcile_probe_to_runtime<R: Renderer, P: PlatformProbe, L:
             }
         }
         "PAUSED_PLAYBACK" => {
+            session.stopped_polls.store(0, Ordering::Release);
             paused_flag.store(true, Ordering::Release);
             let effective_pos = session.mark_paused(pos);
             let changed = rt
@@ -2538,7 +2547,7 @@ pub(crate) fn apply_reconcile_probe_to_runtime<R: Renderer, P: PlatformProbe, L:
                 TransportReport::Steady
             }
         }
-        "STOPPED" => {
+        "STOPPED" | "NO_MEDIA_PRESENT" => {
             let streamed = session.has_streamed_audio.load(Ordering::Acquire);
             let end_offset = session.last_audio_end_offset.load(Ordering::Acquire);
             if streamed && end_offset >= session.audio_payload_end {
@@ -2562,6 +2571,20 @@ pub(crate) fn apply_reconcile_probe_to_runtime<R: Renderer, P: PlatformProbe, L:
                 if advanced {
                     return TransportReport::CompletedAndAdvanced;
                 }
+                return TransportReport::Steady;
+            }
+
+            let polls = session.stopped_polls.fetch_add(1, Ordering::AcqRel) + 1;
+            let saw_playing = session.saw_playing.load(Ordering::Acquire);
+            if (saw_playing && polls >= 2) || polls >= 4 {
+                if let Ok(mut guard) = active_session_ref.lock() {
+                    if let Some(prev) = guard.take() {
+                        prev.cancelled.store(true, Ordering::Release);
+                    }
+                }
+                paused_flag.store(false, Ordering::Release);
+                let _ = rt.on_renderer_event(RendererEvent::Failed(token));
+                return TransportReport::RendererFailed;
             }
             TransportReport::Steady
         }

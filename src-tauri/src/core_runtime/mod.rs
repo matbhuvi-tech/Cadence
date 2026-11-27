@@ -692,7 +692,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         self.ensure_storage_idle_at(Instant::now())?;
         let data_root=self.config.db_path.parent().ok_or_else(||RuntimeError::Database("Missing app-data root".into()))?.canonicalize().map_err(|e|RuntimeError::Database(e.to_string()))?;
         for root in &roots {
-            let root=root.canonicalize().map_err(|e|RuntimeError::Database(e.to_string()))?;
+            let root = root.canonicalize().unwrap_or_else(|_| root.clone());
             let is_volume_root = root.parent().is_none();
             if root.starts_with(&data_root) || (!is_volume_root && data_root.starts_with(&root)) {
                 return Err(RuntimeError::Database("Browse roots and persistent app data must not overlap".into()));
@@ -704,6 +704,14 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
         for smb_root in smb::remount_persisted_shares(&db) {
             if !all_roots.contains(&smb_root) {
                 all_roots.push(smb_root);
+            }
+        }
+        if let Ok(shares) = smb::list_shares(&db) {
+            for share in shares {
+                let pb = PathBuf::from(&share.mount_path);
+                if pb.exists() && !all_roots.contains(&pb) {
+                    all_roots.push(pb);
+                }
             }
         }
         let library = library::Library::open(db, all_roots).map_err(RuntimeError::Database)?;

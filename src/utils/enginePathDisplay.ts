@@ -32,6 +32,9 @@ export function formatEngineDisplayName(
   if (share) {
     return share.displayName || share.share
   }
+  if (fallbackName.includes('/') || fallbackName.includes('\\')) {
+    return fallbackName.split(/[/\\]/).filter(Boolean).pop() || fallbackName
+  }
   return fallbackName
 }
 

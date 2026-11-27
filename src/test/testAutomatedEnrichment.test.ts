@@ -25,7 +25,9 @@ import {
   formatEnrichmentStateLabel,
   formatRootEnrichmentHeadline,
   getRootScanState,
+  humanizeScanError,
 } from '../components/Modals/StorageManagerModal'
+import { formatEngineDisplayName } from '../utils/enginePathDisplay'
 import {
   extractCachedEnrichmentProposal,
   formatArtworkSourcePlainEnglish,
@@ -769,4 +771,32 @@ test('Watched Root scan state and headline avoid misleading 100% (0/0 albums) du
   assert.equal(complete.showArtPercent, true)
   assert.equal(complete.barPercent, 100)
   assert.equal(complete.barTone, 'emerald')
+})
+
+test('humanizeScanError and formatEngineDisplayName produce clear user-facing storage copy', () => {
+  assert.equal(
+    humanizeScanError('Encountered an invalid timestamp: Timestamp segment is too short').summary,
+    'Malformed date/timestamp tag in audio file',
+  )
+  assert.equal(
+    humanizeScanError('Wav: File does not contain a "data" chunk').summary,
+    'Corrupt or incomplete WAV file (missing PCM audio data chunk) — skipped',
+  )
+  assert.equal(
+    humanizeScanError('Symlinks are not authorized').summary,
+    'Symbolic link skipped for security',
+  )
+  assert.deepEqual(humanizeScanError('Permission denied'), {
+    summary: 'Permission denied',
+    detail: '',
+  })
+
+  assert.equal(
+    formatEngineDisplayName(
+      '//192.168.1.6/Mathan/Music Collection/Master/Tamil',
+      '//192.168.1.6/Mathan/Music Collection/Master/Tamil',
+      [],
+    ),
+    'Tamil',
+  )
 })

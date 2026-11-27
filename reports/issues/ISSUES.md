@@ -4,16 +4,21 @@
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/64
 - **Branch:** `fix/64-watched-root-scan-album-count`
-- **Reported behavior:** Adding a watched root with leaf album folders nested several levels deep shows `0 tracks`, `Auto-Enrich 100% (0/0 albums) · Art 100%`, and a full green progress bar before/during scanning, making it look like subfolder scanning skipped nested albums.
+- **Reported behavior:**
+  1. Adding a watched root with leaf album folders nested several levels deep shows `0 tracks`, `Auto-Enrich 100% (0/0 albums) · Art 100%`, and a full green progress bar before/during scanning.
+  2. When nothing was playing, Storage Manager showed `Watched Roots: 0`, `Scan: failed · ... · paused during playback/cooldown`, and retained Lofty errors (`Encountered an invalid timestamp`, `Wav: File does not contain a "data" chunk`).
 - **Root causes:**
-  1. `src-tauri/src/core_runtime/enrichment/schema.rs` (`pct()`) returned `100` when `total == 0`, causing empty/unscanned/scanning roots to report `100%` metadata and artwork coverage.
-  2. `src-tauri/src/core_runtime/library.rs` (`step()`) recursively traverses nested subfolders depth-first, but did not update `self.scan["folderId"]` when advancing across roots in multi-root scans.
-  3. `StorageManagerModal.tsx` and `AutoEnrichmentPanel.tsx` rendered `Auto-Enrich 100% (0/0 albums)` + a full green bar for `totalAlbums === 0`, lacked per-root `Scanning…` / `Queued` / `Scan Paused` indicators, and only refreshed folder/enrichment counts on terminal scan events.
+  1. `src-tauri/src/core_runtime/enrichment/schema.rs` (`pct()`) returned `100` when `total == 0`.
+  2. `src-tauri/src/core_runtime/windows_engine.rs` (`run_windows_reconcile_loop`) and `src-tauri/src/core_runtime/upnp_session.rs` (`apply_reconcile_probe_to_runtime`) could leave `Activity::Loading` / `Playing` wedged when a track failed before starting or stopped early on the renderer, keeping `!idle` active permanently.
+  3. `src-tauri/src/core_runtime/library.rs` blocked `folders.list` when `!idle` (which `StorageManagerModal.tsx` swallowed into `[]` -> `Watched Roots: 0`), unconditionally set `scan.deferred = !idle` on finished scans, rejected a second `folders.scan` with `"Scan already queued"`, skipped updating `last_scanned_timestamp` when any individual file failed, and aborted `Library::open` if a persisted UNC root was offline.
+  4. `src-tauri/src/scanner/media.rs` used `ParsingMode::BestAttempt` without `ParsingMode::Relaxed` fallback, dropping tracks with malformed ID3v2 timestamps.
 - **Changes:**
-  1. `src-tauri/src/core_runtime/enrichment/schema.rs`: Updated `pct()` to return `0` when `total == 0`.
-  2. `src-tauri/src/core_runtime/library.rs`: Updated `step()` to set `self.scan["folderId"]` to the active root `folder_id` on each step.
-  3. `src/core/coreProtocol.ts`, `src/components/Modals/StorageManagerModal.tsx`, `src/components/Curate/AutoEnrichmentPanel.tsx`: Added `getRootScanState` and `formatRootEnrichmentHeadline`, static per-root scan badges (`Scanning…`, `Queued`, `Scan Paused`), event-driven mid-scan progress refreshes (every 100 processed items), and explicit non-100% empty/scanning/unscanned copy.
-  4. `src-tauri/src/core_runtime/enrichment/tests.rs` & `src/test/testAutomatedEnrichment.test.ts`: Added Rust and Vitest coverage for empty roots, deep subfolder album matching, and root scan state/headline formatting.
+  1. `src-tauri/src/core_runtime/enrichment/schema.rs`: `pct()` returns `0` when `total == 0`.
+  2. `src-tauri/src/core_runtime/windows_engine.rs` & `upnp_session.rs`: Added startup/early-stop recovery (`RendererEvent::Failed`) and `saw_active`/`stopped_polls` reset on `Resume`/`Seek` so neither Windows Engine nor Linux/TrueNAS UPnP can wedge in `!idle`.
+  3. `src-tauri/src/core_runtime/library.rs` & `mod.rs`: Allowed `folders.list` when `!idle` using SQLite-only reads (zero music-drive I/O); gated `scan.deferred` on `!idle && !self.pending.is_empty()`; appended roots in `folders.scan` + remounted persisted SMB shares; updated `last_scanned_timestamp` and online cleanup even on per-file parse errors; tolerated offline absolute roots in `Library::open` / `configure_library`.
+  4. `src-tauri/src/scanner/media.rs`: Added `ParsingMode::Relaxed` recovery and tagless fallback across non-DSD formats.
+  5. `src/core/coreProtocol.ts`, `src/utils/enginePathDisplay.ts`, `src/components/Modals/StorageManagerModal.tsx`, `src/components/Curate/AutoEnrichmentPanel.tsx`: Added `getRootScanState`, `formatRootEnrichmentHeadline`, `humanizeScanError`, leaf-name display fallback, non-destructive `listFolders()` refresh handling, and active enrichment/artwork queue indicators.
+  6. `src-tauri/src/core_runtime/enrichment/tests.rs`, `library.rs`, `scanner/media.rs`, & `src/test/testAutomatedEnrichment.test.ts`: Added unit tests covering all backend and frontend behaviors.
 - **Status:** Implemented on `fix/64-watched-root-scan-album-count`; awaiting verification.
 
 ## Support & Self-Diagnostics UX Redesign (`feat/support-troubleshooting-ux-redesign`)

@@ -1,5 +1,5 @@
 //! Shared native container inspection, used by headless library indexing.
-use lofty::config::ParseOptions;
+use lofty::config::{ParseOptions, ParsingMode};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{Picture, PictureType};
 use lofty::tag::{Accessor, ItemKey, Tag};
@@ -32,21 +32,29 @@ pub fn inspect(path: &Path, extension: &str) -> Result<MediaMetadata, String> {
                 None,
             )
         } else {
-            let parse = |read_tags| {
+            let parse = |read_tags, parsing_mode| {
                 lofty::probe::Probe::open(path)
                     .map_err(|error| error.to_string())?
-                    .options(ParseOptions::new().read_tags(read_tags))
+                    .options(
+                        ParseOptions::new()
+                            .read_tags(read_tags)
+                            .parsing_mode(parsing_mode),
+                    )
                     .guess_file_type()
                     .map_err(|error| error.to_string())?
                     .read()
                     .map_err(|error| error.to_string())
             };
-            let (parsed, tag_parse_error) = match parse(true) {
+            let (parsed, tag_parse_error) = match parse(true, ParsingMode::BestAttempt) {
                 Ok(parsed) => (parsed, None),
-                Err(original_error) if extension == "wav" => {
-                    (parse(false).map_err(|_| original_error.clone())?, Some(original_error))
-                }
-                Err(error) => return Err(error),
+                Err(_) => match parse(true, ParsingMode::Relaxed) {
+                    Ok(parsed) => (parsed, None),
+                    Err(original_error) => (
+                        parse(false, ParsingMode::Relaxed)
+                            .map_err(|_| original_error.clone())?,
+                        Some(original_error),
+                    ),
+                },
             };
             let props = parsed.properties();
             let mut chosen_tag = parsed.primary_tag().or_else(|| parsed.first_tag()).cloned();
@@ -329,5 +337,60 @@ mod tests {
             metadata.tag.is_none(),
             "broken INFO tags should be ignored on fallback"
         );
+    }
+
+    #[test]
+    fn invalid_id3v2_timestamp_recovers_via_relaxed_mode_preserving_title() {
+        let mut body = b"WAVE".to_vec();
+        let mut format = Vec::new();
+        format.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        format.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        format.extend_from_slice(&44_100u32.to_le_bytes());
+        format.extend_from_slice(&176_400u32.to_le_bytes());
+        format.extend_from_slice(&4u16.to_le_bytes());
+        format.extend_from_slice(&16u16.to_le_bytes());
+        body.extend_from_slice(&chunk(b"fmt ", &format));
+        body.extend_from_slice(&chunk(b"data", &[0; 4]));
+
+        let mut frames = Vec::new();
+        let title_bytes = b"Unnai Nan Parthadhu";
+        frames.extend_from_slice(b"TIT2");
+        frames.extend_from_slice(&((1 + title_bytes.len()) as u32).to_be_bytes());
+        frames.extend_from_slice(&[0x00, 0x00, 0x03]);
+        frames.extend_from_slice(title_bytes);
+
+        // Short malformed TDRC timestamp ("20") triggers invalid timestamp in BestAttempt
+        frames.extend_from_slice(b"TDRC");
+        frames.extend_from_slice(&3u32.to_be_bytes());
+        frames.extend_from_slice(&[0x00, 0x00, 0x03]);
+        frames.extend_from_slice(b"20");
+
+        let len = frames.len() as u32;
+        let syncsafe = [
+            ((len >> 21) & 0x7F) as u8,
+            ((len >> 14) & 0x7F) as u8,
+            ((len >> 7) & 0x7F) as u8,
+            (len & 0x7F) as u8,
+        ];
+        let mut id3 = b"ID3\x04\x00\x00".to_vec();
+        id3.extend_from_slice(&syncsafe);
+        id3.extend_from_slice(&frames);
+        body.extend_from_slice(&chunk(b"id3 ", &id3));
+
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&body);
+
+        let file = TempFile::new(&wav);
+        let metadata = inspect(&file.0, "wav")
+            .expect("malformed ID3v2 timestamp should recover technical metadata via fallback");
+
+        assert_eq!(metadata.sample_rate, Some(44_100));
+        assert_eq!(metadata.bit_depth, Some(16));
+        assert_eq!(metadata.channels, Some(2));
+        assert!(metadata
+            .tag_parse_error
+            .as_deref()
+            .is_some_and(|e| e.contains("Timestamp segment is too short")));
     }
 }

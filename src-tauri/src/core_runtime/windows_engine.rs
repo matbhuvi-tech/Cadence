@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -422,6 +422,7 @@ fn detect_lan_ipv4() -> Option<String> {
 pub(crate) struct ActiveRunState {
     token: Option<RunToken>,
     saw_active: bool,
+    dispatched_at: Option<Instant>,
 }
 
 pub struct WindowsEngineRenderer {
@@ -450,6 +451,7 @@ impl Renderer for WindowsEngineRenderer {
                 if let Ok(mut guard) = self.run_state.lock() {
                     guard.token = Some(token.clone());
                     guard.saw_active = false;
+                    guard.dispatched_at = Some(Instant::now());
                 }
                 Ok(())
             }
@@ -458,6 +460,8 @@ impl Renderer for WindowsEngineRenderer {
                 self.audio.resume().map_err(|_| RendererError)?;
                 if let Ok(mut guard) = self.run_state.lock() {
                     guard.token = Some(token.clone());
+                    guard.saw_active = false;
+                    guard.dispatched_at = Some(Instant::now());
                 }
                 Ok(())
             }
@@ -465,6 +469,8 @@ impl Renderer for WindowsEngineRenderer {
                 self.audio.seek(*position_seconds).map_err(|_| RendererError)?;
                 if let Ok(mut guard) = self.run_state.lock() {
                     guard.token = Some(token.clone());
+                    guard.saw_active = false;
+                    guard.dispatched_at = Some(Instant::now());
                 }
                 Ok(())
             }
@@ -473,6 +479,7 @@ impl Renderer for WindowsEngineRenderer {
                 if let Ok(mut guard) = self.run_state.lock() {
                     guard.token = None;
                     guard.saw_active = false;
+                    guard.dispatched_at = None;
                 }
                 Ok(())
             }
@@ -628,6 +635,7 @@ impl WindowsEngineNode {
         let run_state = Arc::new(Mutex::new(ActiveRunState {
             token: None,
             saw_active: false,
+            dispatched_at: None,
         }));
         let shared_buffers = Arc::new(Mutex::new(HashMap::new()));
         let renderer = WindowsEngineRenderer::new(
@@ -932,6 +940,7 @@ fn run_windows_reconcile_loop<P, L>(
         }
 
         let mut completed_token: Option<RunToken> = None;
+        let mut failed_token: Option<RunToken> = None;
         let mut started_token: Option<RunToken> = None;
         let mut current_token: Option<RunToken> = None;
         if let Ok(mut guard) = run_state.lock() {
@@ -943,8 +952,19 @@ fn run_windows_reconcile_loop<P, L>(
                 } else if !active && guard.saw_active {
                     guard.saw_active = false;
                     guard.token = None;
+                    guard.dispatched_at = None;
                     current_token = None;
                     completed_token = Some(tok);
+                } else if !active
+                    && !guard.saw_active
+                    && guard
+                        .dispatched_at
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+                {
+                    guard.token = None;
+                    guard.dispatched_at = None;
+                    current_token = None;
+                    failed_token = Some(tok);
                 }
             }
         }
@@ -965,6 +985,9 @@ fn run_windows_reconcile_loop<P, L>(
             }
             if let Some(tok) = completed_token {
                 let _ = rt.on_windows_renderer_completed(tok);
+            }
+            if let Some(tok) = failed_token {
+                let _ = rt.on_renderer_event(RendererEvent::Failed(tok));
             }
         }
 

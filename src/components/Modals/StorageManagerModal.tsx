@@ -50,6 +50,38 @@ export function findRootEnrichmentProgress(
   return status?.roots.find((r) => r.folderId === folderId) ?? null
 }
 
+export function humanizeScanError(rawMessage: string): {
+  summary: string
+  detail: string
+} {
+  const lower = rawMessage.toLowerCase()
+  if (lower.includes('timestamp segment is too short') || lower.includes('invalid timestamp')) {
+    return {
+      summary: 'Malformed date/timestamp tag in audio file',
+      detail: rawMessage,
+    }
+  }
+  if (lower.includes('does not contain a "data" chunk')) {
+    return {
+      summary: 'Corrupt or incomplete WAV file (missing PCM audio data chunk) — skipped',
+      detail: rawMessage,
+    }
+  }
+  if (
+    lower.includes('symlinks are not authorized') ||
+    lower.includes('too many levels of symbolic links')
+  ) {
+    return {
+      summary: 'Symbolic link skipped for security',
+      detail: rawMessage,
+    }
+  }
+  return {
+    summary: rawMessage,
+    detail: '',
+  }
+}
+
 export type RootScanState = 'scanning' | 'queued' | 'deferred' | 'unscanned' | 'idle'
 
 export function getRootScanState(
@@ -187,18 +219,45 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
   const [smbDisplayName, setSmbDisplayName] = useState('')
   const [smbError, setSmbError] = useState<string | null>(null)
 
-  const refreshEngineStorage = useCallback(async () => {
+  const refreshEngineStorage = useCallback(async (notifyOnFolderError = false) => {
     if (!engineClient) return
     setIsLoading(true)
     try {
-      const [folders, status, support, shares, enrichment] = await Promise.all([
-        engineClient.listFolders().catch(() => []),
+      const [foldersRes, status, support, shares, enrichment] = await Promise.all([
+        engineClient
+          .listFolders()
+          .then((folders) => ({ ok: true as const, folders }))
+          .catch((err: any) => ({
+            ok: false as const,
+            error: err?.message || 'Could not refresh watched folders.',
+          })),
         engineClient.getScanStatus().catch(() => null),
         engineClient.getSmbStatus().catch(() => null),
         engineClient.listSmbShares().catch(() => []),
         engineClient.getEnrichmentStatus().catch(() => null),
       ])
-      setEngineFolders(folders)
+      if (foldersRes.ok) {
+        setEngineFolders(foldersRes.folders)
+      } else {
+        setEngineFolders((prev) => {
+          if (prev.length > 0) return prev
+          if (enrichment && enrichment.roots.length > 0) {
+            return enrichment.roots.map((r) => ({
+              id: r.folderId,
+              path: r.path,
+              displayName: r.displayName,
+              scanMode: 'manual',
+              lastScannedAt: null,
+              trackCount: 0,
+              online: true,
+            }))
+          }
+          return prev
+        })
+        if (notifyOnFolderError) {
+          showToast(foldersRes.error)
+        }
+      }
       setScanStatus(status)
       setSmbSupport(support)
       setSmbShares(shares)
@@ -206,7 +265,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
     } finally {
       setIsLoading(false)
     }
-  }, [engineClient])
+  }, [engineClient, showToast])
 
   useEffect(() => {
     setEngineFolders([])
@@ -459,6 +518,16 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                 <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] text-white/75">
                   {formatEnrichmentStateLabel(enrichmentStatus)}
                 </span>
+                {enrichmentStatus.currentAlbumTitle && (
+                  <span className="text-[11px] text-white/60 truncate max-w-[200px]" title={enrichmentStatus.currentAlbumTitle}>
+                    · Enriching: {enrichmentStatus.currentAlbumTitle}
+                  </span>
+                )}
+                {enrichmentStatus.artworkPendingItems > 0 && (
+                  <span className="text-[11px] text-white/45 font-mono">
+                    · {enrichmentStatus.artworkPendingItems.toLocaleString()} covers queued
+                  </span>
+                )}
                 <button
                   type="button"
                   onClick={() => void handleToggleEnrichmentPause()}
@@ -495,7 +564,7 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
             <button
               type="button"
               onClick={() => {
-                void refreshEngineStorage()
+                void refreshEngineStorage(true)
                 onRefreshLibrary()
               }}
               disabled={isLoading || !engineClient}
@@ -545,9 +614,13 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
               {scanStatus.errors?.map((error, index) => {
                 const path = typeof error === 'string' ? null : error.path
                 const message = typeof error === 'string' ? error : error.message
+                const formatted = humanizeScanError(message)
                 return (
                   <li key={`${path ?? 'error'}-${index}`} className="break-all">
-                    <span className="text-rose-200">{message}</span>
+                    <span className="text-rose-200">{formatted.summary}</span>
+                    {formatted.detail && (
+                      <div className="mt-0.5 font-mono text-[10px] text-white/45">{formatted.detail}</div>
+                    )}
                     {path && <div className="mt-0.5 font-mono text-[10px] text-white/50">{path}</div>}
                   </li>
                 )
