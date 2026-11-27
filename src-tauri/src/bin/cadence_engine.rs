@@ -992,6 +992,7 @@ fn print_usage() {
 }
 
 fn main() {
+    cadence_core_lib::diagnostics::init_from_env();
     let attached_console = attach_parent_console_if_present();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut cfg = WindowsEngineConfig::default();

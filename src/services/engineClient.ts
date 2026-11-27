@@ -31,6 +31,7 @@ import type {
   RemoteCurateFieldChange,
   RemoteCurateTransport,
 } from '../core/remoteCurate'
+import type { CaptureMode, DebugLogState } from '../core/diagnostics'
 import { parseDeliverySnapshot, type DeliverySnapshot } from '../core/upnpDelivery'
 import type { DeliveryCaptureOptions } from './upnpDeliveryCapture'
 
@@ -133,6 +134,12 @@ export interface EngineClient {
     coverArtUrl?: string
   }): Promise<EngineEnrichmentAlbumDetail>
   fetchEvents(): Promise<EngineEventRecord[]>
+  getDiagnosticsStatus(): Promise<DebugLogState>
+  controlDiagnostics(input: {
+    action: 'set_mode' | 'flush_if_idle' | 'clear_logs'
+    mode?: CaptureMode
+  }): Promise<DebugLogState>
+  getDiagnosticsSnapshot(): Promise<Record<string, unknown>>
   readonly curateTransport: RemoteCurateTransport
 }
 
@@ -414,6 +421,16 @@ export function createEngineClient(
       const res = await call<{ events: EngineEventRecord[] }>('engine.events')
       return res.events ?? []
     },
+
+    getDiagnosticsStatus: () => call<DebugLogState>('diagnostics.status'),
+
+    controlDiagnostics: (input) =>
+      call<DebugLogState>('diagnostics.control', {
+        action: input.action,
+        ...(input.mode ? { mode: input.mode } : {}),
+      }),
+
+    getDiagnosticsSnapshot: () => call<Record<string, unknown>>('diagnostics.snapshot'),
 
     curateTransport,
   }

@@ -634,6 +634,19 @@ fn run_worker_loop(
                             json!({ "releaseId": entity_id, "artworkOutcome": format!("{outcome:?}") }),
                         );
                     }
+                    if matches!(outcome, ArtworkProcessOutcome::RetryLater(_) | ArtworkProcessOutcome::Absent) {
+                        crate::diag_log!(
+                            crate::diagnostics::DiagCategory::Enrichment,
+                            0,
+                            0,
+                            0,
+                            "artwork_external_outcome",
+                            "kind={} id={} outcome={:?}",
+                            art_kind,
+                            entity_id,
+                            outcome
+                        );
+                    }
                 }
             }
 
@@ -852,6 +865,7 @@ pub async fn process_text_enrichment_album(
     }
 
     gate.set_current_album(Some((release_id.to_string(), local.title.clone())));
+    let enrich_t0 = crate::diagnostics::is_active().then(Instant::now);
 
     let mut all_candidates: Vec<CandidateAlbum> = Vec::new();
     let mut transient_error: Option<(String, Option<Duration>)> = None;
@@ -895,6 +909,19 @@ pub async fn process_text_enrichment_album(
                  SET attempt_count = ?2, next_retry_at = ?3, last_error = ?4, updated_at = CURRENT_TIMESTAMP
                  WHERE release_id = ?1",
                 params![release_id, attempts + 1, next_retry, err_msg],
+            );
+            let dur_us = enrich_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+            crate::diag_log!(
+                crate::diagnostics::DiagCategory::Enrichment,
+                0,
+                0,
+                dur_us,
+                "enrichment_album_deferred",
+                "release={} attempts={} retry_s={} err={}",
+                release_id,
+                attempts + 1,
+                delay.max(10),
+                err_msg
             );
             return false;
         }
@@ -1050,6 +1077,21 @@ pub async fn process_text_enrichment_album(
     if tx.commit().is_err() {
         return false;
     }
+
+    let dur_us = enrich_t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+    crate::diag_log!(
+        crate::diagnostics::DiagCategory::Enrichment,
+        0,
+        0,
+        dur_us,
+        "enrichment_album_evaluated",
+        "release={} status={} provider={} dist={:.3} applied={}",
+        release_id,
+        status_str,
+        prov_opt.unwrap_or("none"),
+        eval.distance,
+        applied_any
+    );
 
     gate.push_event(
         "enrichment.updated",

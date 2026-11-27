@@ -79,6 +79,10 @@ pub enum DiagCategory {
     AudioEngineCommands = 7,
     BackgroundWorkers = 8,
     AudioHygiene = 9,
+    EngineConnection = 10,
+    Enrichment = 11,
+    StorageAndSmb = 12,
+    DatabaseMigration = 13,
 }
 
 impl DiagCategory {
@@ -94,6 +98,10 @@ impl DiagCategory {
             "audio_engine_commands" => Self::AudioEngineCommands,
             "background_workers" => Self::BackgroundWorkers,
             "audio_hygiene" => Self::AudioHygiene,
+            "engine_connection" => Self::EngineConnection,
+            "enrichment" => Self::Enrichment,
+            "storage_smb" => Self::StorageAndSmb,
+            "db_migration" => Self::DatabaseMigration,
             _ => Self::BackgroundWorkers,
         }
     }
@@ -110,6 +118,10 @@ impl DiagCategory {
             Self::AudioEngineCommands => "AUDIO_ENGINE_CMD",
             Self::BackgroundWorkers => "BACKGROUND_WORKER",
             Self::AudioHygiene => "AUDIO_HYGIENE",
+            Self::EngineConnection => "ENGINE_CONNECTION",
+            Self::Enrichment => "ENRICHMENT",
+            Self::StorageAndSmb => "STORAGE_SMB",
+            Self::DatabaseMigration => "DB_MIGRATION",
         }
     }
 }
@@ -155,6 +167,10 @@ pub struct DebugLogState {
     pub log_file_path: Option<String>,
     pub log_dir_path: Option<String>,
     pub last_flush_error: Option<String>,
+    #[serde(default)]
+    pub crash_log_count: usize,
+    #[serde(default)]
+    pub latest_crash_log: Option<String>,
 }
 
 /// Fixed-size UTF-8 stack buffer avoiding any heap allocation when formatting log payloads.
@@ -818,6 +834,7 @@ impl DiagRuntime {
 
     pub fn status(&self) -> DebugLogState {
         let hygiene = (self.hygiene_probe)();
+        let crashes = list_crash_logs(&self.log_dir);
         DebugLogState {
             mode: self.mode(),
             ring_capacity: self.ring.capacity(),
@@ -829,7 +846,13 @@ impl DiagRuntime {
             log_file_path: Some(self.main_log_path().to_string_lossy().to_string()),
             log_dir_path: Some(self.log_dir.to_string_lossy().to_string()),
             last_flush_error: self.last_flush_error.lock().clone(),
+            crash_log_count: crashes.len(),
+            latest_crash_log: crashes.first().map(|p| p.to_string_lossy().to_string()),
         }
+    }
+
+    pub fn read_persisted_log_tail(&self, max_bytes: usize) -> String {
+        read_log_tail_from_dir(&self.log_dir, max_bytes)
     }
 
     pub fn stop(&self) {
@@ -905,6 +928,8 @@ pub fn get_state() -> DebugLogState {
             log_file_path: None,
             log_dir_path: None,
             last_flush_error: None,
+            crash_log_count: 0,
+            latest_crash_log: None,
         }
     }
 }
@@ -914,6 +939,170 @@ pub fn get_recent_logs() -> Vec<String> {
         .get()
         .map(|rt| rt.recent_logs())
         .unwrap_or_default()
+}
+
+pub fn read_persisted_log_tail(max_bytes: usize) -> String {
+    RUNTIME_CONTROLLER
+        .get()
+        .map(|rt| rt.read_persisted_log_tail(max_bytes))
+        .unwrap_or_default()
+}
+
+pub fn list_crash_logs(log_dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("crash-") && n.ends_with(".log"))
+        })
+        .collect();
+    files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    files
+}
+
+pub fn read_log_tail_from_dir(log_dir: &std::path::Path, max_bytes: usize) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+    let mut combined = String::new();
+    for path in [
+        log_dir.join("cadence-debug.1.log"),
+        log_dir.join("cadence-debug.log"),
+    ] {
+        if let Ok(raw) = fs::read_to_string(&path) {
+            if !raw.is_empty() {
+                if !combined.is_empty() && !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+                combined.push_str(&raw);
+            }
+        }
+    }
+    if combined.len() <= max_bytes {
+        return combined;
+    }
+    let mut start = combined.len() - max_bytes;
+    while start < combined.len() && !combined.is_char_boundary(start) {
+        start += 1;
+    }
+    let slice = &combined[start..];
+    if let Some(nl) = slice.find('\n') {
+        slice[nl + 1..].to_string()
+    } else {
+        slice.to_string()
+    }
+}
+
+static PANIC_HOOK_TARGET: OnceLock<Mutex<(String, PathBuf)>> = OnceLock::new();
+static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+pub fn write_crash_report_to_dir(
+    log_dir: &std::path::Path,
+    process_name: &str,
+    thread_name: &str,
+    location: &str,
+    payload: &str,
+    ring: Option<&LockFreeDiagRing>,
+    recent_lines: &[String],
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(log_dir).map_err(|e| format!("create crash log dir failed: {e}"))?;
+    let ts_ms = now_timestamp_ms();
+    let safe_proc: String = process_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let crash_path = log_dir.join(format!("crash-{ts_ms}-{safe_proc}.log"));
+
+    let mut out = String::with_capacity(4096);
+    let _ = writeln!(out, "=== CADENCE CRASH / PANIC REPORT ===");
+    let _ = writeln!(out, "timestamp_ms: {ts_ms}");
+    let _ = writeln!(out, "utc: {}", Utc::now().to_rfc3339());
+    let _ = writeln!(out, "process: {process_name}");
+    let _ = writeln!(out, "thread: {thread_name}");
+    let _ = writeln!(out, "location: {location}");
+    let _ = writeln!(out, "message: {payload}");
+    let _ = writeln!(out, "capture_mode: {}", capture_mode().as_str());
+
+    if let Some(r) = ring {
+        let mut scratch = Vec::with_capacity(256);
+        let drained = r.drain_batch(DEFAULT_RING_CAPACITY, &mut scratch);
+        if drained > 0 {
+            let _ = writeln!(out, "\n--- Emergency Drained Ring Events ({drained}) ---");
+            for ev in &scratch {
+                ev.format_line(&mut out);
+            }
+        }
+    }
+
+    if !recent_lines.is_empty() {
+        let _ = writeln!(out, "\n--- Recent Flushed Lines ({}) ---", recent_lines.len());
+        for line in recent_lines {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+
+    fs::write(&crash_path, out.as_bytes()).map_err(|e| format!("write crash log failed: {e}"))?;
+    Ok(crash_path)
+}
+
+pub fn install_panic_hook(process_name: &'static str, app_data_dir: PathBuf) {
+    let log_dir = app_data_dir.join("logs");
+    let cell = PANIC_HOOK_TARGET.get_or_init(|| Mutex::new((process_name.to_string(), log_dir.clone())));
+    {
+        let mut guard = cell.lock();
+        guard.0 = process_name.to_string();
+        guard.1 = log_dir;
+    }
+
+    if PANIC_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let (proc_name, target_log_dir) = PANIC_HOOK_TARGET
+            .get()
+            .map(|m| m.lock().clone())
+            .unwrap_or_else(|| ("cadence".to_string(), PathBuf::from(".")));
+
+        let current_thread = thread::current();
+        let thread_name = current_thread.name().unwrap_or("unnamed");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+
+        let recent = RUNTIME_CONTROLLER
+            .get()
+            .and_then(|rt| rt.recent_lines.try_lock().map(|g| g.iter().cloned().collect::<Vec<_>>()))
+            .unwrap_or_default();
+        let ring_ref = RING_CELL.get().map(|arc| arc.as_ref());
+
+        let _ = write_crash_report_to_dir(
+            &target_log_dir,
+            &proc_name,
+            thread_name,
+            &location,
+            &payload,
+            ring_ref,
+            &recent,
+        );
+
+        previous(info);
+    }));
 }
 
 pub fn clear_logs() -> Result<DebugLogState, String> {
@@ -1087,6 +1276,63 @@ mod tests {
             "Producers stalled for {:?}",
             submit_elapsed
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_categories_and_crash_report_round_trip() {
+        for (key, expected, label) in [
+            ("engine_connection", DiagCategory::EngineConnection, "ENGINE_CONNECTION"),
+            ("enrichment", DiagCategory::Enrichment, "ENRICHMENT"),
+            ("storage_smb", DiagCategory::StorageAndSmb, "STORAGE_SMB"),
+            ("db_migration", DiagCategory::DatabaseMigration, "DB_MIGRATION"),
+        ] {
+            let parsed = DiagCategory::from_str_key(key);
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), label);
+        }
+
+        let dir = temp_dir("crash_dump");
+        let log_dir = dir.join("logs");
+        let ring = LockFreeDiagRing::with_capacity(32);
+        let (thread_buf, thread_len) = FixedUtf8Buf::<24>::from_str_truncated("main");
+        let (event_buf, event_len) = FixedUtf8Buf::<32>::from_str_truncated("enrichment_start");
+        let (detail_buf, detail_len) = FixedUtf8Buf::<256>::from_str_truncated("album=rel_1");
+        assert!(ring.try_push(DiagEvent {
+            seq: 0,
+            timestamp_ms: now_timestamp_ms(),
+            category: DiagCategory::Enrichment,
+            correlation_id: 77,
+            wait_us: 0,
+            exec_us: 120,
+            thread_name: thread_buf,
+            thread_name_len: thread_len as u8,
+            event: event_buf,
+            event_len: event_len as u8,
+            detail: detail_buf,
+            detail_len: detail_len as u16,
+        }));
+
+        let crash_path = write_crash_report_to_dir(
+            &log_dir,
+            "cadence-engine",
+            "worker-1",
+            "src/test.rs:10:5",
+            "simulated panic",
+            Some(&ring),
+            &["previous line".to_string()],
+        )
+        .unwrap();
+
+        let crashes = list_crash_logs(&log_dir);
+        assert_eq!(crashes.len(), 1);
+        assert_eq!(crashes[0], crash_path);
+        let text = fs::read_to_string(&crash_path).unwrap();
+        assert!(text.contains("process: cadence-engine"));
+        assert!(text.contains("simulated panic"));
+        assert!(text.contains("enrichment_start"));
+        assert!(text.contains("previous line"));
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

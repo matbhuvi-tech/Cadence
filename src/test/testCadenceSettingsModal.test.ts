@@ -84,7 +84,8 @@ test('CadenceSettingsModal renders Priority Settings tab with all 14 categories 
     }),
   )
 
-  assert.equal(html.match(/<select\b/g)?.length, 14)
+  const priorityPanel = html.split(/role="tabpanel"[^>]*aria-labelledby="[^"]*-tab-priorities"/)[1] ?? html
+  assert.equal(priorityPanel.match(/<select\b/g)?.length, 14)
   assert.match(html, /Info · Exempt/)
   assert.match(html, /Save priorities/)
 })

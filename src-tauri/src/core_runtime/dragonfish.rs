@@ -591,6 +591,27 @@ impl<P: PlatformProbe + Clone + 'static, L: MemoryLocker + Clone + 'static> Drag
         };
 
         rt.set_curate_worker_active(true);
+        if !config.allow_loopback_for_tests {
+            crate::diagnostics::install_panic_hook("cadence-headless", config.app_data_dir.clone());
+            let gate_for_diag = rt.enrichment_idle_gate();
+            let _ = crate::diagnostics::configure_persistence(
+                config.app_data_dir.clone(),
+                Arc::new(move || {
+                    if gate_for_diag.is_transport_active() {
+                        crate::diagnostics::HygieneState::Playing
+                    } else {
+                        let rem_ms = gate_for_diag.cooldown_remaining_ms();
+                        if rem_ms > 0 {
+                            crate::diagnostics::HygieneState::Cooldown {
+                                remaining_secs: rem_ms.div_ceil(1000).max(1),
+                            }
+                        } else {
+                            crate::diagnostics::HygieneState::Idle
+                        }
+                    }
+                }),
+            );
+        }
         let curate_worker = Some(super::curate::CurateJobWorker::start(
             db_path.clone(),
             config.music_read_only,

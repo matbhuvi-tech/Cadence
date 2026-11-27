@@ -11,6 +11,10 @@ export type DiagCategory =
   | 'audio_engine_commands'
   | 'background_workers'
   | 'audio_hygiene'
+  | 'engine_connection'
+  | 'enrichment'
+  | 'storage_smb'
+  | 'db_migration'
 
 export interface DebugLogState {
   mode: CaptureMode
@@ -23,6 +27,21 @@ export interface DebugLogState {
   logFilePath?: string | null
   logDirPath?: string | null
   lastFlushError?: string | null
+  crashLogCount?: number
+  latestCrashLog?: string | null
+}
+
+export interface SupportWebhookConfig {
+  webhookUrl?: string | null
+  source: string
+}
+
+export interface SupportSubmissionResult {
+  submitted: boolean
+  ticketId: string
+  message: string
+  driveFileUrl?: string | null
+  bundle: unknown
 }
 
 export interface FrontendDebugEvent {

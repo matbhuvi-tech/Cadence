@@ -4,9 +4,13 @@ import {
   Battery,
   Bell,
   CheckCircle2,
+  ClipboardCopy,
+  Download,
   KeyRound,
+  Link2,
   Lock,
   RefreshCw,
+  Send,
   Server,
   ShieldAlert,
   ShieldCheck,
@@ -18,6 +22,16 @@ import type { ConnectionDiagnostic, ServerProfile } from '../../types/remote';
 import type { DiagnosticsRunResult } from '../../hooks/useRemoteSocket';
 import { formatFingerprintBlocks } from '../../services/serverProfiles';
 import { CadenceRemote, isNativeAndroid } from '../../platform/cadenceBridge';
+import {
+  buildMobileSupportReport,
+  getMobileSupportWebhookUrl,
+  MOBILE_SUPPORT_EMAIL,
+  MOBILE_SUPPORT_SCENARIOS,
+  mobileDiagnostics,
+  setMobileSupportWebhookUrl,
+  submitMobileSupportReport,
+  type MobileSupportScenario,
+} from '../../services/mobileDiagnostics';
 
 interface DiagnosticsSheetProps {
   isOpen: boolean;
@@ -63,12 +77,24 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
   const [editingPin, setEditingPin] = useState(false);
   const [pinDraft, setPinDraft] = useState(activeProfile?.token || '');
   const [notifDeniedHint, setNotifDeniedHint] = useState(false);
+  const [supportScenario, setSupportScenario] = useState<MobileSupportScenario>('mobile_not_connecting');
+  const [supportNotes, setSupportNotes] = useState('');
+  const [supportContactEmail, setSupportContactEmail] = useState('');
+  const [supportWebhookUrl, setSupportWebhookUrl] = useState(() => getMobileSupportWebhookUrl());
+  const [showWebhookConfig, setShowWebhookConfig] = useState(false);
+  const [supportConsent, setSupportConsent] = useState(false);
+  const [supportSending, setSupportSending] = useState(false);
+  const [supportStatus, setSupportStatus] = useState<string | null>(null);
 
   const runChecks = useCallback(async () => {
     setIsChecking(true);
     try {
       const res = await onRunDiagnostics();
       setDiagResult(res);
+      mobileDiagnostics.record(
+        'probe_result',
+        `reachable=${Boolean(res.probe?.reachable)} kind=${res.probe?.errorKind ?? 'none'} wifi=${res.network.isWifi}`
+      );
     } finally {
       setIsChecking(false);
     }
@@ -126,6 +152,92 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
     if (!cleaned) return;
     onUpdatePin(cleaned);
     setEditingPin(false);
+  };
+
+  const handleSaveMobileWebhook = () => {
+    try {
+      const saved = setMobileSupportWebhookUrl(supportWebhookUrl);
+      setSupportWebhookUrl(saved);
+      setShowWebhookConfig(false);
+      setSupportStatus(
+        saved ? 'Mobile support webhook URL saved.' : 'Cleared mobile support webhook URL.'
+      );
+    } catch (err) {
+      setSupportStatus(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleExportSupport = async (mode: 'submit' | 'download') => {
+    if (!supportConsent) return;
+    setSupportStatus(null);
+    setSupportSending(true);
+    try {
+      const report = buildMobileSupportReport({
+        scenario: supportScenario,
+        userNotes: supportNotes,
+        consentGranted: true,
+        nativeAndroid,
+        activeProfile,
+        isConnected,
+        isConnecting,
+        diagResult,
+        connectionDiagnostic,
+      });
+
+      if (mode === 'submit') {
+        const res = await submitMobileSupportReport({
+          report,
+          scenario: supportScenario,
+          userNotes: supportNotes,
+          contactEmail: supportContactEmail,
+          webhookUrl: supportWebhookUrl,
+        });
+        setSupportStatus(`Submitted (${res.ticketId}): ${res.message}`);
+        return;
+      }
+
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(report.jsonPayload);
+        } catch {
+          // clipboard optional
+        }
+      }
+
+      if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+        try {
+          const file = new File([report.jsonPayload], report.fileName, {
+            type: 'application/json',
+          });
+          await navigator.share({
+            title: report.emailSubject,
+            text: report.emailBody,
+            files: [file],
+          });
+          setSupportStatus(`Shared ${report.fileName}.`);
+          return;
+        } catch {
+          // Fall back to direct blob download / clipboard
+        }
+      }
+
+      if (typeof document !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+        const blob = new Blob([report.jsonPayload], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = report.fileName;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      setSupportStatus(
+        `Saved ${report.fileName} and copied diagnostic JSON for ${report.emailTo}.`
+      );
+    } catch (err) {
+      setSupportStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSupportSending(false);
+    }
   };
 
   const network = diagResult?.network;
@@ -489,6 +601,127 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
                   </button>
                 )}
               </div>
+            )}
+          </div>
+
+          {/* Consent-First Mobile Support Export (Works Offline) */}
+          <div className="rounded-2xl bg-zinc-900/45 border border-zinc-800/90 p-3.5 flex flex-col gap-2.5">
+            <div>
+              <p className="text-xs font-semibold text-zinc-100">
+                Report Issue to Cadence Support
+              </p>
+              <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
+                Export sanitized connection logs on consent even if your phone cannot reach the Playback Engine.
+              </p>
+            </div>
+
+            <select
+              aria-label="Mobile support issue"
+              value={supportScenario}
+              onChange={(e) => setSupportScenario(e.target.value as MobileSupportScenario)}
+              className="w-full min-h-[40px] rounded-xl bg-zinc-950 border border-zinc-700 px-3 text-xs text-zinc-100 focus:outline-none focus:border-[#D4AF37]"
+            >
+              {MOBILE_SUPPORT_SCENARIOS.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+
+            <textarea
+              aria-label="Mobile issue notes"
+              rows={2}
+              value={supportNotes}
+              onChange={(e) => setSupportNotes(e.target.value)}
+              placeholder="Optional notes (router, VPN, Android/iOS version)..."
+              className="w-full rounded-xl bg-zinc-950 border border-zinc-700 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-[#D4AF37] resize-none"
+            />
+
+            <input
+              aria-label="Mobile reply email"
+              type="email"
+              value={supportContactEmail}
+              onChange={(e) => setSupportContactEmail(e.target.value)}
+              placeholder="Your email (optional, for reply)"
+              className="w-full min-h-[38px] rounded-xl bg-zinc-950 border border-zinc-700 px-3 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-[#D4AF37]"
+            />
+
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setShowWebhookConfig((prev) => !prev)}
+                className="text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
+              >
+                <Link2 className="w-3 h-3" />
+                <span>
+                  {supportWebhookUrl ? 'Support webhook ready' : 'Configure Support Webhook URL'}
+                </span>
+              </button>
+            </div>
+
+            {(showWebhookConfig || !supportWebhookUrl) && (
+              <div className="flex items-center gap-1.5">
+                <input
+                  aria-label="Mobile support webhook URL"
+                  type="url"
+                  value={supportWebhookUrl}
+                  onChange={(e) => setSupportWebhookUrl(e.target.value)}
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  className="flex-1 min-h-[36px] rounded-xl bg-zinc-950 border border-zinc-700 px-2.5 text-[11px] font-mono text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-[#D4AF37]"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveMobileWebhook}
+                  className="min-h-[36px] px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-[11px] font-semibold text-zinc-100 shrink-0"
+                >
+                  Save
+                </button>
+              </div>
+            )}
+
+            <label className="flex items-start gap-2.5 text-[11px] text-zinc-300 cursor-pointer">
+              <input
+                type="checkbox"
+                aria-label="Consent to share mobile diagnostic report"
+                checked={supportConsent}
+                onChange={(e) => setSupportConsent(e.target.checked)}
+                className="mt-0.5 rounded border-zinc-600 bg-zinc-950 accent-[#D4AF37]"
+              />
+              <span>
+                I consent to sharing this redacted connection report with{' '}
+                <span className="font-mono text-zinc-100">{MOBILE_SUPPORT_EMAIL}</span>.
+              </span>
+            </label>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={!supportConsent || supportSending || !supportWebhookUrl.trim()}
+                onClick={() => void handleExportSupport('submit')}
+                className="min-h-[44px] rounded-xl bg-[#D4AF37] text-zinc-950 text-xs font-bold flex items-center justify-center gap-1.5 disabled:opacity-40"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>Send to Support</span>
+              </button>
+              <button
+                type="button"
+                disabled={!supportConsent || supportSending}
+                onClick={() => void handleExportSupport('download')}
+                className="min-h-[44px] rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-40"
+              >
+                {typeof navigator !== 'undefined' && typeof navigator.share === 'function' ? (
+                  <ClipboardCopy className="w-3.5 h-3.5" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                <span>Export Report</span>
+              </button>
+            </div>
+
+            {supportStatus && (
+              <p role="status" className="text-[11px] text-emerald-300 leading-relaxed">
+                {supportStatus}
+              </p>
             )}
           </div>
 

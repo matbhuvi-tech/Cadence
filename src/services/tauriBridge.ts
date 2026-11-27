@@ -95,6 +95,101 @@ export interface StorageAccessibilityReport {
   releasesCount: number
 }
 
+export interface SupportScenarioInfo {
+  id: string
+  label: string
+  description: string
+}
+
+export interface DatabaseLineageEntry {
+  label: string
+  path: string
+  exists: boolean
+  dbExists: boolean
+  dbSizeBytes?: number | null
+  dbModifiedUtc?: string | null
+  tracksCount?: number | null
+  releasesCount?: number | null
+  playlistsCount?: number | null
+  watchedFoldersCount?: number | null
+  curationDraftsCount?: number | null
+  engineId?: string | null
+  libraryId?: string | null
+  schemaVersion?: number | null
+  hasLocalhostPairing: boolean
+  crashLogCount: number
+  migrationHistory: unknown
+  inspectError?: string | null
+}
+
+export interface SelfDiagnosisHint {
+  severity: 'error' | 'warn' | 'info' | string
+  code: string
+  title: string
+  detail: string
+  recommendedAction: string
+}
+
+export interface SupportDiagnosticsPreview {
+  scenarioId: string
+  scenarioLabel: string
+  generatedAtUtc: string
+  supportEmail: string
+  desktopVersion: string
+  osInfo: string
+  windowsServiceRunning: boolean
+  activeEngineUrl?: string | null
+  activeEngineReachable: boolean
+  activeEngineProbeError?: string | null
+  desktopDebugState: DebugLogState
+  hints: SelfDiagnosisHint[]
+  databaseLineage: DatabaseLineageEntry[]
+  doctorReports: unknown[]
+  plannedBundleFiles: string[]
+  emailSubject: string
+  emailBody: string
+  mailtoUrl: string
+}
+
+export interface SupportBundleRequest {
+  scenarioId: string
+  userNotes?: string
+  contactEmail?: string
+  webhookUrl?: string
+  redactPaths?: boolean
+  consentGranted: boolean
+  activeEngineUrl?: string | null
+  activeEngineReachable?: boolean
+  activeEngineProbeError?: string | null
+  engineSnapshot?: Record<string, unknown> | null
+  frontendContext?: Record<string, unknown> | null
+}
+
+export interface SupportWebhookConfig {
+  webhookUrl?: string | null
+  source: string
+}
+
+export interface SupportSubmissionResult {
+  submitted: boolean
+  ticketId: string
+  message: string
+  driveFileUrl?: string | null
+  bundle: GeneratedSupportBundle
+}
+
+export interface GeneratedSupportBundle {
+  zipPath: string
+  fileName: string
+  sizeBytes: number
+  filesIncluded: string[]
+  emailTo: string
+  emailSubject: string
+  emailBody: string
+  mailtoUrl: string
+  preview: SupportDiagnosticsPreview
+}
+
 class TauriBridgeService {
   private curateDraftWrites = new Map<string, Promise<void>>()
   private browserAudio: HTMLAudioElement | null = null
@@ -1732,6 +1827,70 @@ class TauriBridgeService {
   public async logFrontendDebugBatch(events: FrontendDebugEvent[]): Promise<void> {
     if (this.isTauri() && events.length > 0) {
       await invoke('log_frontend_debug_batch', { events })
+    }
+  }
+
+  public async getSupportScenarios(): Promise<SupportScenarioInfo[]> {
+    if (this.isTauri()) {
+      return await invoke<SupportScenarioInfo[]>('get_support_scenarios')
+    }
+    return []
+  }
+
+  public async previewSupportDiagnostics(input: {
+    scenarioId: string
+    activeEngineUrl?: string | null
+    activeEngineReachable?: boolean
+    activeEngineProbeError?: string | null
+    engineSnapshot?: Record<string, unknown> | null
+  }): Promise<SupportDiagnosticsPreview | null> {
+    if (this.isTauri()) {
+      return await invoke<SupportDiagnosticsPreview>('preview_support_diagnostics', {
+        scenarioId: input.scenarioId,
+        activeEngineUrl: input.activeEngineUrl ?? null,
+        activeEngineReachable: input.activeEngineReachable ?? false,
+        activeEngineProbeError: input.activeEngineProbeError ?? null,
+        engineSnapshot: input.engineSnapshot ?? null,
+      })
+    }
+    return null
+  }
+
+  public async generateSupportBundle(
+    request: SupportBundleRequest,
+  ): Promise<GeneratedSupportBundle | null> {
+    if (this.isTauri()) {
+      return await invoke<GeneratedSupportBundle>('generate_support_bundle', { request })
+    }
+    return null
+  }
+
+  public async submitSupportBundle(
+    request: SupportBundleRequest,
+  ): Promise<SupportSubmissionResult | null> {
+    if (this.isTauri()) {
+      return await invoke<SupportSubmissionResult>('submit_support_bundle', { request })
+    }
+    return null
+  }
+
+  public async getSupportWebhookConfig(): Promise<SupportWebhookConfig> {
+    if (this.isTauri()) {
+      return await invoke<SupportWebhookConfig>('get_support_webhook_config')
+    }
+    return { webhookUrl: null, source: 'browser' }
+  }
+
+  public async setSupportWebhookUrl(webhookUrl: string): Promise<SupportWebhookConfig> {
+    if (this.isTauri()) {
+      return await invoke<SupportWebhookConfig>('set_support_webhook_url', { webhookUrl })
+    }
+    return { webhookUrl: webhookUrl.trim() || null, source: 'browser' }
+  }
+
+  public async revealSupportBundleInFolder(zipPath: string): Promise<void> {
+    if (this.isTauri()) {
+      await invoke('reveal_support_bundle_in_folder', { zipPath })
     }
   }
 

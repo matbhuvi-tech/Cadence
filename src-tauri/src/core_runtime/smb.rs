@@ -320,9 +320,21 @@ fn ensure_safe_mount_dir(path: &Path) -> Result<(), String> {
 fn mount_cifs_share(input: &AddShareInput, mount_path: &Path) -> Result<(), String> {
     let support = get_smb_mount_support();
     if !support.supported {
-        return Err(support
+        let reason = support
             .reason
-            .unwrap_or_else(|| "SMB mounting is unavailable.".into()));
+            .unwrap_or_else(|| "SMB mounting is unavailable.".into());
+        crate::diag_log!(
+            crate::diagnostics::DiagCategory::StorageAndSmb,
+            0,
+            0,
+            0,
+            "smb_mount_unsupported",
+            "server={} share={} reason={}",
+            input.server,
+            input.share,
+            reason
+        );
+        return Err(reason);
     }
     #[cfg(target_os = "linux")]
     {
@@ -425,6 +437,19 @@ pub fn add_and_mount_share(db: &AppDb, raw: AddShareInput) -> Result<NetworkShar
     let id = share_id(&input.server, &input.share);
     let mount_path = PathBuf::from(SMB_MOUNT_ROOT).join(&id);
     mount_cifs_share(&input, &mount_path)?;
+    crate::diag_log!(
+        crate::diagnostics::DiagCategory::StorageAndSmb,
+        0,
+        0,
+        0,
+        "smb_share_mounted",
+        "id={} server={} share={} ver={} ro={}",
+        id,
+        input.server,
+        input.share,
+        input.smb_version.as_deref().unwrap_or("auto"),
+        input.read_only
+    );
     let mount_str = mount_path.to_string_lossy().to_string();
     let display_name = input
         .display_name

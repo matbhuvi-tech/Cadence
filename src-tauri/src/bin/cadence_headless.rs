@@ -617,6 +617,7 @@ fn parse_migration_args(args: &[String]) -> Result<CliMode, String> {
 }
 
 fn main() {
+    cadence_core_lib::diagnostics::init_from_env();
     let mode = match parse_args() {
         Ok(m) => m,
         Err(err) => {

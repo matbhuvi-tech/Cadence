@@ -9,6 +9,7 @@ pub mod core_session;
 pub mod curation;
 pub mod db;
 pub mod diagnostics;
+pub mod support_bundle;
 #[cfg(feature = "desktop")]
 pub mod maintenance;
 #[cfg(feature = "desktop")]
@@ -172,6 +173,7 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            diagnostics::install_panic_hook("cadence-desktop", app_data_dir.clone());
             let _ = diagnostics::configure_persistence(
                 app_data_dir,
                 std::sync::Arc::new(|| diagnostics::HygieneState::Idle),
@@ -245,6 +247,13 @@ pub fn run() {
             flush_debug_logs_if_idle,
             open_debug_log_folder,
             log_frontend_debug_batch,
+            get_support_scenarios,
+            preview_support_diagnostics,
+            generate_support_bundle,
+            submit_support_bundle,
+            get_support_webhook_config,
+            set_support_webhook_url,
+            reveal_support_bundle_in_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cadence application");

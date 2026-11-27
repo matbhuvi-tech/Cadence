@@ -556,17 +556,71 @@ impl WindowsEngineNode {
         if !config.allow_loopback_for_tests {
             if let Some(legacy_db_path) = detect_legacy_desktop_db() {
                 if legacy_db_path != db_path {
-                    let target_empty = !db_path.is_file()
-                        || Connection::open(&db_path)
-                            .and_then(|c| {
-                                c.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0))
-                            })
-                            .unwrap_or(0)
-                            == 0;
+                    let target_count = Connection::open(&db_path)
+                        .and_then(|c| {
+                            c.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, i64>(0))
+                        })
+                        .unwrap_or(0);
+                    let target_empty = !db_path.is_file() || target_count == 0;
                     if target_empty {
-                        let _ = migrate_legacy_desktop_db(&legacy_db_path, &config.app_data_dir);
+                        match migrate_legacy_desktop_db(&legacy_db_path, &config.app_data_dir) {
+                            Ok(res) => {
+                                record_migration_history(
+                                    &config.app_data_dir,
+                                    &legacy_db_path,
+                                    &db_path,
+                                    "migrated",
+                                    Some(res.imported_tracks),
+                                    Some(res.imported_playlists),
+                                    Some(res.imported_drafts),
+                                    None,
+                                );
+                                crate::diag_log!(
+                                    crate::diagnostics::DiagCategory::DatabaseMigration,
+                                    0,
+                                    0,
+                                    0,
+                                    "legacy_db_migrated",
+                                    "tracks={} playlists={} drafts={}",
+                                    res.imported_tracks,
+                                    res.imported_playlists,
+                                    res.imported_drafts
+                                );
+                            }
+                            Err(err) => {
+                                record_migration_history(
+                                    &config.app_data_dir,
+                                    &legacy_db_path,
+                                    &db_path,
+                                    "error",
+                                    None,
+                                    None,
+                                    None,
+                                    Some(&err),
+                                );
+                                crate::diag_log!(
+                                    crate::diagnostics::DiagCategory::DatabaseMigration,
+                                    0,
+                                    0,
+                                    0,
+                                    "legacy_db_migration_failed",
+                                    "err={}",
+                                    err
+                                );
+                            }
+                        }
                     } else {
-                        let _ = copy_cached_artwork_from_legacy(&legacy_db_path, &db_path);
+                        let art_res = copy_cached_artwork_from_legacy(&legacy_db_path, &db_path);
+                        record_migration_history(
+                            &config.app_data_dir,
+                            &legacy_db_path,
+                            &db_path,
+                            "skipped_target_non_empty",
+                            Some(target_count.max(0) as usize),
+                            None,
+                            None,
+                            art_res.err().as_deref(),
+                        );
                     }
                 }
             }
@@ -622,6 +676,27 @@ impl WindowsEngineNode {
             None
         };
         let idle_gate_rec = rt.enrichment_idle_gate();
+        if !config.allow_loopback_for_tests {
+            crate::diagnostics::install_panic_hook("cadence-engine", config.app_data_dir.clone());
+            let gate_for_diag = Arc::clone(&idle_gate_rec);
+            let _ = crate::diagnostics::configure_persistence(
+                config.app_data_dir.clone(),
+                Arc::new(move || {
+                    if gate_for_diag.is_transport_active() {
+                        crate::diagnostics::HygieneState::Playing
+                    } else {
+                        let rem_ms = gate_for_diag.cooldown_remaining_ms();
+                        if rem_ms > 0 {
+                            crate::diagnostics::HygieneState::Cooldown {
+                                remaining_secs: rem_ms.div_ceil(1000).max(1),
+                            }
+                        } else {
+                            crate::diagnostics::HygieneState::Idle
+                        }
+                    }
+                }),
+            );
+        }
         rt.set_curate_worker_active(true);
         let curate_worker = Some(crate::core_runtime::curate::CurateJobWorker::start(
             db_path.clone(),
@@ -947,6 +1022,40 @@ fn register_engine_mdns(
 
 /// One-time migration from a legacy Desktop `%APPDATA%/cadence.db` into the
 /// Windows Playback Engine `cadence.db`.
+pub fn record_migration_history(
+    engine_data_dir: &Path,
+    source_db: &Path,
+    target_db: &Path,
+    status: &str,
+    imported_tracks: Option<usize>,
+    imported_playlists: Option<usize>,
+    imported_drafts: Option<usize>,
+    error: Option<&str>,
+) {
+    let history_path = engine_data_dir.join("migration-history.json");
+    let mut entries: Vec<Value> = std::fs::read_to_string(&history_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    entries.push(json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "sourceDb": source_db.to_string_lossy(),
+        "targetDb": target_db.to_string_lossy(),
+        "status": status,
+        "importedTracks": imported_tracks,
+        "importedPlaylists": imported_playlists,
+        "importedDrafts": imported_drafts,
+        "error": error,
+    }));
+    if entries.len() > 32 {
+        let drop_n = entries.len() - 32;
+        entries.drain(0..drop_n);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&entries) {
+        let _ = std::fs::write(&history_path, json);
+    }
+}
+
 pub fn migrate_legacy_desktop_db(
     legacy_db_path: &Path,
     engine_data_dir: &Path,

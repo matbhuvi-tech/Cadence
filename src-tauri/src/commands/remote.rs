@@ -232,13 +232,37 @@ pub async fn core_probe_endpoint(target: CoreEndpointBridgeTarget) -> Result<Val
     )?;
     let req = attach_token(client.get(url), target.pairing_token.as_deref());
     let res = req.send().await.map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            "unavailable".to_string()
+        let code = if e.is_connect() || e.is_timeout() {
+            "unavailable"
         } else {
-            "untrusted_peer".to_string()
-        }
+            "untrusted_peer"
+        };
+        crate::diag_log!(
+            crate::diagnostics::DiagCategory::EngineConnection,
+            0,
+            0,
+            0,
+            "core_probe_failed",
+            "url={} code={} err={}",
+            target.base_url,
+            code,
+            e
+        );
+        code.to_string()
     })?;
-    read_bounded_json_response(res).await
+    read_bounded_json_response(res).await.map_err(|code| {
+        crate::diag_log!(
+            crate::diagnostics::DiagCategory::EngineConnection,
+            0,
+            0,
+            0,
+            "core_probe_rejected",
+            "url={} code={}",
+            target.base_url,
+            code
+        );
+        code
+    })
 }
 
 #[tauri::command]
@@ -275,13 +299,37 @@ pub async fn core_control_request(
         target.pairing_token.as_deref(),
     );
     let res = req.send().await.map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            "unavailable".to_string()
+        let code = if e.is_connect() || e.is_timeout() {
+            "unavailable"
         } else {
-            "untrusted_peer".to_string()
-        }
+            "untrusted_peer"
+        };
+        crate::diag_log!(
+            crate::diagnostics::DiagCategory::EngineConnection,
+            0,
+            0,
+            0,
+            "core_probe_failed",
+            "url={} code={} err={}",
+            target.base_url,
+            code,
+            e
+        );
+        code.to_string()
     })?;
-    read_bounded_json_response(res).await
+    read_bounded_json_response(res).await.map_err(|code| {
+        crate::diag_log!(
+            crate::diagnostics::DiagCategory::EngineConnection,
+            0,
+            0,
+            0,
+            "core_probe_rejected",
+            "url={} code={}",
+            target.base_url,
+            code
+        );
+        code
+    })
 }
 
 #[tauri::command]

@@ -44,6 +44,7 @@ import {
   syncCoreNativeMediaSession,
   syncNativeServerProfile,
 } from '../platform/cadenceBridge';
+import { mobileDiagnostics } from '../services/mobileDiagnostics';
 
 const INITIAL_STATUS: PlaybackStatus = {
   isPlaying: false,
@@ -768,6 +769,10 @@ export function useRemoteSocket() {
       }
 
       setIsConnecting(true);
+      mobileDiagnostics.record(
+        'connect_attempt',
+        `kind=${target.engineKind ?? 'local'} url=${target.baseUrl}`
+      );
 
       // Direct Cadence Core v1/v2 control path (independent of Windows Desktop)
       if (target.engineKind === 'core') {
@@ -796,6 +801,7 @@ export function useRemoteSocket() {
           setIsConnecting(false);
           setError(null);
           setConnectionDiagnostic(null);
+          mobileDiagnostics.record('connect_success', `core url=${target.baseUrl}`);
           void refreshOutputDevices();
           if (prepared.snapshot.playback.activity === 'loading') {
             scheduleCoreLoadingSettleCheck();
@@ -812,6 +818,10 @@ export function useRemoteSocket() {
               ? err.message
               : 'Connection lost. Playback may still be continuing.';
           setError(message);
+          mobileDiagnostics.record(
+            'connect_failed',
+            `core url=${target.baseUrl} code=${err instanceof CoreClientError ? err.code : 'unknown'} msg=${message}`
+          );
           setConnectionDiagnostic(
             buildConnectionDiagnostic(
               err instanceof CoreClientError && err.code === 'untrusted_peer'
@@ -873,6 +883,7 @@ export function useRemoteSocket() {
           setIsConnecting(false);
           setError(null);
           setConnectionDiagnostic(null);
+          mobileDiagnostics.record('connect_success', `core url=${target.baseUrl}`);
           void refreshOutputDevices();
           fetchQueue(target.token, target.baseUrl).then(applyRemoteQueue).catch(() => {});
         };
@@ -884,6 +895,7 @@ export function useRemoteSocket() {
 
         ws.onerror = () => {
           if (socketRef.current !== ws) return;
+          mobileDiagnostics.record('ws_error', `url=${target.baseUrl}`);
           const diag = buildConnectionDiagnostic(
             'network_error',
             'WebSocket connection to Cadence Desktop failed.',
@@ -898,6 +910,7 @@ export function useRemoteSocket() {
           socketRef.current = null;
           setIsConnected(false);
           setIsConnecting(false);
+          mobileDiagnostics.record('ws_closed', `url=${target.baseUrl} code=${ev.code}`);
 
           const isAuthClose = ev.code === 4401 || ev.code === 1008;
           if (isAuthClose) {

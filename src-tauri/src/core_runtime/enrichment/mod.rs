@@ -135,6 +135,18 @@ pub fn handle_enrichment_request(
                 gates,
             ) {
                 Ok(status) => {
+                    crate::diag_log!(
+                        crate::diagnostics::DiagCategory::Enrichment,
+                        0,
+                        0,
+                        0,
+                        "enrichment_control",
+                        "action={} state={} pending={} art_pending={}",
+                        action,
+                        status.state,
+                        status.pending_albums,
+                        status.artwork_pending_items
+                    );
                     gate.push_event("enrichment.updated", json!({ "action": action }));
                     (json!({ "ok": true, "data": status }), false)
                 }

@@ -466,6 +466,9 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
                     if op == "renderer.discover" {
                         return self.handle_renderer_discover_at(&parsed, now);
                     }
+                    if op.starts_with("diagnostics.") {
+                        return self.handle_diagnostics_request_at(&parsed, now);
+                    }
                     if op.starts_with("curate.") {
                         if parsed["protocolVersion"].as_u64()!=Some(1){return json!({"ok":false,"error":{"code":"incompatible_protocol"}});}
                         return self.handle_curate_request_at(&parsed, now);
@@ -815,6 +818,9 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             project_track_tokens(&mut response, &self.public_track_ids);
             return response;
         }
+        if operation.starts_with("diagnostics.") {
+            return self.handle_diagnostics_request_at(&request, now);
+        }
         if operation.starts_with("fs.") || operation.starts_with("folders.") || operation.starts_with("shares.") || operation.starts_with("playlists.") || operation.starts_with("releases.split.") || operation=="engine.events" || operation=="curate.draft.list" {
             let idle=self.ensure_storage_idle_at(now).is_ok();
             if operation=="playlists.setTracks"{if let Some(ids)=request["trackIds"].as_array_mut(){for id in ids{if let Some(raw)=id.as_str().and_then(|id|self.track_db_ids.get(id)){*id=json!(raw);}}}}
@@ -841,7 +847,7 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             response["data"]["protocolVersion"]=json!(2);
             response["data"]["protocolRevision"]=json!(crate::build_info::CORE_PROTOCOL_V2_REVISION);
             response["data"]["build"]=serde_json::to_value(crate::build_info::current_build_info()).unwrap_or(Value::Null);
-            if let Some(caps)=response["data"]["capabilities"].as_array_mut(){caps.extend(["fs.browse","folders.manage","playlists.manage","artwork.read","curate.write","enrichment.manage"].iter().map(|s|json!(s)));}
+            if let Some(caps)=response["data"]["capabilities"].as_array_mut(){caps.extend(["fs.browse","folders.manage","playlists.manage","artwork.read","curate.write","enrichment.manage","diagnostics.manage"].iter().map(|s|json!(s)));}
         }
         let catalog=if operation=="catalog.page" {response.get_mut("data")} else if operation=="session.snapshot"{response.get_mut("data").and_then(|v|v.get_mut("catalog"))} else {None};
         if let Some(catalog)=catalog {
@@ -970,6 +976,177 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
             }
             Err(RuntimeError::Closed) => Err(curate::RemoteCurateError::Database("runtime closed".into())),
             Err(e) => Err(curate::RemoteCurateError::Database(format!("{:?}", e))),
+        }
+    }
+
+    fn handle_diagnostics_request_at(&mut self, parsed: &Value, now: Instant) -> Value {
+        if parsed.get("engineId").and_then(Value::as_str) != Some(self.config.engine_id.as_str())
+            || parsed.get("libraryId").and_then(Value::as_str)
+                != Some(self.config.library_id.as_str())
+        {
+            return json!({ "ok": false, "error": { "code": "identity_mismatch" } });
+        }
+        let op = parsed.get("operation").and_then(Value::as_str).unwrap_or_default();
+        match op {
+            "diagnostics.status" => {
+                json!({ "ok": true, "data": crate::diagnostics::get_state() })
+            }
+            "diagnostics.control" => {
+                let action = parsed
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("set_mode");
+                match action {
+                    "set_mode" => {
+                        let raw_mode = parsed
+                            .get("mode")
+                            .and_then(Value::as_str)
+                            .unwrap_or("off");
+                        let mode = match raw_mode {
+                            "debug" => crate::diagnostics::CaptureMode::Debug,
+                            "diagnostic_capture" => crate::diagnostics::CaptureMode::DiagnosticCapture,
+                            "off" => crate::diagnostics::CaptureMode::Off,
+                            _ => return json!({ "ok": false, "error": { "code": "invalid_payload", "message": "Invalid diagnostics mode" } }),
+                        };
+                        let state = crate::diagnostics::set_mode(mode);
+                        json!({ "ok": true, "data": state })
+                    }
+                    "flush_if_idle" => match crate::diagnostics::flush_if_idle() {
+                        Ok(state) => json!({ "ok": true, "data": state }),
+                        Err(msg) => json!({ "ok": false, "error": { "code": "deferred_until_idle", "message": msg } }),
+                    },
+                    "clear_logs" => match crate::diagnostics::clear_logs() {
+                        Ok(state) => json!({ "ok": true, "data": state }),
+                        Err(msg) => json!({ "ok": false, "error": { "code": "invalid_payload", "message": msg } }),
+                    },
+                    _ => json!({ "ok": false, "error": { "code": "invalid_payload", "message": "Unsupported diagnostics.control action" } }),
+                }
+            }
+            "diagnostics.snapshot" => {
+                let idle = self.ensure_storage_idle_at(now).is_ok();
+                let debug_state = crate::diagnostics::get_state();
+                let recent_logs = crate::diagnostics::get_recent_logs();
+                let persisted_log_tail = crate::diagnostics::read_persisted_log_tail(64 * 1024);
+
+                let (rt_state, cooldown_secs) = self.idle_gate.runtime_state();
+                let current_album = self.idle_gate.current_album();
+                let provider_gates = self.idle_gate.provider_gates_snapshot();
+                let curate_prep_in_flight = self.idle_gate.curate_prep_settle_remaining_ms(1) > 0;
+
+                let mut enrichment_counts: HashMap<String, i64> = HashMap::new();
+                let mut enrichment_errors: Vec<Value> = Vec::new();
+                let mut artwork_queue_count: i64 = 0;
+                let mut artwork_errors: Vec<Value> = Vec::new();
+                let mut shares: Vec<smb::NetworkShareRecord> = Vec::new();
+
+                if idle {
+                    if let Some(db) = self.db.as_ref() {
+                        {
+                            let conn = db.conn.lock();
+                            if let Ok(mut stmt) = conn.prepare(
+                                "SELECT status, COUNT(*) FROM enrichment_album_state GROUP BY status",
+                            ) {
+                                if let Ok(rows) = stmt.query_map([], |r| {
+                                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                                }) {
+                                    for (st, cnt) in rows.flatten() {
+                                        enrichment_counts.insert(st, cnt);
+                                    }
+                                }
+                            }
+                            if let Ok(mut stmt) = conn.prepare(
+                                "SELECT release_id, attempt_count, next_retry_at, last_error, updated_at
+                                 FROM enrichment_album_state
+                                 WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
+                                 ORDER BY updated_at DESC LIMIT 15",
+                            ) {
+                                if let Ok(rows) = stmt.query_map([], |r| {
+                                    Ok(json!({
+                                        "releaseId": r.get::<_, String>(0)?,
+                                        "attemptCount": r.get::<_, i64>(1)?,
+                                        "nextRetryAt": r.get::<_, i64>(2)?,
+                                        "lastError": r.get::<_, String>(3)?,
+                                        "updatedAt": r.get::<_, String>(4)?,
+                                    }))
+                                }) {
+                                    enrichment_errors.extend(rows.flatten());
+                                }
+                            }
+                            artwork_queue_count = conn
+                                .query_row("SELECT COUNT(*) FROM artwork_queue", [], |r| r.get(0))
+                                .unwrap_or(0);
+                            if let Ok(mut stmt) = conn.prepare(
+                                "SELECT entity_kind, entity_id, attempts, next_retry_at, last_error
+                                 FROM artwork_queue
+                                 WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
+                                 ORDER BY enqueued_at DESC LIMIT 15",
+                            ) {
+                                if let Ok(rows) = stmt.query_map([], |r| {
+                                    Ok(json!({
+                                        "entityKind": r.get::<_, String>(0)?,
+                                        "entityId": r.get::<_, String>(1)?,
+                                        "attempts": r.get::<_, i64>(2)?,
+                                        "nextRetryAt": r.get::<_, i64>(3)?,
+                                        "lastError": r.get::<_, String>(4)?,
+                                    }))
+                                }) {
+                                    artwork_errors.extend(rows.flatten());
+                                }
+                            };
+                        }
+                        shares = smb::list_shares(db).unwrap_or_default();
+                    }
+                }
+
+                let scan_status = self
+                    .library
+                    .as_mut()
+                    .and_then(|lib| lib.request("folders.scan.status", &json!({}), idle).ok())
+                    .unwrap_or(Value::Null);
+                let watched_folders = if idle {
+                    self.library
+                        .as_mut()
+                        .and_then(|lib| lib.request("folders.list", &json!({}), true).ok())
+                        .unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                };
+
+                json!({
+                    "ok": true,
+                    "data": {
+                        "idle": idle,
+                        "activity": self.owner.activity(),
+                        "debugState": debug_state,
+                        "recentLogs": recent_logs,
+                        "persistedLogTail": persisted_log_tail,
+                        "enrichment": {
+                            "runtimeState": rt_state,
+                            "cooldownRemainingSecs": cooldown_secs,
+                            "currentAlbum": current_album.map(|(id, title)| json!({ "releaseId": id, "title": title })),
+                            "curatePrepInFlight": curate_prep_in_flight,
+                            "providerGates": provider_gates,
+                            "albumStatusCounts": enrichment_counts,
+                            "recentAlbumErrors": enrichment_errors,
+                            "artworkQueueCount": artwork_queue_count,
+                            "recentArtworkErrors": artwork_errors,
+                        },
+                        "smb": {
+                            "support": smb::get_smb_mount_support(),
+                            "shares": shares,
+                        },
+                        "libraryScan": scan_status,
+                        "watchedFolders": watched_folders,
+                        "memoryArena": {
+                            "retainedLockedBytes": self.arena.retained_locked_bytes(),
+                            "availableBudgetBytes": self.arena.available_budget_bytes(),
+                        },
+                        "build": crate::build_info::current_build_info(),
+                        "appDataDir": self.config.db_path.parent().map(|p| p.to_string_lossy().to_string()),
+                    }
+                })
+            }
+            _ => json!({ "ok": false, "error": { "code": "unsupported_capability" } }),
         }
     }
 
@@ -1597,5 +1774,82 @@ fn project_track_tokens(value:&mut Value,ids:&HashMap<String,String>){
         }
         Value::Array(values)=>{for nested in values{project_track_tokens(nested,ids);}}
         _=>{}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestRenderer;
+    impl Renderer for TestRenderer {
+        fn apply(&mut self, _action: &RendererAction) -> Result<(), RendererError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn core_protocol_exposes_diagnostics_status_control_and_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "cadence_core_diag_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("cadence.db");
+
+        let mut rt = HeadlessCoreRuntime::open(
+            HeadlessConfig {
+                db_path,
+                engine_id: "eng_diag".into(),
+                library_id: "lib_diag".into(),
+                label: "Diag Test Engine".into(),
+                output: None,
+                headroom_bytes: DEFAULT_CONTAINER_HEADROOM_BYTES,
+            },
+            TestRenderer,
+        )
+        .unwrap();
+
+        let status_req = serde_json::to_vec(&json!({
+            "protocolVersion": 2,
+            "engineId": "eng_diag",
+            "libraryId": "lib_diag",
+            "operation": "diagnostics.status",
+        }))
+        .unwrap();
+        let status_resp = rt.request(&status_req);
+        assert_eq!(status_resp["ok"], true, "{status_resp}");
+        assert!(status_resp["data"]["ringCapacity"].as_u64().unwrap_or(0) > 0);
+
+        let bad_ctrl = serde_json::to_vec(&json!({
+            "protocolVersion": 2,
+            "engineId": "eng_diag",
+            "libraryId": "lib_diag",
+            "operation": "diagnostics.control",
+            "action": "set_mode",
+            "mode": "invalid_mode",
+        }))
+        .unwrap();
+        let bad_resp = rt.request(&bad_ctrl);
+        assert_eq!(bad_resp["ok"], false);
+        assert_eq!(bad_resp["error"]["code"], "invalid_payload");
+
+        let snap_req = serde_json::to_vec(&json!({
+            "protocolVersion": 2,
+            "engineId": "eng_diag",
+            "libraryId": "lib_diag",
+            "operation": "diagnostics.snapshot",
+        }))
+        .unwrap();
+        let snap_resp = rt.request(&snap_req);
+        assert_eq!(snap_resp["ok"], true, "{snap_resp}");
+        assert_eq!(snap_resp["data"]["idle"], true);
+        assert!(snap_resp["data"]["enrichment"].is_object());
+        assert!(snap_resp["data"]["smb"].is_object());
+        assert!(snap_resp["data"]["memoryArena"].is_object());
+
+        let _ = rt.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

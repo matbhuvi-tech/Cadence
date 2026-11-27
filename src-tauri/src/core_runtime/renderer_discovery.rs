@@ -788,6 +788,18 @@ pub fn discover_with<S: SsdpSource + ?Sized>(
         .renderers
         .sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.udn.cmp(&b.udn)));
     report.elapsed_ms = started.elapsed().as_millis() as u64;
+    crate::diag_log!(
+        crate::diagnostics::DiagCategory::DeviceDiscovery,
+        0,
+        0,
+        report.elapsed_ms * 1000,
+        "core_renderer_discover",
+        "found={} rejected={} timed_out={} truncated={}",
+        report.renderers.len(),
+        report.rejected_total(),
+        report.timed_out,
+        report.truncated
+    );
     report
 }
 
