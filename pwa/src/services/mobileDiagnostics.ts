@@ -59,6 +59,7 @@ export interface MobileSupportSubmissionResult {
 export async function submitMobileSupportReport(options: {
   report: MobileSupportReport;
   scenario: MobileSupportScenario;
+  customProblem?: string;
   userNotes?: string;
   contactEmail?: string;
   webhookUrl: string;
@@ -67,8 +68,11 @@ export async function submitMobileSupportReport(options: {
   if (!url) {
     throw new Error('Support webhook URL is not configured yet.');
   }
+  const customLabel = options.customProblem?.trim();
   const scenarioLabel =
-    MOBILE_SUPPORT_SCENARIOS.find((s) => s.id === options.scenario)?.label ?? options.scenario;
+    customLabel ||
+    MOBILE_SUPPORT_SCENARIOS.find((s) => s.id === options.scenario)?.label ||
+    options.scenario;
   const fallbackTicket = `CAD-MOB-${Date.now().toString(36).toUpperCase()}`;
 
   const body = JSON.stringify({
@@ -146,11 +150,11 @@ export type MobileSupportScenario =
   | 'other';
 
 export const MOBILE_SUPPORT_SCENARIOS: Array<{ id: MobileSupportScenario; label: string }> = [
-  { id: 'mobile_not_connecting', label: 'Mobile is not connecting with playback engine' },
-  { id: 'cert_mismatch', label: 'TLS certificate mismatch / untrusted error' },
+  { id: 'mobile_not_connecting', label: 'Cannot connect to Playback Engine' },
+  { id: 'cert_mismatch', label: 'Security certificate warning or untrusted engine' },
   { id: 'pin_rejected', label: 'Pairing PIN rejected or keeps asking' },
   { id: 'upnp_or_playback', label: 'Playback, queue, or speaker control issue' },
-  { id: 'other', label: 'Other mobile remote issue' },
+  { id: 'other', label: 'Describe my own issue...' },
 ];
 
 function redactMobileDetail(raw: string): string {
@@ -225,6 +229,7 @@ export interface MobileSupportReport {
 
 export function buildMobileSupportReport(options: {
   scenario: MobileSupportScenario;
+  customProblem?: string;
   userNotes?: string;
   consentGranted: boolean;
   nativeAndroid: boolean;
@@ -238,8 +243,11 @@ export function buildMobileSupportReport(options: {
     throw new Error('Explicit user consent is required before exporting mobile diagnostics.');
   }
 
+  const customLabel = options.customProblem?.trim();
   const scenarioLabel =
-    MOBILE_SUPPORT_SCENARIOS.find((s) => s.id === options.scenario)?.label ?? options.scenario;
+    customLabel ||
+    MOBILE_SUPPORT_SCENARIOS.find((s) => s.id === options.scenario)?.label ||
+    options.scenario;
 
   const sanitizedProfile = options.activeProfile
     ? {

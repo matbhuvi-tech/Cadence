@@ -40,4 +40,5 @@
 
 - UPnP pacing graph: replace 100 ms throughput steps with observed early/late timing extremes and chunk-size/expected-spacing summaries. Pacer algorithms unchanged. Evidence: [reports/upnp-pacing-graph.md](reports/upnp-pacing-graph.md).
 - [#59](https://github.com/matbhuvi-tech/Cadence/issues/59): Mobile Android APK pairing PIN/QR broken and feature drift behind Standalone Playback Engine (Core v2).
+- Support & Self-Diagnostics UX Redesign (`feat/support-troubleshooting-ux-redesign`): Listener-first 3-stage Help & Troubleshooting flow, hybrid Type-or-Select problem input with keyword routing, 5-state System Health Checklist, visual Library Consistency cards, Guided Playback Capture, and Mobile Remote parity.
 - [#60](https://github.com/matbhuvi-tech/Cadence/issues/60): CI failures across Playwright E2E pairing selector, Linux/Windows Rust `tsx` dependency, Windows 8.3 temp-path artwork tests, and headless Windows audio endpoint enumeration.

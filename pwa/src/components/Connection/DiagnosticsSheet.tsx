@@ -7,7 +7,6 @@ import {
   ClipboardCopy,
   Download,
   KeyRound,
-  Link2,
   Lock,
   RefreshCw,
   Send,
@@ -28,7 +27,6 @@ import {
   MOBILE_SUPPORT_EMAIL,
   MOBILE_SUPPORT_SCENARIOS,
   mobileDiagnostics,
-  setMobileSupportWebhookUrl,
   submitMobileSupportReport,
   type MobileSupportScenario,
 } from '../../services/mobileDiagnostics';
@@ -78,10 +76,10 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
   const [pinDraft, setPinDraft] = useState(activeProfile?.token || '');
   const [notifDeniedHint, setNotifDeniedHint] = useState(false);
   const [supportScenario, setSupportScenario] = useState<MobileSupportScenario>('mobile_not_connecting');
+  const [supportCustomProblem, setSupportCustomProblem] = useState('');
   const [supportNotes, setSupportNotes] = useState('');
   const [supportContactEmail, setSupportContactEmail] = useState('');
-  const [supportWebhookUrl, setSupportWebhookUrl] = useState(() => getMobileSupportWebhookUrl());
-  const [showWebhookConfig, setShowWebhookConfig] = useState(false);
+  const supportWebhookUrl = getMobileSupportWebhookUrl();
   const [supportConsent, setSupportConsent] = useState(false);
   const [supportSending, setSupportSending] = useState(false);
   const [supportStatus, setSupportStatus] = useState<string | null>(null);
@@ -154,19 +152,6 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
     setEditingPin(false);
   };
 
-  const handleSaveMobileWebhook = () => {
-    try {
-      const saved = setMobileSupportWebhookUrl(supportWebhookUrl);
-      setSupportWebhookUrl(saved);
-      setShowWebhookConfig(false);
-      setSupportStatus(
-        saved ? 'Mobile support webhook URL saved.' : 'Cleared mobile support webhook URL.'
-      );
-    } catch (err) {
-      setSupportStatus(err instanceof Error ? err.message : String(err));
-    }
-  };
-
   const handleExportSupport = async (mode: 'submit' | 'download') => {
     if (!supportConsent) return;
     setSupportStatus(null);
@@ -174,6 +159,7 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
     try {
       const report = buildMobileSupportReport({
         scenario: supportScenario,
+        customProblem: supportCustomProblem,
         userNotes: supportNotes,
         consentGranted: true,
         nativeAndroid,
@@ -188,6 +174,7 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
         const res = await submitMobileSupportReport({
           report,
           scenario: supportScenario,
+          customProblem: supportCustomProblem,
           userNotes: supportNotes,
           contactEmail: supportContactEmail,
           webhookUrl: supportWebhookUrl,
@@ -608,17 +595,23 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
           <div className="rounded-2xl bg-zinc-900/45 border border-zinc-800/90 p-3.5 flex flex-col gap-2.5">
             <div>
               <p className="text-xs font-semibold text-zinc-100">
-                Report Issue to Cadence Support
+                Get Help from Cadence Support
               </p>
               <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
-                Export sanitized connection logs on consent even if your phone cannot reach the Playback Engine.
+                Share a privacy-protected connection report — passwords and pairing PINs are removed automatically. Works even offline.
               </p>
             </div>
 
             <select
               aria-label="Mobile support issue"
               value={supportScenario}
-              onChange={(e) => setSupportScenario(e.target.value as MobileSupportScenario)}
+              onChange={(e) => {
+                const next = e.target.value as MobileSupportScenario;
+                setSupportScenario(next);
+                if (next !== 'other') {
+                  setSupportCustomProblem('');
+                }
+              }}
               className="w-full min-h-[40px] rounded-xl bg-zinc-950 border border-zinc-700 px-3 text-xs text-zinc-100 focus:outline-none focus:border-[#D4AF37]"
             >
               {MOBILE_SUPPORT_SCENARIOS.map((s) => (
@@ -628,12 +621,27 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
               ))}
             </select>
 
+            <input
+              aria-label="Describe mobile issue"
+              type="text"
+              value={supportCustomProblem}
+              onChange={(e) => {
+                const next = e.target.value;
+                setSupportCustomProblem(next);
+                if (next.trim().length > 0 && supportScenario !== 'other') {
+                  setSupportScenario('other');
+                }
+              }}
+              placeholder="Or type your problem in your own words..."
+              className="w-full min-h-[38px] rounded-xl bg-zinc-950 border border-zinc-700 px-3 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-[#D4AF37]"
+            />
+
             <textarea
               aria-label="Mobile issue notes"
               rows={2}
               value={supportNotes}
               onChange={(e) => setSupportNotes(e.target.value)}
-              placeholder="Optional notes (router, VPN, Android/iOS version)..."
+              placeholder="Optional details (router, VPN, phone model)..."
               className="w-full rounded-xl bg-zinc-950 border border-zinc-700 px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-[#D4AF37] resize-none"
             />
 
@@ -642,42 +650,9 @@ export const DiagnosticsSheet: React.FC<DiagnosticsSheetProps> = ({
               type="email"
               value={supportContactEmail}
               onChange={(e) => setSupportContactEmail(e.target.value)}
-              placeholder="Your email (optional, for reply)"
+              placeholder="Your email (optional, if you'd like a reply)"
               className="w-full min-h-[38px] rounded-xl bg-zinc-950 border border-zinc-700 px-3 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-[#D4AF37]"
             />
-
-            <div className="flex items-center justify-between">
-              <button
-                type="button"
-                onClick={() => setShowWebhookConfig((prev) => !prev)}
-                className="text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
-              >
-                <Link2 className="w-3 h-3" />
-                <span>
-                  {supportWebhookUrl ? 'Support webhook ready' : 'Configure Support Webhook URL'}
-                </span>
-              </button>
-            </div>
-
-            {(showWebhookConfig || !supportWebhookUrl) && (
-              <div className="flex items-center gap-1.5">
-                <input
-                  aria-label="Mobile support webhook URL"
-                  type="url"
-                  value={supportWebhookUrl}
-                  onChange={(e) => setSupportWebhookUrl(e.target.value)}
-                  placeholder="https://script.google.com/macros/s/.../exec"
-                  className="flex-1 min-h-[36px] rounded-xl bg-zinc-950 border border-zinc-700 px-2.5 text-[11px] font-mono text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-[#D4AF37]"
-                />
-                <button
-                  type="button"
-                  onClick={handleSaveMobileWebhook}
-                  className="min-h-[36px] px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-[11px] font-semibold text-zinc-100 shrink-0"
-                >
-                  Save
-                </button>
-              </div>
-            )}
 
             <label className="flex items-start gap-2.5 text-[11px] text-zinc-300 cursor-pointer">
               <input

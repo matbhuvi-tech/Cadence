@@ -31,85 +31,151 @@ pub fn support_scenarios() -> Vec<SupportScenarioInfo> {
     vec![
         SupportScenarioInfo {
             id: "engine_not_connecting".into(),
-            label: "App is not connecting with playback engine".into(),
-            description: "Desktop UI cannot reach, pair with, or stay connected to Cadence Playback Engine.".into(),
+            label: "Cannot connect to Playback Engine".into(),
+            description: "Desktop app cannot reach, pair with, or stay connected to your Playback Engine.".into(),
         },
         SupportScenarioInfo {
             id: "upnp_discovery_failed".into(),
-            label: "App is not discovering UPnP or playback speakers".into(),
-            description: "UPnP renderers, USB DACs, or audio output devices are missing from the output list.".into(),
+            label: "Speakers or audio output devices not showing".into(),
+            description: "UPnP speakers, USB DACs, or audio output devices are missing from your output list.".into(),
         },
         SupportScenarioInfo {
             id: "enrichment_stuck".into(),
-            label: "Enrichment is not working or got stuck".into(),
-            description: "Metadata or cover art enrichment stopped progressing or stays paused/pending.".into(),
+            label: "Album metadata or cover art enrichment is stuck".into(),
+            description: "Automatic metadata or cover art matching stopped progressing or stays paused.".into(),
         },
         SupportScenarioInfo {
             id: "enrichment_slow".into(),
-            label: "Enrichment is going slow".into(),
+            label: "Metadata or cover art matching is running slowly".into(),
             description: "Album matching or artwork fetching is taking unusually long.".into(),
         },
         SupportScenarioInfo {
             id: "app_crashed".into(),
-            label: "App crashed or closed unexpectedly".into(),
-            description: "Desktop or Playback Engine exited abruptly or generated a crash report.".into(),
+            label: "Cadence closed unexpectedly or crashed".into(),
+            description: "Desktop app or Playback Engine closed abruptly or generated a crash report.".into(),
         },
         SupportScenarioInfo {
             id: "mobile_not_connecting".into(),
-            label: "Mobile is not connecting with playback engine".into(),
-            description: "Cadence Remote on phone/tablet cannot discover, trust, or authenticate with the engine.".into(),
+            label: "Mobile Remote cannot connect to Playback Engine".into(),
+            description: "Cadence Remote on your phone or tablet cannot find, trust, or pair with the engine.".into(),
         },
         SupportScenarioInfo {
             id: "smb_mount_failed".into(),
-            label: "Not able to add an SMB folder".into(),
-            description: "Adding or mounting a network SMB/NAS share fails or returns permission/path errors.".into(),
+            label: "Cannot add or access a network (SMB / NAS) music folder".into(),
+            description: "Adding or connecting to a network shared folder fails or reports permission errors.".into(),
         },
         SupportScenarioInfo {
             id: "lost_library_after_upgrade".into(),
-            label: "Lost library after upgrading playback engine".into(),
-            description: "Tracks, playlists, or folders disappeared after updating or switching Tray/Service mode.".into(),
+            label: "Missing tracks, albums, or playlists after an update".into(),
+            description: "Your music library or playlists disappeared after updating or switching engine mode.".into(),
         },
         SupportScenarioInfo {
             id: "wasapi_exclusive_failed".into(),
-            label: "WASAPI Exclusive / ASIO bit-perfect playback failed".into(),
+            label: "Bit-perfect playback (WASAPI Exclusive / ASIO) failed".into(),
             description: "Bit-perfect audio device initialization or sample-rate switching fails.".into(),
         },
         SupportScenarioInfo {
             id: "upnp_dropouts".into(),
-            label: "UPnP playback stutters, drops out, or cuts off early".into(),
-            description: "Network streaming to a UPnP renderer pauses, skips, or stops mid-track.".into(),
+            label: "Music playback stutters, drops out, or stops early".into(),
+            description: "Streaming to a network speaker pauses, skips, or cuts off mid-track.".into(),
         },
         SupportScenarioInfo {
             id: "ram_lock_admission_failed".into(),
-            label: "Track failed to pre-load into RAM (VirtualLock / memlock)".into(),
-            description: "Playback fails with not_ready or memory lock budget errors on large hi-res/DSD files.".into(),
+            label: "Large hi-res or DSD track failed to load into memory".into(),
+            description: "Playback fails with memory lock or track-not-ready errors on large hi-res or DSD files.".into(),
         },
         SupportScenarioInfo {
             id: "scanner_skipped_files".into(),
-            label: "Library scan skipped files or shows wrong format".into(),
-            description: "Some audio files are missing after scanning or DSD/PCM metadata looks wrong.".into(),
+            label: "Library scan skipped files or shows wrong audio format".into(),
+            description: "Some audio files are missing after scanning or DSD/PCM format details look wrong.".into(),
         },
         SupportScenarioInfo {
             id: "tag_commit_stuck".into(),
-            label: "Tag writes / Curation commits are stuck or failing".into(),
-            description: "Approved metadata changes stay queued or fail to write to audio files.".into(),
+            label: "Saving metadata edits to audio files is stuck or failing".into(),
+            description: "Approved tag changes stay queued or fail to write to your audio files.".into(),
         },
         SupportScenarioInfo {
             id: "gemini_provenance_failed".into(),
-            label: "Gemini AI / Compilation provenance resolution failed".into(),
-            description: "AI metadata resolution or soundtrack provenance lookup returns errors.".into(),
+            label: "Gemini AI album or soundtrack lookup failed".into(),
+            description: "AI metadata resolution or soundtrack lookup returned errors.".into(),
         },
         SupportScenarioInfo {
             id: "missing_artwork".into(),
             label: "Album covers or artist portraits are missing".into(),
-            description: "Releases or artists show placeholders even when local or remote art exists.".into(),
+            description: "Albums or artists show placeholders even when local or online artwork exists.".into(),
         },
         SupportScenarioInfo {
             id: "cooldown_deadlock".into(),
-            label: "Actions keep saying 'deferred until idle' when stopped".into(),
-            description: "Folder scans, discovery, or curation stay blocked after playback stops.".into(),
+            label: "Background actions stay paused ('deferred until idle')".into(),
+            description: "Folder scans, speaker discovery, or metadata saving remain blocked after playback stops.".into(),
         },
     ]
+}
+
+pub fn resolve_scenario_from_input(raw_scenario_or_text: &str) -> SupportScenarioInfo {
+    let trimmed = raw_scenario_or_text.trim();
+    let scenarios = support_scenarios();
+
+    if let Some(exact) = scenarios
+        .iter()
+        .find(|s| s.id == trimmed || s.label.eq_ignore_ascii_case(trimmed))
+    {
+        return exact.clone();
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let contains_any = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+
+    let inferred_id = if contains_any(&["stutter", "dropout", "drop out", "skip", "cut off", "cuts off", "glitch"]) {
+        Some("upnp_dropouts")
+    } else if contains_any(&["vanish", "disappear", "upgrade", "empty library", "lost library", "missing track", "missing album", "missing playlist"]) {
+        Some("lost_library_after_upgrade")
+    } else if contains_any(&["smb", "nas", "unc", "network folder", "network share", "cifs", "share"]) {
+        Some("smb_mount_failed")
+    } else if contains_any(&["wasapi", "asio", "exclusive", "bit-perfect", "bit perfect", "dac"]) {
+        Some("wasapi_exclusive_failed")
+    } else if contains_any(&["virtuallock", "memlock", "ram", "dsd load", "memory lock", "not_ready"]) {
+        Some("ram_lock_admission_failed")
+    } else if contains_any(&["enrich", "musicbrainz", "metadata stuck"]) {
+        Some("enrichment_stuck")
+    } else if contains_any(&["artwork", "cover", "portrait", "album art"]) {
+        Some("missing_artwork")
+    } else if contains_any(&["tag", "commit", "curate write"]) {
+        Some("tag_commit_stuck")
+    } else if contains_any(&["gemini", "provenance", "ai lookup"]) {
+        Some("gemini_provenance_failed")
+    } else if contains_any(&["deferred", "cooldown", "until idle"]) {
+        Some("cooldown_deadlock")
+    } else if contains_any(&["mobile", "phone", "android", "ios", "pin", "qr"]) {
+        Some("mobile_not_connecting")
+    } else if contains_any(&["upnp", "speaker", "renderer", "discover", "output device"]) {
+        Some("upnp_discovery_failed")
+    } else if contains_any(&["connect", "unreachable", "port 4040", "engine"]) {
+        Some("engine_not_connecting")
+    } else if contains_any(&["crash", "panic", "closed unexpectedly"]) {
+        Some("app_crashed")
+    } else {
+        None
+    };
+
+    let resolved_id = inferred_id
+        .map(str::to_string)
+        .unwrap_or_else(|| sanitize_scenario_slug(trimmed));
+    let description = scenarios
+        .iter()
+        .find(|s| s.id == resolved_id)
+        .map(|s| s.description.clone())
+        .unwrap_or_default();
+
+    SupportScenarioInfo {
+        id: resolved_id,
+        label: if trimmed.is_empty() {
+            "General troubleshooting".to_string()
+        } else {
+            trimmed.to_string()
+        },
+        description,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -714,9 +780,9 @@ pub fn compute_self_diagnosis_hints(
             hints.push(SelfDiagnosisHint {
                 severity: "info".into(),
                 code: "AUDIO_HYGIENE_GUARD_ACTIVE".into(),
-                title: format!("Audio hygiene guard active (transport: {activity})"),
-                detail: "Background enrichment, folder scans, UPnP discovery, and tag writes are intentionally suspended during active/paused playback and for 30s afterward.".into(),
-                recommended_action: "Stop playback and wait 30 seconds for the post-playback cooldown to clear.".into(),
+                title: format!("Your music takes priority (playback protection active · {activity})"),
+                detail: "Cadence intentionally pauses background enrichment, folder scans, speaker discovery, and tag writes during playback and for 30 seconds afterward to protect audio quality.".into(),
+                recommended_action: "Stop playback and wait 30 seconds for background processing to resume automatically.".into(),
             });
         }
 
@@ -792,13 +858,31 @@ pub fn compute_self_diagnosis_hints(
     }
 
     if hints.is_empty() {
-        hints.push(SelfDiagnosisHint {
-            severity: "info".into(),
-            code: "NO_OBVIOUS_LOCAL_FAULT".into(),
-            title: "No blocking local fault detected automatically".into(),
-            detail: "Database integrity, engine identity, and local configuration checks completed without fatal errors.".into(),
-            recommended_action: "If you are still experiencing the issue, enable Debug Logging (or Diagnostic Capture Mode while reproducing) and submit this bundle to support.".into(),
-        });
+        if matches!(
+            scenario_id,
+            "upnp_dropouts"
+                | "wasapi_exclusive_failed"
+                | "ram_lock_admission_failed"
+                | "scanner_skipped_files"
+                | "gemini_provenance_failed"
+                | "missing_artwork"
+        ) {
+            hints.push(SelfDiagnosisHint {
+                severity: "info".into(),
+                code: "CAPTURE_RECOMMENDED_FOR_ISSUE".into(),
+                title: "Live diagnostic capture recommended for this issue".into(),
+                detail: "Local database integrity, engine identity, and configuration checks passed. Investigating this issue requires capturing logs while the problem occurs.".into(),
+                recommended_action: "Use Start Diagnostic Capture below, reproduce the issue, then stop capture and send the report to Cadence Support.".into(),
+            });
+        } else {
+            hints.push(SelfDiagnosisHint {
+                severity: "info".into(),
+                code: "NO_OBVIOUS_LOCAL_FAULT".into(),
+                title: "No blocking local fault detected automatically".into(),
+                detail: "Database integrity, engine identity, and local configuration checks completed without fatal errors.".into(),
+                recommended_action: "If the issue continues, share a diagnostic report with Cadence Support below so we can investigate further.".into(),
+            });
+        }
     }
 
     hints
@@ -843,16 +927,7 @@ pub fn build_support_preview(
     active_engine_probe_error: Option<&str>,
     engine_snapshot: Option<&Value>,
 ) -> SupportDiagnosticsPreview {
-    let scenarios = support_scenarios();
-    let scenario_info = scenarios
-        .iter()
-        .find(|s| s.id == scenario_id)
-        .cloned()
-        .unwrap_or(SupportScenarioInfo {
-            id: sanitize_scenario_slug(scenario_id),
-            label: scenario_id.to_string(),
-            description: String::new(),
-        });
+    let scenario_info = resolve_scenario_from_input(scenario_id);
 
     let dirs = candidate_database_directories();
     let lineage = inspect_database_lineage_for_dirs(&dirs);
@@ -1737,5 +1812,35 @@ path=C:\Users\TestUser\Music\album.flac"#;
         assert!(body_json["zipBase64"].as_str().is_some_and(|s| s.starts_with("UEsDB")));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn custom_problem_text_resolves_keywords_while_preserving_user_label() {
+        let matched = resolve_scenario_from_input("My USB DAC fails bit-perfect playback at 192kHz");
+        assert_eq!(matched.id, "wasapi_exclusive_failed");
+        assert_eq!(matched.label, "My USB DAC fails bit-perfect playback at 192kHz");
+
+        let dropout = resolve_scenario_from_input("Music stutters on my living room speaker");
+        assert_eq!(dropout.id, "upnp_dropouts");
+        assert_eq!(dropout.label, "Music stutters on my living room speaker");
+
+        let custom = resolve_scenario_from_input("Album sorting order looks alphabetical instead of year");
+        assert_eq!(custom.id, "album_sorting_order_looks_alphabetical_i");
+        assert_eq!(custom.label, "Album sorting order looks alphabetical instead of year");
+
+        let hints = compute_self_diagnosis_hints(
+            "upnp_dropouts",
+            &[],
+            &[],
+            false,
+            true,
+            None,
+            None,
+            &diagnostics::get_state(),
+        );
+        assert!(
+            hints.iter().any(|h| h.code == "CAPTURE_RECOMMENDED_FOR_ISSUE"),
+            "expected CAPTURE_RECOMMENDED_FOR_ISSUE for runtime capture scenario, got: {hints:?}"
+        );
     }
 }

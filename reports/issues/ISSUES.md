@@ -1,5 +1,14 @@
 # Issue Log
 
+## Support & Self-Diagnostics UX Redesign (`feat/support-troubleshooting-ux-redesign`)
+
+- **Reported behavior:** Support & Self-Diagnostics exposed developer jargon (`Webhook Ready`, `Redact OS username`, `Zero-allocation lock-free ring buffer`), presented all three stages simultaneously without visual hierarchy, ignored `doctorReports` / detailed `databaseLineage` metrics in the UI, returned a misleading `NO_OBVIOUS_LOCAL_FAULT` for runtime audio issues, and only allowed fixed dropdown selection.
+- **Changes:**
+  1. `src-tauri/src/support_bundle.rs`: Rewrote all 16 scenario labels/descriptions into listener-friendly language, added `resolve_scenario_from_input()` keyword matching for custom typed problem descriptions while preserving the user's exact text as `scenario_label`, added `CAPTURE_RECOMMENDED_FOR_ISSUE` hint for runtime capture scenarios, and updated `AUDIO_HYGIENE_GUARD_ACTIVE` copy.
+  2. `src/components/CommandBar/DebugDiagnosticsPanel.tsx` & `src/components/Modals/CadenceSettingsModal.tsx`: Redesigned into a progressive 3-stage **Help & Troubleshooting** flow (`01 · Identify the problem` with hybrid Type-or-Select input + Guided Playback Capture, `02 · Diagnostic results` with 5-state System Health Checklist including explicit `Not checked` when unreachable + visual Library Consistency cards, `03 · Still need help? Contact Cadence Support` with redacted preview & consent gating) and moved ring-buffer/webhook controls into **Advanced Diagnostics**.
+  3. `pwa/src/components/Connection/DiagnosticsSheet.tsx` & `pwa/src/services/mobileDiagnostics.ts`: Added Type-or-Select custom problem input and plain-language copy parity on Mobile Remote.
+- **Status:** Implemented on `feat/support-troubleshooting-ux-redesign`; awaiting user verification.
+
 ## GitHub #62 — Mobile playback and queue feedback
 
 - **Issue** [Mobile Remote reports misleading output, connection, and queue errors during playback](https://github.com/matbhuvi-tech/Cadence/issues/62)

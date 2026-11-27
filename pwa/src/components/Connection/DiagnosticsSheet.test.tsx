@@ -85,4 +85,67 @@ describe('DiagnosticsSheet offline support export', () => {
 
     fetchSpy.mockRestore();
   });
+
+  it('allows typing a custom mobile problem description and includes it in the submitted report', async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          ticketId: 'CAD-MOB-CUSTOM-1',
+          message: 'Saved custom report.',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+
+    render(
+      <DiagnosticsSheet
+        isOpen
+        onClose={vi.fn()}
+        activeProfile={null}
+        isConnected={false}
+        isConnecting={false}
+        connectionDiagnostic={null}
+        lockScreenControls={false}
+        onToggleLockScreenControls={vi.fn()}
+        onRunDiagnostics={vi.fn().mockResolvedValue({
+          network: {
+            isWifi: true,
+            isCellular: false,
+            isVpn: false,
+            localIpv4s: ['192.168.1.25'],
+            isBatteryOptimized: false,
+          },
+          probe: null,
+          diagnostic: null,
+        })}
+        onProbeAlternateEndpoints={vi.fn().mockResolvedValue(false)}
+        onRetryConnection={vi.fn()}
+        onUpdatePin={vi.fn()}
+        onTrustFingerprint={vi.fn()}
+        onSwitchDesktop={vi.fn()}
+        onDisconnectDesktop={vi.fn()}
+      />
+    );
+
+    await user.type(
+      screen.getByLabelText(/Describe mobile issue/i),
+      'Lock-screen play button disappears on Pixel 9'
+    );
+    await user.click(
+      screen.getByRole('checkbox', { name: /Consent to share mobile diagnostic report/i })
+    );
+    await user.click(screen.getByRole('button', { name: /Send to Support/i }));
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    const bodyText = String(fetchSpy.mock.calls[0]?.[1]?.body ?? '');
+    const parsed = JSON.parse(bodyText) as { scenarioLabel: string; jsonPayload: string };
+    expect(parsed.scenarioLabel).toBe('Lock-screen play button disappears on Pixel 9');
+    expect(parsed.jsonPayload).toContain('Lock-screen play button disappears on Pixel 9');
+
+    fetchSpy.mockRestore();
+  });
 });

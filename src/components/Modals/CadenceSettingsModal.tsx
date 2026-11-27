@@ -203,9 +203,9 @@ export const CadenceSettingsModal: React.FC<CadenceSettingsModalProps> = ({
               hidden={activeTab !== 'diagnostics'}
             >
               <div className="rounded-xl border border-white/[0.08] bg-black/35 p-4">
-                <h2 className="mb-1 text-sm font-semibold text-white">Diagnostics &amp; Debug Logs</h2>
+                <h2 className="mb-1 text-sm font-semibold text-white">Help &amp; Troubleshooting</h2>
                 <p className="mb-4 text-xs text-white/50">
-                  Zero-allocation lock-free ring buffer for troubleshooting discovery, endpoint routing, playback commands, and audio hygiene.
+                  Diagnose playback, library, or connection problems, inspect system health, and share redacted reports with Cadence Support.
                 </p>
                 <DebugDiagnosticsPanel isActive={isOpen && activeTab === 'diagnostics'} />
               </div>
