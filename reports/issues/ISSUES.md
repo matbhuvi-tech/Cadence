@@ -1,5 +1,17 @@
 # Issue Log
 
+## GitHub #69 — Composer/artist portrait resolution, folder-add seeding, and watched-root tracking
+
+- [Issue #69](https://github.com/matbhuvi-tech/Cadence/issues/69)
+- **Branch:** `fix/69-composer-artist-portraits`
+- **Reported behavior:** All composers in the Composers tab display monogram initials (`IL`, `AR`, `DE`, etc.) instead of composer portraits or album covers, and Engine Watched Roots only tracks album art coverage without artist/composer portrait indexing or coverage tracking.
+- **Root causes:**
+  1. Core folder scanning (`library.rs`) and `seed_pending_albums_and_artwork` (`enrichment/schema.rs`) never populated `canonical_artists` or `track_artist_credits` from scanned tracks, and `enqueue_rerun` did not re-queue artists for a watched root.
+  2. `CompositeArtworkProvider::fetch_artist_portrait` (`enrichment/providers.rs`) only queried iTunes album covers (no local `artist.*`, Deezer, or Wikimedia/Wikipedia waterfall), and `enrichment/worker.rs` never emitted `enrichment.updated` when artist artwork completed.
+  3. Frontend `AlbumCoverGrid.tsx` and `ArtistsView.tsx` ignored backend `canonical_artists` portraits, used raw `<img>` on `cadence-art://` fallbacks (causing immediate `onError` to monograms), and `core_fetch_artwork` / `createBrowserArtworkFetch` lacked `cadence-artist-art://` routing.
+  4. `RootEnrichmentProgress` / `EnrichmentStatusResponse` and `StorageManagerModal.tsx` did not track artist/composer portrait counts or coverage.
+- **Status:** Implemented on `fix/69-composer-artist-portraits`; awaiting user verification.
+
 ## GitHub #68 — Windows release suite packaging fails with relative NSIS paths
 
 - The Windows job built both component installers, then MakeNSIS looked for the relative Playback Engine installer path from the suite script's directory and failed. The suite output path was also relative. [Failed Windows job](https://github.com/matbhuvi-tech/Cadence/actions/runs/46085651100/job/140795216382)

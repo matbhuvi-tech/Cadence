@@ -1,6 +1,6 @@
 use super::artwork_worker::{
     build_override_candidate_urls, handle_retry_budget, process_album_artwork_item,
-    ArtworkProcessOutcome,
+    process_artist_artwork_item, ArtworkProcessOutcome,
 };
 use super::gate::{GateOutcome, GateRegistry, BREAKER_PROBE_AFTER, BREAKER_RECOVERIES, BREAKER_THRESHOLD};
 use super::image_store::ImageStore;
@@ -10,9 +10,10 @@ use super::matcher::{
 };
 use super::providers::{BoxFuture, ExternalArtworkProvider, MetadataProvider, ProviderError};
 use super::schema::{
-    accept_album_proposal, apply_user_overlay, compute_enrichment_status, ensure_schema,
-    get_enrichment_album_detail, record_file_commit_for_tracks, revert_album_to_file_tags,
-    seed_pending_albums_and_artwork, unlock_album_for_enrichment,
+    accept_album_proposal, apply_user_overlay, compute_enrichment_status, enqueue_rerun,
+    ensure_schema, get_enrichment_album_detail, list_enrichment_artist_portraits,
+    record_file_commit_for_tracks, revert_album_to_file_tags, seed_pending_albums_and_artwork,
+    unlock_album_for_enrichment,
 };
 use super::worker::{
     next_user_override_artwork_item, process_text_enrichment_album, EnrichmentIdleGate,
@@ -1121,4 +1122,202 @@ fn accept_proposal_enqueues_artwork_and_revert_to_file_restores_local_art() {
     assert_eq!(art_count, 0);
     assert_eq!(prio, 5);
     assert_eq!(reverted_override, None);
+}
+
+struct MockArtistPortraitProvider {
+    bytes: Vec<u8>,
+}
+
+impl ExternalArtworkProvider for MockArtistPortraitProvider {
+    fn name(&self) -> &'static str {
+        "deezer"
+    }
+
+    fn fetch_album_cover<'a>(
+        &'a self,
+        _local: &'a LocalAlbum,
+        _mb_release_id: Option<&'a str>,
+        _hint: Option<&'a str>,
+        _cancel: &'a Notify,
+    ) -> BoxFuture<'a, Result<(Vec<u8>, String), ProviderError>> {
+        Box::pin(async move { Err(ProviderError::NotFound) })
+    }
+
+    fn fetch_artist_portrait<'a>(
+        &'a self,
+        artist_name: &'a str,
+        _cancel: &'a Notify,
+    ) -> BoxFuture<'a, Result<(Vec<u8>, String), ProviderError>> {
+        let target = artist_name.to_string();
+        let bytes = self.bytes.clone();
+        Box::pin(async move {
+            if target == "A. R. Rahman" {
+                Ok((bytes, "deezer".to_string()))
+            } else {
+                Err(ProviderError::NotFound)
+            }
+        })
+    }
+}
+
+#[test]
+fn seed_syncs_canonical_artists_queues_portraits_and_tracks_per_root_coverage() {
+    let dir = temp_dir("cadence-artist-portrait-seeding");
+    let root_a = dir.join("Tamil");
+    let root_b = dir.join("Retro");
+    let alb_il = root_a.join("Kizhakku Vasal");
+    let alb_ar = root_a.join("Roja");
+    let alb_de = root_b.join("Baasha");
+    std::fs::create_dir_all(&alb_il).unwrap();
+    std::fs::create_dir_all(&alb_ar).unwrap();
+    std::fs::create_dir_all(&alb_de).unwrap();
+
+    // Local artist.jpg inside Ilaiyaraaja's album folder
+    std::fs::write(alb_il.join("artist.jpg"), make_png_bytes(400, 400, [50, 90, 200])).unwrap();
+
+    let db = AppDb::new(dir.join("cadence.db")).unwrap();
+    let store = ImageStore::new(dir.join("artwork"));
+    let gates = Arc::new(GateRegistry::new());
+    let gate = Arc::new(EnrichmentIdleGate::new(gates));
+
+    {
+        let conn = db.conn.lock();
+        ensure_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO storage_mounts(id,name,mount_path,mount_type,file_system,last_seen_timestamp) VALUES('m1','RootA',?1,'local','ntfs',CURRENT_TIMESTAMP)",
+            params![root_a.to_string_lossy()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO storage_mounts(id,name,mount_path,mount_type,file_system,last_seen_timestamp) VALUES('m2','RootB',?1,'local','ntfs',CURRENT_TIMESTAMP)",
+            params![root_b.to_string_lossy()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders(id,mount_id,folder_path,display_name,scan_mode) VALUES('wf_a','m1',?1,'Tamil','manual')",
+            params![root_a.to_string_lossy()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders(id,mount_id,folder_path,display_name,scan_mode) VALUES('wf_b','m2',?1,'Retro','manual')",
+            params![root_b.to_string_lossy()],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,composer_name,created_at)
+             VALUES('rel_il','Kizhakku Vasal',?1,'Kizhakku Vasal','Ilaiyaraaja','Ilaiyaraaja',CURRENT_TIMESTAMP)",
+            params![alb_il.to_string_lossy()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,file_size,mtime,title,artist_credit,album_title,composer,track_number,disc_number,duration_secs,format,is_online,created_at)
+             VALUES('t_il','rel_il','m1',?1,'Kizhakku Vasal',?2,'01.flac',100,1,'Song 1','Ilaiyaraaja','Kizhakku Vasal','Ilaiyaraaja',1,1,240.0,'FLAC',1,CURRENT_TIMESTAMP)",
+            params![alb_il.to_string_lossy(), alb_il.join("01.flac").to_string_lossy()],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,composer_name,created_at)
+             VALUES('rel_ar','Roja',?1,'Roja','A. R. Rahman','A. R. Rahman',CURRENT_TIMESTAMP)",
+            params![alb_ar.to_string_lossy()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,file_size,mtime,title,artist_credit,album_title,composer,track_number,disc_number,duration_secs,format,is_online,created_at)
+             VALUES('t_ar','rel_ar','m1',?1,'Roja',?2,'01.flac',100,1,'Chinna','A. R. Rahman','Roja','A. R. Rahman',1,1,240.0,'FLAC',1,CURRENT_TIMESTAMP)",
+            params![alb_ar.to_string_lossy(), alb_ar.join("01.flac").to_string_lossy()],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,composer_name,created_at)
+             VALUES('rel_de','Baasha',?1,'Baasha','Deva','Deva',CURRENT_TIMESTAMP)",
+            params![alb_de.to_string_lossy()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,file_size,mtime,title,artist_credit,album_title,composer,track_number,disc_number,duration_secs,format,is_online,created_at)
+             VALUES('t_de','rel_de','m2',?1,'Baasha',?2,'01.flac',100,1,'Auto','Deva','Baasha','Deva',1,1,240.0,'FLAC',1,CURRENT_TIMESTAMP)",
+            params![alb_de.to_string_lossy(), alb_de.join("01.flac").to_string_lossy()],
+        ).unwrap();
+
+        let (_, seeded_art) = seed_pending_albums_and_artwork(&conn).unwrap();
+        assert!(seeded_art >= 6);
+
+        let status0 = compute_enrichment_status(&conn, "active", None, None, None, vec![]).unwrap();
+        assert_eq!(status0.total_artists, 3);
+        assert_eq!(status0.artist_artwork_covered, 0);
+        assert_eq!(status0.artist_artwork_pending, 3);
+        let root_a_p = status0.roots.iter().find(|r| r.folder_id == "wf_a").unwrap();
+        assert_eq!(root_a_p.total_artists, 2);
+        assert_eq!(root_a_p.artist_artwork_covered, 0);
+        assert_eq!(root_a_p.artist_artwork_pending, 2);
+        let root_b_p = status0.roots.iter().find(|r| r.folder_id == "wf_b").unwrap();
+        assert_eq!(root_b_p.total_artists, 1);
+        assert_eq!(root_b_p.artist_artwork_pending, 1);
+    }
+
+    let il_id: String = db.conn.lock().query_row(
+        "SELECT id FROM canonical_artists WHERE name='Ilaiyaraaja'", [], |r| r.get(0)
+    ).unwrap();
+    let ar_id: String = db.conn.lock().query_row(
+        "SELECT id FROM canonical_artists WHERE name='A. R. Rahman'", [], |r| r.get(0)
+    ).unwrap();
+    let de_id: String = db.conn.lock().query_row(
+        "SELECT id FROM canonical_artists WHERE name='Deva'", [], |r| r.get(0)
+    ).unwrap();
+
+    let ext_art: Arc<dyn ExternalArtworkProvider> = Arc::new(MockArtistPortraitProvider {
+        bytes: make_png_bytes(600, 600, [20, 180, 90]),
+    });
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+    // Non-idle guard must cancel without DB writes
+    {
+        let mut conn = db.conn.lock();
+        let not_idle = || false;
+        let out = rt.block_on(process_artist_artwork_item(
+            &mut conn, &store, Some(&ext_art), &il_id, 0, 0, &not_idle, gate.cancel_notify(),
+        ));
+        assert_eq!(out, ArtworkProcessOutcome::Cancelled);
+    }
+
+    // Resolve Ilaiyaraaja via local artist.jpg, A. R. Rahman via external Deezer mock, Deva -> Absent
+    {
+        let mut conn = db.conn.lock();
+        let is_idle = || true;
+        assert_eq!(
+            rt.block_on(process_artist_artwork_item(
+                &mut conn, &store, Some(&ext_art), &il_id, 0, 0, &is_idle, gate.cancel_notify(),
+            )),
+            ArtworkProcessOutcome::Found
+        );
+        assert_eq!(
+            rt.block_on(process_artist_artwork_item(
+                &mut conn, &store, Some(&ext_art), &ar_id, 0, 0, &is_idle, gate.cancel_notify(),
+            )),
+            ArtworkProcessOutcome::Found
+        );
+        assert_eq!(
+            rt.block_on(process_artist_artwork_item(
+                &mut conn, &store, Some(&ext_art), &de_id, 0, 0, &is_idle, gate.cancel_notify(),
+            )),
+            ArtworkProcessOutcome::Absent
+        );
+
+        let portraits = list_enrichment_artist_portraits(&conn).unwrap();
+        assert_eq!(portraits.len(), 2);
+        let ar_entry = portraits.iter().find(|p| p.id == ar_id).unwrap();
+        assert_eq!(ar_entry.alias_norm, "arrahman");
+        assert_eq!(ar_entry.artwork_url.as_deref(), Some(format!("cadence-artist-art://{ar_id}").as_str()));
+
+        let status1 = compute_enrichment_status(&conn, "active", None, None, None, vec![]).unwrap();
+        assert_eq!(status1.total_artists, 3);
+        assert_eq!(status1.artist_artwork_covered, 2);
+        assert_eq!(status1.artist_artwork_coverage_percent, 66);
+        let root_a_p = status1.roots.iter().find(|r| r.folder_id == "wf_a").unwrap();
+        assert_eq!(root_a_p.artist_artwork_covered, 2);
+        assert_eq!(root_a_p.artist_artwork_coverage_percent, 100);
+
+        // Re-enrich root B re-queues absent Deva for portrait retry
+        enqueue_rerun(&mut conn, None, Some("wf_b"), false).unwrap();
+        let de_queued: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM artwork_queue WHERE entity_kind='artist' AND entity_id=?1",
+            params![de_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(de_queued, 1);
+    }
 }

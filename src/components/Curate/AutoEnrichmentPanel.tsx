@@ -274,7 +274,14 @@ export const AutoEnrichmentHeaderStrip: React.FC<AutoEnrichmentHeaderStripProps>
   busy,
   onTogglePause,
 }) => {
-  if (!status) return null
+  if (
+    !status ||
+    status.totalAlbums === 0 ||
+    status.state === 'complete' ||
+    status.state === 'disabled'
+  ) {
+    return null
+  }
   return (
     <div
       data-testid="curate-auto-enrichment-strip"
@@ -283,9 +290,7 @@ export const AutoEnrichmentHeaderStrip: React.FC<AutoEnrichmentHeaderStripProps>
     >
       <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
       <span className="text-white/75 font-mono">
-        {status.totalAlbums === 0
-          ? 'Auto-Enrich · No albums indexed'
-          : `Auto-Enrich ${status.coveragePercent}% (${status.coveredAlbums}/${status.totalAlbums})`}
+        {`Auto-Enrich ${status.coveragePercent}% (${status.coveredAlbums}/${status.totalAlbums})`}
       </span>
       <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] text-white/70">
         {formatEnrichmentStateLabel(status)}

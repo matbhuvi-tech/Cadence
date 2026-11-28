@@ -645,6 +645,10 @@ export interface RootEnrichmentProgress {
   failedAlbums: number
   artworkCoveredAlbums: number
   artworkCoveragePercent: number
+  totalArtists?: number
+  artistArtworkCovered?: number
+  artistArtworkCoveragePercent?: number
+  artistArtworkPending?: number
 }
 
 export interface ProviderGateSnapshot {
@@ -673,8 +677,21 @@ export interface EngineEnrichmentStatus {
   artworkCoveredAlbums: number
   artworkCoveragePercent: number
   artworkPendingItems: number
+  totalArtists?: number
+  artistArtworkCovered?: number
+  artistArtworkCoveragePercent?: number
+  artistArtworkPending?: number
   providerGates: ProviderGateSnapshot[]
   roots: RootEnrichmentProgress[]
+}
+
+export interface EngineArtistPortraitSummary {
+  id: string
+  name: string
+  aliasNorm: string
+  portraitStatus: string
+  hasArtwork: boolean
+  artworkUrl?: string | null
 }
 
 export interface EngineEnrichmentAlbumSummary {

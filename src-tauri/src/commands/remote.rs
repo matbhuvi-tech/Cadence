@@ -339,17 +339,30 @@ pub async fn core_fetch_artwork(
     if_none_match: Option<String>,
 ) -> Result<CoreArtworkResponse, String> {
     let clean_id = release_id.trim();
-    if clean_id.is_empty()
-        || clean_id.len() > 128
-        || !clean_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err("invalid_payload".to_string());
-    }
+    let endpoint_path = if let Some(artist_id) = clean_id.strip_prefix("artist/") {
+        if artist_id.is_empty()
+            || artist_id.len() > 128
+            || !artist_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err("invalid_payload".to_string());
+        }
+        format!("v1/artwork/artist/{artist_id}")
+    } else {
+        if clean_id.is_empty()
+            || clean_id.len() > 128
+            || !clean_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err("invalid_payload".to_string());
+        }
+        format!("v1/artwork/{clean_id}")
+    };
     let base = validate_core_base_url(&target.base_url)?;
     let url = base
-        .join(&format!("v1/artwork/{clean_id}"))
+        .join(&endpoint_path)
         .map_err(|_| "invalid_payload".to_string())?;
     let client = build_core_http_client(
         target.cert_fingerprint.as_deref(),

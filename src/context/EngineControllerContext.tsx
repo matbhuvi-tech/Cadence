@@ -93,6 +93,7 @@ export interface EngineControllerContextValue {
   getCachedCoreArtworkUrl: (rawReleaseId: string) => string | null
   invalidateCoreArtwork: (rawReleaseId?: string) => void
   artworkVersion: number
+  artistPortraits: Record<string, string>
   subscribeEngineEvents: (listener: (event: EngineEventRecord) => void) => () => void
   selectLocalEndpointWithCoreGuard: (endpoint: AudioEndpoint) => Promise<void>
   confirmRs130Takeover: () => Promise<void>
@@ -420,6 +421,8 @@ export const EngineControllerProvider: React.FC<{
   const eventListenersRef = useRef(new Set<(event: EngineEventRecord) => void>())
   const pendingCatalogRefreshRef = useRef(false)
   const [artworkVersion, setArtworkVersion] = useState(0)
+  const [artistPortraitNonce, setArtistPortraitNonce] = useState(0)
+  const [artistPortraits, setArtistPortraits] = useState<Record<string, string>>({})
   const artworkCacheRef = useRef<EngineArtworkCache | null>(null)
   if (!artworkCacheRef.current) {
     artworkCacheRef.current = createEngineArtworkCache({
@@ -470,6 +473,32 @@ export const EngineControllerProvider: React.FC<{
       bridge.postCoreRequest(target, body),
     )
   }, [isCoreActive, activeProfile])
+
+  useEffect(() => {
+    if (!engineClient) {
+      setArtistPortraits({})
+      return
+    }
+    let cancelled = false
+    void engineClient
+      .listEnrichmentArtists()
+      .then((rows) => {
+        if (cancelled) return
+        const next: Record<string, string> = {}
+        for (const row of rows) {
+          const url = row.artworkUrl || (row.hasArtwork ? `cadence-artist-art://${row.id}` : '')
+          if (!url) continue
+          const lower = row.name.toLowerCase().trim()
+          if (lower) next[lower] = url
+          if (row.aliasNorm) next[row.aliasNorm] = url
+        }
+        setArtistPortraits(next)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [engineClient, artistPortraitNonce])
 
   useEffect(() => {
     if (!isCoreActive || !activeProfile) {
@@ -536,14 +565,19 @@ export const EngineControllerProvider: React.FC<{
         if (payload.event === 'catalog.changed') {
           artworkCacheRef.current?.invalidate()
           setArtworkVersion((v) => v + 1)
+          setArtistPortraitNonce((n) => n + 1)
           scheduleCatalogRefresh()
         } else if (payload.event === 'enrichment.updated') {
           const data = (payload.data ?? {}) as Record<string, unknown>
           const rid = typeof data.releaseId === 'string' ? data.releaseId : undefined
+          const aid = typeof data.artistId === 'string' ? data.artistId : undefined
           const act = typeof data.action === 'string' ? data.action : undefined
           if (data.artworkOutcome || act === 'save_overlay' || act === 'accept_proposal' || act === 'revert_to_file') {
-            artworkCacheRef.current?.invalidate(rid)
+            artworkCacheRef.current?.invalidate(aid ? `artist/${aid}` : rid)
             setArtworkVersion((v) => v + 1)
+            if (aid) {
+              setArtistPortraitNonce((n) => n + 1)
+            }
           }
         } else if (payload.event === 'stream.disconnected') {
           scheduleSseReconnect()
@@ -790,9 +824,12 @@ export const EngineControllerProvider: React.FC<{
   const resolveCoreArtworkUrl = useCallback(
     async (rawReleaseId: string): Promise<string | null> => {
       if (!isCoreActive || !activeProfile || !artworkCacheRef.current) return null
+      const cacheKey = rawReleaseId.startsWith('artist/')
+        ? rawReleaseId
+        : stripCoreReleasePrefix(rawReleaseId)
       return artworkCacheRef.current.getOrFetch(
         activeProfile,
-        stripCoreReleasePrefix(rawReleaseId),
+        cacheKey,
         catalogRevision,
       )
     },
@@ -802,9 +839,12 @@ export const EngineControllerProvider: React.FC<{
   const getCachedCoreArtworkUrl = useCallback(
     (rawReleaseId: string): string | null => {
       if (!isCoreActive || !activeProfile || !artworkCacheRef.current) return null
+      const cacheKey = rawReleaseId.startsWith('artist/')
+        ? rawReleaseId
+        : stripCoreReleasePrefix(rawReleaseId)
       return artworkCacheRef.current.getCached(
         activeProfile.engineId,
-        stripCoreReleasePrefix(rawReleaseId),
+        cacheKey,
         catalogRevision,
       )
     },
@@ -1025,6 +1065,7 @@ export const EngineControllerProvider: React.FC<{
       getCachedCoreArtworkUrl,
       invalidateCoreArtwork,
       artworkVersion,
+      artistPortraits,
       subscribeEngineEvents,
       selectLocalEndpointWithCoreGuard: async (endpoint) => {
         const intercepted = store.requestRs130TakeoverIfControlledByCore(endpoint, () =>
@@ -1054,6 +1095,7 @@ export const EngineControllerProvider: React.FC<{
     getCachedCoreArtworkUrl,
     invalidateCoreArtwork,
     artworkVersion,
+    artistPortraits,
     subscribeEngineEvents,
     beginPendingPlay,
     finishPendingPlay,

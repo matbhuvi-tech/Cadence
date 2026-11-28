@@ -625,14 +625,20 @@ fn run_worker_loop(
                     if matches!(
                         outcome,
                         ArtworkProcessOutcome::Found | ArtworkProcessOutcome::FoundStale
-                    ) && art_kind == "album"
-                    {
-                        pending_catalog_flush += 1;
-                        last_change_at = Some(Instant::now());
-                        gate.push_event(
-                            "enrichment.updated",
-                            json!({ "releaseId": entity_id, "artworkOutcome": format!("{outcome:?}") }),
-                        );
+                    ) {
+                        if art_kind == "album" {
+                            pending_catalog_flush += 1;
+                            last_change_at = Some(Instant::now());
+                            gate.push_event(
+                                "enrichment.updated",
+                                json!({ "releaseId": entity_id, "artworkOutcome": format!("{outcome:?}") }),
+                            );
+                        } else {
+                            gate.push_event(
+                                "enrichment.updated",
+                                json!({ "artistId": entity_id, "artworkOutcome": format!("{outcome:?}") }),
+                            );
+                        }
                     }
                     if matches!(outcome, ArtworkProcessOutcome::RetryLater(_) | ArtworkProcessOutcome::Absent) {
                         crate::diag_log!(

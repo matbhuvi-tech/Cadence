@@ -829,7 +829,122 @@ impl ExternalArtworkProvider for CompositeArtworkProvider {
             if trimmed.is_empty() || is_va_artist(trimmed) {
                 return Err(ProviderError::NotFound);
             }
-            let json = gated_get_json(
+            let mut last_transient: Option<ProviderError> = None;
+
+            // 1. Deezer artist search (exact/normalized match ranked by fan count, rejecting blank silhouettes)
+            match gated_get_json(
+                &self.client,
+                &self.gates,
+                "deezer",
+                "https://api.deezer.com/search/artist",
+                &[("q", trimmed.to_string()), ("limit", "25".to_string())],
+                cancel,
+            )
+            .await
+            {
+                Ok(json) => {
+                    if let Some(items) = json.get("data").and_then(Value::as_array) {
+                        let target_norm = crate::db::DbOperations::normalize_artist_alias(trimmed);
+                        let mut ranked: Vec<(u8, u64, String)> = items
+                            .iter()
+                            .filter_map(|item| {
+                                let cand_name = item.get("name").and_then(Value::as_str)?.trim();
+                                let rank = if cand_name == trimmed {
+                                    3
+                                } else if cand_name.eq_ignore_ascii_case(trimmed) {
+                                    2
+                                } else if !target_norm.is_empty()
+                                    && crate::db::DbOperations::normalize_artist_alias(cand_name)
+                                        == target_norm
+                                {
+                                    1
+                                } else {
+                                    0
+                                };
+                                if rank == 0 {
+                                    return None;
+                                }
+                                let fans = item.get("nb_fan").and_then(Value::as_u64).unwrap_or(0);
+                                let pic_url = ["picture_xl", "picture_big", "picture_medium"]
+                                    .iter()
+                                    .filter_map(|k| item.get(*k).and_then(Value::as_str))
+                                    .map(str::trim)
+                                    .find(|u| !u.is_empty() && !u.contains("/images/artist//"))?
+                                    .to_string();
+                                Some((rank, fans, pic_url))
+                            })
+                            .collect();
+                        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+                        for (_, _, pic_url) in ranked.into_iter().take(2) {
+                            match gated_get_bytes(&self.client, &self.gates, "deezer", &pic_url, cancel).await {
+                                Ok(bytes) => return Ok((bytes, "deezer".to_string())),
+                                Err(ProviderError::Cancelled) => return Err(ProviderError::Cancelled),
+                                Err(ProviderError::NotFound) => continue,
+                                Err(e) => last_transient = Some(e),
+                            }
+                        }
+                    }
+                }
+                Err(ProviderError::Cancelled) => return Err(ProviderError::Cancelled),
+                Err(ProviderError::NotFound) => {}
+                Err(e) => last_transient = Some(e),
+            }
+
+            // 2. Wikimedia / Wikipedia REST summary (strong recall for film & classical composers)
+            let wiki_titles = [
+                trimmed.replace(' ', "_"),
+                format!("{}_(composer)", trimmed.replace(' ', "_")),
+                format!("{}_(musician)", trimmed.replace(' ', "_")),
+            ];
+            for wiki_title in wiki_titles {
+                let Ok(mut url) = reqwest::Url::parse("https://en.wikipedia.org/api/rest_v1/page/summary/") else {
+                    break;
+                };
+                if let Ok(mut segs) = url.path_segments_mut() {
+                    segs.pop_if_empty();
+                    segs.push(&wiki_title);
+                }
+                match gated_get_json(&self.client, &self.gates, "wikimedia", url.as_str(), &[], cancel).await {
+                    Ok(json) => {
+                        if json.get("type").and_then(Value::as_str) == Some("disambiguation") {
+                            continue;
+                        }
+                        let img_url = json
+                            .get("originalimage")
+                            .and_then(|v| v.get("source"))
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                json.get("thumbnail")
+                                    .and_then(|v| v.get("source"))
+                                    .and_then(Value::as_str)
+                            })
+                            .map(str::trim)
+                            .filter(|u| {
+                                !u.is_empty()
+                                    && !u.to_ascii_lowercase().ends_with(".svg")
+                                    && !u.to_ascii_lowercase().contains(".svg/")
+                            });
+                        if let Some(img) = img_url {
+                            match gated_get_bytes(&self.client, &self.gates, "wikimedia", img, cancel).await {
+                                Ok(bytes) => return Ok((bytes, "wikimedia".to_string())),
+                                Err(ProviderError::Cancelled) => return Err(ProviderError::Cancelled),
+                                Err(ProviderError::NotFound) => {}
+                                Err(e) => last_transient = Some(e),
+                            }
+                        }
+                        break;
+                    }
+                    Err(ProviderError::Cancelled) => return Err(ProviderError::Cancelled),
+                    Err(ProviderError::NotFound) => continue,
+                    Err(e) => {
+                        last_transient = Some(e);
+                        break;
+                    }
+                }
+            }
+
+            // 3. Apple iTunes album-art fallback
+            match gated_get_json(
                 &self.client,
                 &self.gates,
                 "apple_music",
@@ -842,25 +957,44 @@ impl ExternalArtworkProvider for CompositeArtworkProvider {
                 ],
                 cancel,
             )
-            .await?;
-            let Some(results) = json.get("results").and_then(Value::as_array) else {
-                return Err(ProviderError::NotFound);
-            };
-            for item in results {
-                let candidate_artist = item.get("artistName").and_then(Value::as_str).unwrap_or("");
-                if string_dist(Some(trimmed), Some(candidate_artist)) > 0.2 {
-                    continue;
-                }
-                if let Some(url) = item.get("artworkUrl100").and_then(Value::as_str) {
-                    let hi = url.replace("100x100bb.jpg", "600x600bb.jpg");
-                    match gated_get_bytes(&self.client, &self.gates, "apple_music", &hi, cancel).await {
-                        Ok(bytes) => return Ok((bytes, "apple_music".to_string())),
-                        Err(ProviderError::Cancelled) => return Err(ProviderError::Cancelled),
-                        Err(_) => continue,
+            .await
+            {
+                Ok(json) => {
+                    if let Some(results) = json.get("results").and_then(Value::as_array) {
+                        for item in results {
+                            let candidate_artist =
+                                item.get("artistName").and_then(Value::as_str).unwrap_or("");
+                            if string_dist(Some(trimmed), Some(candidate_artist)) > 0.2 {
+                                continue;
+                            }
+                            if let Some(url) = item.get("artworkUrl100").and_then(Value::as_str) {
+                                let hi = url.replace("100x100bb.jpg", "600x600bb.jpg");
+                                match gated_get_bytes(
+                                    &self.client,
+                                    &self.gates,
+                                    "apple_music",
+                                    &hi,
+                                    cancel,
+                                )
+                                .await
+                                {
+                                    Ok(bytes) => return Ok((bytes, "apple_music".to_string())),
+                                    Err(ProviderError::Cancelled) => {
+                                        return Err(ProviderError::Cancelled)
+                                    }
+                                    Err(ProviderError::NotFound) => continue,
+                                    Err(e) => last_transient = Some(e),
+                                }
+                            }
+                        }
                     }
                 }
+                Err(ProviderError::Cancelled) => return Err(ProviderError::Cancelled),
+                Err(ProviderError::NotFound) => {}
+                Err(e) => last_transient = Some(e),
             }
-            Err(ProviderError::NotFound)
+
+            Err(last_transient.unwrap_or(ProviderError::NotFound))
         })
     }
 }

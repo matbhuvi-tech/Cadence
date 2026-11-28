@@ -31,8 +31,8 @@ import {
   matchesComposer,
   matchesSearchText,
 } from '../../core/taxonomyUtils'
-import { resolveMediaUrl } from '../../services/tauriBridge'
 import { deriveCanonicalArtistsFromCatalog } from '../../core/libraryProjection'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { EngineArtworkImg } from '../common/EngineArtworkImg'
 import { useAudioPlayer } from '../../context/AudioPlayerContext'
 import { IntegrityScanner } from '../../services/integrityScanner'
@@ -359,17 +359,36 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
     setActiveVariantId(null)
   }, [selectedAlbumId])
 
-  // Map of canonical artist/composer name (lowercase) -> portraitUrl
+  const engineController = useOptionalEngineController()
+
+  // Map of canonical artist/composer name (lowercase + normalized alias) -> portraitUrl
   const composerPortraits = useMemo(() => {
     const map = new Map<string, string>()
     const artists = deriveCanonicalArtistsFromCatalog(releases, tracks, splitReleaseIds)
     artists.forEach((a) => {
       if (a.portraitUrl) {
         map.set(a.name.toLowerCase().trim(), a.portraitUrl)
+        map.set(a.name.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase(), a.portraitUrl)
       }
     })
+    if (engineController?.artistPortraits) {
+      for (const [k, url] of Object.entries(engineController.artistPortraits)) {
+        if (url) {
+          map.set(k, url)
+        }
+      }
+    }
     return map
-  }, [releases, tracks, splitReleaseIds])
+  }, [releases, tracks, splitReleaseIds, engineController?.artistPortraits])
+
+  const resolveComposerPortrait = useCallback(
+    (name: string): string | undefined => {
+      const trimmed = name.toLowerCase().trim()
+      const aliasNorm = name.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase()
+      return composerPortraits.get(trimmed) || (aliasNorm ? composerPortraits.get(aliasNorm) : undefined)
+    },
+    [composerPortraits],
+  )
 
   // 0. Group multi-disc releases
   const groupedReleaseList = useMemo(() => {
@@ -1448,11 +1467,9 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
       )
       return specific.length > 0 ? specific : a.tracks
     })
-    const norm = composerName.toLowerCase().trim()
-    const heroPortrait =
-      composerPortraits.get(norm) ||
-      albums[0]?.coverArtUrl ||
-      generateMonogramAvatar(composerName)
+    const heroPortrait = resolveComposerPortrait(composerName)
+    const albumFallback = albums[0]?.coverArtUrl
+    const monogramSrc = generateMonogramAvatar(composerName)
 
     return (
       <div className="flex flex-col gap-6 max-w-6xl mx-auto w-full">
@@ -1460,18 +1477,25 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
         <div className="flex items-center justify-between gap-6 p-6 rounded-2xl bg-gradient-to-r from-[#2A1826] via-[#16121B] to-[#0D0E12] border border-white/[0.08] shadow-xl">
           <div className="flex items-center gap-5">
             <div className="w-20 h-20 rounded-full overflow-hidden bg-black/60 border-2 border-[#818CF8]/60 shadow-lg shrink-0 flex items-center justify-center text-3xl">
-              {heroPortrait ? (
-                <img
-                  src={resolveMediaUrl(heroPortrait)}
-                  alt={composerName}
-                  className="w-full h-full object-cover"
-                  onError={(e) => {
-                    ;(e.target as HTMLImageElement).src = generateMonogramAvatar(composerName)
-                  }}
-                />
-              ) : (
-                '🎼'
-              )}
+              <EngineArtworkImg
+                src={heroPortrait || albumFallback || monogramSrc}
+                alt={composerName}
+                className="w-full h-full object-cover"
+                fallback={
+                  heroPortrait && albumFallback ? (
+                    <EngineArtworkImg
+                      src={albumFallback}
+                      alt={composerName}
+                      className="w-full h-full object-cover"
+                      fallback={
+                        <img src={monogramSrc} alt={composerName} className="w-full h-full object-cover" />
+                      }
+                    />
+                  ) : (
+                    <img src={monogramSrc} alt={composerName} className="w-full h-full object-cover" />
+                  )
+                }
+              />
             </div>
             <div>
               <div className="text-xs font-mono uppercase tracking-wider text-[#818CF8] font-semibold">
@@ -1968,10 +1992,9 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
                       : cardSize === 'large'
                       ? 'w-36 h-36'
                       : 'w-24 h-24'
-                  const compPortrait =
-                    composerPortraits.get(group.composer.toLowerCase().trim()) ||
-                    group.albums[0]?.coverArtUrl ||
-                    generateMonogramAvatar(group.composer)
+                  const compPortrait = resolveComposerPortrait(group.composer)
+                  const albumFallback = group.albums[0]?.coverArtUrl
+                  const monogramSrc = generateMonogramAvatar(group.composer)
 
                   return (
                     <div
@@ -1987,18 +2010,35 @@ export const AlbumCoverGrid: React.FC<AlbumCoverGridProps> = React.memo(({
                       <div
                         className={`${compAvatarSize} rounded-full overflow-hidden bg-black/60 border-2 border-white/10 group-hover/comp:border-[#818CF8] mb-3 shadow-md flex items-center justify-center transition-all duration-300`}
                       >
-                        {compPortrait ? (
-                          <img
-                            src={resolveMediaUrl(compPortrait)}
-                            alt={group.composer}
-                            className="w-full h-full object-cover group-hover/comp:scale-105 transition-transform"
-                            onError={(e) => {
-                              ;(e.target as HTMLImageElement).src = generateMonogramAvatar(group.composer)
-                            }}
-                          />
-                        ) : (
-                          <div className="text-3xl">🎼</div>
-                        )}
+                        <EngineArtworkImg
+                          src={compPortrait || albumFallback || monogramSrc}
+                          alt={group.composer}
+                          loading="lazy"
+                          className="w-full h-full object-cover group-hover/comp:scale-105 transition-transform"
+                          fallback={
+                            compPortrait && albumFallback ? (
+                              <EngineArtworkImg
+                                src={albumFallback}
+                                alt={group.composer}
+                                loading="lazy"
+                                className="w-full h-full object-cover group-hover/comp:scale-105 transition-transform"
+                                fallback={
+                                  <img
+                                    src={monogramSrc}
+                                    alt={group.composer}
+                                    className="w-full h-full object-cover"
+                                  />
+                                }
+                              />
+                            ) : (
+                              <img
+                                src={monogramSrc}
+                                alt={group.composer}
+                                className="w-full h-full object-cover"
+                              />
+                            )
+                          }
+                        />
                       </div>
                       <span className="font-bold text-sm text-[#F1F5F9] group-hover/comp:text-[#818CF8] truncate max-w-full">
                         {group.composer}

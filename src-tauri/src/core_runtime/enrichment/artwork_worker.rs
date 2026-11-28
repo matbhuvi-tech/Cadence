@@ -1177,6 +1177,148 @@ pub(crate) fn handle_retry_budget(
     ArtworkProcessOutcome::RetryLater(delay_secs)
 }
 
+fn find_artist_image_in_dir(dir: &Path) -> Option<PathBuf> {
+    let read_dir = fs::read_dir(dir).ok()?;
+    let mut matches: Vec<(String, PathBuf)> = Vec::new();
+    for entry in read_dir.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file() && !t.is_symlink()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = dir.join(&name);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if stem.eq_ignore_ascii_case("artist") && media::is_cover_image_extension(ext) {
+            matches.push((name.to_ascii_lowercase(), path));
+        }
+    }
+    matches.sort_by(|a, b| a.0.cmp(&b.0));
+    matches.into_iter().next().map(|(_, p)| p)
+}
+
+fn common_parent_dir(dirs: &[PathBuf]) -> Option<PathBuf> {
+    if dirs.is_empty() {
+        return None;
+    }
+    if dirs.len() == 1 {
+        return dirs[0].parent().map(Path::to_path_buf);
+    }
+    let first: Vec<_> = dirs[0].components().collect();
+    let mut shared_len = first.len();
+    for d in &dirs[1..] {
+        let comps: Vec<_> = d.components().collect();
+        let common = first
+            .iter()
+            .zip(comps.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        shared_len = shared_len.min(common);
+    }
+    if shared_len == 0 {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for c in &first[..shared_len] {
+        out.push(c.as_os_str());
+    }
+    Some(out)
+}
+
+fn find_local_artist_portrait(conn: &Connection, artist_id: &str) -> Option<(Vec<u8>, String, i64)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT r.folder_path
+             FROM track_artist_credits tac
+             JOIN tracks t ON t.id = tac.track_id
+             JOIN releases r ON r.id = t.release_id
+             WHERE tac.canonical_artist_id = ?1
+               AND t.is_online != 0
+               AND TRIM(COALESCE(r.folder_path, '')) != ''",
+        )
+        .ok()?;
+    let album_dirs: Vec<PathBuf> = stmt
+        .query_map(params![artist_id], |r| r.get::<_, String>(0))
+        .ok()?
+        .flatten()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect();
+
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = common_parent_dir(&album_dirs) {
+        if parent.is_dir() {
+            search_dirs.push(parent);
+        }
+    }
+    for dir in album_dirs {
+        if !search_dirs.contains(&dir) {
+            search_dirs.push(dir);
+        }
+    }
+
+    for dir in search_dirs {
+        if let Some(img_path) = find_artist_image_in_dir(&dir) {
+            if let Some(bytes) = read_capped_file(&img_path) {
+                return Some((
+                    bytes,
+                    img_path.to_string_lossy().to_string(),
+                    file_mtime_secs(&img_path),
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn persist_artist_artwork(
+    conn: &Connection,
+    store: &ImageStore,
+    artist_id: &str,
+    bytes: &[u8],
+    source: &str,
+    source_path: &str,
+    ref_mtime: i64,
+    trace: &[ArtworkTraceStep],
+) -> Result<(), String> {
+    let meta = store.store_bytes(bytes)?;
+    let now = epoch_secs();
+    let trace_json = serde_json::to_string(trace).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "INSERT INTO artwork_items
+            (entity_kind, entity_id, status, image_hash, mime, width, height, size_bytes, source, source_path, ref_mtime, trace_json, updated_at)
+         VALUES('artist', ?1, 'found', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(entity_kind, entity_id) DO UPDATE SET
+            status='found', image_hash=excluded.image_hash, mime=excluded.mime,
+            width=excluded.width, height=excluded.height, size_bytes=excluded.size_bytes,
+            source=excluded.source, source_path=excluded.source_path, ref_mtime=excluded.ref_mtime,
+            trace_json=excluded.trace_json, updated_at=excluded.updated_at",
+        params![
+            artist_id,
+            meta.hash,
+            meta.mime,
+            meta.width as i64,
+            meta.height as i64,
+            meta.size_bytes as i64,
+            source,
+            source_path,
+            ref_mtime,
+            trace_json,
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE canonical_artists SET portrait_status='enriched', portrait_url=?2, portrait_checked_at=?3 WHERE id=?1",
+        params![artist_id, format!("cadence-artist-art://{artist_id}"), now],
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = conn.execute(
+        "DELETE FROM artwork_queue WHERE entity_kind='artist' AND entity_id=?1",
+        params![artist_id],
+    );
+    Ok(())
+}
+
 pub async fn process_artist_artwork_item(
     conn: &mut Connection,
     store: &ImageStore,
@@ -1190,13 +1332,23 @@ pub async fn process_artist_artwork_item(
     if !is_idle_fn() {
         return ArtworkProcessOutcome::Cancelled;
     }
-    let Some(ext_provider) = external else {
+
+    let existing_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM artwork_items WHERE entity_kind='artist' AND entity_id=?1",
+            params![artist_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    if existing_status.as_deref() == Some("user_override") {
         let _ = conn.execute(
             "DELETE FROM artwork_queue WHERE entity_kind='artist' AND entity_id=?1",
             params![artist_id],
         );
-        return ArtworkProcessOutcome::Absent;
-    };
+        return ArtworkProcessOutcome::Found;
+    }
+
     let name: Option<String> = conn
         .query_row(
             "SELECT name FROM canonical_artists WHERE id = ?1",
@@ -1213,44 +1365,56 @@ pub async fn process_artist_artwork_item(
         return ArtworkProcessOutcome::Absent;
     };
 
+    // 1. Local artist.* file in artist parent folder or album folders (idle-gated)
+    if let Some((local_bytes, src_path, ref_mtime)) = find_local_artist_portrait(conn, artist_id) {
+        let trace = vec![ArtworkTraceStep {
+            candidate: "folder".into(),
+            outcome: "hit".into(),
+            detail: src_path.clone(),
+        }];
+        if persist_artist_artwork(
+            conn,
+            store,
+            artist_id,
+            &local_bytes,
+            "folder",
+            &src_path,
+            ref_mtime,
+            &trace,
+        )
+        .is_ok()
+        {
+            return ArtworkProcessOutcome::Found;
+        }
+    }
+
+    let Some(ext_provider) = external else {
+        let _ = conn.execute(
+            "DELETE FROM artwork_queue WHERE entity_kind='artist' AND entity_id=?1",
+            params![artist_id],
+        );
+        return ArtworkProcessOutcome::Absent;
+    };
+
     match ext_provider.fetch_artist_portrait(&artist_name, cancel).await {
         Ok((bytes, prov)) => {
-            if let Ok(meta) = store.store_bytes(&bytes) {
-                let now = epoch_secs();
-                let trace_json = serde_json::to_string(&vec![ArtworkTraceStep {
-                    candidate: format!("external:{prov}"),
-                    outcome: "hit".into(),
-                    detail: format!("{}x{}", meta.width, meta.height),
-                }])
-                .unwrap_or_else(|_| "[]".to_string());
-                let _ = conn.execute(
-                    "INSERT INTO artwork_items
-                        (entity_kind, entity_id, status, image_hash, mime, width, height, size_bytes, source, source_path, ref_mtime, trace_json, updated_at)
-                     VALUES('artist', ?1, 'found', ?2, ?3, ?4, ?5, ?6, ?7, '', 0, ?8, ?9)
-                     ON CONFLICT(entity_kind, entity_id) DO UPDATE SET
-                        status='found', image_hash=excluded.image_hash, mime=excluded.mime,
-                        width=excluded.width, height=excluded.height, size_bytes=excluded.size_bytes,
-                        source=excluded.source, trace_json=excluded.trace_json, updated_at=excluded.updated_at",
-                    params![
-                        artist_id,
-                        meta.hash,
-                        meta.mime,
-                        meta.width as i64,
-                        meta.height as i64,
-                        meta.size_bytes as i64,
-                        format!("external:{prov}"),
-                        trace_json,
-                        now
-                    ],
-                );
-                let _ = conn.execute(
-                    "UPDATE canonical_artists SET portrait_status='enriched', portrait_url=?2, portrait_checked_at=?3 WHERE id=?1",
-                    params![artist_id, format!("/v1/artwork/artist/{artist_id}"), now],
-                );
-                let _ = conn.execute(
-                    "DELETE FROM artwork_queue WHERE entity_kind='artist' AND entity_id=?1",
-                    params![artist_id],
-                );
+            let trace = vec![ArtworkTraceStep {
+                candidate: format!("external:{prov}"),
+                outcome: "hit".into(),
+                detail: format!("{} bytes", bytes.len()),
+            }];
+            if persist_artist_artwork(
+                conn,
+                store,
+                artist_id,
+                &bytes,
+                &format!("external:{prov}"),
+                "",
+                0,
+                &trace,
+            )
+            .is_ok()
+            {
                 return ArtworkProcessOutcome::Found;
             }
             ArtworkProcessOutcome::Absent

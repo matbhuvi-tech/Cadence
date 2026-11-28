@@ -15,9 +15,9 @@ use rusqlite::{params, OptionalExtension};
 use schema::{
     accept_album_proposal, apply_user_overlay, compute_enrichment_status, enqueue_rerun,
     get_enrichment_album_detail, get_enrichment_config, list_enrichment_albums,
-    lock_album_file_tags, revert_album_to_file_tags, seed_pending_albums_and_artwork,
-    set_enrichment_config, strip_core_release_prefix, unlock_album_for_enrichment,
-    UserTrackOverlayEdit,
+    list_enrichment_artist_portraits, lock_album_file_tags, revert_album_to_file_tags,
+    seed_pending_albums_and_artwork, set_enrichment_config, strip_core_release_prefix,
+    unlock_album_for_enrichment, UserTrackOverlayEdit,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -168,6 +168,16 @@ pub fn handle_enrichment_request(
             }
             match list_enrichment_albums(&conn, status_filter, folder_id, limit, offset) {
                 Ok(albums) => (json!({ "ok": true, "data": { "albums": albums } }), false),
+                Err(e) => fail("invalid_payload", e.to_string()),
+            }
+        }
+        "enrichment.artists.list" => {
+            let conn = db.conn.lock();
+            if let Err(e) = schema::ensure_schema(&conn) {
+                return fail("invalid_payload", e.to_string());
+            }
+            match list_enrichment_artist_portraits(&conn) {
+                Ok(artists) => (json!({ "ok": true, "data": { "artists": artists } }), false),
                 Err(e) => fail("invalid_payload", e.to_string()),
             }
         }

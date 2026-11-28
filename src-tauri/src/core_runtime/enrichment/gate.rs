@@ -157,6 +157,22 @@ impl GateRegistry {
                 breaker: Breaker::new(),
             },
         );
+        map.insert(
+            "deezer".to_string(),
+            ProviderGateState {
+                min_interval: Duration::from_millis(350),
+                last_call: None,
+                breaker: Breaker::new(),
+            },
+        );
+        map.insert(
+            "wikimedia".to_string(),
+            ProviderGateState {
+                min_interval: Duration::from_millis(500),
+                last_call: None,
+                breaker: Breaker::new(),
+            },
+        );
         Self {
             providers: Mutex::new(map),
         }

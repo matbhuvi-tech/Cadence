@@ -3,9 +3,11 @@ import { test  } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
+  createBrowserArtworkFetch,
   createEngineArtworkCache,
   createEngineClient,
 } from '../services/engineClient'
+import { extractEngineArtworkKey } from '../components/common/EngineArtworkImg'
 import type {
   CoreCatalogTrack,
   EngineEnrichmentAlbumDetail,
@@ -29,6 +31,7 @@ import {
 } from '../components/Modals/StorageManagerModal'
 import { formatEngineDisplayName } from '../utils/enginePathDisplay'
 import {
+  AutoEnrichmentHeaderStrip,
   extractCachedEnrichmentProposal,
   formatArtworkSourcePlainEnglish,
   formatEnrichmentUserAction,
@@ -859,4 +862,120 @@ test('humanizeScanError and formatEngineDisplayName produce clear user-facing st
     ),
     'Tamil',
   )
+})
+
+test('AutoEnrichmentHeaderStrip only renders while enrichment has unfinished work', () => {
+  const baseStatus: EngineEnrichmentStatus = {
+    state: 'active',
+    enabled: true,
+    userPaused: false,
+    cooldownRemainingSecs: null,
+    currentReleaseId: 'rel_1',
+    currentAlbumTitle: 'Roja',
+    totalAlbums: 855,
+    coveredAlbums: 400,
+    coveragePercent: 47,
+    autoAppliedAlbums: 350,
+    needsReviewAlbums: 50,
+    noMatchAlbums: 0,
+    userLockedAlbums: 0,
+    pendingAlbums: 455,
+    failedAlbums: 0,
+    artworkCoveredAlbums: 400,
+    artworkCoveragePercent: 47,
+    artworkPendingItems: 455,
+    providerGates: [],
+    roots: [],
+  }
+  const renderStrip = (status: EngineEnrichmentStatus | null) =>
+    renderToStaticMarkup(
+      createElement(AutoEnrichmentHeaderStrip, {
+        status,
+        busy: false,
+        onTogglePause: () => {},
+      }),
+    )
+
+  assert.equal(renderStrip(null), '')
+  assert.equal(renderStrip({ ...baseStatus, totalAlbums: 0, coveredAlbums: 0, coveragePercent: 0 }), '')
+  assert.equal(renderStrip({ ...baseStatus, state: 'complete', coveredAlbums: 855, coveragePercent: 100, pendingAlbums: 0 }), '')
+  assert.equal(renderStrip({ ...baseStatus, state: 'disabled', enabled: false }), '')
+
+  for (const state of ['active', 'cooldown', 'paused_playback'] as const) {
+    const html = renderStrip({
+      ...baseStatus,
+      state,
+      cooldownRemainingSecs: state === 'cooldown' ? 12 : null,
+    })
+    assert.ok(html.includes('data-testid="curate-auto-enrichment-strip"'), `expected strip for ${state}`)
+    assert.ok(html.includes('Auto-Enrich 47% (400/855)'), `expected progress text for ${state}`)
+    assert.ok(html.includes('Pause'), `expected Pause button for ${state}`)
+  }
+
+  const pausedHtml = renderStrip({
+    ...baseStatus,
+    state: 'user_paused',
+    userPaused: true,
+  })
+  assert.ok(pausedHtml.includes('data-testid="curate-auto-enrichment-strip"'))
+  assert.ok(pausedHtml.includes('Resume'))
+})
+
+test('artist portrait keys and browser artwork fetch route cadence-artist-art:// to /v1/artwork/artist/', async () => {
+  assert.equal(extractEngineArtworkKey('cadence-art://rel_123'), 'rel_123')
+  assert.equal(extractEngineArtworkKey('cadence-artist-art://art_456'), 'artist/art_456')
+
+  const requestedUrls: string[] = []
+  const origFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requestedUrls.push(String(input))
+    return new Response(new Uint8Array([0xff, 0xd8, 0xff]), {
+      status: 200,
+      headers: { 'Content-Type': 'image/jpeg', ETag: '"e1"' },
+    })
+  }) as typeof fetch
+  try {
+    const fetchArtwork = createBrowserArtworkFetch()
+    await fetchArtwork(
+      { baseUrl: 'http://127.0.0.1:19400', pairingToken: 'tok-1' },
+      'artist/art_456',
+    )
+    assert.equal(requestedUrls[0], 'http://127.0.0.1:19400/v1/artwork/artist/art_456')
+  } finally {
+    globalThis.fetch = origFetch
+  }
+
+  const client = createEngineClient(
+    {
+      baseUrl: 'http://127.0.0.1:19400',
+      engineId: 'eng-1',
+      libraryId: 'lib-1',
+      label: 'Test Core',
+      pairingToken: 'tok-1',
+    },
+    async (_target, body) => {
+      if (body.operation === 'enrichment.artists.list') {
+        return {
+          ok: true,
+          data: {
+            artists: [
+              {
+                id: 'art_1',
+                name: 'Ilaiyaraaja',
+                aliasNorm: 'ilaiyaraaja',
+                portraitStatus: 'enriched',
+                hasArtwork: true,
+                artworkUrl: 'cadence-artist-art://art_1',
+              },
+            ],
+          },
+        }
+      }
+      return { ok: false, error: { code: 'not_found', message: 'nope' } }
+    },
+  )
+  const artists = await client.listEnrichmentArtists()
+  assert.equal(artists.length, 1)
+  assert.equal(artists[0].aliasNorm, 'ilaiyaraaja')
+  assert.equal(artists[0].artworkUrl, 'cadence-artist-art://art_1')
 })

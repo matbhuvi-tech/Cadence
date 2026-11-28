@@ -49,6 +49,10 @@ pub struct RootEnrichmentProgress {
     pub failed_albums: usize,
     pub artwork_covered_albums: usize,
     pub artwork_coverage_percent: u8,
+    pub total_artists: usize,
+    pub artist_artwork_covered: usize,
+    pub artist_artwork_coverage_percent: u8,
+    pub artist_artwork_pending: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,8 +85,23 @@ pub struct EnrichmentStatusResponse {
     pub artwork_covered_albums: usize,
     pub artwork_coverage_percent: u8,
     pub artwork_pending_items: usize,
+    pub total_artists: usize,
+    pub artist_artwork_covered: usize,
+    pub artist_artwork_coverage_percent: u8,
+    pub artist_artwork_pending: usize,
     pub provider_gates: Vec<ProviderGateSnapshot>,
     pub roots: Vec<RootEnrichmentProgress>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrichmentArtistPortraitSummary {
+    pub id: String,
+    pub name: String,
+    pub alias_norm: String,
+    pub portrait_status: String,
+    pub has_artwork: bool,
+    pub artwork_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -495,7 +514,78 @@ pub fn compute_release_raw_signature(conn: &Connection, release_id: &str) -> Res
     Ok(Some(format!("{:x}", hasher.finalize())))
 }
 
+fn is_ignored_artist_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.is_empty()
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "unknown" | "unknown artist" | "unknown composer" | "various" | "various artists" | "va"
+        )
+}
+
+pub fn sync_canonical_artists_from_tracks(conn: &Connection) -> Result<usize> {
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.artist_credit, COALESCE(NULLIF(TRIM(t.album_artist), ''), r.artist_credit),
+                    COALESCE(NULLIF(TRIM(t.composer), ''), r.composer_name)
+             FROM tracks t
+             LEFT JOIN releases r ON r.id = t.release_id
+             WHERE t.is_online != 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM track_artist_credits tac WHERE tac.track_id = t.id
+               )",
+        )?;
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        mapped
+    };
+
+    let mut linked = 0usize;
+    for (track_id, artist_credit, album_artist, composer) in rows {
+        let mut credits = crate::db::DbOperations::split_multi_artist_credits(
+            &artist_credit,
+            composer.as_deref(),
+        );
+        if let Some(aa) = album_artist.as_deref().map(str::trim).filter(|s| !is_ignored_artist_name(s)) {
+            let aa_credits = crate::db::DbOperations::split_multi_artist_credits(aa, None);
+            let mut order = credits.iter().map(|c| c.3).max().unwrap_or(-1) + 1;
+            for (name, _, join_phrase, _) in aa_credits {
+                if !is_ignored_artist_name(&name)
+                    && !credits.iter().any(|(existing, _, _, _)| existing.eq_ignore_ascii_case(&name))
+                {
+                    credits.push((name, "AlbumArtist".to_string(), join_phrase, order));
+                    order += 1;
+                }
+            }
+        }
+
+        for (artist_name, role, join_phrase, order) in credits {
+            if is_ignored_artist_name(&artist_name) {
+                continue;
+            }
+            let artist_id = crate::db::DbOperations::upsert_canonical_artist_entity(
+                conn,
+                artist_name.trim(),
+                &role,
+            )?;
+            if !artist_id.is_empty() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO track_artist_credits (track_id, canonical_artist_id, role, join_phrase, credit_order)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![track_id, artist_id, role, join_phrase, order],
+                )?;
+                linked += 1;
+            }
+        }
+    }
+
+    Ok(linked)
+}
+
 pub fn seed_pending_albums_and_artwork(conn: &Connection) -> Result<(usize, usize)> {
+    let _ = sync_canonical_artists_from_tracks(conn)?;
+
     let release_ids: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT t.release_id
@@ -571,20 +661,21 @@ pub fn seed_pending_albums_and_artwork(conn: &Connection) -> Result<(usize, usiz
         }
     }
 
-    // Seed artist artwork queue for canonical artists without resolved artwork yet
-    let artist_ids: Vec<String> = {
+    // Seed artist artwork queue for canonical artists without resolved artwork yet.
+    // Prioritize composers and album artists ahead of secondary performers.
+    let artist_rows: Vec<(String, String)> = {
         let mut stmt = conn.prepare(
-            "SELECT id FROM canonical_artists
+            "SELECT id, COALESCE(primary_role, 'Performer') FROM canonical_artists
              WHERE COALESCE(TRIM(name), '') != ''
-               AND LOWER(TRIM(name)) NOT IN ('unknown', 'unknown artist', 'various', 'various artists', 'va')
+               AND LOWER(TRIM(name)) NOT IN ('unknown', 'unknown artist', 'unknown composer', 'various', 'various artists', 'va')
                AND (portrait_status IS NULL OR portrait_status = 'pending')",
         )?;
         let rows = stmt
-            .query_map([], |r| r.get(0))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows
     };
-    for artist_id in artist_ids {
+    for (artist_id, primary_role) in artist_rows {
         let needs: bool = conn.query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM artwork_items WHERE entity_kind='artist' AND entity_id=?1 AND status IN ('found', 'absent', 'user_override'))
                 AND NOT EXISTS(SELECT 1 FROM artwork_queue WHERE entity_kind='artist' AND entity_id=?1)",
@@ -592,10 +683,15 @@ pub fn seed_pending_albums_and_artwork(conn: &Connection) -> Result<(usize, usiz
             |r| r.get(0),
         )?;
         if needs {
+            let priority = if matches!(primary_role.as_str(), "Composer" | "AlbumArtist") {
+                40
+            } else {
+                50
+            };
             conn.execute(
                 "INSERT OR IGNORE INTO artwork_queue(entity_kind, entity_id, priority, enqueued_at, next_retry_at)
-                 VALUES('artist', ?1, 50, ?2, 0)",
-                params![artist_id, now],
+                 VALUES('artist', ?1, ?2, ?3, 0)",
+                params![artist_id, priority, now],
             )?;
             seeded_artwork += 1;
         }
@@ -733,6 +829,79 @@ pub fn compute_enrichment_status(
         c
     };
 
+    let mut artist_covered: HashSet<String> = HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id FROM artwork_items
+             WHERE entity_kind = 'artist' AND status IN ('found', 'found_stale', 'user_override')
+             UNION
+             SELECT id FROM canonical_artists
+             WHERE portrait_status IN ('enriched', 'manual_override')
+               AND portrait_url IS NOT NULL AND TRIM(portrait_url) != ''",
+        )?;
+        for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            artist_covered.insert(row?);
+        }
+    }
+
+    let mut artist_pending: HashSet<String> = HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id FROM artwork_queue WHERE entity_kind = 'artist'",
+        )?;
+        for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            artist_pending.insert(row?);
+        }
+    }
+
+    let mut release_to_roots: HashMap<String, Vec<String>> = HashMap::new();
+    for (folder_id, releases_set) in &root_buckets {
+        for rid in releases_set {
+            release_to_roots
+                .entry(rid.clone())
+                .or_default()
+                .push(folder_id.clone());
+        }
+    }
+
+    let mut global_artists: HashSet<String> = HashSet::new();
+    let mut root_artists: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT tac.canonical_artist_id, t.release_id
+             FROM track_artist_credits tac
+             JOIN tracks t ON t.id = tac.track_id
+             JOIN canonical_artists ca ON ca.id = tac.canonical_artist_id
+             WHERE t.is_online != 0
+               AND t.release_id IS NOT NULL
+               AND TRIM(t.release_id) != ''
+               AND COALESCE(TRIM(ca.name), '') != ''
+               AND LOWER(TRIM(ca.name)) NOT IN ('unknown', 'unknown artist', 'unknown composer', 'various', 'various artists', 'va')",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (artist_id, release_id) = row?;
+            global_artists.insert(artist_id.clone());
+            if let Some(fids) = release_to_roots.get(&release_id) {
+                for fid in fids {
+                    root_artists
+                        .entry(fid.clone())
+                        .or_default()
+                        .insert(artist_id.clone());
+                }
+            }
+        }
+    }
+
+    let tally_artists = |artists: &HashSet<String>| -> (usize, usize, u8, usize) {
+        let total = artists.len();
+        let covered = artists.iter().filter(|id| artist_covered.contains(*id)).count();
+        let pending = artists.iter().filter(|id| artist_pending.contains(*id)).count();
+        (total, covered, pct(covered, total), pending)
+    };
+
+    let (global_total_artists, global_artist_covered, global_artist_pct, global_artist_pending) =
+        tally_artists(&global_artists);
+
     let global = tally(&global_releases);
     let global_total = global.releases.len();
     let global_covered =
@@ -744,6 +913,9 @@ pub fn compute_enrichment_status(
         let b = tally(&set);
         let total = b.releases.len();
         let covered = b.auto_applied + b.needs_review + b.no_match + b.user_locked;
+        let artist_set = root_artists.get(&folder_id).cloned().unwrap_or_default();
+        let (root_total_artists, root_artist_covered, root_artist_pct, root_artist_pending) =
+            tally_artists(&artist_set);
         roots.push(RootEnrichmentProgress {
             folder_id,
             display_name,
@@ -759,6 +931,10 @@ pub fn compute_enrichment_status(
             failed_albums: b.failed,
             artwork_covered_albums: b.artwork_covered,
             artwork_coverage_percent: pct(b.artwork_covered, total),
+            total_artists: root_total_artists,
+            artist_artwork_covered: root_artist_covered,
+            artist_artwork_coverage_percent: root_artist_pct,
+            artist_artwork_pending: root_artist_pending,
         });
     }
 
@@ -796,6 +972,10 @@ pub fn compute_enrichment_status(
         artwork_covered_albums: global.artwork_covered,
         artwork_coverage_percent: pct(global.artwork_covered, global_total),
         artwork_pending_items,
+        total_artists: global_total_artists,
+        artist_artwork_covered: global_artist_covered,
+        artist_artwork_coverage_percent: global_artist_pct,
+        artist_artwork_pending: global_artist_pending,
         provider_gates,
         roots,
     })
@@ -1905,7 +2085,7 @@ pub fn enqueue_rerun(
     };
 
     let mut queued = 0usize;
-    for rid in target_rids {
+    for rid in &target_rids {
         let cur_status: Option<String> = conn
             .query_row(
                 "SELECT status FROM enrichment_album_state WHERE release_id = ?1",
@@ -1938,5 +2118,103 @@ pub fn enqueue_rerun(
         queued += 1;
     }
 
+    // Re-queue artists/composers associated with target releases when rerunning a root or missing items.
+    let _ = sync_canonical_artists_from_tracks(conn);
+    if !target_rids.is_empty() {
+        let mut artist_ids = HashSet::new();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT tac.canonical_artist_id, COALESCE(ca.portrait_status, 'pending'), ca.portrait_url,
+                             COALESCE(ai.status, '')
+             FROM track_artist_credits tac
+             JOIN tracks t ON t.id = tac.track_id
+             JOIN canonical_artists ca ON ca.id = tac.canonical_artist_id
+             LEFT JOIN artwork_items ai ON ai.entity_kind = 'artist' AND ai.entity_id = ca.id
+             WHERE t.release_id = ?1
+               AND t.is_online != 0
+               AND COALESCE(TRIM(ca.name), '') != ''
+               AND LOWER(TRIM(ca.name)) NOT IN ('unknown', 'unknown artist', 'unknown composer', 'various', 'various artists', 'va')",
+        )?;
+        for rid in &target_rids {
+            let rows = stmt.query_map(params![rid], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (aid, p_status, p_url, art_status) = row?;
+                if p_status == "manual_override" || art_status == "user_override" {
+                    continue;
+                }
+                if only_missing_or_failed {
+                    let has_art = matches!(art_status.as_str(), "found" | "found_stale")
+                        || (p_status == "enriched" && p_url.as_deref().is_some_and(|u| !u.trim().is_empty()));
+                    if has_art {
+                        continue;
+                    }
+                }
+                artist_ids.insert(aid);
+            }
+        }
+        for aid in artist_ids {
+            conn.execute(
+                "UPDATE canonical_artists
+                 SET portrait_status = CASE
+                     WHEN portrait_status IN ('manual_override', 'enriched') THEN portrait_status
+                     ELSE 'pending'
+                 END
+                 WHERE id = ?1",
+                params![aid],
+            )?;
+            conn.execute(
+                "DELETE FROM artwork_items WHERE entity_kind = 'artist' AND entity_id = ?1 AND status = 'absent'",
+                params![aid],
+            )?;
+            conn.execute(
+                "INSERT INTO artwork_queue(entity_kind, entity_id, priority, attempts, next_retry_at, enqueued_at, last_error)
+                 VALUES('artist', ?1, 40, 0, 0, ?2, NULL)
+                 ON CONFLICT(entity_kind, entity_id) DO UPDATE SET
+                    attempts = 0, next_retry_at = 0, last_error = NULL",
+                params![aid, now],
+            )?;
+        }
+    }
+
     Ok(queued)
+}
+
+pub fn list_enrichment_artist_portraits(
+    conn: &Connection,
+) -> Result<Vec<EnrichmentArtistPortraitSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT ca.id, ca.name, COALESCE(ca.portrait_status, 'pending')
+         FROM canonical_artists ca
+         JOIN artwork_items ai ON ai.entity_kind = 'artist' AND ai.entity_id = ca.id
+         WHERE ai.status IN ('found', 'found_stale', 'user_override')
+           AND ai.image_hash IS NOT NULL
+           AND ai.mime IS NOT NULL
+           AND COALESCE(TRIM(ca.name), '') != ''
+         ORDER BY ca.name ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let id: String = r.get(0)?;
+        let name: String = r.get(1)?;
+        let portrait_status: String = r.get(2)?;
+        let alias_norm = crate::db::DbOperations::normalize_artist_alias(&name);
+        Ok(EnrichmentArtistPortraitSummary {
+            artwork_url: Some(format!("cadence-artist-art://{id}")),
+            id,
+            name,
+            alias_norm,
+            portrait_status,
+            has_artwork: true,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }

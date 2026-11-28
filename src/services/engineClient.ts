@@ -8,6 +8,7 @@ import {
   type CoreCatalogTrack,
   type CoreDescriptor,
   type CoreErrorCode,
+  type EngineArtistPortraitSummary,
   type EngineCurateDraftSummary,
   type EngineEnrichmentAlbumDetail,
   type EngineEnrichmentAlbumSummary,
@@ -125,6 +126,7 @@ export interface EngineClient {
     limit?: number
     offset?: number
   }): Promise<EngineEnrichmentAlbumSummary[]>
+  listEnrichmentArtists(): Promise<EngineArtistPortraitSummary[]>
   getEnrichmentAlbumDetail(releaseId: string): Promise<EngineEnrichmentAlbumDetail>
   applyEnrichmentAlbumAction(input: {
     releaseId: string
@@ -403,6 +405,11 @@ export function createEngineClient(
       return res.albums ?? []
     },
 
+    listEnrichmentArtists: async () => {
+      const res = await call<{ artists: EngineArtistPortraitSummary[] }>('enrichment.artists.list')
+      return res.artists ?? []
+    },
+
     getEnrichmentAlbumDetail: (releaseId) =>
       call<EngineEnrichmentAlbumDetail>('enrichment.album.detail', {
         releaseId: stripCoreReleasePrefix(releaseId),
@@ -466,7 +473,10 @@ export function createBrowserArtworkFetch(): EngineArtworkFetchFn {
     if (ifNoneMatch) {
       headers['If-None-Match'] = ifNoneMatch
     }
-    const res = await fetch(`${cleanBase}/v1/artwork/${encodeURIComponent(releaseId)}`, {
+    const artworkPath = releaseId.startsWith('artist/')
+      ? `/v1/artwork/artist/${encodeURIComponent(releaseId.slice('artist/'.length))}`
+      : `/v1/artwork/${encodeURIComponent(releaseId)}`
+    const res = await fetch(`${cleanBase}${artworkPath}`, {
       method: 'GET',
       headers,
       redirect: 'error',

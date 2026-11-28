@@ -523,6 +523,11 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                     · Enriching: {enrichmentStatus.currentAlbumTitle}
                   </span>
                 )}
+                {(enrichmentStatus.totalArtists ?? 0) > 0 && (
+                  <span className="text-[11px] text-white/55 font-mono">
+                    · Artists {enrichmentStatus.artistArtworkCoveragePercent ?? 0}% ({enrichmentStatus.artistArtworkCovered ?? 0}/{enrichmentStatus.totalArtists})
+                  </span>
+                )}
                 {enrichmentStatus.artworkPendingItems > 0 && (
                   <span className="text-[11px] text-white/45 font-mono">
                     · {enrichmentStatus.artworkPendingItems.toLocaleString()} covers queued
@@ -954,6 +959,11 @@ export const StorageManagerModal: React.FC<StorageManagerModalProps> = ({
                               {progressDisplay.showArtPercent && (
                                 <span className="text-white/45 font-mono">
                                   · Art {rootProgress.artworkCoveragePercent}%
+                                </span>
+                              )}
+                              {(rootProgress.totalArtists ?? 0) > 0 && (
+                                <span className="text-white/55 font-mono">
+                                  · Artists {rootProgress.artistArtworkCoveragePercent ?? 0}% ({rootProgress.artistArtworkCovered ?? 0}/{rootProgress.totalArtists})
                                 </span>
                               )}
                             </div>

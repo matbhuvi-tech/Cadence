@@ -15,7 +15,6 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react'
-import { resolveMediaUrl } from '../../services/tauriBridge'
 import {
   ArtistSummary,
   ArtistDetail,
@@ -31,6 +30,7 @@ import {
   saveClientArtistPreference,
 } from '../../core/libraryProjection'
 import { EngineArtworkImg } from '../common/EngineArtworkImg'
+import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { federatedResolversService, ArtistPortraitCandidate } from '../../services/federatedResolvers'
 import { ambientCurationService } from '../../services/ambientCurationService'
 import { tauriBridge } from '../../services/tauriBridge'
@@ -75,8 +75,6 @@ interface ArtistsViewProps {
 type RoleFilter = 'all' | 'composer' | 'performer'
 type SortBy = 'albums_desc' | 'tracks_desc' | 'name_asc'
 
-const resolvePortraitUrl = resolveMediaUrl
-
 export const ArtistsView: React.FC<ArtistsViewProps> = ({
   releases,
   tracks,
@@ -112,6 +110,19 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
   const [queuedPortraitNotification, setQueuedPortraitNotification] = useState<string | null>(null)
   const [isEnrichingEditorial, setIsEnrichingEditorial] = useState(false)
   const [isBioExpanded, setIsBioExpanded] = useState(false)
+  const engineController = useOptionalEngineController()
+  const coreArtistPortraits = engineController?.artistPortraits
+
+  const resolveCoreArtistPortrait = useCallback(
+    (name: string, existing?: string): string | undefined => {
+      if (existing) return existing
+      if (!coreArtistPortraits) return undefined
+      const trimmed = name.toLowerCase().trim()
+      const aliasNorm = name.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase()
+      return coreArtistPortraits[trimmed] || (aliasNorm ? coreArtistPortraits[aliasNorm] : undefined)
+    },
+    [coreArtistPortraits],
+  )
 
   // Ambient Hardware Telemetry: Curation state subscription
   const [curationState, setCurationState] = useState(ambientCurationService.getState())
@@ -156,12 +167,17 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
   const loadArtists = useCallback(() => {
     setIsLoading(true)
     try {
-      const data = deriveCanonicalArtistsFromCatalog(releases, tracks, splitReleaseIds)
+      const data = deriveCanonicalArtistsFromCatalog(releases, tracks, splitReleaseIds).map((a) => {
+        const portraitUrl = resolveCoreArtistPortrait(a.name, a.portraitUrl)
+        return portraitUrl && portraitUrl !== a.portraitUrl
+          ? { ...a, portraitUrl, portraitStatus: 'enriched' as const }
+          : a
+      })
       setArtists(data)
     } finally {
       setIsLoading(false)
     }
-  }, [releases, tracks, splitReleaseIds])
+  }, [releases, tracks, splitReleaseIds, resolveCoreArtistPortrait])
 
   useEffect(() => {
     loadArtists()
@@ -183,9 +199,15 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
       tracks,
       splitReleaseIds,
     )
+    if (detail) {
+      const portraitUrl = resolveCoreArtistPortrait(detail.artist.name, detail.artist.portraitUrl)
+      if (portraitUrl && portraitUrl !== detail.artist.portraitUrl) {
+        detail.artist = { ...detail.artist, portraitUrl, portraitStatus: 'enriched' }
+      }
+    }
     setArtistDetail(detail)
     setIsLoadingDetail(false)
-  }, [selectedArtistId, releases, tracks, splitReleaseIds])
+  }, [selectedArtistId, releases, tracks, splitReleaseIds, resolveCoreArtistPortrait])
 
   // Zero-match drilldown guard: auto-reset selectedArtistId if 0 tracks match under active filter
   useEffect(() => {
@@ -400,8 +422,8 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
       return true
     })
 
-    const portraitSrc =
-      resolvePortraitUrl(artist.portraitUrl) || generateMonogramAvatar(artist.name)
+    const monogramSrc = generateMonogramAvatar(artist.name)
+    const portraitSrc = artist.portraitUrl || monogramSrc
 
     return (
       <div className="flex-1 flex flex-col min-h-0 bg-[#0D0E11] text-[#F5F5F7] overflow-y-auto px-8 py-6">
@@ -426,13 +448,17 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
           {/* Large Circular Portrait with Specular Glow */}
           <div className="relative group shrink-0">
             <div className="relative w-40 h-40 md:w-48 md:h-48 rounded-full overflow-hidden ring-1 ring-inset ring-white/15 shadow-[0_16px_40px_rgba(0,0,0,0.8)] bg-[#14161A]">
-              <img
+              <EngineArtworkImg
                 src={portraitSrc}
                 alt={artist.name}
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                onError={(e) => {
-                  ;(e.target as HTMLImageElement).src = generateMonogramAvatar(artist.name)
-                }}
+                fallback={
+                  <img
+                    src={monogramSrc}
+                    alt={artist.name}
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                  />
+                }
               />
               {/* Hover overlay to change portrait */}
               <div
@@ -972,8 +998,8 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
         ) : filteredArtists.length > 0 ? (
           <div className={`grid ${gridTemplateClass} gap-8`}>
             {filteredArtists.map((artist) => {
-              const portraitSrc =
-                resolvePortraitUrl(artist.portraitUrl) || generateMonogramAvatar(artist.name)
+              const monogramSrc = generateMonogramAvatar(artist.name)
+              const portraitSrc = artist.portraitUrl || monogramSrc
               const isActiveEnriching =
                 curationState.state === 'active' && curationState.currentArtistId === artist.id
 
@@ -1002,15 +1028,18 @@ export const ArtistsView: React.FC<ArtistsViewProps> = ({
                       />
                     )}
 
-                    <img
+                    <EngineArtworkImg
                       src={portraitSrc}
                       alt={artist.name}
                       className="w-full h-full object-cover transition-opacity duration-700 ease-out"
                       loading="lazy"
-                      onError={(e) => {
-                        // Fall back to brushed titanium monogram on any failure
-                        ;(e.target as HTMLImageElement).src = generateMonogramAvatar(artist.name)
-                      }}
+                      fallback={
+                        <img
+                          src={monogramSrc}
+                          alt={artist.name}
+                          className="w-full h-full object-cover transition-opacity duration-700 ease-out"
+                        />
+                      }
                     />
 
                     {/* Subtle Specular Ring on Hover */}

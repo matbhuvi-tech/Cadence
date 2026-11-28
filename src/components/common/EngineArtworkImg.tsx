@@ -3,13 +3,24 @@ import { useOptionalEngineController } from '../../context/EngineControllerConte
 import { resolveMediaUrl } from '../../services/tauriBridge'
 
 const ENGINE_ART_SCHEME = 'cadence-art://'
+const ENGINE_ARTIST_ART_SCHEME = 'cadence-artist-art://'
 
-export function extractEngineArtworkReleaseId(url?: string | null): string | null {
+export function extractEngineArtworkKey(url?: string | null): string | null {
   if (!url) return null
   const trimmed = url.trim()
-  if (!trimmed.startsWith(ENGINE_ART_SCHEME)) return null
-  const id = trimmed.slice(ENGINE_ART_SCHEME.length).trim()
-  return id || null
+  if (trimmed.startsWith(ENGINE_ARTIST_ART_SCHEME)) {
+    const id = trimmed.slice(ENGINE_ARTIST_ART_SCHEME.length).trim()
+    return id ? `artist/${id}` : null
+  }
+  if (trimmed.startsWith(ENGINE_ART_SCHEME)) {
+    const id = trimmed.slice(ENGINE_ART_SCHEME.length).trim()
+    return id || null
+  }
+  return null
+}
+
+export function extractEngineArtworkReleaseId(url?: string | null): string | null {
+  return extractEngineArtworkKey(url)
 }
 
 export function useResolvedMediaUrl(src?: string | null, enabled: boolean = true): string {
