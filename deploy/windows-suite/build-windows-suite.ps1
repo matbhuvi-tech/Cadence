@@ -67,14 +67,18 @@ if (-not $EngineInstaller) {
   }
 }
 
-if (-not $DesktopInstaller -or -not (Test-Path $DesktopInstaller)) {
+if (-not $DesktopInstaller -or -not (Test-Path -LiteralPath $DesktopInstaller -PathType Leaf)) {
   Write-Error "Desktop NSIS setup executable not found. Run 'npm run tauri:build -- --bundles nsis' first or pass -DesktopInstaller."
   exit 1
 }
-if (-not $EngineInstaller -or -not (Test-Path $EngineInstaller)) {
+if (-not $EngineInstaller -or -not (Test-Path -LiteralPath $EngineInstaller -PathType Leaf)) {
   Write-Error "Playback Engine NSIS setup executable not found. Run '.\deploy\windows-engine\build-windows-engine.ps1 -RequireInstaller' first or pass -EngineInstaller."
   exit 1
 }
+
+# MakeNSIS resolves relative paths from the directory of cadence-suite.nsi.
+$DesktopInstaller = (Resolve-Path -LiteralPath $DesktopInstaller).ProviderPath
+$EngineInstaller = (Resolve-Path -LiteralPath $EngineInstaller).ProviderPath
 
 # A Desktop-only build leaves the old unified installer untouched. Do not silently
 # wrap an engine/desktop setup that predates the corresponding newly built binary.
@@ -93,6 +97,7 @@ foreach ($component in @(
 if (-not $OutputFile) {
   $OutputFile = Join-Path $BundleDir "Cadence_${Version}_x64-setup.exe"
 }
+$OutputFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputFile)
 
 $Makensis = Get-Command makensis -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
 if (-not $Makensis) {

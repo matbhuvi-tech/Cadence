@@ -497,7 +497,7 @@ jobs:
           Write-Host $doctor
 
           $semver = "${{ needs.prepare.outputs.semver }}"
-          $nsisDir = "src-tauri\target\release\bundle\nsis"
+          $nsisDir = Join-Path $env:GITHUB_WORKSPACE "src-tauri\target\release\bundle\nsis"
           $desktopExe = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" |
             Where-Object { $_.Name -ne "cadence-engine-setup.exe" -and $_.Name -notlike "Cadence_*_x64-setup.exe" } |
             Select-Object -First 1
@@ -505,23 +505,23 @@ jobs:
             throw "Desktop NSIS setup executable not found in $nsisDir"
           }
           $engineExe = Join-Path $nsisDir "cadence-engine-setup.exe"
-          if (-not (Test-Path $engineExe)) {
+          if (-not (Test-Path -LiteralPath $engineExe -PathType Leaf)) {
             throw "Engine NSIS setup executable not found at $engineExe"
           }
 
-          New-Item -ItemType Directory -Force -Path "staging-windows" | Out-Null
-          $suiteOut = "staging-windows\Cadence_${semver}_x64-setup.exe"
+          $stagingDir = Join-Path $env:GITHUB_WORKSPACE "staging-windows"
+          $suiteOut = Join-Path $stagingDir "Cadence_${semver}_x64-setup.exe"
           .\deploy\windows-suite\build-windows-suite.ps1 `
             -DesktopInstaller $desktopExe.FullName `
             -EngineInstaller $engineExe `
             -Version $semver `
             -OutputFile $suiteOut `
             -RequireInstaller
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $suiteOut)) {
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $suiteOut -PathType Leaf)) {
             throw "Unified Windows suite installer build failed (exit=$LASTEXITCODE)"
           }
-          Copy-Item $desktopExe.FullName "staging-windows\Cadence.Desktop_${semver}_x64-setup.exe"
-          Copy-Item $engineExe "staging-windows\Cadence.PlaybackEngine_${semver}_x64-setup.exe"
+          Copy-Item -LiteralPath $desktopExe.FullName -Destination (Join-Path $stagingDir "Cadence.Desktop_${semver}_x64-setup.exe")
+          Copy-Item -LiteralPath $engineExe -Destination (Join-Path $stagingDir "Cadence.PlaybackEngine_${semver}_x64-setup.exe")
 
       - name: Upload Windows installers
         uses: actions/upload-artifact@v4

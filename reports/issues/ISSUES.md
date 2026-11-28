@@ -1,5 +1,12 @@
 # Issue Log
 
+## GitHub #68 — Windows release suite packaging fails with relative NSIS paths
+
+- The Windows job built both component installers, then MakeNSIS looked for the relative Playback Engine installer path from the suite script's directory and failed. The suite output path was also relative. [Failed Windows job](https://github.com/matbhuvi-tech/Cadence/actions/runs/46085651100/job/140795216382)
+- The release step now uses absolute paths under `GITHUB_WORKSPACE`. The suite builder also resolves caller-supplied paths before invoking MakeNSIS.
+- Reproduced the original `no files found` error locally with the existing RC.4 component installers. After the fix, the mixed-path invocation produced the suite from a separate working directory and all three manifest hashes matched. The updated workflow packaging block staged all three installers and wrote a valid suite manifest.
+- Implemented on `fix/68-windows-suite-installer-paths`. Hosted release verification is pending. [Issue #68](https://github.com/matbhuvi-tech/Cadence/issues/68)
+
 ## Auto-Enrich misses `3 Roses [Hit Music]` while Refresh Evidence finds the soundtrack
 
 - **Reported behavior:** Auto-Enrich finished with `No automatic match` and no cover for the five-track album. Refresh Evidence with the same visible inputs showed the Apple Music artwork and a candidate sequence offset of `+6`. Selected Output remained unchanged.
