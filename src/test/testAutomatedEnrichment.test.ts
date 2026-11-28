@@ -573,6 +573,66 @@ test('EngineArtworkCache.invalidate evicts cached 404 misses and target releases
   }
 })
 
+test('EngineArtworkCache revalidates cached releases when catalog revision advances or invalidate() runs', async () => {
+  let step = 0
+  let seq = 0
+  const seenIfNoneMatch: Array<string | undefined> = []
+  const cache = createEngineArtworkCache({
+    async fetchArtwork(_target, _releaseId, ifNoneMatch) {
+      seenIfNoneMatch.push(ifNoneMatch)
+      step++
+      if (step === 1) {
+        return {
+          status: 200,
+          etag: '"art_old_12b"',
+          contentType: 'image/jpeg',
+          base64: null,
+          bytes: new Uint8Array([1, 2, 3]),
+        }
+      }
+      if (step === 2) {
+        return {
+          status: 304,
+          etag: '"art_old_12b"',
+          contentType: 'image/jpeg',
+          base64: null,
+        }
+      }
+      return {
+        status: 200,
+        etag: '"art_new_override"',
+        contentType: 'image/jpeg',
+        base64: null,
+        bytes: new Uint8Array([4, 5, 6]),
+      }
+    },
+  })
+  const origCreate = URL.createObjectURL
+  const origRevoke = URL.revokeObjectURL
+  URL.createObjectURL = () => `blob:mock-art-${++seq}`
+  URL.revokeObjectURL = () => {}
+  try {
+    const profile = { engineId: 'eng-1', baseUrl: 'http://127.0.0.1:19400', pairingToken: 'tok' }
+    // Revision 1: initial fetch caches blob:mock-art-1
+    assert.equal(await cache.getOrFetch(profile, 'core_rel_rel_1', 1), 'blob:mock-art-1')
+    assert.equal(cache.getCached('eng-1', 'core_rel_rel_1', 1), 'blob:mock-art-1')
+
+    // Revision 2: getCached must NOT short-circuit stale revision; getOrFetch sends If-None-Match and keeps blob on 304
+    assert.equal(cache.getCached('eng-1', 'core_rel_rel_1', 2), null)
+    assert.equal(await cache.getOrFetch(profile, 'core_rel_rel_1', 2), 'blob:mock-art-1')
+    assert.equal(seenIfNoneMatch[1], '"art_old_12b"')
+
+    // Full invalidate() forces revalidation even at same revision, picking up the new ETag and JPEG blob
+    cache.invalidate()
+    assert.equal(cache.getCached('eng-1', 'core_rel_rel_1', 2), null)
+    assert.equal(await cache.getOrFetch(profile, 'core_rel_rel_1', 2), 'blob:mock-art-2')
+    assert.equal(cache.getCached('eng-1', 'core_rel_rel_1', 2), 'blob:mock-art-2')
+  } finally {
+    URL.createObjectURL = origCreate
+    URL.revokeObjectURL = origRevoke
+  }
+})
+
 test('buildEngineCurateChanges diffs Staged Cache against true rawBaseline even when Listen track is overlaid', () => {
   const overlaidTrack = {
     id: 'trk_1',

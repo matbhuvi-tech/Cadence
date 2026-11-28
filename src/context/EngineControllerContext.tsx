@@ -91,6 +91,7 @@ export interface EngineControllerContextValue {
   coreRefreshCatalog: () => Promise<void>
   resolveCoreArtworkUrl: (rawReleaseId: string) => Promise<string | null>
   getCachedCoreArtworkUrl: (rawReleaseId: string) => string | null
+  invalidateCoreArtwork: (rawReleaseId?: string) => void
   artworkVersion: number
   subscribeEngineEvents: (listener: (event: EngineEventRecord) => void) => () => void
   selectLocalEndpointWithCoreGuard: (endpoint: AudioEndpoint) => Promise<void>
@@ -540,7 +541,7 @@ export const EngineControllerProvider: React.FC<{
           const data = (payload.data ?? {}) as Record<string, unknown>
           const rid = typeof data.releaseId === 'string' ? data.releaseId : undefined
           const act = typeof data.action === 'string' ? data.action : undefined
-          if (data.artworkOutcome || act === 'save_overlay' || act === 'accept_proposal') {
+          if (data.artworkOutcome || act === 'save_overlay' || act === 'accept_proposal' || act === 'revert_to_file') {
             artworkCacheRef.current?.invalidate(rid)
             setArtworkVersion((v) => v + 1)
           }
@@ -810,6 +811,11 @@ export const EngineControllerProvider: React.FC<{
     [isCoreActive, activeProfile, catalogRevision],
   )
 
+  const invalidateCoreArtwork = useCallback((rawReleaseId?: string) => {
+    artworkCacheRef.current?.invalidate(rawReleaseId)
+    setArtworkVersion((v) => v + 1)
+  }, [])
+
   const subscribeEngineEvents = useCallback(
     (listener: (event: EngineEventRecord) => void) => {
       eventListenersRef.current.add(listener)
@@ -1017,6 +1023,7 @@ export const EngineControllerProvider: React.FC<{
       },
       resolveCoreArtworkUrl,
       getCachedCoreArtworkUrl,
+      invalidateCoreArtwork,
       artworkVersion,
       subscribeEngineEvents,
       selectLocalEndpointWithCoreGuard: async (endpoint) => {
@@ -1045,6 +1052,7 @@ export const EngineControllerProvider: React.FC<{
     selectEndpoint,
     resolveCoreArtworkUrl,
     getCachedCoreArtworkUrl,
+    invalidateCoreArtwork,
     artworkVersion,
     subscribeEngineEvents,
     beginPendingPlay,

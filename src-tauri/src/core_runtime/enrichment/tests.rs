@@ -10,9 +10,9 @@ use super::matcher::{
 };
 use super::providers::{BoxFuture, ExternalArtworkProvider, MetadataProvider, ProviderError};
 use super::schema::{
-    apply_user_overlay, compute_enrichment_status, ensure_schema, get_enrichment_album_detail,
-    record_file_commit_for_tracks, revert_album_to_file_tags, seed_pending_albums_and_artwork,
-    unlock_album_for_enrichment,
+    accept_album_proposal, apply_user_overlay, compute_enrichment_status, ensure_schema,
+    get_enrichment_album_detail, record_file_commit_for_tracks, revert_album_to_file_tags,
+    seed_pending_albums_and_artwork, unlock_album_for_enrichment,
 };
 use super::worker::{
     next_user_override_artwork_item, process_text_enrichment_album, EnrichmentIdleGate,
@@ -1041,4 +1041,84 @@ fn empty_and_deep_subfolder_watched_roots_report_accurate_album_counts() {
     assert_eq!(after_deep.total_albums, 1);
     assert_eq!(after_deep.pending_albums, 1);
     assert_eq!(after_deep.coverage_percent, 0);
+}
+
+#[test]
+fn accept_proposal_enqueues_artwork_and_revert_to_file_restores_local_art() {
+    let dir = temp_dir("cadence-accept-revert-art");
+    let db = AppDb::new(dir.join("cadence.db")).unwrap();
+    let mut conn = db.conn.lock();
+    ensure_schema(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO storage_mounts(id,name,mount_path,mount_type,file_system,last_seen_timestamp) VALUES('m1','Root',?1,'local','ntfs',CURRENT_TIMESTAMP)",
+        params![dir.to_string_lossy()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO releases(id,title,folder_path,folder_name,artist_credit,created_at) VALUES('rel_ar','Old',?1,'Old','Artist',CURRENT_TIMESTAMP)",
+        params![dir.to_string_lossy()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tracks(id,release_id,mount_id,folder_path,folder_name,file_path,file_name,file_size,mtime,title,artist_credit,album_title,track_number,disc_number,duration_secs,format,created_at)
+         VALUES('tar_1','rel_ar','m1',?1,'Old',?2,'01.wav',100,1,'Song','Artist','Old',1,1,120.0,'WAV',CURRENT_TIMESTAMP)",
+        params![dir.to_string_lossy(), dir.join("01.wav").to_string_lossy()],
+    )
+    .unwrap();
+    let proposal_url = "https://is1-ssl.mzstatic.com/image/thumb/cover.jpg/1200x1200bb.jpg";
+    conn.execute(
+        "INSERT INTO enrichment_album_state(release_id,status,provider,external_release_id,distance,proposal_json,raw_signature)
+         VALUES('rel_ar','needs_review','apple_music','am-1',0.12,?1,'sig')",
+        params![serde_json::json!({"provider":"apple_music","album":"New","artworkUrl":proposal_url}).to_string()],
+    )
+    .unwrap();
+
+    accept_album_proposal(&mut conn, "rel_ar").unwrap();
+    let queued_override: Option<String> = conn
+        .query_row(
+            "SELECT override_url FROM artwork_queue WHERE entity_kind='album' AND entity_id='rel_ar'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued_override.as_deref(), Some(proposal_url));
+
+    // Simulate downloaded user_override artwork, then verify revert_album_to_file_tags clears it and re-queues local art.
+    conn.execute(
+        "INSERT INTO artwork_items(entity_kind,entity_id,status,image_hash,mime,updated_at) VALUES('album','rel_ar','user_override','h1','image/jpeg',1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO engine_artwork(release_id,etag,jpeg) VALUES('rel_ar','art_h1',X'FFD8FF')",
+        [],
+    )
+    .unwrap();
+    revert_album_to_file_tags(&mut conn, "rel_ar").unwrap();
+
+    let item_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM artwork_items WHERE entity_kind='album' AND entity_id='rel_ar'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let art_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM engine_artwork WHERE release_id='rel_ar'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let (prio, reverted_override): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT priority, override_url FROM artwork_queue WHERE entity_kind='album' AND entity_id='rel_ar'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(item_count, 0);
+    assert_eq!(art_count, 0);
+    assert_eq!(prio, 5);
+    assert_eq!(reverted_override, None);
 }

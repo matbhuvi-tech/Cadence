@@ -221,7 +221,14 @@ impl Library {
             .unwrap_or_default()
     }
 
+    pub fn clear_art_cache(&mut self) {
+        self.art_cache.clear();
+        self.art_lru.clear();
+        self.art_source_hashes.clear();
+    }
+
     pub fn metadata_changed(&mut self) -> Result<()> {
+        self.clear_art_cache();
         self.changed()
     }
 
@@ -1841,5 +1848,52 @@ mod artwork_regression_tests {
             ts.is_some(),
             "last_scanned_timestamp must be updated even when individual files error"
         );
+    }
+
+    #[test]
+    fn metadata_changed_clears_ram_art_cache_so_updated_artwork_is_served() {
+        let (root, mut lib, wav) = fixture();
+        cover(&root.join("cover.png"), [255, 0, 0]);
+        lib.scan_path("w", &wav).unwrap();
+
+        let (release_id, track_id): (String, String) = lib
+            .db
+            .conn
+            .lock()
+            .query_row("SELECT release_id, id FROM tracks LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+
+        // Populate RAM `art_cache` for both release_id and track_id with the initial local cover.
+        let (old_etag, old_bytes) = lib.artwork(&release_id, true).unwrap();
+        let (track_old_etag, _) = lib.artwork(&track_id, false).unwrap();
+        assert_eq!(old_etag, track_old_etag);
+
+        // Simulate background enrichment / user override updating `engine_artwork` in SQLite.
+        let new_jpeg = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4];
+        let new_etag = "art_override_new".to_string();
+        {
+            let conn = lib.db.conn.lock();
+            conn.execute(
+                "INSERT INTO engine_artwork(release_id, etag, jpeg) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(release_id) DO UPDATE SET etag = excluded.etag, jpeg = excluded.jpeg",
+                params![release_id, new_etag, new_jpeg],
+            )
+            .unwrap();
+        }
+
+        // Notifying `metadata_changed()` must evict `art_cache` so the updated cover is served immediately.
+        lib.metadata_changed().unwrap();
+        let (served_etag, served_bytes) = lib.artwork(&release_id, true).unwrap();
+        assert_ne!(served_etag, old_etag);
+        assert_eq!(served_etag, new_etag);
+        assert_ne!(served_bytes, old_bytes);
+        assert_eq!(served_bytes, new_jpeg);
+
+        // Track-ID lookup during playback (`idle = false`) must also serve the new cover, not stale RAM.
+        let (track_new_etag, track_new_bytes) = lib.artwork(&track_id, false).unwrap();
+        assert_eq!(track_new_etag, new_etag);
+        assert_eq!(track_new_bytes, new_jpeg);
     }
 }

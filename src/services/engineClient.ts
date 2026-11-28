@@ -539,10 +539,11 @@ export function createEngineArtworkCache(options: {
   }
 
   return {
-    getCached(engineId, rawReleaseId, _revision) {
+    getCached(engineId, rawReleaseId, revision) {
       const cleanId = stripCoreReleasePrefix(rawReleaseId)
       const entry = cache.get(makeKey(engineId, cleanId))
-      return entry?.objectUrl ?? null
+      if (!entry || entry.revision !== revision) return null
+      return entry.objectUrl ?? null
     },
 
     async getOrFetch(profile, rawReleaseId, revision) {
@@ -640,6 +641,8 @@ export function createEngineArtworkCache(options: {
       for (const [key, entry] of cache.entries()) {
         if (entry.miss) {
           cache.delete(key)
+        } else {
+          entry.revision = -1
         }
       }
     },

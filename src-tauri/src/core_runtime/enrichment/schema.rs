@@ -1545,6 +1545,38 @@ pub fn accept_album_proposal(conn: &mut Connection, release_id: &str) -> std::re
         }
     }
 
+    if let Some(art_url) = proposal
+        .get("artworkUrl")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let existing_art_status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM artwork_items WHERE entity_kind='album' AND entity_id=?1",
+                params![rid],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if existing_art_status.as_deref() != Some("user_override") {
+            let now = epoch_secs();
+            tx.execute(
+                "INSERT INTO artwork_queue(entity_kind, entity_id, priority, attempts, next_retry_at, enqueued_at, last_error, override_url)
+                 VALUES('album', ?1, 0, 0, 0, ?2, NULL, ?3)
+                 ON CONFLICT(entity_kind, entity_id) DO UPDATE SET
+                    priority = 0,
+                    attempts = 0,
+                    next_retry_at = 0,
+                    enqueued_at = excluded.enqueued_at,
+                    last_error = NULL,
+                    override_url = excluded.override_url",
+                params![rid, now, art_url],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
     tx.execute(
         "UPDATE enrichment_album_state
          SET status = 'auto_applied', raw_signature = ?2, updated_at = CURRENT_TIMESTAMP
@@ -1588,6 +1620,46 @@ pub fn revert_album_to_file_tags(conn: &mut Connection, release_id: &str) -> std
         "user",
     )
     .map_err(|e| e.to_string())?;
+
+    let has_user_art: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM artwork_items
+                WHERE entity_kind = 'album' AND entity_id = ?1 AND status = 'user_override'
+            ) OR EXISTS(
+                SELECT 1 FROM artwork_queue
+                WHERE entity_kind = 'album' AND entity_id = ?1 AND override_url IS NOT NULL AND TRIM(override_url) != ''
+            )",
+            params![rid],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has_user_art {
+        let now = epoch_secs();
+        tx.execute(
+            "DELETE FROM artwork_items WHERE entity_kind = 'album' AND entity_id = ?1",
+            params![rid],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM engine_artwork WHERE release_id = ?1",
+            params![rid],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO artwork_queue(entity_kind, entity_id, priority, attempts, next_retry_at, enqueued_at, last_error, override_url)
+             VALUES('album', ?1, 5, 0, 0, ?2, NULL, NULL)
+             ON CONFLICT(entity_kind, entity_id) DO UPDATE SET
+                priority = 5,
+                attempts = 0,
+                next_retry_at = 0,
+                enqueued_at = excluded.enqueued_at,
+                last_error = NULL,
+                override_url = NULL",
+            params![rid, now],
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     tx.execute(
         "INSERT INTO enrichment_album_state(release_id, status, raw_signature, updated_at)

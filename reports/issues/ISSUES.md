@@ -1,5 +1,23 @@
 # Issue Log
 
+## Auto-Enrich misses `3 Roses [Hit Music]` while Refresh Evidence finds the soundtrack
+
+- **Reported behavior:** Auto-Enrich finished with `No automatic match` and no cover for the five-track album. Refresh Evidence with the same visible inputs showed the Apple Music artwork and a candidate sequence offset of `+6`. Selected Output remained unchanged.
+- **Verified:** The background Apple search omits the storefront. In a live replay its query returned Apple release `1706187378`, while the India storefront also returned `1842076282`, whose credit and genre match the refreshed Apple column. The background artwork fallback rejects both titles because their title distance is `0.7561`, above its `0.25` cutoff.
+- **TrueNAS diagnostics (ticket `CAD-20261127-A369`):** The bundle contains the connected TrueNAS engine snapshot, but its log tail and ring buffer were empty with engine logging off. `logs/engine-debug.log` contains local Windows fallback logs. None of the 32 retained TrueNAS scan error paths identifies this album.
+- **Status:** Analyzed. The exact background metadata decision remains unverified because the bundle contains no album-level enrichment record.
+
+## GitHub #66 — Updated cover art staged/committed in Curate does not refresh in Album Grid and Detail views
+
+- **Link:** https://github.com/matbhuvi-tech/Cadence/issues/66
+- **Branch:** `fix/66-artwork-cache-refresh-on-curate-commit`
+- **Reported behavior:** After saving/committing new cover art in Curate Cockpit (`Staged in Cache · Custom cover art saved`), navigating back to the Album Grid and Album Detail views still displays the old embedded local cover art (`12B`).
+- **Root causes:**
+  1. `Library::metadata_changed()` (`src-tauri/src/core_runtime/library.rs`) incremented the catalog revision without clearing `Library::art_cache` / `art_lru` / `art_source_hashes`, and `CoreRuntime::artwork_at()` (`src-tauri/src/core_runtime/mod.rs`) did not flush stale `art_cache` entries when `idle_gate.catalog_dirty_version()` changed, causing `/v1/artwork/<release_id>` to keep serving the stale RAM-cached JPEG and ETag.
+  2. `accept_album_proposal()` and `revert_album_to_file_tags()` (`src-tauri/src/core_runtime/enrichment/schema.rs` & `enrichment/mod.rs`) did not enqueue/revert `artwork_queue` or wake the enrichment worker.
+  3. Frontend `EngineArtworkCache.getCached()` (`src/services/engineClient.ts`) ignored the `revision` parameter and `invalidate()` without arguments only cleared `miss` entries, while `useResolvedMediaUrl` (`src/components/common/EngineArtworkImg.tsx`) cleared `resolved` before revalidating and `UnifiedCurateCockpit.tsx` did not switch `coverArt.selected` from remote URL to `cadence-art://` after download or allow click-to-adopt on archived Apple evidence cells.
+- **Status:** Implemented on `fix/66-artwork-cache-refresh-on-curate-commit`; awaiting user verification.
+
 ## GitHub #65 — Protocol v2 catalog hydration degrades to v1 on multi-line lyrics/tags and lacks user-friendly Catalog Health UI
 
 - **Link:** https://github.com/matbhuvi-tech/Cadence/issues/65

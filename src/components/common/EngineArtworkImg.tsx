@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useOptionalEngineController } from '../../context/EngineControllerContext'
 import { resolveMediaUrl } from '../../services/tauriBridge'
 
@@ -20,10 +20,13 @@ export function useResolvedMediaUrl(src?: string | null, enabled: boolean = true
     : resolveMediaUrl(src)
 
   const [resolved, setResolved] = useState<string>(syncUrl)
+  const prevReleaseIdRef = useRef<string | null>(rawReleaseId)
   const playbackActivity = engine?.activeCoreSnapshot?.playback.activity
   const artworkVersion = engine?.artworkVersion ?? 0
 
   useEffect(() => {
+    const releaseChanged = prevReleaseIdRef.current !== rawReleaseId
+    prevReleaseIdRef.current = rawReleaseId
     if (!rawReleaseId) {
       setResolved(resolveMediaUrl(src))
       return
@@ -36,14 +39,16 @@ export function useResolvedMediaUrl(src?: string | null, enabled: boolean = true
     if (!enabled) {
       return
     }
-    setResolved('')
+    if (releaseChanged) {
+      setResolved('')
+    }
     if (!engine?.isCoreActive) return
     let cancelled = false
     void engine
       .resolveCoreArtworkUrl(rawReleaseId)
       .then((url) => {
-        if (!cancelled && url) {
-          setResolved(url)
+        if (!cancelled) {
+          setResolved(url ?? '')
         }
       })
       .catch(() => {})

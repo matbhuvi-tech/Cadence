@@ -240,8 +240,20 @@ pub fn handle_enrichment_request(
                     }
                     r
                 }
-                "accept_proposal" => accept_album_proposal(&mut conn, &rid),
-                "revert_to_file" => revert_album_to_file_tags(&mut conn, &rid),
+                "accept_proposal" => {
+                    let r = accept_album_proposal(&mut conn, &rid);
+                    if r.is_ok() {
+                        gate.wake();
+                    }
+                    r
+                }
+                "revert_to_file" => {
+                    let r = revert_album_to_file_tags(&mut conn, &rid);
+                    if r.is_ok() {
+                        gate.wake();
+                    }
+                    r
+                }
                 "lock_file_tags" => lock_album_file_tags(&mut conn, &rid),
                 "unlock_auto" => {
                     let r = unlock_album_for_enrichment(&mut conn, &rid);

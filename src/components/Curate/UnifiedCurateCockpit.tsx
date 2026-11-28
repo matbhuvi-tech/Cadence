@@ -501,9 +501,12 @@ function applyEnrichmentDetailToAlbumItem(
     detail.artworkStatus === 'user_override' || detail.artworkStatus === 'found'
       ? `cadence-art://${stripCoreReleasePrefix(detail.releaseId)}`
       : undefined
-  const resolvedSelectedCover = album.coverArt.userOverridden
-    ? album.coverArt.selected
-    : (pendingArtUrl ?? (cachedArtUrl ? (album.coverArt.selected || cachedArtUrl) : album.coverArt.selected))
+  const selectedIsExternal = /^https?:\/\/|^data:image\//i.test((album.coverArt.selected || '').trim())
+  const resolvedSelectedCover = pendingArtUrl
+    ? (album.coverArt.userOverridden ? album.coverArt.selected : pendingArtUrl)
+    : cachedArtUrl && (!album.coverArt.userOverridden || (detail.artworkStatus === 'user_override' && selectedIsExternal))
+      ? cachedArtUrl
+      : album.coverArt.selected
 
   return {
     ...album,
@@ -1844,6 +1847,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         })
         anchoredAlbum = applyEnrichmentDetailToAlbumItem(selectedAlbum, savedDetail)
         markSelfMutatedAlbum(selectedAlbum.id)
+        if (overlayPayload.coverArtUrl) {
+          engine?.invalidateCoreArtwork?.(selectedAlbum.id)
+        }
         setEnrichmentRefreshNonce((n) => n + 1)
       }
       if (!isDsdOnly && !isEngineReadOnly) {
@@ -1950,6 +1956,9 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
         ...(overlayPayload.coverArtUrl ? { coverArtUrl: overlayPayload.coverArtUrl } : {}),
       })
       markSelfMutatedAlbum(selectedAlbum.id)
+      if (overlayPayload.coverArtUrl) {
+        engine?.invalidateCoreArtwork?.(selectedAlbum.id)
+      }
 
       const anchoredAlbum = applyEnrichmentDetailToAlbumItem(selectedAlbum, savedDetail)
       const anchoredRelease = anchoredAlbum.rawRelease
@@ -2206,7 +2215,7 @@ export const UnifiedCurateCockpit: React.FC<UnifiedCurateCockpitProps> = ({
 
         {/* Apple */}
         <td
-          onClick={() => { if (fieldState.apple !== undefined || cachedApple !== undefined) handleSelectFieldSource(fieldKey, 'apple', appleValue) }}
+          onClick={() => { if (appleValue !== undefined) handleSelectFieldSource(fieldKey, 'apple', appleValue) }}
           data-testid={`master-cell-${fieldKey}-apple`}
           className="py-2.5 px-4 cursor-pointer text-white/70 hover:text-[#D4AF37] transition-colors"
         >

@@ -761,6 +761,18 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
     pub fn artwork_at(&mut self, id: &str, now: Instant) -> Result<(String, Vec<u8>), String> {
         if id.len()>128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'_' || b==b'-') { return Err("Invalid release ID".into()); }
         let idle = self.ensure_storage_idle_at(now).is_ok();
+        let dirty_ver = self.idle_gate.catalog_dirty_version();
+        if dirty_ver != self.last_enrichment_dirty_version {
+            if idle {
+                self.last_enrichment_dirty_version = dirty_ver;
+                if let Some(library) = &mut self.library {
+                    let _ = library.metadata_changed();
+                }
+                let _ = self.reload_catalog_at(now);
+            } else if let Some(library) = &mut self.library {
+                library.clear_art_cache();
+            }
+        }
         self.library.as_mut().ok_or("Library unavailable")?.artwork(id,idle)
     }
 
@@ -813,6 +825,9 @@ impl<R: Renderer, P: PlatformProbe, L: MemoryLocker> HeadlessCoreRuntime<R, P, L
                 &self.track_db_ids,
             );
             if catalog_changed {
+                if let Some(library) = &mut self.library {
+                    library.clear_art_cache();
+                }
                 if self.ensure_storage_idle_at(now).is_ok() {
                     if let Some(library) = &mut self.library {
                         let _ = library.metadata_changed();
